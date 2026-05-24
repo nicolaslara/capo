@@ -1,0 +1,15 @@
+# Generated research clones and scratch artifacts
+workpads/references/repos/
+workpads/**/references/repos/
+
+# Local runtime state
+.capo/
+target/
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+.env.*
+!.env.example
