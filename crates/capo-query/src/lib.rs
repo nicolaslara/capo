@@ -6,10 +6,10 @@
 
 use capo_core::{ProjectId, SessionId};
 use capo_state::{
-    AdapterDispatchPlanProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
-    AgentProjection, ConnectivityExposureProjection, EventRecord, EvidenceProjection,
-    MemoryPacketProjection, RunProjection, SessionProjection, SqliteStateStore, StateResult,
-    ToolCallProjection, WorkpadTaskProjection,
+    AdapterDispatchGateProjection, AdapterDispatchPlanProjection, AdapterReadinessProjection,
+    AdapterSmokeReportProjection, AgentProjection, ConnectivityExposureProjection, EventRecord,
+    EvidenceProjection, MemoryPacketProjection, RunProjection, SessionProjection, SqliteStateStore,
+    StateResult, ToolCallProjection, WorkpadTaskProjection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,6 +20,7 @@ pub struct ProjectDashboard {
     pub adapter_readiness: Vec<AdapterReadinessProjection>,
     pub adapter_smoke_reports: Vec<AdapterSmokeReportProjection>,
     pub adapter_dispatch_plans: Vec<AdapterDispatchPlanProjection>,
+    pub adapter_dispatch_gates: Vec<AdapterDispatchGateProjection>,
     pub adapter_dogfood_gate: AdapterDogfoodGate,
     pub workpad_tasks: Vec<WorkpadTaskProjection>,
 }
@@ -132,6 +133,7 @@ pub fn project_dashboard(
     let adapter_readiness = state.adapter_readiness(&query.project_id)?;
     let adapter_smoke_reports = state.adapter_smoke_reports(&query.project_id)?;
     let adapter_dispatch_plans = state.adapter_dispatch_plans(&query.project_id)?;
+    let adapter_dispatch_gates = state.adapter_dispatch_gates(&query.project_id)?;
     let adapter_dogfood_gate = adapter_dogfood_gate(&adapter_smoke_reports);
     let workpad_tasks = state
         .workpad_tasks(&query.project_id)?
@@ -160,6 +162,7 @@ pub fn project_dashboard(
         adapter_readiness,
         adapter_smoke_reports,
         adapter_dispatch_plans,
+        adapter_dispatch_gates,
         adapter_dogfood_gate,
         workpad_tasks,
     })
@@ -455,6 +458,7 @@ mod tests {
         let project_id = ProjectId::new("project-capo");
         append_agent(&state, &project_id, "agent-idle", None);
         append_adapter_dispatch_plan(&state, &project_id);
+        append_adapter_dispatch_gate(&state, &project_id);
 
         let dashboard =
             project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
@@ -467,6 +471,13 @@ mod tests {
         assert_eq!(plan.runtime_prompt_policy, "not_rendered");
         assert!(!plan.provider_cli_executed);
         assert_eq!(plan.status, "planned");
+        assert_eq!(dashboard.adapter_dispatch_gates.len(), 1);
+        let gate = &dashboard.adapter_dispatch_gates[0];
+        assert_eq!(gate.dispatch_plan_id, "adapter-dispatch-plan-codex");
+        assert_eq!(gate.adapter_kind, "codex_exec");
+        assert_eq!(gate.status, "blocked");
+        assert!(!gate.provider_cli_execution_allowed);
+        assert!(!gate.provider_cli_executed);
     }
 
     #[test]
@@ -931,6 +942,43 @@ mod tests {
                 )],
             )
             .expect("append adapter dispatch plan");
+    }
+
+    fn append_adapter_dispatch_gate(state: &SqliteStateStore, project_id: &ProjectId) {
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-adapter-dispatch-gate-codex".to_string(),
+                    kind: EventKind::AdapterDispatchGateChecked,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: Some(AgentId::new("agent-codex")),
+                    session_id: Some(SessionId::new("session-codex")),
+                    run_id: Some(RunId::new("run-codex")),
+                    turn_id: None,
+                    item_id: Some("adapter-dispatch-gate-codex".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::AdapterDispatchGate(
+                    AdapterDispatchGateProjection {
+                        dispatch_gate_id: "adapter-dispatch-gate-codex".to_string(),
+                        project_id: project_id.clone(),
+                        dispatch_plan_id: "adapter-dispatch-plan-codex".to_string(),
+                        adapter_kind: "codex_exec".to_string(),
+                        provider_cli_execution_allowed: false,
+                        status: "blocked".to_string(),
+                        required_dogfood_gate: "blocked_pending_real_smoke".to_string(),
+                        reason_codes: "codex_exec:real_subscription_smoke_not_recorded".to_string(),
+                        provider_cli_executed: false,
+                        runtime_prompt_policy: "not_rendered".to_string(),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append adapter dispatch gate");
     }
 
     fn append_workpad_task(

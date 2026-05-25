@@ -336,3 +336,29 @@ Decision:
 - Keep real execution behind an explicit read-only gate before adding any command that can invoke a subscription-backed provider CLI.
 - Reuse the shared `AdapterDogfoodGate` from `capo-query` so dashboard, dogfood checks, and dispatch gating agree on the same recorded-evidence rule.
 - A recorded dispatch plan becomes execution-eligible only when Codex real-smoke evidence is recorded as passed, clean, marker-confirmed, and `real_agent_connector_proven`; otherwise the command reports blocked reasons without mutating state.
+
+### AC14 - Dispatch Gate Audit Trail
+
+Status: completed
+
+Acceptance:
+
+- Allow operators to persist dispatch-gate decisions as Capo-owned audit records.
+- Rebuild dispatch-gate read models from projection records after restart.
+- Expose recorded gate decisions through the shared dashboard/query surface.
+- Keep records prompt-redacted and explicit that provider CLIs were not executed.
+
+Evidence:
+
+- `AdapterDispatchGateProjection`, `EventKind::AdapterDispatchGateChecked`, SQLite table, rebuild codec, and read query in `../../crates/capo-state/src/lib.rs`.
+- `ProjectDashboard.adapter_dispatch_gates` in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo adapter dispatch-gate ... --record` and dashboard rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-state adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-query adapter_dispatch -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Treat gate checks as separate audit facts from dispatch plans. A dispatch plan records intent; a dispatch gate records whether execution would be allowed at a point in time.
+- Store only plan ID, adapter kind, gate status, reason codes, prompt policy, and `provider_cli_executed=false`. Do not store or render the raw prompt.
+- Recording a gate does not launch provider CLIs, create runtime artifact directories, or transition a dispatch plan into execution.

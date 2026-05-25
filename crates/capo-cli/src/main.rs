@@ -15,12 +15,12 @@ use capo_core::{
 use capo_eval::TaskOutcomeReport;
 use capo_query::{AdapterDogfoodGate, ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 use capo_state::{
-    AdapterDispatchPlanProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
-    ArtifactRecord, CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection,
-    MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection, NewEvent,
-    PermissionApprovalProjection, ProjectionRecord, RedactionState, ReviewFindingProjection,
-    RunProjection, SessionProjection, SqliteStateStore, ToolCallProjection, WorkpadFileProjection,
-    WorkpadIndexResetProjection, WorkpadTaskProjection,
+    AdapterDispatchGateProjection, AdapterDispatchPlanProjection, AdapterReadinessProjection,
+    AdapterSmokeReportProjection, ArtifactRecord, CapabilityGrantProjection, EventKind,
+    EventRecord, EvidenceProjection, MemoryPacketProjection, MemoryRecordProjection,
+    MemorySourceProjection, NewEvent, PermissionApprovalProjection, ProjectionRecord,
+    RedactionState, ReviewFindingProjection, RunProjection, SessionProjection, SqliteStateStore,
+    ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
 use capo_voice::{
     MemoryIngestionPolicy, TranscriptRetentionPolicy, VOICE_TRANSCRIPT_RETENTION_DEFAULT,
@@ -44,7 +44,7 @@ Usage:
   capo agent list [--state PATH]
   capo adapter readiness [--record] [--state PATH]
   capo adapter plan-launch --adapter codex|claude --agent NAME --goal GOAL [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
-  capo adapter dispatch-gate --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
+  capo adapter dispatch-gate --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter dogfood-gate [--state PATH]
   capo adapter smoke-report scan --artifact-root PATH [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
@@ -902,10 +902,10 @@ fn adapter_dogfood_gate(parsed: &ParsedArgs) -> Result<String, String> {
 
 fn adapter_dispatch_gate(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let dispatch_plan_id = required_arg(args, "--dispatch-plan")?;
-    if let Some(unknown) = args
-        .iter()
-        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan"))
-    {
+    let record = has_flag(args, "--record");
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan" | "--record")
+    }) {
         return Err(format!("unknown adapter dispatch-gate option: {unknown}"));
     }
     let state = state(parsed)?;
@@ -916,16 +916,55 @@ fn adapter_dispatch_gate(parsed: &ParsedArgs, args: &[String]) -> Result<String,
         .iter()
         .find(|plan| plan.dispatch_plan_id == dispatch_plan_id)
         .ok_or_else(|| format!("unknown adapter dispatch plan: {dispatch_plan_id}"))?;
+    let gate = adapter_dispatch_gate_projection(plan, &dashboard.adapter_dogfood_gate);
+    let recorded_sequence = if record {
+        let event = NewEvent {
+            event_id: format!(
+                "event-adapter-dispatch-gate-{}",
+                stable_cli_hash(&gate.dispatch_gate_id)
+            ),
+            kind: EventKind::AdapterDispatchGateChecked,
+            actor: "local-cli".to_string(),
+            project_id: Some(gate.project_id.clone()),
+            task_id: None,
+            agent_id: Some(plan.agent_id.clone()),
+            session_id: Some(plan.session_id.clone()),
+            run_id: Some(plan.run_id.clone()),
+            turn_id: None,
+            item_id: Some(gate.dispatch_gate_id.clone()),
+            payload_json: format!(
+                "{{\"dispatch_plan_id\":\"{}\",\"provider_cli_execution_allowed\":{},\"provider_cli_executed\":false}}",
+                escape_json(&gate.dispatch_plan_id),
+                gate.provider_cli_execution_allowed
+            ),
+            idempotency_key: Some(format!(
+                "adapter-dispatch-gate:{}:{}:{}",
+                gate.project_id, gate.dispatch_plan_id, gate.reason_codes
+            )),
+            redaction_state: RedactionState::Safe,
+        };
+        Some(
+            state
+                .append_event(
+                    event,
+                    &[ProjectionRecord::AdapterDispatchGate(gate.clone())],
+                )
+                .map_err(debug_error)?,
+        )
+    } else {
+        None
+    };
     Ok(render_adapter_dispatch_gate(
-        plan,
-        &dashboard.adapter_dogfood_gate,
+        &gate,
+        record,
+        recorded_sequence,
     ))
 }
 
-fn render_adapter_dispatch_gate(
+fn adapter_dispatch_gate_projection(
     plan: &AdapterDispatchPlanProjection,
     dogfood_gate: &AdapterDogfoodGate,
-) -> String {
+) -> AdapterDispatchGateProjection {
     let adapter_proven = dogfood_gate
         .proven_adapters
         .iter()
@@ -957,20 +996,51 @@ fn render_adapter_dispatch_gate(
     if reasons.is_empty() {
         reasons.push("required_real_smoke_evidence_recorded".to_string());
     }
+    let status = if execution_allowed {
+        "ready_for_execution"
+    } else {
+        "blocked"
+    }
+    .to_string();
+    AdapterDispatchGateProjection {
+        dispatch_gate_id: format!(
+            "adapter-dispatch-gate-{}-{}",
+            stable_cli_hash(&plan.dispatch_plan_id),
+            stable_cli_hash(&reasons.join(","))
+        ),
+        project_id: plan.project_id.clone(),
+        dispatch_plan_id: plan.dispatch_plan_id.clone(),
+        adapter_kind: plan.adapter_kind.clone(),
+        provider_cli_execution_allowed: execution_allowed,
+        status,
+        required_dogfood_gate: dogfood_gate.status.clone(),
+        reason_codes: reasons.join(","),
+        provider_cli_executed: plan.provider_cli_executed,
+        runtime_prompt_policy: plan.runtime_prompt_policy.clone(),
+        updated_sequence: 0,
+    }
+}
+
+fn render_adapter_dispatch_gate(
+    gate: &AdapterDispatchGateProjection,
+    recorded: bool,
+    recorded_sequence: Option<i64>,
+) -> String {
     format!(
-        "adapter_dispatch_gate=true\ndispatch_plan={}\nadapter={}\nprovider_cli_execution_allowed={}\nstatus={}\nrequired_dogfood_gate={}\nprovider_cli_executed={}\nruntime_prompt_policy={}\nreasons={}\n",
-        plan.dispatch_plan_id,
-        plan.adapter_kind,
-        execution_allowed,
-        if execution_allowed {
-            "ready_for_execution"
-        } else {
-            "blocked"
-        },
-        dogfood_gate.status,
-        plan.provider_cli_executed,
-        plan.runtime_prompt_policy,
-        comma_or_none(&reasons)
+        "adapter_dispatch_gate=true\ndispatch_gate={}\ndispatch_plan={}\nadapter={}\nprovider_cli_execution_allowed={}\nstatus={}\nrequired_dogfood_gate={}\nprovider_cli_executed={}\nruntime_prompt_policy={}\nreasons={}\nrecorded={}\nrecorded_sequence={}\n",
+        gate.dispatch_gate_id,
+        gate.dispatch_plan_id,
+        gate.adapter_kind,
+        gate.provider_cli_execution_allowed,
+        gate.status,
+        gate.required_dogfood_gate,
+        gate.provider_cli_executed,
+        gate.runtime_prompt_policy,
+        gate.reason_codes,
+        recorded,
+        recorded_sequence
+            .map(|sequence| sequence.to_string())
+            .unwrap_or_else(|| "none".to_string())
     )
 }
 
@@ -1200,6 +1270,24 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
             plan.artifact_root,
             plan.provider_cli_executed,
             plan.status
+        ));
+    }
+    output.push_str(&format!(
+        "adapter_dispatch_gates={}\n",
+        dashboard.adapter_dispatch_gates.len()
+    ));
+    for gate in &dashboard.adapter_dispatch_gates {
+        output.push_str(&format!(
+            "adapter_dispatch_gate={} dispatch_plan={} adapter={} provider_cli_execution_allowed={} gate_status={} required_dogfood_gate={} provider_cli_executed={} runtime_prompt_policy={} reasons={}\n",
+            gate.dispatch_gate_id,
+            gate.dispatch_plan_id,
+            gate.adapter_kind,
+            gate.provider_cli_execution_allowed,
+            gate.status,
+            gate.required_dogfood_gate,
+            gate.provider_cli_executed,
+            gate.runtime_prompt_policy,
+            gate.reason_codes
         ));
     }
     output.push_str(&render_adapter_dogfood_gate(
@@ -3895,6 +3983,7 @@ mod tests {
         assert!(blocked.contains("provider_cli_executed=false"));
         assert!(blocked.contains("runtime_prompt_policy=not_rendered"));
         assert!(blocked.contains("codex_exec:real_subscription_smoke_not_recorded"));
+        assert!(blocked.contains("recorded=false"));
         assert!(!blocked.contains("Do not render this dispatch prompt"));
         assert!(!workspace.exists());
         assert!(!artifacts.exists());
@@ -3927,6 +4016,7 @@ mod tests {
             "dispatch-gate".to_string(),
             "--dispatch-plan".to_string(),
             dispatch_plan_id,
+            "--record".to_string(),
             "--state".to_string(),
             state_root.display().to_string(),
         ])
@@ -3935,6 +4025,26 @@ mod tests {
         assert!(ready.contains("status=ready_for_execution"));
         assert!(ready.contains("required_dogfood_gate=ready_for_first_real_agent_dogfood"));
         assert!(ready.contains("reasons=required_real_smoke_evidence_recorded"));
+        assert!(ready.contains("recorded=true"));
+        let gates = SqliteStateStore::open(&state_root)
+            .expect("state")
+            .adapter_dispatch_gates(&project_id())
+            .expect("dispatch gates");
+        assert_eq!(gates.len(), 1);
+        assert_eq!(gates[0].adapter_kind, "codex_exec");
+        assert_eq!(gates[0].status, "ready_for_execution");
+        assert!(gates[0].provider_cli_execution_allowed);
+        assert!(!gates[0].provider_cli_executed);
+        assert_eq!(gates[0].runtime_prompt_policy, "not_rendered");
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard");
+        assert!(dashboard.contains("adapter_dispatch_gates=1"));
+        assert!(dashboard.contains("gate_status=ready_for_execution"));
+        assert!(!dashboard.contains("Do not render this dispatch prompt"));
         assert!(!workspace.exists());
         assert!(!artifacts.exists());
     }

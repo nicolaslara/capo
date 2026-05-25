@@ -140,6 +140,16 @@ Observed 2026-05-25.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC13.
 
+## F1/AC14 Dispatch Gate Audit Trail
+
+Observed 2026-05-25.
+
+- Dispatch-gate projection, event kind, SQLite table, rebuild codec, and read query: `../../crates/capo-state/src/lib.rs`
+- Shared dashboard query field for recorded dispatch gates: `../../crates/capo-query/src/lib.rs`
+- CLI `adapter dispatch-gate --record` and dashboard rendering: `../../crates/capo-cli/src/main.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC14.
+
 ## F3/DS1 Query Surface Extraction
 
 Observed 2026-05-25.

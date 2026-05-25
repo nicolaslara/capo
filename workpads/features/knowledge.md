@@ -333,6 +333,27 @@ Follow-up:
 
 - A future execution command should call this gate before invoking `LocalProcessRunner`, then record a separate runtime-start/adapter-stream lifecycle rather than reusing the planned projection as execution evidence.
 
+## F1/AC14 - Dispatch Gate Audit Trail
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `AdapterDispatchGateProjection` as a durable audit record for dispatch-gate checks. Dispatch plans record intended runtime metadata; dispatch gates record whether that plan would be allowed to execute under current evidence.
+- Add `capo adapter dispatch-gate --dispatch-plan DISPATCH_PLAN_ID --record` to persist the gate result without invoking a provider CLI.
+- Expose recorded gate checks through `ProjectDashboard.adapter_dispatch_gates` and CLI dashboard rendering so future voice/web/mobile surfaces can inspect the same audit trail.
+- Keep gate records prompt-redacted: store dispatch plan ID, adapter kind, readiness status, reason codes, prompt policy, and `provider_cli_executed=false`, not the raw goal.
+
+Verification:
+
+- `cargo test -p capo-state adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-query adapter_dispatch -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Follow-up:
+
+- The future provider-running command should append a separate execution-start projection only after a recorded ready gate and should preserve blocked gate records as denial/audit evidence.
+
 ## F3/DS1 - Query Surface Extraction
 
 Status: completed on 2026-05-25.

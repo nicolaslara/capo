@@ -898,6 +898,39 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn adapter_dispatch_gates(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<AdapterDispatchGateProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT dispatch_gate_id, project_id, dispatch_plan_id, adapter_kind,
+                    provider_cli_execution_allowed, status, required_dogfood_gate,
+                    reason_codes, provider_cli_executed, runtime_prompt_policy,
+                    updated_sequence
+             FROM adapter_dispatch_gates
+             WHERE project_id = ?1
+             ORDER BY updated_sequence ASC, dispatch_gate_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(AdapterDispatchGateProjection {
+                dispatch_gate_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                dispatch_plan_id: row.get(2)?,
+                adapter_kind: row.get(3)?,
+                provider_cli_execution_allowed: row.get::<_, i64>(4)? != 0,
+                status: row.get(5)?,
+                required_dogfood_gate: row.get(6)?,
+                reason_codes: row.get(7)?,
+                provider_cli_executed: row.get::<_, i64>(8)? != 0,
+                runtime_prompt_policy: row.get(9)?,
+                updated_sequence: row.get(10)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn evidence_for_session(
         &self,
         session_id: &SessionId,
@@ -1375,6 +1408,7 @@ pub enum EventKind {
     AdapterReadinessChecked,
     AdapterSmokeRecorded,
     AdapterDispatchPlanned,
+    AdapterDispatchGateChecked,
     ToolCallRequested,
     ToolInvocationStarted,
     ToolOutputArtifactRecorded,
@@ -1419,6 +1453,7 @@ impl EventKind {
             Self::AdapterReadinessChecked => "adapter.readiness_checked",
             Self::AdapterSmokeRecorded => "adapter.smoke_recorded",
             Self::AdapterDispatchPlanned => "adapter.dispatch_planned",
+            Self::AdapterDispatchGateChecked => "adapter.dispatch_gate_checked",
             Self::ToolCallRequested => "tool.call_requested",
             Self::ToolInvocationStarted => "tool.invocation_started",
             Self::ToolOutputArtifactRecorded => "tool.output_artifact_recorded",
@@ -1515,6 +1550,7 @@ pub enum ProjectionRecord {
     AdapterReadiness(AdapterReadinessProjection),
     AdapterSmokeReport(AdapterSmokeReportProjection),
     AdapterDispatchPlan(AdapterDispatchPlanProjection),
+    AdapterDispatchGate(AdapterDispatchGateProjection),
     ToolCall(ToolCallProjection),
     MemoryPacketRef(MemoryPacketProjection),
     MemoryRecord(Box<MemoryRecordProjection>),
@@ -1683,6 +1719,21 @@ pub struct AdapterDispatchPlanProjection {
     pub stderr_policy: String,
     pub provider_cli_executed: bool,
     pub status: String,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterDispatchGateProjection {
+    pub dispatch_gate_id: String,
+    pub project_id: ProjectId,
+    pub dispatch_plan_id: String,
+    pub adapter_kind: String,
+    pub provider_cli_execution_allowed: bool,
+    pub status: String,
+    pub required_dogfood_gate: String,
+    pub reason_codes: String,
+    pub provider_cli_executed: bool,
+    pub runtime_prompt_policy: String,
     pub updated_sequence: i64,
 }
 
@@ -2087,6 +2138,19 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             status TEXT NOT NULL,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS adapter_dispatch_gates (
+            dispatch_gate_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            dispatch_plan_id TEXT NOT NULL,
+            adapter_kind TEXT NOT NULL,
+            provider_cli_execution_allowed INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            required_dogfood_gate TEXT NOT NULL,
+            reason_codes TEXT NOT NULL,
+            provider_cli_executed INTEGER NOT NULL,
+            runtime_prompt_policy TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS tool_calls (
             tool_call_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
@@ -2279,6 +2343,7 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "adapter_readiness",
         "adapter_smoke_reports",
         "adapter_dispatch_plans",
+        "adapter_dispatch_gates",
         "tool_calls",
         "memory_packet_refs",
         "memory_records",
@@ -2682,6 +2747,37 @@ fn apply_projection_record(
                 plan.stderr_policy,
                 if plan.provider_cli_executed { 1 } else { 0 },
                 plan.status,
+                sequence,
+            ],
+        )?,
+        ProjectionRecord::AdapterDispatchGate(gate) => transaction.execute(
+            "INSERT INTO adapter_dispatch_gates(
+                dispatch_gate_id, project_id, dispatch_plan_id, adapter_kind,
+                provider_cli_execution_allowed, status, required_dogfood_gate,
+                reason_codes, provider_cli_executed, runtime_prompt_policy, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(dispatch_gate_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                dispatch_plan_id = excluded.dispatch_plan_id,
+                adapter_kind = excluded.adapter_kind,
+                provider_cli_execution_allowed = excluded.provider_cli_execution_allowed,
+                status = excluded.status,
+                required_dogfood_gate = excluded.required_dogfood_gate,
+                reason_codes = excluded.reason_codes,
+                provider_cli_executed = excluded.provider_cli_executed,
+                runtime_prompt_policy = excluded.runtime_prompt_policy,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                gate.dispatch_gate_id,
+                gate.project_id.as_str(),
+                gate.dispatch_plan_id,
+                gate.adapter_kind,
+                if gate.provider_cli_execution_allowed { 1 } else { 0 },
+                gate.status,
+                gate.required_dogfood_gate,
+                gate.reason_codes,
+                if gate.provider_cli_executed { 1 } else { 0 },
+                gate.runtime_prompt_policy,
                 sequence,
             ],
         )?,
@@ -3193,6 +3289,22 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
                 "redaction_rule_count": plan.redaction_rule_count,
                 "stdout_format": plan.stdout_format,
                 "stderr_policy": plan.stderr_policy,
+            })
+            .to_string(),
+        },
+        ProjectionRecord::AdapterDispatchGate(gate) => ProjectionRecordRow {
+            kind: "adapter_dispatch_gate",
+            record_id: gate.dispatch_gate_id.clone(),
+            a: Some(gate.project_id.to_string()),
+            b: Some(gate.dispatch_plan_id.clone()),
+            c: Some(gate.adapter_kind.clone()),
+            d: Some(gate.provider_cli_execution_allowed.to_string()),
+            e: Some(gate.status.clone()),
+            f: Some(gate.required_dogfood_gate.clone()),
+            g: Some(gate.provider_cli_executed.to_string()),
+            h: Some(gate.runtime_prompt_policy.clone()),
+            payload_json: json!({
+                "reason_codes": gate.reason_codes,
             })
             .to_string(),
         },
@@ -3827,6 +3939,76 @@ fn projection_record_from_row(
                         ))
                     })?,
                     status: required_field(&projection_kind, "adapter_dispatch_plan", f, "status")?,
+                    updated_sequence: 0,
+                },
+            ))
+        }
+        "adapter_dispatch_gate" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::AdapterDispatchGate(
+                AdapterDispatchGateProjection {
+                    dispatch_gate_id: record_id,
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "adapter_dispatch_gate",
+                        a,
+                        "project_id",
+                    )?),
+                    dispatch_plan_id: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_gate",
+                        b,
+                        "dispatch_plan_id",
+                    )?,
+                    adapter_kind: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_gate",
+                        c,
+                        "adapter_kind",
+                    )?,
+                    provider_cli_execution_allowed: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_gate",
+                        d,
+                        "provider_cli_execution_allowed",
+                    )?
+                    .parse::<bool>()
+                    .map_err(|error| {
+                        ProjectionDecodeError(format!(
+                            "invalid bool for adapter_dispatch_gate provider_cli_execution_allowed: {error}"
+                        ))
+                    })?,
+                    status: required_field(&projection_kind, "adapter_dispatch_gate", e, "status")?,
+                    required_dogfood_gate: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_gate",
+                        f,
+                        "required_dogfood_gate",
+                    )?,
+                    reason_codes: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_gate",
+                        &payload,
+                        "reason_codes",
+                    )?,
+                    provider_cli_executed: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_gate",
+                        g,
+                        "provider_cli_executed",
+                    )?
+                    .parse::<bool>()
+                    .map_err(|error| {
+                        ProjectionDecodeError(format!(
+                            "invalid bool for adapter_dispatch_gate provider_cli_executed: {error}"
+                        ))
+                    })?,
+                    runtime_prompt_policy: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_gate",
+                        h,
+                        "runtime_prompt_policy",
+                    )?,
                     updated_sequence: 0,
                 },
             ))
@@ -5566,6 +5748,61 @@ mod tests {
         assert_eq!(plans[0].runtime_prompt_policy, "not_rendered");
         assert!(!plans[0].provider_cli_executed);
         assert_eq!(plans[0].status, "planned");
+    }
+
+    #[test]
+    fn adapter_dispatch_gate_is_persisted_and_rebuilt() {
+        let store = temp_store("adapter-dispatch-gate-rebuild");
+        let project_id = ProjectId::new("project-capo");
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-adapter-dispatch-gate".to_string(),
+                    kind: EventKind::AdapterDispatchGateChecked,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: Some(AgentId::new("agent-codex")),
+                    session_id: Some(SessionId::new("session-codex")),
+                    run_id: Some(RunId::new("run-codex")),
+                    turn_id: None,
+                    item_id: Some("adapter-dispatch-gate-codex".to_string()),
+                    payload_json:
+                        "{\"provider_cli_execution_allowed\":false,\"provider_cli_executed\":false}"
+                            .to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::AdapterDispatchGate(
+                    AdapterDispatchGateProjection {
+                        dispatch_gate_id: "adapter-dispatch-gate-codex".to_string(),
+                        project_id: project_id.clone(),
+                        dispatch_plan_id: "adapter-dispatch-plan-codex".to_string(),
+                        adapter_kind: "codex_exec".to_string(),
+                        provider_cli_execution_allowed: false,
+                        status: "blocked".to_string(),
+                        required_dogfood_gate: "blocked_pending_real_smoke".to_string(),
+                        reason_codes: "codex_exec:real_subscription_smoke_not_recorded".to_string(),
+                        provider_cli_executed: false,
+                        runtime_prompt_policy: "not_rendered".to_string(),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append adapter dispatch gate");
+
+        store.rebuild_projections().expect("rebuild projections");
+        let gates = store
+            .adapter_dispatch_gates(&project_id)
+            .expect("adapter dispatch gates");
+        assert_eq!(gates.len(), 1);
+        assert_eq!(gates[0].dispatch_plan_id, "adapter-dispatch-plan-codex");
+        assert_eq!(gates[0].adapter_kind, "codex_exec");
+        assert_eq!(gates[0].status, "blocked");
+        assert!(!gates[0].provider_cli_execution_allowed);
+        assert!(!gates[0].provider_cli_executed);
+        assert_eq!(gates[0].runtime_prompt_policy, "not_rendered");
     }
 
     #[test]
