@@ -1035,3 +1035,24 @@ Verification:
 Follow-up:
 
 - A future approval UI/API should use these rows plus `permission_approvals` to let operators grant or revoke exposure without parsing raw event logs.
+
+## F7/RR5 - Connectivity Exposure Operator Surface
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo connectivity expose-stub` as a provider-free operator surface for planning and recording connectivity exposure intent.
+- Keep this command on the connectivity boundary. It resolves endpoint metadata through `ConnectivityTunnel`, writes `ConnectivityExposureProjection` rows when `--record` is used, and does not start runtime processes or provider CLIs.
+- Private and public exposures fail closed with `status=blocked_pending_permission` and a permission scope such as `network:connect:private_tunnel`. Loopback exposure can be active because it does not require remote/public permission.
+- Public stub exposure keeps its allowed-channel list narrow; unsupported channel requests fail before any state write.
+
+Verification:
+
+- `cargo test -p capo-cli connectivity_expose_stub -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Follow-up:
+
+- A future slice should connect exposure approval decisions to this operator surface so a matching durable grant can transition a blocked exposure to active without hand-writing projections in tests.
+- Concrete SSH/Tailscale/cloud adapters remain deferred until local real-agent dispatch is proven.

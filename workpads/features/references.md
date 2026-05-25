@@ -456,3 +456,13 @@ Observed 2026-05-25.
 - Connectivity exposure projection source: `../../crates/capo-state/src/lib.rs`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR4.
+
+## F7/RR5 Connectivity Exposure Operator Surface
+
+Observed 2026-05-26.
+
+- CLI `connectivity expose-stub` command, endpoint parsing, exposure projection recording, and regression test: `../../crates/capo-cli/src/main.rs`
+- Connectivity endpoint stub and exposure scope contracts reused by the command: `../../crates/capo-runtime/src/lib.rs`
+- Connectivity exposure projection source: `../../crates/capo-state/src/lib.rs`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR5.

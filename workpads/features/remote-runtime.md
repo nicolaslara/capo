@@ -85,3 +85,27 @@ Evidence:
 - CLI `capo dashboard` renders exposure ID, endpoint, owner, channel, exposure scope, status, health, reachability, permission scope, grant ID, and revocation timestamp from the shared query contract.
 - `cargo test -p capo-query connectivity -- --nocapture`: passed.
 - `cargo test -p capo-cli dashboard_renders_connectivity -- --nocapture`: passed.
+
+### RR5 - Connectivity Exposure Operator Surface
+
+Status: completed
+
+Acceptance:
+
+- Add an operator command that resolves a stub connectivity endpoint and records an exposure row without opening a real tunnel.
+- Keep provider/runtime execution untouched: no agent process launch, no provider CLI execution, and no remote credentials.
+- Fail closed for private/public exposure by recording `blocked_pending_permission` until a separate durable grant exists.
+- Reuse the shared dashboard/read-model path for recorded exposure status.
+
+Evidence:
+
+- CLI `capo connectivity expose-stub --endpoint ENDPOINT_ID --owner-kind runtime_target|capo_server --owner-id OWNER_ID --channel control|stdio|logs|dashboard|artifact --exposure loopback|private|public [--record]` in `../../crates/capo-cli/src/main.rs`.
+- Private stub exposure records `permission_scope=network:connect:private_tunnel` and `status=blocked_pending_permission`.
+- Public stub exposure rejects disallowed channels before recording.
+- `cargo test -p capo-cli connectivity_expose_stub -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Decision:
+
+- Treat this as an exposure-planning and audit surface, not actual remote networking. Concrete SSH/Tailscale/cloud adapters remain deferred until real local-agent semantics are proven.
+- The command records only endpoint/owner/channel/scope/status/health metadata. It does not create tunnels, run provider CLIs, inspect credentials, or mutate runtime process refs.

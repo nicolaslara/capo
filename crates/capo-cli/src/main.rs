@@ -14,16 +14,19 @@ use capo_core::{
 };
 use capo_eval::TaskOutcomeReport;
 use capo_query::{AdapterDogfoodGate, ProjectDashboard, ProjectDashboardQuery, project_dashboard};
+use capo_runtime::{
+    ChannelKind, ConnectivityEndpointConfig, ConnectivityTunnel, EndpointOwner, ExposureScope,
+};
 use capo_state::{
     AdapterDispatchExecutionRequestProjection, AdapterDispatchGateProjection,
     AdapterDispatchPlanProjection, AdapterDispatchPromptMaterializationProjection,
     AdapterDispatchPromptSourceProjection, AdapterDispatchReplayProjection,
     AdapterReadinessProjection, AdapterSmokeReportProjection, ArtifactRecord,
-    CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection, MemoryPacketProjection,
-    MemoryRecordProjection, MemorySourceProjection, NewEvent, PermissionApprovalProjection,
-    ProjectionRecord, RedactionState, ReviewFindingProjection, RunProjection, SessionProjection,
-    SqliteStateStore, ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection,
-    WorkpadTaskProjection,
+    CapabilityGrantProjection, ConnectivityExposureProjection, EventKind, EventRecord,
+    EvidenceProjection, MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
+    NewEvent, PermissionApprovalProjection, ProjectionRecord, RedactionState,
+    ReviewFindingProjection, RunProjection, SessionProjection, SqliteStateStore,
+    ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
 use capo_voice::{
     MemoryIngestionPolicy, TranscriptRetentionPolicy, VOICE_TRANSCRIPT_RETENTION_DEFAULT,
@@ -66,6 +69,7 @@ Usage:
   capo permission request --approval APPROVAL_ID --scope-json JSON --reason REASON [--profile PROFILE] [--session SESSION_ID] [--tool-call TOOL_CALL_ID] [--subject-json JSON] [--requested-by ACTOR] [--state PATH]
   capo permission list [--state PATH]
   capo permission decide --approval APPROVAL_ID --decision allow_once|allow_always|reject_once|reject_always [--state PATH]
+  capo connectivity expose-stub --endpoint ENDPOINT_ID --owner-kind runtime_target|capo_server --owner-id OWNER_ID --channel control|stdio|logs|dashboard|artifact --exposure loopback|private|public [--address REF] [--record] [--state PATH]
   capo workpad index --root PATH [--state PATH]
   capo workpad next [--path PATH] [--state PATH]
   capo workpad plan-next --agent NAME --adapter codex|claude [--path PATH] [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
@@ -178,6 +182,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "permission" && command == "decide" => {
             decide_permission_approval(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "connectivity" && command == "expose-stub" => {
+            expose_connectivity_stub(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "workpad" && command == "index" => {
             index_workpads(&parsed, rest)
@@ -3102,6 +3109,191 @@ fn decide_permission_approval(parsed: &ParsedArgs, args: &[String]) -> Result<St
     ))
 }
 
+fn expose_connectivity_stub(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let endpoint_id = required_arg(args, "--endpoint")?;
+    let owner_kind = required_arg(args, "--owner-kind")?;
+    let owner_id = required_arg(args, "--owner-id")?;
+    let channel = parse_channel_kind(&required_arg(args, "--channel")?)?;
+    let exposure = parse_exposure_scope(&required_arg(args, "--exposure")?)?;
+    let address_ref = optional_arg(args, "--address").unwrap_or_else(|| owner_id.clone());
+    let record = has_flag(args, "--record");
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--")
+            && !matches!(
+                arg.as_str(),
+                "--endpoint"
+                    | "--owner-kind"
+                    | "--owner-id"
+                    | "--channel"
+                    | "--exposure"
+                    | "--address"
+                    | "--record"
+            )
+    }) {
+        return Err(format!(
+            "unknown connectivity expose-stub option: {unknown}"
+        ));
+    }
+
+    let owner = endpoint_owner(&owner_kind, &owner_id)?;
+    let tunnel = match exposure {
+        ExposureScope::Loopback => ConnectivityTunnel::local_loopback(),
+        ExposureScope::Private => ConnectivityTunnel::endpoint_stub(
+            ConnectivityEndpointConfig::stub_private(endpoint_id.clone(), address_ref),
+        ),
+        ExposureScope::Public => ConnectivityTunnel::endpoint_stub(
+            ConnectivityEndpointConfig::stub_public(endpoint_id.clone(), address_ref),
+        ),
+    };
+    let resolved = tunnel
+        .resolve_endpoint(owner, channel)
+        .map_err(|error| format!("connectivity endpoint resolution failed: {error:?}"))?;
+    let health = tunnel.check_reachability();
+    let status = if resolved.permission_required {
+        "blocked_pending_permission"
+    } else {
+        "active"
+    };
+    let exposure = ConnectivityExposureProjection {
+        exposure_id: format!(
+            "connectivity-exposure-{}",
+            stable_cli_hash(&format!(
+                "{}:{}",
+                resolved.resolved_endpoint_id,
+                exposure_scope_str(resolved.exposure)
+            ))
+        ),
+        project_id: project_id(),
+        connectivity_endpoint_id: resolved.connectivity_endpoint_id.clone(),
+        owner_kind: resolved.owner.owner_kind.clone(),
+        owner_id: resolved.owner.owner_id.clone(),
+        channel_kind: channel_kind_str(resolved.channel_kind).to_string(),
+        exposure: exposure_scope_str(resolved.exposure).to_string(),
+        permission_scope: resolved.permission_scope.clone(),
+        status: status.to_string(),
+        capability_grant_id: None,
+        health_status: health.status.clone(),
+        reachable: health.reachable,
+        revoked_at: None,
+        updated_sequence: 0,
+    };
+    let sequence = if record {
+        let event_kind = if resolved.permission_required {
+            EventKind::ConnectivityExposureRequested
+        } else {
+            EventKind::ConnectivityExposureChanged
+        };
+        let mut event = NewEvent::new(
+            format!(
+                "event-connectivity-exposure-{}",
+                stable_cli_hash(&exposure.exposure_id)
+            ),
+            event_kind,
+            "capo-cli",
+        );
+        event.project_id = Some(exposure.project_id.clone());
+        event.item_id = Some(exposure.exposure_id.clone());
+        event.payload_json = format!(
+            "{{\"exposure_id\":\"{}\",\"resolved_endpoint_id\":\"{}\",\"endpoint_id\":\"{}\",\"owner_kind\":\"{}\",\"owner_id\":\"{}\",\"channel\":\"{}\",\"exposure\":\"{}\",\"permission_scope\":\"{}\",\"status\":\"{}\"}}",
+            escape_json(&exposure.exposure_id),
+            escape_json(&resolved.resolved_endpoint_id),
+            escape_json(&exposure.connectivity_endpoint_id),
+            escape_json(&exposure.owner_kind),
+            escape_json(&exposure.owner_id),
+            escape_json(&exposure.channel_kind),
+            escape_json(&exposure.exposure),
+            escape_json(&exposure.permission_scope),
+            escape_json(&exposure.status)
+        );
+        event.idempotency_key = Some(format!(
+            "connectivity-exposure:{}:{}:{}:{}:{}:{}",
+            exposure.project_id,
+            exposure.connectivity_endpoint_id,
+            exposure.owner_kind,
+            exposure.owner_id,
+            exposure.channel_kind,
+            exposure.exposure
+        ));
+        event.redaction_state = RedactionState::Safe;
+        Some(
+            state(parsed)?
+                .append_event(
+                    event,
+                    &[ProjectionRecord::ConnectivityExposure(exposure.clone())],
+                )
+                .map_err(debug_error)?,
+        )
+    } else {
+        None
+    };
+
+    Ok(format!(
+        "connectivity_exposure_planned=true\nexposure={}\nendpoint={}\nresolved_endpoint={}\nowner={}:{}\nchannel={}\nexposure_scope={}\npermission_required={}\npermission_scope={}\nstatus={}\nhealth={}\nreachable={}\nrecorded={}\nrecorded_sequence={}\n",
+        exposure.exposure_id,
+        exposure.connectivity_endpoint_id,
+        resolved.resolved_endpoint_id,
+        exposure.owner_kind,
+        exposure.owner_id,
+        exposure.channel_kind,
+        exposure.exposure,
+        resolved.permission_required,
+        exposure.permission_scope,
+        exposure.status,
+        exposure.health_status,
+        exposure.reachable,
+        record,
+        sequence
+            .map(|sequence| sequence.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    ))
+}
+
+fn parse_channel_kind(value: &str) -> Result<ChannelKind, String> {
+    match value {
+        "control" => Ok(ChannelKind::Control),
+        "stdio" => Ok(ChannelKind::Stdio),
+        "logs" => Ok(ChannelKind::Logs),
+        "dashboard" => Ok(ChannelKind::Dashboard),
+        "artifact" => Ok(ChannelKind::Artifact),
+        other => Err(format!("unsupported channel kind: {other}")),
+    }
+}
+
+fn channel_kind_str(value: ChannelKind) -> &'static str {
+    match value {
+        ChannelKind::Control => "control",
+        ChannelKind::Stdio => "stdio",
+        ChannelKind::Logs => "logs",
+        ChannelKind::Dashboard => "dashboard",
+        ChannelKind::Artifact => "artifact",
+    }
+}
+
+fn parse_exposure_scope(value: &str) -> Result<ExposureScope, String> {
+    match value {
+        "loopback" => Ok(ExposureScope::Loopback),
+        "private" => Ok(ExposureScope::Private),
+        "public" => Ok(ExposureScope::Public),
+        other => Err(format!("unsupported exposure scope: {other}")),
+    }
+}
+
+fn exposure_scope_str(value: ExposureScope) -> &'static str {
+    match value {
+        ExposureScope::Loopback => "loopback",
+        ExposureScope::Private => "private",
+        ExposureScope::Public => "public",
+    }
+}
+
+fn endpoint_owner(owner_kind: &str, owner_id: &str) -> Result<EndpointOwner, String> {
+    match owner_kind {
+        "runtime_target" => Ok(EndpointOwner::runtime_target(owner_id)),
+        "capo_server" => Ok(EndpointOwner::capo_server(owner_id)),
+        other => Err(format!("unsupported endpoint owner kind: {other}")),
+    }
+}
+
 fn index_workpads(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let root = PathBuf::from(required_arg(args, "--root")?);
     let index = index_project_workpads(&root)?;
@@ -4665,6 +4857,7 @@ mod tests {
         assert!(HELP.contains("adapter materialize-prompt"));
         assert!(HELP.contains("adapter replay-dispatch"));
         assert!(HELP.contains("adapter dogfood-gate"));
+        assert!(HELP.contains("connectivity expose-stub"));
         assert!(HELP.contains("workpad index"));
         assert!(HELP.contains("workpad next"));
         assert!(HELP.contains("workpad plan-next"));
@@ -6580,6 +6773,67 @@ mod tests {
         assert!(dashboard.contains("exposure_status=blocked_pending_permission"));
         assert!(dashboard.contains("permission_scope=network:connect:private_tunnel"));
         assert!(dashboard.contains("grant=none"));
+    }
+
+    #[test]
+    fn connectivity_expose_stub_records_blocked_private_exposure_without_runtime_execution() {
+        let state_root = temp_root("cli-connectivity-expose-stub");
+        let planned = run_cli(vec![
+            "connectivity".to_string(),
+            "expose-stub".to_string(),
+            "--endpoint".to_string(),
+            "endpoint-private-1".to_string(),
+            "--owner-kind".to_string(),
+            "runtime_target".to_string(),
+            "--owner-id".to_string(),
+            "remote-target-1".to_string(),
+            "--channel".to_string(),
+            "control".to_string(),
+            "--exposure".to_string(),
+            "private".to_string(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record private exposure");
+
+        assert!(planned.contains("connectivity_exposure_planned=true"));
+        assert!(planned.contains("permission_required=true"));
+        assert!(planned.contains("permission_scope=network:connect:private_tunnel"));
+        assert!(planned.contains("status=blocked_pending_permission"));
+        assert!(planned.contains("recorded=true"));
+
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard");
+        assert!(dashboard.contains("connectivity_exposures=1"));
+        assert!(dashboard.contains("endpoint=endpoint-private-1"));
+        assert!(dashboard.contains("owner=runtime_target:remote-target-1"));
+        assert!(dashboard.contains("exposure_status=blocked_pending_permission"));
+        assert!(dashboard.contains("permission_scope=network:connect:private_tunnel"));
+
+        let denied = run_cli(vec![
+            "connectivity".to_string(),
+            "expose-stub".to_string(),
+            "--endpoint".to_string(),
+            "endpoint-public-1".to_string(),
+            "--owner-kind".to_string(),
+            "capo_server".to_string(),
+            "--owner-id".to_string(),
+            "server-1".to_string(),
+            "--channel".to_string(),
+            "control".to_string(),
+            "--exposure".to_string(),
+            "public".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap_err();
+        assert!(denied.contains("connectivity endpoint resolution failed"));
+        assert!(denied.contains("ChannelNotAllowed"));
     }
 
     #[test]
