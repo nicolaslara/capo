@@ -75,14 +75,21 @@ Evidence:
 
 ## A3 - Capability And Permission Model
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Define capability grants, scopes, approvals, revocation, and audit events.
 - Cover shell, filesystem, git, network, browser, MCP/tools, and voice transcript access.
-- Start with an all-allowed local prototype policy, but define a modular permission-decision interface that can later use static policy, user approval, or a fast security agent.
+- Start with a trusted local prototype policy that can allow broad local scopes, but define a modular permission-decision interface that can later use static policy, user approval, or a fast security agent.
 - Define how ACP permission options such as `allow_once`, `allow_always`, `reject_once`, and `reject_always` map into Capo policy decisions even if the first policy allows everything.
+
+Evidence:
+
+- `workpads/architecture/capability-permissions.md`
+- `workpads/architecture/state-model.md` capability/permission additions
+- `workpads/architecture/knowledge.md` A3 section
+- `workpads/architecture/references.md` ACP permission references
 
 ## A4 - Runtime And Tunnel Plan
 

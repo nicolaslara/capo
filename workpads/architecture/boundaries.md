@@ -15,7 +15,7 @@ This file is the architecture contract surface for A1. It is concrete enough to 
 - Capo's event log is authoritative. Raw external streams are inputs.
 - UI, voice, and mobile surfaces submit commands and render read models; they do not own orchestration state.
 - Tools exposed through Capo should be instrumented wrappers when feasible.
-- The local prototype may allow all actions, but permission decisions still flow through a policy boundary and produce audit events.
+- The local prototype may allow trusted local profile actions broadly, but permission decisions still flow through a policy boundary and produce audit events.
 - Prefer static dispatch for the initial Rust scaffold where the variant set is known: `enum AgentAdapter`, `enum RuntimeRunner`, `enum ConnectivityTunnel`, `enum ProviderConnector`, `enum PermissionPolicy`, `enum ToolExposure`, `enum StateStore`, `enum MemoryBackend`, and `enum EvaluationLayer`. Use trait objects only when plugin loading or third-party extension genuinely needs dynamic dispatch.
 
 ## Naming Vocabulary
@@ -428,18 +428,20 @@ revocation_instructions() -> RevocationPlan
 
 Defines what an agent may do and how decisions are made.
 
+Detailed capability profile, scope, grant, approval, revocation, and ACP permission mapping design lives in `capability-permissions.md`.
+
 Initial variants:
 
 ```text
 PermissionPolicy =
-  AllowAllLocalPolicy
+  AllowTrustedLocalProfilePolicy
   | StaticPolicy
   | UserApprovalPolicy
   | SecurityAgentPolicy
   | FakePermissionPolicy
 ```
 
-Prototype starts with `AllowAllLocalPolicy`, but every decision still emits events.
+Prototype starts with `AllowTrustedLocalProfilePolicy`, but every decision still emits events.
 
 ### Contract
 
@@ -461,7 +463,7 @@ explain(PermissionDecisionId) -> DecisionExplanation
 
 - Implementing OS sandbox mechanics directly.
 - Hiding policy decisions inside prompts.
-- Treating "all allowed" as "no audit needed."
+- Treating broad trusted-local permission as "no audit needed."
 
 ### Failure Modes
 
@@ -472,7 +474,7 @@ explain(PermissionDecisionId) -> DecisionExplanation
 
 ### Test Strategy
 
-- All-allowed policy still emits decision events.
+- Trusted-local policy still emits decision events.
 - Scope/expiry/revocation unit tests.
 - ACP permission option mapping tests.
 - Restart persistence tests for pending approvals.
@@ -545,7 +547,7 @@ The prototype e2e flow should be explicit:
 
 1. `AgentAdapter` emits an `AdapterEvent::ToolCallRequested` with external IDs and raw metadata.
 2. `CapoController` maps it to `tool.call_requested` and asks `PermissionPolicy` for a decision.
-3. `PermissionPolicy` emits request/decision/grant events, even under `AllowAllLocalPolicy`.
+3. `PermissionPolicy` emits request/decision/grant events, even under `AllowTrustedLocalProfilePolicy`.
 4. `ToolExposure` invokes or wraps the requested tool and emits started/output/completed/failed events.
 5. `CapoController` persists the result and calls `AgentAdapter.deliver_tool_result(...)` when the adapter can accept structured results.
 6. If the adapter cannot accept structured results, Capo records the result as observed-only and exposes that limitation in the session read model.
@@ -725,7 +727,7 @@ enum AgentAdapter { Codex(CodexExecAdapter), Claude(ClaudeCodeAdapter), Acp(AcpA
 enum RuntimeRunner { Local(LocalProcessRunner), Fake(FakeRuntimeRunner) }
 enum ConnectivityTunnel { Local(LocalLoopback), Fake(FakeTunnel) }
 enum ProviderConnector { Codex(CodexSubscription), Claude(ClaudeSubscription), OpenAi(OpenAiApi), Anthropic(AnthropicApi), LocalModel(LocalModelEndpoint), Unknown(UnknownProvider), Fake(FakeProviderConnector) }
-enum PermissionPolicy { AllowAll(AllowAllLocalPolicy), Static(StaticPolicy), UserApproval(UserApprovalPolicy), SecurityAgent(SecurityAgentPolicy), Fake(FakePermissionPolicy) }
+enum PermissionPolicy { AllowTrustedLocalProfile(AllowTrustedLocalProfilePolicy), Static(StaticPolicy), UserApproval(UserApprovalPolicy), SecurityAgent(SecurityAgentPolicy), Fake(FakePermissionPolicy) }
 enum ToolExposure { Local(LocalToolExposure), Fake(FakeToolExposure) }
 enum StateStore { Sqlite(SqliteStateStore), InMemory(InMemoryStateStore), Fake(FakeStateStore) }
 enum MemoryBackend { Markdown(MarkdownMemory), SqliteFts(SqliteFtsMemory) }

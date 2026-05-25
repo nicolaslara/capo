@@ -35,6 +35,10 @@ Observed 2026-05-25. Local clones are gitignored under `workpads/references/repo
 - ACP agent plan docs: https://agentclientprotocol.com/protocol/agent-plan
 - ACP session resume announcement: https://agentclientprotocol.com/announcements/session-resume-stabilized
 - ACP Message ID RFD: https://agentclientprotocol.com/rfds/message-id
+- Capability/permission architecture artifact: `capability-permissions.md` (created 2026-05-25)
+- ACP permission requests and option mapping, observed 2026-05-25:
+  - `workpads/references/repos/agent-client-protocol/docs/protocol/tool-calls.mdx`
+  - `workpads/references/repos/agent-client-protocol/schema/schema.json`
 
 ## Runtime And Connectivity
 

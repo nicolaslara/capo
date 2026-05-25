@@ -17,6 +17,7 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 | `workpads/architecture/boundaries.md` | System boundaries and adapter contracts |
 | `workpads/architecture/state-model.md` | State entities, event log, read models, and restart recovery |
 | `workpads/architecture/acp-replay-dedupe.md` | ACP streaming replay, `session/load`, and dedupe design |
+| `workpads/architecture/capability-permissions.md` | Capability profiles, scopes, grants, permissions, and ACP option mapping |
 | `.cursor/commands/next.md` / `.opencode/commands/next.md` | `/next` task-execution command |
 | `.agents/skills/next/SKILL.md` | Codex `$next` task-execution skill |
 
@@ -42,12 +43,13 @@ Before task work:
 4. `workpads/architecture/boundaries.md` for architecture, prototype, features, and dogfood work
 5. `workpads/architecture/state-model.md` for architecture, prototype, features, and dogfood work once A2 is complete
 6. `workpads/architecture/acp-replay-dedupe.md` for ACP/protocol, state, prototype, features, and dogfood work once A2a is complete
-7. `workpads/prototype/spec.md` for prototype and dogfood work
-8. Pick a pending task and mark it `in_progress`
-9. Complete the acceptance criteria with the smallest correct change
-10. Record findings in `knowledge.md` and source links in `references.md`
-11. Review per `WORKING.md`
-12. Mark complete only after evidence is recorded
+7. `workpads/architecture/capability-permissions.md` for permission, runtime, tool, protocol, prototype, features, and dogfood work once A3 is complete
+8. `workpads/prototype/spec.md` for prototype and dogfood work
+9. Pick a pending task and mark it `in_progress`
+10. Complete the acceptance criteria with the smallest correct change
+11. Record findings in `knowledge.md` and source links in `references.md`
+12. Review per `WORKING.md`
+13. Mark complete only after evidence is recorded
 
 ## Git Rules
 

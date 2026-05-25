@@ -30,7 +30,7 @@ This is the A2 architecture artifact. It refines the `StateStore` boundary from 
 | Raw adapter events | File artifacts or raw-event table | Used for replay/debug/dedupe, not UI truth. |
 | Adapter replay batches | SQLite plus raw-update artifacts | Used to reconcile ACP `session/load` and restart recovery without duplicate UI state. |
 | Adapter replay candidates | SQLite staging table | Non-projecting records used during replay reconciliation before accepted Capo events are appended. |
-| Capability grants and permission decisions | SQLite events | A3 will expand exact scopes. |
+| Capability profiles, grants, and permission decisions | SQLite events and read models | Detailed scope and policy model lives in `capability-permissions.md`. |
 | Human decisions and review/evidence | SQLite events plus artifacts | Links back to workpad evidence where applicable. |
 | Derived memory | Memory layer | Must reference event/file provenance. |
 | Recovery attempts | SQLite events plus recovery metadata | Used only to make restart reconciliation idempotent. |
@@ -218,14 +218,65 @@ Fields:
 - `run_id?`
 - `tool_call_id?`
 - `capability_profile_id`
-- `decision`: `allow`, `reject`
-- `persistence`: `once`, `always`, `until_revoked`, `until_session_end`
-- `source`: `allow_all_local`, `static_policy`, `user`, `security_agent`
+- `decision`: `allow`, `reject`, `cancel`
+- `persistence`: `once`, `until_turn_end`, `until_session_end`, `until_revoked`, `until_time`
+- `source`: `allow_trusted_local_profile`, `static_policy`, `user`, `security_agent`
 - `scope`
 - `expires_at?`
 - `revoked_at?`
 
 A3 owns the full scope vocabulary and ACP option mapping.
+
+### CapabilityProfile
+
+Named default authority envelope for an agent/session/run.
+
+Fields:
+
+- `capability_profile_id`
+- `project_id?`
+- `name`
+- `description`
+- `default_scopes`
+- `risk_level`
+- `decision_mode`
+- `created_at`
+- `updated_at`
+- `disabled_at?`
+
+### CapabilityGrant
+
+Durable scoped grant or deny rule created by policy.
+
+Fields:
+
+- `capability_grant_id`
+- `capability_profile_id`
+- `scope`
+- `effect`: `allow`, `deny`
+- `subject`
+- `decision_id`
+- `source`
+- `persistence`
+- `expires_at?`
+- `revoked_at?`
+- `revocation_reason?`
+- `created_at`
+
+### CapabilityGrantUse
+
+Audit record that a grant was consumed by a tool/runtime/adapter/input action.
+
+Fields:
+
+- `capability_grant_use_id`
+- `capability_grant_id`
+- `permission_request_id?`
+- `session_id?`
+- `run_id?`
+- `tool_call_id?`
+- `used_at`
+- `result`
 
 ### PermissionRequest
 
@@ -433,6 +484,13 @@ Uniqueness rules:
 | `permission.requested` | Scope/risk/source request | `permission_requests`, `permission_queue` |
 | `permission.decided` | Decision, persistence, source, expiry | `permission_decisions` |
 | `permission.revoked` | Grant/decision ID, reason | `permission_decisions` |
+| `permission.explanation_recorded` | Human-readable decision explanation | `permission_decisions` |
+| `capability.profile_created` | Profile name, scopes, decision mode | `capability_profiles` |
+| `capability.profile_updated` | Scope/profile changes, reason | `capability_profiles` |
+| `capability.grant_created` | Scope, effect, subject, persistence, expiry | `capability_grants` |
+| `capability.grant_used` | Grant use result and action refs | `capability_grant_uses` |
+| `capability.grant_expired` | Grant ID and expiry reason | `capability_grants` |
+| `capability.grant_revoked` | Grant ID, actor, reason | `capability_grants` |
 | `tool.call_requested` | Tool name, origin, input artifact/ref | `tool_calls`, `items` |
 | `tool.call_started` | Execution metadata | `tool_calls` |
 | `tool.output_observed` | Output artifact/ref | `tool_calls`, `items` |
@@ -558,6 +616,9 @@ items(item_id, turn_id, kind, status, stream_state, ordinal, summary, artifact_i
 tool_calls(tool_call_id, session_id, turn_id, item_id, tool_name, tool_origin, permission_decision_id, status, started_at, completed_at, latency_ms, input_artifact_id, output_artifact_id, external_tool_ref_json)
 permission_decisions(permission_decision_id, request_id, session_id, run_id, tool_call_id, capability_profile_id, decision, persistence, source, scope_json, expires_at, revoked_at, created_at)
 permission_requests(permission_request_id, session_id, run_id, tool_call_id, capability_profile_id, scope_json, risk, source, adapter_options_json, status, created_at, decided_at)
+capability_profiles(capability_profile_id, project_id, name, description, default_scopes_json, risk_level, decision_mode, created_at, updated_at, disabled_at)
+capability_grants(capability_grant_id, capability_profile_id, scope_json, effect, subject_json, decision_id, source, persistence, expires_at, revoked_at, revocation_reason, created_at)
+capability_grant_uses(capability_grant_use_id, capability_grant_id, permission_request_id, session_id, run_id, tool_call_id, used_at, result)
 checkpoints(checkpoint_id, project_id, session_id, run_id, kind, artifact_id, created_at, restored_at)
 commands(command_id, project_id, actor_id, origin, target_json, intent, status, idempotency_key, received_at, completed_at)
 evidence(evidence_id, project_id, task_id, session_id, run_id, kind, artifact_id, source_ref_json, confidence, created_at)
@@ -584,6 +645,9 @@ Minimum indexes:
 - `tool_calls(session_id, status)`
 - `permission_requests(status, created_at)`
 - `permission_decisions(session_id, revoked_at)`
+- `capability_profiles(project_id, name)`
+- `capability_grants(capability_profile_id, revoked_at, expires_at)`
+- `capability_grant_uses(capability_grant_id, used_at)`
 - `evidence(task_id, created_at)`
 - `recovery_attempts(started_at)`
 - `adapter_replay_batches(session_id, source, started_at)`
@@ -610,6 +674,7 @@ Minimum indexes:
 - UI clients subscribe from a sequence and use read models for snapshots.
 - UI state dedupe keys are Capo `sequence` and `event_id`, not adapter IDs.
 - `PermissionQueue` is a read model over `permission_requests` joined to decisions and affected sessions/tools.
+- Capability profile/grant read models are projections over capability and permission events.
 
 ## Workpad Status Boundary
 

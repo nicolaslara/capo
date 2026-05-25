@@ -33,16 +33,17 @@ Use this loop for `/next`, `$next`, and similar task execution. The concrete com
 4. For architecture, prototype, features, or dogfood work, also load `workpads/architecture/boundaries.md`.
 5. After A2 is complete, also load `workpads/architecture/state-model.md` for architecture, prototype, features, or dogfood work.
 6. After A2a is complete, also load `workpads/architecture/acp-replay-dedupe.md` for ACP/protocol, state, prototype, features, or dogfood work.
-7. For prototype or dogfood work, also load `workpads/prototype/spec.md`.
-8. Select a task by dependencies, risk, and testability.
-9. Mark the task `in_progress` before doing work.
-10. Complete acceptance criteria with the smallest correct change.
-11. Verify per the task's evidence standard.
-12. Record findings, decisions, and open questions in the workpad or project docs.
-13. Assess confidence and use review subagents per thresholds below.
-14. Incorporate review feedback, record rejections, or ask the user when product-sensitive.
-15. Mark `completed` only when acceptance criteria and review requirements are satisfied.
-16. Before another `/next` pass: explicit commit decision - commit, or record why not.
+7. After A3 is complete, also load `workpads/architecture/capability-permissions.md` for permission, runtime, tool, protocol, prototype, features, or dogfood work.
+8. For prototype or dogfood work, also load `workpads/prototype/spec.md`.
+9. Select a task by dependencies, risk, and testability.
+10. Mark the task `in_progress` before doing work.
+11. Complete acceptance criteria with the smallest correct change.
+12. Verify per the task's evidence standard.
+13. Record findings, decisions, and open questions in the workpad or project docs.
+14. Assess confidence and use review subagents per thresholds below.
+15. Incorporate review feedback, record rejections, or ask the user when product-sensitive.
+16. Mark `completed` only when acceptance criteria and review requirements are satisfied.
+17. Before another `/next` pass: explicit commit decision - commit, or record why not.
 
 ## Verification
 
@@ -115,13 +116,14 @@ Prefer clear names. Comment non-obvious invariants: permission boundaries, recov
 | `workpads/architecture/boundaries.md` | Boundary contracts and architecture map |
 | `workpads/architecture/state-model.md` | State entities, event log, read models, and restart recovery |
 | `workpads/architecture/acp-replay-dedupe.md` | ACP replay and dedupe rules |
+| `workpads/architecture/capability-permissions.md` | Capability and permission model |
 
 ## Phase Focus
 
 | Phase | Workpad | `/next` reads |
 | --- | --- | --- |
 | Complete | `research` | `research/tasks.md`, `knowledge.md`, `references.md` |
-| Now | `architecture` | `architecture/tasks.md`, `knowledge.md`, `references.md`, `boundaries.md`, `state-model.md`, `acp-replay-dedupe.md` |
+| Now | `architecture` | `architecture/tasks.md`, `knowledge.md`, `references.md`, `boundaries.md`, `state-model.md`, `acp-replay-dedupe.md`, `capability-permissions.md` |
 | Next | `prototype` | `prototype/spec.md`, `tasks.md`, `knowledge.md`, `references.md`, architecture artifacts |
 | Later | `features` | Feature-specific tasks after prototype |
 | Later | `dogfood` | Migration of Capo project execution into Capo |

@@ -60,6 +60,7 @@ workpads/architecture/references.md
 workpads/architecture/boundaries.md
 workpads/architecture/state-model.md
 workpads/architecture/acp-replay-dedupe.md
+workpads/architecture/capability-permissions.md
 workpads/research/knowledge.md
 ```
 
@@ -68,6 +69,7 @@ workpads/research/knowledge.md
 - `boundaries.md` system boundary map and initial contracts
 - `state-model.md` operational entities, event log, read models, SQLite/files layout, and restart recovery
 - `acp-replay-dedupe.md` ACP `session/load`, `session/resume`, streaming, and dedupe design
+- `capability-permissions.md` capability profiles, scopes, grants, permissions, revocation, and ACP option mapping
 - `tasks.md` A0-A8: event model, capability model, runtime, security, prototype plan
 - `knowledge.md` Architecture gate section
 
@@ -96,6 +98,7 @@ workpads/prototype/references.md
 workpads/architecture/boundaries.md
 workpads/architecture/state-model.md
 workpads/architecture/acp-replay-dedupe.md
+workpads/architecture/capability-permissions.md
 workpads/architecture/knowledge.md
 ```
 
@@ -129,6 +132,7 @@ workpads/features/references.md
 workpads/architecture/boundaries.md
 workpads/architecture/state-model.md
 workpads/architecture/acp-replay-dedupe.md
+workpads/architecture/capability-permissions.md
 workpads/prototype/knowledge.md
 ```
 
@@ -157,6 +161,7 @@ workpads/prototype/knowledge.md
 workpads/architecture/boundaries.md
 workpads/architecture/state-model.md
 workpads/architecture/acp-replay-dedupe.md
+workpads/architecture/capability-permissions.md
 ```
 
 **Rules:**

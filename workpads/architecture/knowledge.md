@@ -64,7 +64,7 @@ Architecture direction:
 - Use Rust for controller, state, runtime supervision, command handling, and audit.
 - Use SQLite for operational truth and markdown workpads for human-auditable project state.
 - Use local process runtime first; remote, Tailscale, SSH, container, and stronger sandboxing are later adapters.
-- Start permissions as all-allowed for trusted local dogfooding while still routing all decisions through a modular policy boundary.
+- Start permissions with a trusted local profile for dogfooding while still routing all decisions through a modular policy boundary.
 - Make Capo-exposed tools instrumented wrappers so tool calls become durable, auditable events.
 - Treat conversational voice as a Capo-facing control surface over the same read models and command envelopes as CLI/dashboard.
 
@@ -167,6 +167,32 @@ Residual risk:
 
 - Message-boundary dedupe without stable message IDs is inherently medium confidence. Prototype ACP fixtures must cover same-history `session/load`, foreign import, consecutive same-type chunks, plan replacement, repeated tool updates, and cancellation with pending permissions.
 - If ACP stabilizes message IDs later, Capo should support them opportunistically without making them required for correctness.
+
+## A3 - Capability And Permission Model
+
+Status: completed on 2026-05-25.
+
+Decision:
+
+- Use `workpads/architecture/capability-permissions.md` as the implementation-facing capability and permission model.
+- Keep `CapabilityProfile` as data and `PermissionPolicy` as the decision boundary.
+- Start the prototype with `AllowTrustedLocalProfilePolicy`, but route every action through the same request, decision, grant, grant-use, expiry, and revocation event flow that stricter policies will use.
+- Use static dispatch for policy variants: trusted local profile, static, user approval, security-agent, and fake test policy.
+- Store capability profiles, grants, and grant-use audit records in SQLite projections derived from append-only events.
+
+Scope and policy coverage:
+
+- A3 covers shell, filesystem, git, network, browser, Capo tools, adapter/provider-native tools, MCP servers/tools, secrets/subscription material, and voice transcript/approval scopes.
+- Trusted local dogfooding is audit-only convenience, not a sandbox claim.
+- Credential material and raw voice transcripts remain privileged scopes and are not retained or read by default.
+
+ACP mapping:
+
+- ACP `allow_once` maps to an allow decision with once/turn-scoped grant.
+- ACP `allow_always` maps to an allow decision with scoped durable grant only when the profile permits durable remembered grants; otherwise it is downscoped to session scope for the prototype.
+- ACP `reject_once` maps to a one-request rejection with no allow grant.
+- ACP `reject_always` maps to a scoped durable deny rule/grant record.
+- ACP `session/cancel` while a permission request is pending maps to Capo decision `cancel` and ACP outcome `cancelled`.
 
 ## Architecture Gate
 
