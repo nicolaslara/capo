@@ -213,3 +213,38 @@ Follow-up:
 
 - If `--status` becomes confusing during dogfood, split it into explicit `--agent-status`, `--session-status`, and `--run-status` filters.
 - Future web/TUI work should consume `capo-query` structs directly rather than adding state reads in a UI crate.
+
+## F4/PT1 - Static Policy Variant
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `PermissionPolicy::Static` as a real static-dispatch policy variant beside `TrustedLocal` and `Fake`.
+- Start with `read-only-local` and `reviewer` profiles. `read-only-local` can invoke read/status/workpad tools and read git status/diff scopes; it denies state writes, shell execution, memory packet build, and other absent scopes.
+- Keep `trusted-local-dev` as explicit opt-in broad local prototype behavior. It still produces durable grant metadata.
+- Use `serde_json` to parse requested scope JSON as an array of strings. Malformed, object-shaped, or mixed-type payloads are denied.
+- Scope grant IDs by session, effect, profile, and scope payload to avoid same-session grant collisions.
+- Persist decision source, persistence, and explanation in `capability_grants`, and migrate existing local stores by adding missing columns.
+- Controller-level denied permissions now stop tool invocation, grant-use events, memory packet creation, and evidence recording.
+
+Verification:
+
+- `cargo info serde_json`: version `1.0.150`, license `MIT OR Apache-2.0`, rust-version `1.71`.
+- `cargo test -p capo-tools`: passed.
+- `cargo test -p capo-state artifacts_tool_grants_memory_and_evidence_are_persisted_and_rebuilt`: passed.
+- `cargo test -p capo-controller denied_static_permission_stops_tool_invocation_in_controller_path`: passed.
+- `cargo test -p capo-controller`: passed.
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Review:
+
+- First focused permission review found blockers in scope parsing, grant identity, and decision metadata durability. Structured JSON parsing, scoped grant IDs, and persisted decision metadata resolved them.
+- Second focused permission review found blockers in denied controller execution and session-scoped permission event IDs. Denied permissions now stop execution in the controller path, and permission lifecycle event IDs include grant/tool identity.
+
+Follow-up:
+
+- PT2 should build the pending approval queue on the same `PermissionDecision` and grant metadata instead of introducing a separate approval vocabulary.
+- PT3 should route wrapper tools through the same deny-before-invoke controller behavior.

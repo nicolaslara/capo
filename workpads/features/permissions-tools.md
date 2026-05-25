@@ -19,13 +19,41 @@ Harden Capo's capability, permission, and tool-instrumentation model beyond the 
 
 ### PT1 - Static Policy Variant
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Add a stricter static policy variant for common local dogfood scopes.
 - Keep allow/reject decisions durable and scoped.
 - Preserve trusted-local as an explicit opt-in profile.
+
+Evidence:
+
+- `crates/capo-tools/src/lib.rs`
+- `crates/capo-state/src/lib.rs`
+- `crates/capo-controller/src/lib.rs`
+- `crates/capo-tools/Cargo.toml`
+- `Cargo.lock`
+- `cargo test -p capo-tools`
+- `cargo test -p capo-state artifacts_tool_grants_memory_and_evidence_are_persisted_and_rebuilt`
+- `cargo test -p capo-controller denied_static_permission_stops_tool_invocation_in_controller_path`
+- `cargo test -p capo-controller`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+
+Decision:
+
+- Add `PermissionPolicy::Static` with `read-only-local` and `reviewer` profiles while preserving `PermissionPolicy::TrustedLocal` as the explicit broad local prototype profile.
+- Parse requested scopes as structured JSON arrays using `serde_json`; malformed, non-array, or non-string scope payloads fail closed.
+- Scope grant IDs by session, effect, profile, and requested scopes so multiple same-session decisions do not collide in projections.
+- Persist decision source, persistence, and explanation on capability grant projections.
+- In the controller path, denied permissions block tool invocation, grant use, memory packet creation, and evidence recording.
+
+Review:
+
+- First focused permission review found three blockers: permissive scope parsing, grant ID collisions, and non-durable decision metadata. All were fixed.
+- Second focused permission review found two remaining blockers: denied controller decisions still allowed tool execution, and permission lifecycle event IDs were session-scoped. Both were fixed before completion.
 
 ### PT2 - User Approval Queue
 

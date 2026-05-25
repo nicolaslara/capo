@@ -140,7 +140,7 @@ Evidence:
 
 ## F4 - Capability And Tool Hardening
 
-Status: pending
+Status: in_progress
 
 Source workpad: `permissions-tools.md`
 
@@ -149,6 +149,22 @@ Acceptance:
 - Add stricter policy variants beyond trusted-local allow-all.
 - Expand instrumented wrappers for tools Capo can execute directly.
 - Keep provider-native tools observed-only unless Capo receives structured lifecycle evidence.
+
+Progress:
+
+- PT1 static policy variant is completed. PT2 approval queue and PT3 wrapper expansion remain pending.
+
+Evidence:
+
+- `crates/capo-tools/src/lib.rs`
+- `crates/capo-state/src/lib.rs`
+- `crates/capo-controller/src/lib.rs`
+- `cargo test -p capo-tools`
+- `cargo test -p capo-controller denied_static_permission_stops_tool_invocation_in_controller_path`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+- Focused PT1 permission reviews: scope parsing, grant scoping, decision durability, denied controller execution, and permission event IDs blockers found and fixed
 
 ## F5 - Memory And Evaluation Reports
 

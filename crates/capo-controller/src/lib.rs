@@ -23,7 +23,9 @@ use capo_state::{
     ProjectionRecord, RedactionState, RunProjection, SessionProjection, SqliteStateStore,
     StateError, StateResult, TaskProjection,
 };
-use capo_tools::{FakeToolRequest, PermissionPolicy, PermissionRequest, ToolExposure};
+use capo_tools::{
+    FakeToolRequest, PermissionDecision, PermissionPolicy, PermissionRequest, ToolExposure,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FakeBoundaryController {
@@ -39,13 +41,25 @@ pub struct FakeBoundaryController {
 
 impl FakeBoundaryController {
     pub fn open(project_id: ProjectId, state_root: impl AsRef<Path>) -> StateResult<Self> {
+        Self::open_with_permission_policy(
+            project_id,
+            state_root,
+            PermissionPolicy::allow_trusted_local(),
+        )
+    }
+
+    pub fn open_with_permission_policy(
+        project_id: ProjectId,
+        state_root: impl AsRef<Path>,
+        permission_policy: PermissionPolicy,
+    ) -> StateResult<Self> {
         Ok(Self {
             project_id,
             state: SqliteStateStore::open(state_root)?,
             adapter: AgentAdapter::fake(),
             runtime: RuntimeRunner::fake(),
             provider: ProviderConnector::fake(),
-            permission_policy: PermissionPolicy::allow_trusted_local(),
+            permission_policy,
             tools: ToolExposure::fake(),
             memory: MemoryBackend::fake(),
         })
@@ -232,9 +246,38 @@ impl FakeBoundaryController {
         );
         let permission = self.permission_policy.decide(PermissionRequest {
             session_id: session_id.clone(),
-            capability_profile_id: "trusted-local-dev".to_string(),
-            scope_json: "[\"tool:capo.session_summary\",\"memory:build_packet\"]".to_string(),
+            capability_profile_id: self.permission_policy.default_profile_id().to_string(),
+            scope_json: "[\"tool:invoke:capo.session_summary\",\"state:read:session\",\"state:read:tool\",\"state:read:permission_queue\",\"memory:build_packet:session\"]".to_string(),
         });
+        let permission_event_suffix = slug(&format!(
+            "{} {}",
+            tool_call_id, permission.capability_grant_id
+        ));
+        if permission.effect != "allow" {
+            self.record_denied_tool_request(
+                registration,
+                goal,
+                &task_id,
+                &session_id,
+                &run_id,
+                &turn_id,
+                &tool_call_id,
+                runtime_process.status.clone(),
+                &adapter_output.status,
+                adapter_output.confidence,
+                &adapter_output.summary,
+                &permission,
+                &permission_event_suffix,
+            )?;
+            return Ok(FakeRunRefs {
+                task_id,
+                agent_id: registration.agent_id.clone(),
+                session_id,
+                run_id,
+                runtime_process_ref: runtime_process.runtime_process_ref,
+                external_session_ref: adapter_output.external_session_ref,
+            });
+        }
         let tool_result = self.tools.invoke(FakeToolRequest {
             tool_call_id: tool_call_id.clone(),
             session_id: session_id.clone(),
@@ -403,67 +446,15 @@ impl FakeBoundaryController {
             ],
         )?;
 
-        self.state.append_event(
-            scoped_event(
-                &format!("event-permission-requested-{}", session_id),
-                EventKind::PermissionRequested,
-                &self.project_id,
-                &task_id,
-                &registration.agent_id,
-                &session_id,
-                &run_id,
-            )
-            .with_turn(turn_id.to_string())
-            .with_payload(format!(
-                "{{\"tool_call_id\":\"{}\",\"scope_json\":{}}}",
-                tool_call_id, permission.scope_json
-            )),
-            &[],
-        )?;
-
-        self.state.append_event(
-            scoped_event(
-                &format!("event-permission-decided-{}", session_id),
-                EventKind::PermissionDecided,
-                &self.project_id,
-                &task_id,
-                &registration.agent_id,
-                &session_id,
-                &run_id,
-            )
-            .with_turn(turn_id.to_string())
-            .with_payload(format!(
-                "{{\"tool_call_id\":\"{}\",\"effect\":\"{}\",\"capability_grant_id\":\"{}\"}}",
-                tool_call_id, permission.effect, permission.capability_grant_id
-            )),
-            &[],
-        )?;
-
-        self.state.append_event(
-            scoped_event(
-                &format!("event-capability-grant-{}", session_id),
-                EventKind::CapabilityGrantCreated,
-                &self.project_id,
-                &task_id,
-                &registration.agent_id,
-                &session_id,
-                &run_id,
-            )
-            .with_turn(turn_id.to_string())
-            .with_payload(format!(
-                "{{\"capability_grant_id\":\"{}\",\"effect\":\"{}\"}}",
-                permission.capability_grant_id, permission.effect
-            )),
-            &[ProjectionRecord::CapabilityGrant(
-                capo_state::CapabilityGrantProjection {
-                    capability_grant_id: permission.capability_grant_id.clone(),
-                    capability_profile_id: permission.capability_profile_id.clone(),
-                    scope_json: permission.scope_json.clone(),
-                    effect: permission.effect.clone(),
-                    subject_json: permission.subject_json.clone(),
-                    updated_sequence: 0,
-                },
-            )],
+        self.record_permission_decision(
+            registration,
+            &task_id,
+            &session_id,
+            &run_id,
+            &turn_id,
+            &tool_call_id,
+            &permission,
+            &permission_event_suffix,
         )?;
 
         self.state.append_event(
@@ -493,7 +484,10 @@ impl FakeBoundaryController {
 
         self.state.append_event(
             scoped_event(
-                &format!("event-capability-grant-used-{}", session_id),
+                &format!(
+                    "event-capability-grant-used-{}-{}",
+                    session_id, permission_event_suffix
+                ),
                 EventKind::CapabilityGrantUsed,
                 &self.project_id,
                 &task_id,
@@ -680,6 +674,217 @@ impl FakeBoundaryController {
             runtime_process_ref: runtime_process.runtime_process_ref,
             external_session_ref: adapter_session.external_session_ref,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_denied_tool_request(
+        &self,
+        registration: &FakeAgentRegistration,
+        goal: &str,
+        task_id: &TaskId,
+        session_id: &SessionId,
+        run_id: &RunId,
+        turn_id: &TurnId,
+        tool_call_id: &ToolCallId,
+        run_status: String,
+        adapter_status: &str,
+        adapter_confidence: i64,
+        adapter_summary: &str,
+        permission: &PermissionDecision,
+        permission_event_suffix: &str,
+    ) -> StateResult<()> {
+        self.state.append_event(
+            scoped_event(
+                &format!("event-task-started-{}", session_id),
+                EventKind::SessionStarted,
+                &self.project_id,
+                task_id,
+                &registration.agent_id,
+                session_id,
+                run_id,
+            )
+            .with_turn(turn_id.clone())
+            .with_payload(format!(
+                "{{\"goal\":\"{}\",\"permission_effect\":\"{}\"}}",
+                escape_json(goal),
+                permission.effect
+            )),
+            &[
+                ProjectionRecord::Task(TaskProjection {
+                    task_id: task_id.clone(),
+                    project_id: self.project_id.clone(),
+                    title: goal.to_string(),
+                    capo_execution_status: "blocked".to_string(),
+                    active_session_id: Some(session_id.clone()),
+                    latest_summary: Some(adapter_summary.to_string()),
+                    evidence_id: None,
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Agent(AgentProjection {
+                    agent_id: registration.agent_id.clone(),
+                    project_id: self.project_id.clone(),
+                    name: registration.agent_name.clone(),
+                    status: "paused".to_string(),
+                    current_session_id: Some(session_id.clone()),
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Session(SessionProjection {
+                    session_id: session_id.clone(),
+                    project_id: self.project_id.clone(),
+                    task_id: Some(task_id.clone()),
+                    agent_id: registration.agent_id.clone(),
+                    title: goal.to_string(),
+                    status: "waiting_for_permission".to_string(),
+                    current_goal: goal.to_string(),
+                    latest_summary: Some(adapter_summary.to_string()),
+                    latest_confidence: Some(adapter_confidence),
+                    latest_blocker: Some(permission.explanation.clone()),
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Run(RunProjection {
+                    run_id: run_id.clone(),
+                    session_id: session_id.clone(),
+                    status: run_status,
+                    recovery_of_run_id: None,
+                    updated_sequence: 0,
+                }),
+            ],
+        )?;
+        self.record_permission_decision(
+            registration,
+            task_id,
+            session_id,
+            run_id,
+            turn_id,
+            tool_call_id,
+            permission,
+            permission_event_suffix,
+        )?;
+        self.state.append_event(
+            scoped_event(
+                &format!("event-tool-requested-{}-{}", session_id, permission_event_suffix),
+                EventKind::ToolCallRequested,
+                &self.project_id,
+                task_id,
+                &registration.agent_id,
+                session_id,
+                run_id,
+            )
+            .with_turn(turn_id.to_string())
+            .with_payload(format!(
+                "{{\"tool\":\"capo.session_summary\",\"status\":\"permission_denied\",\"adapter_status\":\"{}\"}}",
+                escape_json(adapter_status)
+            )),
+            &[ProjectionRecord::ToolCall(capo_state::ToolCallProjection {
+                tool_call_id: tool_call_id.clone(),
+                session_id: session_id.clone(),
+                turn_id: Some(turn_id.to_string()),
+                tool_name: "capo.session_summary".to_string(),
+                tool_origin: "capo".to_string(),
+                status: "denied".to_string(),
+                input_artifact_id: None,
+                output_artifact_id: None,
+                updated_sequence: 0,
+            })],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_permission_decision(
+        &self,
+        registration: &FakeAgentRegistration,
+        task_id: &TaskId,
+        session_id: &SessionId,
+        run_id: &RunId,
+        turn_id: &TurnId,
+        tool_call_id: &ToolCallId,
+        permission: &PermissionDecision,
+        permission_event_suffix: &str,
+    ) -> StateResult<()> {
+        self.state.append_event(
+            scoped_event(
+                &format!(
+                    "event-permission-requested-{}-{}",
+                    session_id, permission_event_suffix
+                ),
+                EventKind::PermissionRequested,
+                &self.project_id,
+                task_id,
+                &registration.agent_id,
+                session_id,
+                run_id,
+            )
+            .with_turn(turn_id.to_string())
+            .with_payload(format!(
+                "{{\"tool_call_id\":\"{}\",\"scope_json\":{}}}",
+                tool_call_id, permission.scope_json
+            )),
+            &[],
+        )?;
+
+        self.state.append_event(
+            scoped_event(
+                &format!(
+                    "event-permission-decided-{}-{}",
+                    session_id, permission_event_suffix
+                ),
+                EventKind::PermissionDecided,
+                &self.project_id,
+                task_id,
+                &registration.agent_id,
+                session_id,
+                run_id,
+            )
+            .with_turn(turn_id.to_string())
+            .with_payload(format!(
+                "{{\"tool_call_id\":\"{}\",\"effect\":\"{}\",\"capability_grant_id\":\"{}\",\"decision_source\":\"{}\",\"persistence\":\"{}\",\"explanation\":\"{}\"}}",
+                tool_call_id,
+                permission.effect,
+                permission.capability_grant_id,
+                permission.decision_source,
+                permission.persistence,
+                escape_json(&permission.explanation)
+            )),
+            &[],
+        )?;
+
+        self.state.append_event(
+            scoped_event(
+                &format!(
+                    "event-capability-grant-{}-{}",
+                    session_id, permission_event_suffix
+                ),
+                EventKind::CapabilityGrantCreated,
+                &self.project_id,
+                task_id,
+                &registration.agent_id,
+                session_id,
+                run_id,
+            )
+            .with_turn(turn_id.to_string())
+            .with_payload(format!(
+                "{{\"capability_grant_id\":\"{}\",\"effect\":\"{}\",\"decision_source\":\"{}\",\"persistence\":\"{}\"}}",
+                permission.capability_grant_id,
+                permission.effect,
+                permission.decision_source,
+                permission.persistence
+            )),
+            &[ProjectionRecord::CapabilityGrant(
+                capo_state::CapabilityGrantProjection {
+                    capability_grant_id: permission.capability_grant_id.clone(),
+                    capability_profile_id: permission.capability_profile_id.clone(),
+                    scope_json: permission.scope_json.clone(),
+                    effect: permission.effect.clone(),
+                    subject_json: permission.subject_json.clone(),
+                    decision_source: permission.decision_source.clone(),
+                    persistence: permission.persistence.clone(),
+                    explanation: permission.explanation.clone(),
+                    updated_sequence: 0,
+                },
+            )],
+        )?;
+        Ok(())
     }
 
     pub fn send_task_to_agent_name(
@@ -1174,9 +1379,12 @@ fn stable_hash(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn fake_boundaries_drive_controller_state_and_interrupt_from_read_models() {
@@ -1274,6 +1482,84 @@ mod tests {
     }
 
     #[test]
+    fn denied_static_permission_stops_tool_invocation_in_controller_path() {
+        let controller = FakeBoundaryController::open_with_permission_policy(
+            ProjectId::new("project-capo"),
+            temp_root(),
+            PermissionPolicy::static_read_only_local(),
+        )
+        .expect("open controller");
+        let registration = controller.register_agent("fake-codex").expect("agent");
+        let refs = controller
+            .send_task(&registration, "Inspect the project with static policy")
+            .expect("send task");
+        let observation = controller.observe(&refs).expect("observe");
+
+        assert_eq!(observation.task.capo_execution_status, "blocked");
+        assert_eq!(observation.agent.status, "paused");
+        assert_eq!(observation.session.status, "waiting_for_permission");
+        assert!(
+            observation
+                .session
+                .latest_blocker
+                .as_deref()
+                .expect("blocker")
+                .contains("memory:build_packet:session")
+        );
+        assert!(observation.recent_events.iter().any(|event| {
+            event.kind == "permission.decided"
+                && event.payload_json.contains("\"effect\":\"deny\"")
+                && event.event_id.contains("grant-")
+        }));
+        assert!(
+            !observation
+                .recent_events
+                .iter()
+                .any(|event| event.kind == "capability.grant_used")
+        );
+        assert!(
+            !observation
+                .recent_events
+                .iter()
+                .any(|event| event.kind == "tool.invocation_started")
+        );
+        assert!(
+            !observation
+                .recent_events
+                .iter()
+                .any(|event| event.kind == "tool.call_completed")
+        );
+
+        let grants = controller.state().capability_grants().expect("grants");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].effect, "deny");
+        assert_eq!(grants[0].decision_source, "static_policy:read-only-local");
+        assert!(grants[0].capability_grant_id.contains("-deny-"));
+
+        let tools = controller
+            .state()
+            .tool_calls_for_session(&refs.session_id)
+            .expect("tool calls");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].status, "denied");
+        assert!(tools[0].output_artifact_id.is_none());
+        assert!(
+            controller
+                .state()
+                .memory_packets_for_session(&refs.session_id)
+                .expect("memory packets")
+                .is_empty()
+        );
+        assert!(
+            controller
+                .state()
+                .evidence_for_session(&refs.session_id)
+                .expect("evidence")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn acp_fixture_replay_dedupes_stable_tool_updates_in_state() {
         let store = SqliteStateStore::open(temp_root()).expect("open state");
         let project_id = ProjectId::new("project-capo");
@@ -1366,6 +1652,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        std::env::temp_dir().join(format!("capo-controller-{nanos}"))
+        let counter = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("capo-controller-{nanos}-{counter}"))
     }
 }

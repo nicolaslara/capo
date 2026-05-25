@@ -91,3 +91,15 @@ Observed 2026-05-25.
 - CLI dashboard filters and text rendering: `../../crates/capo-cli/src/main.rs`
 - Dashboard source workpad: `dashboard.md`
 - No new third-party dependencies were added for DS2.
+
+## F4/PT1 Static Policy Variant
+
+Observed 2026-05-25.
+
+- Static permission policy, structured scope parsing, scoped grant IDs, and policy tests: `../../crates/capo-tools/src/lib.rs`
+- Capability grant projection metadata and migration/readback: `../../crates/capo-state/src/lib.rs`
+- Controller denied-permission stop path and scoped permission event IDs: `../../crates/capo-controller/src/lib.rs`
+- Tools manifest dependency: `../../crates/capo-tools/Cargo.toml`
+- Workspace lockfile: `../../Cargo.lock`
+- Dependency check: `cargo info serde_json` reported version `1.0.150`, license `MIT OR Apache-2.0`, rust-version `1.71`, repository `https://github.com/serde-rs/json`.
+- Permissions/tools source workpad: `permissions-tools.md`

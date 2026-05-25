@@ -572,6 +572,31 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn capability_grants(&self) -> StateResult<Vec<CapabilityGrantProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT capability_grant_id, capability_profile_id, scope_json, effect,
+                    subject_json, decision_source, persistence, explanation, updated_sequence
+             FROM capability_grants
+             ORDER BY updated_sequence ASC, capability_grant_id ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(CapabilityGrantProjection {
+                capability_grant_id: row.get(0)?,
+                capability_profile_id: row.get(1)?,
+                scope_json: row.get(2)?,
+                effect: row.get(3)?,
+                subject_json: row.get(4)?,
+                decision_source: row.get(5)?,
+                persistence: row.get(6)?,
+                explanation: row.get(7)?,
+                updated_sequence: row.get(8)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn evidence_for_session(
         &self,
         session_id: &SessionId,
@@ -1008,6 +1033,9 @@ pub struct CapabilityGrantProjection {
     pub scope_json: String,
     pub effect: String,
     pub subject_json: String,
+    pub decision_source: String,
+    pub persistence: String,
+    pub explanation: String,
     pub updated_sequence: i64,
 }
 
@@ -1228,6 +1256,9 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             scope_json TEXT NOT NULL,
             effect TEXT NOT NULL,
             subject_json TEXT NOT NULL,
+            decision_source TEXT NOT NULL DEFAULT 'unknown',
+            persistence TEXT NOT NULL DEFAULT 'unknown',
+            explanation TEXT NOT NULL DEFAULT '',
             updated_sequence INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS tool_calls (
@@ -1293,6 +1324,43 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
         );
         ",
     )?;
+    add_missing_column(
+        connection,
+        "capability_grants",
+        "decision_source",
+        "TEXT NOT NULL DEFAULT 'unknown'",
+    )?;
+    add_missing_column(
+        connection,
+        "capability_grants",
+        "persistence",
+        "TEXT NOT NULL DEFAULT 'unknown'",
+    )?;
+    add_missing_column(
+        connection,
+        "capability_grants",
+        "explanation",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    Ok(())
+}
+
+fn add_missing_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> StateResult<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|existing| existing == column) {
+        connection.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -1465,13 +1533,16 @@ fn apply_projection_record(
         ProjectionRecord::CapabilityGrant(grant) => transaction.execute(
             "INSERT INTO capability_grants(
                 capability_grant_id, capability_profile_id, scope_json, effect,
-                subject_json, updated_sequence
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                subject_json, decision_source, persistence, explanation, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(capability_grant_id) DO UPDATE SET
                 capability_profile_id = excluded.capability_profile_id,
                 scope_json = excluded.scope_json,
                 effect = excluded.effect,
                 subject_json = excluded.subject_json,
+                decision_source = excluded.decision_source,
+                persistence = excluded.persistence,
+                explanation = excluded.explanation,
                 updated_sequence = excluded.updated_sequence",
             params![
                 grant.capability_grant_id,
@@ -1479,6 +1550,9 @@ fn apply_projection_record(
                 grant.scope_json,
                 grant.effect,
                 grant.subject_json,
+                grant.decision_source,
+                grant.persistence,
+                grant.explanation,
                 sequence,
             ],
         )?,
@@ -1712,9 +1786,9 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
             b: Some(grant.scope_json.clone()),
             c: Some(grant.effect.clone()),
             d: Some(grant.subject_json.clone()),
-            e: None,
-            f: None,
-            g: None,
+            e: Some(grant.decision_source.clone()),
+            f: Some(grant.persistence.clone()),
+            g: Some(grant.explanation.clone()),
             h: None,
             payload_json: "{}".to_string(),
         },
@@ -1896,6 +1970,9 @@ fn projection_record_from_row(
                     d,
                     "subject_json",
                 )?,
+                decision_source: e.unwrap_or_else(|| "unknown".to_string()),
+                persistence: f.unwrap_or_else(|| "unknown".to_string()),
+                explanation: g.unwrap_or_default(),
                 updated_sequence: 0,
             },
         )),
@@ -2365,6 +2442,9 @@ mod tests {
                         scope_json: "[\"state:read:project\"]".to_string(),
                         effect: "allow".to_string(),
                         subject_json: "{\"agent\":\"fake\"}".to_string(),
+                        decision_source: "allow_trusted_local_profile".to_string(),
+                        persistence: "until_session_end".to_string(),
+                        explanation: "test grant".to_string(),
                         updated_sequence: 0,
                     }),
                     ProjectionRecord::ToolCall(ToolCallProjection {
@@ -2423,6 +2503,12 @@ mod tests {
                 .unwrap();
             assert_eq!(count, expected, "{table}");
         }
+
+        let grants = store.capability_grants().expect("read grants");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].decision_source, "allow_trusted_local_profile");
+        assert_eq!(grants[0].persistence, "until_session_end");
+        assert_eq!(grants[0].explanation, "test grant");
     }
 
     #[test]
