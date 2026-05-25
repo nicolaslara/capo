@@ -97,6 +97,19 @@ impl FakeBoundaryController {
         self.send_task_to_agent_name(agent_name, goal)
     }
 
+    pub fn redirect_command(
+        &self,
+        command: &CommandEnvelope,
+    ) -> StateResult<FakeReadModelObservation> {
+        require_intent(command, CommandIntent::RedirectSession);
+        let agent_name = required_structured_arg(command, "agent")?;
+        let goal = command
+            .text
+            .as_deref()
+            .ok_or_else(|| missing_read_model("command.text", &command.command_id))?;
+        self.redirect_agent_name(agent_name, goal)
+    }
+
     pub fn interrupt_command(
         &self,
         command: &CommandEnvelope,
@@ -116,7 +129,11 @@ impl FakeBoundaryController {
 
     pub fn recover_command(&self, command: &CommandEnvelope) -> StateResult<RecoveryReport> {
         require_intent(command, CommandIntent::Recover);
-        let recovery_attempt_id = format!("recovery-{}", command.command_id);
+        let recovery_attempt_id = format!(
+            "recovery-{}-after-{}",
+            command.command_id,
+            self.state.last_sequence()?
+        );
         let started = self.state.begin_recovery(&recovery_attempt_id)?;
         self.state.rebuild_projections()?;
         let recovered_runs = self
@@ -708,6 +725,101 @@ impl FakeBoundaryController {
         self.observe(&refs)
     }
 
+    pub fn redirect_agent_name(
+        &self,
+        agent_name: &str,
+        goal: &str,
+    ) -> StateResult<FakeReadModelObservation> {
+        let registration = self.registration_for_agent_name(agent_name)?;
+        let refs = self.refs_for_agent_name(agent_name)?;
+        self.redirect(&registration, &refs, goal)
+    }
+
+    pub fn redirect(
+        &self,
+        registration: &FakeAgentRegistration,
+        refs: &FakeRunRefs,
+        goal: &str,
+    ) -> StateResult<FakeReadModelObservation> {
+        let session = self
+            .state
+            .session(&refs.session_id)?
+            .ok_or_else(|| missing_read_model("session", &refs.session_id))?;
+        let task = self
+            .state
+            .task(&refs.task_id)?
+            .ok_or_else(|| missing_read_model("task", &refs.task_id))?;
+        let adapter_session = self
+            .adapter
+            .attach_session(refs.session_id.clone(), refs.external_session_ref.clone());
+        let turn_id = TurnId::new(format!("redirect-{}", refs.session_id));
+        let adapter_output = self.adapter.send_turn(
+            &adapter_session,
+            FakeAdapterTurnRequest {
+                turn_id: turn_id.clone(),
+                agent_name: registration.agent_name.clone(),
+                goal: goal.to_string(),
+            },
+        );
+
+        self.state.append_event(
+            scoped_event(
+                &format!(
+                    "event-session-redirected-{}-{}",
+                    refs.session_id,
+                    stable_hash(goal.as_bytes())
+                ),
+                EventKind::SessionRedirected,
+                &self.project_id,
+                &refs.task_id,
+                &registration.agent_id,
+                &refs.session_id,
+                &refs.run_id,
+            )
+            .with_turn(format!("{turn_id}-{}", stable_hash(goal.as_bytes())))
+            .with_payload(format!(
+                "{{\"goal\":\"{}\",\"adapter_summary\":\"{}\"}}",
+                escape_json(goal),
+                escape_json(&adapter_output.summary)
+            )),
+            &[
+                ProjectionRecord::Task(TaskProjection {
+                    task_id: refs.task_id.clone(),
+                    project_id: self.project_id.clone(),
+                    title: session.title.clone(),
+                    capo_execution_status: "active".to_string(),
+                    active_session_id: Some(refs.session_id.clone()),
+                    latest_summary: Some(adapter_output.summary.clone()),
+                    evidence_id: task.evidence_id,
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Agent(AgentProjection {
+                    agent_id: refs.agent_id.clone(),
+                    project_id: self.project_id.clone(),
+                    name: registration.agent_name.clone(),
+                    status: "running".to_string(),
+                    current_session_id: Some(refs.session_id.clone()),
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Session(SessionProjection {
+                    session_id: refs.session_id.clone(),
+                    project_id: self.project_id.clone(),
+                    task_id: Some(refs.task_id.clone()),
+                    agent_id: refs.agent_id.clone(),
+                    title: session.title,
+                    status: adapter_output.status,
+                    current_goal: goal.to_string(),
+                    latest_summary: Some(adapter_output.summary),
+                    latest_confidence: Some(78),
+                    latest_blocker: None,
+                    updated_sequence: 0,
+                }),
+            ],
+        )?;
+
+        self.observe(refs)
+    }
+
     pub fn interrupt_agent_name(
         &self,
         agent_name: &str,
@@ -738,6 +850,10 @@ impl FakeBoundaryController {
             .state
             .session(&refs.session_id)?
             .ok_or_else(|| missing_read_model("session", &refs.session_id))?;
+        let task = self
+            .state
+            .task(&refs.task_id)?
+            .ok_or_else(|| missing_read_model("task", &refs.task_id))?;
         let runtime_process = self
             .runtime
             .attach_process(refs.run_id.clone(), refs.runtime_process_ref.clone());
@@ -770,7 +886,7 @@ impl FakeBoundaryController {
                     capo_execution_status: "canceled".to_string(),
                     active_session_id: Some(refs.session_id.clone()),
                     latest_summary: Some(adapter_output.summary),
-                    evidence_id: None,
+                    evidence_id: task.evidence_id,
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Agent(AgentProjection {
@@ -817,6 +933,10 @@ impl FakeBoundaryController {
             .state
             .session(&refs.session_id)?
             .ok_or_else(|| missing_read_model("session", &refs.session_id))?;
+        let task = self
+            .state
+            .task(&refs.task_id)?
+            .ok_or_else(|| missing_read_model("task", &refs.task_id))?;
         let runtime_process = self
             .runtime
             .attach_process(refs.run_id.clone(), refs.runtime_process_ref.clone());
@@ -849,7 +969,7 @@ impl FakeBoundaryController {
                     capo_execution_status: "completed".to_string(),
                     active_session_id: Some(refs.session_id.clone()),
                     latest_summary: Some(adapter_output.summary),
-                    evidence_id: None,
+                    evidence_id: task.evidence_id,
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Agent(AgentProjection {

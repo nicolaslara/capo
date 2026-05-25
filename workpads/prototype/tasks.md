@@ -273,7 +273,7 @@ Evidence:
 
 ## P12 - Prototype E2E Smoke
 
-Status: pending
+Status: completed
 
 Acceptance:
 
@@ -281,6 +281,15 @@ Acceptance:
 - Start Capo, register/spawn two fake agents, send work, inspect status/events/summary, redirect one session, interrupt/stop one session, restart, recover, and export evidence.
 - Force at least one Capo tool request, permission audit event, adapter result delivery, and memory packet artifact through the fake smoke scenario.
 - Confirm logs/artifacts contain no provider credentials, subscription tokens, cookies, or sensitive raw transcripts.
+
+Evidence:
+
+- `crates/capo-cli/src/main.rs`
+- `crates/capo-controller/src/lib.rs`
+- `crates/capo-state/src/lib.rs`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
 
 ## P13 - Dashboard/TUI Slice
 

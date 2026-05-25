@@ -359,6 +359,32 @@ Follow-up:
 - P12 should run the full prototype smoke using the export path and inspect the generated markdown as part of the gate evidence.
 - Future evidence work should add richer artifact manifests and optionally copy selected safe artifact contents into the evidence bundle, while preserving the non-corruption guard.
 
+## P12 - Prototype E2E Smoke
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `session redirect` to the CLI and controller so the prototype smoke can steer an already-running fake session through the same command-envelope path as other input-surface commands.
+- Record redirects as durable `session.redirected` events and update task/session/agent read models without reaching around the controller.
+- Make redirect event IDs goal-specific so a second redirect to a different goal is not deduped as a no-op by the state store. Preserve existing task evidence refs across redirect, interrupt, and stop projections.
+- Implement the P12 smoke as an automated CLI-path test around `run_cli`. This does not spawn a separate `cargo run` process for each command, but it exercises the same parser, command envelopes, controller, SQLite store, recovery, and evidence export code with stronger regression coverage.
+- The smoke starts local state, spawns/registers two fake agents, sends work to both, inspects read-model status, redirects one session, interrupts one session, stops the other, recovers after reopen, exports evidence for both sessions, and scans command/evidence output for provider credential markers.
+- Tighten secret-marker checks to provider-key-shaped prefixes instead of the broad `sk-` substring, because ordinary Capo IDs contain strings such as `task-`.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+- `prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence` covers two fake agents, read-model inspection, repeated redirect behavior, redirect event visibility, interrupt/stop behavior, repeated recovery without duplicate read-model rows, evidence markdown export, memory packet refs, tool result delivery, preserved task evidence refs, and credential-marker absence across transcript, exported evidence, state files, and evidence files.
+- Focused review found a repeated-redirect idempotency bug and weaker duplicate/secret checks. The redirect idempotency issue was fixed, duplicate/read-model assertions were added, and state/evidence tree secret scans were added before completion.
+
+Follow-up:
+
+- P13 can now build a dashboard/TUI against the same read models proven by the CLI smoke.
+- P15 should use P12 as the main prototype-gate evidence and decide whether dashboard/TUI or voice spike blocks dogfood.
+
 ## Prototype Gate
 
 Status: not passed.

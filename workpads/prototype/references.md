@@ -161,3 +161,14 @@ Observed 2026-05-25.
 - Prototype spec evidence requirement: `spec.md`
 - Prototype plan evidence export task and smoke path: `../architecture/prototype-plan.md`
 - No new third-party dependencies were added for P11.
+
+## P12 Prototype E2E Smoke
+
+Observed 2026-05-25.
+
+- CLI command surface, redirect command, evidence export, and full smoke test: `../../crates/capo-cli/src/main.rs`
+- Controller redirect handling and fake boundary orchestration: `../../crates/capo-controller/src/lib.rs`
+- SQLite event kind vocabulary and read-model persistence used by smoke: `../../crates/capo-state/src/lib.rs`
+- Prototype smoke plan: `../architecture/prototype-plan.md`
+- Prototype minimum and dogfood gate criteria: `spec.md`
+- No new third-party dependencies were added for P12.

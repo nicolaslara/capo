@@ -27,6 +27,7 @@ Usage:
   capo agent list [--state PATH]
   capo task send --agent NAME --goal GOAL [--scenario NAME] [--state PATH]
   capo session status --agent NAME [--state PATH]
+  capo session redirect --agent NAME --goal GOAL [--state PATH]
   capo session interrupt --agent NAME --reason REASON [--state PATH]
   capo session stop --agent NAME --reason REASON [--state PATH]
   capo recover [--state PATH]
@@ -73,6 +74,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "session" && command == "status" => {
             session_status(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "session" && command == "redirect" => {
+            redirect_session(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "session" && command == "interrupt" => {
             interrupt_session(&parsed, rest, "interrupt")
@@ -238,6 +242,34 @@ fn session_status(parsed: &ParsedArgs, args: &[String]) -> Result<String, String
         .evidence_for_session(&observation.session.session_id)
         .map_err(debug_error)?;
     Ok(render_status(&command, &observation, &evidence))
+}
+
+fn redirect_session(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let agent = required_arg(args, "--agent")?;
+    let goal = required_arg(args, "--goal")?;
+    let mut command = envelope(
+        "redirect",
+        CommandTarget::Agent(AgentId::new(format!("agent-{agent}"))),
+        CommandIntent::RedirectSession,
+        Some(goal.clone()),
+    );
+    command
+        .structured_args
+        .push(("agent".to_string(), agent.clone()));
+    let observation = controller(parsed)?
+        .redirect_command(&command)
+        .map_err(debug_error)?;
+    Ok(format!(
+        "redirected=true\nagent={agent}\nsession_id={}\nstatus={}\ncurrent_goal={}\nlatest_summary={}\ncommand_id={}\n",
+        observation.session.session_id,
+        observation.session.status,
+        observation.session.current_goal,
+        observation
+            .session
+            .latest_summary
+            .unwrap_or_else(|| "none".to_string()),
+        command.command_id
+    ))
 }
 
 fn interrupt_session(parsed: &ParsedArgs, args: &[String], action: &str) -> Result<String, String> {
@@ -745,6 +777,304 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.contains("refusing to overwrite non-Capo evidence file"));
+    }
+
+    #[test]
+    fn prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence() {
+        let state_root = temp_root("cli-e2e-state");
+        let evidence_dir = temp_root("cli-e2e-evidence");
+        let mut transcript = String::new();
+
+        let mut run = |args: Vec<&str>| {
+            let mut owned = args
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<String>>();
+            owned.push("--state".to_string());
+            owned.push(state_root.display().to_string());
+            let output = run_cli(owned).expect("run smoke command");
+            transcript.push_str(&output);
+            output
+        };
+
+        let initialized = run(vec!["init"]);
+        assert!(initialized.contains("initialized=true"));
+
+        let codex = run(vec![
+            "agent",
+            "spawn",
+            "--name",
+            "fake-codex",
+            "--adapter",
+            "fake",
+            "--runtime",
+            "fake",
+        ]);
+        assert!(codex.contains("agent_spawned=true"));
+        let reviewer = run(vec![
+            "agent",
+            "register",
+            "--name",
+            "fake-reviewer",
+            "--adapter",
+            "fake",
+            "--runtime",
+            "fake",
+        ]);
+        assert!(reviewer.contains("agent_registered=true"));
+
+        let codex_send = run(vec![
+            "task",
+            "send",
+            "--agent",
+            "fake-codex",
+            "--goal",
+            "Inspect the project and write a short status summary",
+            "--scenario",
+            "tool-memory",
+        ]);
+        assert!(codex_send.contains("session_id=session-fake-codex"));
+        let reviewer_send = run(vec![
+            "task",
+            "send",
+            "--agent",
+            "fake-reviewer",
+            "--goal",
+            "Review the status summary for blockers",
+            "--scenario",
+            "summary-review",
+        ]);
+        assert!(reviewer_send.contains("session_id=session-fake-reviewer"));
+
+        let agents = run(vec!["agent", "list"]);
+        assert!(agents.contains("active_agents=2"));
+        assert!(agents.contains("agent=fake-codex status=running"));
+        assert!(agents.contains("agent=fake-reviewer status=running"));
+
+        let codex_status = run(vec!["session", "status", "--agent", "fake-codex"]);
+        assert!(codex_status.contains("current_goal=Inspect the project"));
+        assert!(codex_status.contains("kind=permission.decided"));
+        assert!(codex_status.contains("kind=capability.grant_used"));
+        assert!(codex_status.contains("kind=tool.result_delivered"));
+        assert!(codex_status.contains("kind=memory.packet_built"));
+        assert!(codex_status.contains("evidence_refs=evidence-fake-codex"));
+
+        let redirect = run(vec![
+            "session",
+            "redirect",
+            "--agent",
+            "fake-reviewer",
+            "--goal",
+            "Focus only on dogfood blockers",
+        ]);
+        assert!(redirect.contains("redirected=true"));
+        assert!(redirect.contains("current_goal=Focus only on dogfood blockers"));
+        let reviewer_status = run(vec!["session", "status", "--agent", "fake-reviewer"]);
+        assert!(reviewer_status.contains("current_goal=Focus only on dogfood blockers"));
+        assert!(reviewer_status.contains("kind=session.redirected"));
+        let second_redirect = run(vec![
+            "session",
+            "redirect",
+            "--agent",
+            "fake-reviewer",
+            "--goal",
+            "Focus only on evidence export blockers",
+        ]);
+        assert!(second_redirect.contains("redirected=true"));
+        assert!(second_redirect.contains("current_goal=Focus only on evidence export blockers"));
+
+        let interrupted = run(vec![
+            "session",
+            "interrupt",
+            "--agent",
+            "fake-codex",
+            "--reason",
+            "smoke interrupt",
+        ]);
+        assert!(interrupted.contains("status=canceled"));
+        let stopped = run(vec![
+            "session",
+            "stop",
+            "--agent",
+            "fake-reviewer",
+            "--reason",
+            "smoke stop",
+        ]);
+        assert!(stopped.contains("status=completed"));
+
+        let recovered = run(vec!["recover"]);
+        assert!(recovered.contains("recovered=true"));
+        assert!(recovered.contains("recovered_run_count=1"));
+        let recovered_again = run(vec!["recover"]);
+        assert!(recovered_again.contains("recovered=true"));
+        assert!(recovered_again.contains("recovered_run_count=0"));
+
+        let export_codex = run_cli(vec![
+            "evidence".to_string(),
+            "export".to_string(),
+            "--session".to_string(),
+            "session-fake-codex".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("export codex evidence");
+        transcript.push_str(&export_codex);
+        let export_reviewer = run_cli(vec![
+            "evidence".to_string(),
+            "export".to_string(),
+            "--session".to_string(),
+            "session-fake-reviewer".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("export reviewer evidence");
+        transcript.push_str(&export_reviewer);
+
+        let codex_evidence =
+            fs::read_to_string(evidence_dir.join("session-fake-codex.md")).expect("codex evidence");
+        let reviewer_evidence = fs::read_to_string(evidence_dir.join("session-fake-reviewer.md"))
+            .expect("reviewer evidence");
+        assert!(codex_evidence.contains("- Session status: `canceled`"));
+        assert!(codex_evidence.contains("- Run status: `exited_unknown`"));
+        assert!(codex_evidence.contains("tool.result_delivered"));
+        assert!(codex_evidence.contains("artifact=`artifact-memory-packet-packet-fake-codex`"));
+        assert!(reviewer_evidence.contains("- Session status: `completed`"));
+        assert!(reviewer_evidence.contains("Focus only on evidence export blockers"));
+        assert!(reviewer_evidence.contains("session.redirected"));
+        assert!(reviewer_evidence.contains("session.stopped"));
+
+        let reopened = SqliteStateStore::open(&state_root).expect("restart state");
+        assert_eq!(
+            reopened
+                .session(&SessionId::new("session-fake-codex"))
+                .expect("read codex session")
+                .expect("codex session")
+                .status,
+            "canceled"
+        );
+        assert_eq!(
+            reopened
+                .run_for_session(&SessionId::new("session-fake-codex"))
+                .expect("read codex run")
+                .expect("codex run")
+                .status,
+            "exited_unknown"
+        );
+        assert_eq!(
+            reopened
+                .session(&SessionId::new("session-fake-reviewer"))
+                .expect("read reviewer session")
+                .expect("reviewer session")
+                .status,
+            "completed"
+        );
+        assert_eq!(reopened.agents().expect("read agents").len(), 2);
+        assert_eq!(
+            reopened
+                .evidence_for_session(&SessionId::new("session-fake-codex"))
+                .expect("codex evidence")
+                .len(),
+            1
+        );
+        assert_eq!(
+            reopened
+                .evidence_for_session(&SessionId::new("session-fake-reviewer"))
+                .expect("reviewer evidence")
+                .len(),
+            1
+        );
+        assert_eq!(
+            reopened
+                .tool_calls_for_session(&SessionId::new("session-fake-codex"))
+                .expect("codex tool calls")
+                .len(),
+            1
+        );
+        assert_eq!(
+            reopened
+                .memory_packets_for_session(&SessionId::new("session-fake-codex"))
+                .expect("codex memory packets")
+                .len(),
+            1
+        );
+        assert_eq!(
+            reopened
+                .task(&capo_core::TaskId::new(
+                    "task-inspect-the-project-and-write-a-short-status-summary"
+                ))
+                .expect("read codex task")
+                .expect("codex task")
+                .evidence_id
+                .as_ref()
+                .map(ToString::to_string),
+            Some("evidence-fake-codex".to_string())
+        );
+        assert_eq!(
+            reopened
+                .task(&capo_core::TaskId::new(
+                    "task-review-the-status-summary-for-blockers"
+                ))
+                .expect("read reviewer task")
+                .expect("reviewer task")
+                .evidence_id
+                .as_ref()
+                .map(ToString::to_string),
+            Some("evidence-fake-reviewer".to_string())
+        );
+
+        assert_no_sensitive_markers(&transcript);
+        assert_no_sensitive_markers(&codex_evidence);
+        assert_no_sensitive_markers(&reviewer_evidence);
+        assert_no_sensitive_markers_in_tree(&state_root);
+        assert_no_sensitive_markers_in_tree(&evidence_dir);
+    }
+
+    fn assert_no_sensitive_markers(contents: &str) {
+        for marker in [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "Authorization:",
+            "Cookie:",
+            "Set-Cookie:",
+            "session_token",
+            "access_token",
+            "refresh_token",
+            "oauth",
+            "api_key",
+            "sk-proj-",
+            "sk-ant-",
+            "sk-live-",
+            "sk_test_",
+        ] {
+            assert!(
+                !contents
+                    .to_ascii_lowercase()
+                    .contains(&marker.to_ascii_lowercase()),
+                "sensitive marker leaked: {marker}"
+            );
+        }
+    }
+
+    fn assert_no_sensitive_markers_in_tree(root: &Path) {
+        if !root.exists() {
+            return;
+        }
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                for entry in fs::read_dir(&path).expect("read scan dir") {
+                    stack.push(entry.expect("scan dir entry").path());
+                }
+            } else if path.is_file() {
+                let bytes = fs::read(&path).expect("read scan file");
+                let contents = String::from_utf8_lossy(&bytes);
+                assert_no_sensitive_markers(&contents);
+            }
+        }
     }
 
     fn temp_root(name: &str) -> PathBuf {
