@@ -193,3 +193,13 @@ Observed 2026-05-25.
 - Capability model source for raw voice transcript exclusion: `../architecture/capability-permissions.md`
 - Voice source workpad: `voice.md`
 - No new third-party dependencies were added for V3.
+
+## F1/AC3a Deterministic Adapter Replay
+
+Observed 2026-05-25.
+
+- Controller replay seam and Codex/Claude replay regressions: `../../crates/capo-controller/src/lib.rs`
+- Normalized adapter event parsers and fixtures: `../../crates/capo-adapters/src/lib.rs`, `../../crates/capo-adapters/fixtures/codex-exec.jsonl`, `../../crates/capo-adapters/fixtures/claude-code-stream.jsonl`
+- State projections used by replay: `../../crates/capo-state/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC3a.

@@ -77,10 +77,25 @@ Review:
 
 ### AC3 - Real-Agent Controller Path
 
-Status: pending
+Status: in_progress
 
 Acceptance:
 
 - Route at least one successful real local adapter event stream through Capo state/read models.
 - Export markdown evidence with no credential material.
 - Keep fake fixtures available as deterministic regression tests.
+
+Progress:
+
+- Deterministic replay support is completed for normalized Codex and Claude fixture streams. This does not claim real-agent readiness, but it proves parsed provider events can flow through controller-owned state/read models without launching subscription-backed CLIs.
+
+Evidence:
+
+- `FakeBoundaryController::apply_normalized_adapter_events` replays normalized adapter events into session summary, native tool-call, and evidence projections.
+- `cargo test -p capo-controller replay -- --nocapture`: passed.
+- Codex replay regression covers `fixtures/codex-exec.jsonl`, updates `session.summary_updated`, `tool_calls`, and `evidence`, and asserts event payloads do not persist raw provider message/tool text.
+- Claude replay regression covers `fixtures/claude-code-stream.jsonl`, preserves tool name across tool-result updates, updates evidence, and asserts event payloads do not persist raw provider message/tool text.
+
+Skipped verification:
+
+- A real local Codex or Claude adapter process has still not been run because subscription-backed smokes require explicit user opt-in.

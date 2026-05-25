@@ -7,7 +7,8 @@
 use std::path::Path;
 
 use capo_adapters::{
-    AgentAdapter, FakeAdapterSessionRequest, FakeAdapterTurnRequest, ProviderConnector,
+    AgentAdapter, FakeAdapterSessionRequest, FakeAdapterTurnRequest, NormalizedAdapterEvent,
+    ProviderConnector,
 };
 use capo_core::{
     AgentId, CommandEnvelope, CommandIntent, EvidenceId, MemoryPacketId, ProjectId, RunId,
@@ -161,6 +162,210 @@ impl FakeBoundaryController {
             watermark: self.state.watermark("default")?,
             recovered_run_count: recovered_runs.len(),
         })
+    }
+
+    pub fn apply_normalized_adapter_events(
+        &self,
+        refs: &FakeRunRefs,
+        adapter_events: &[NormalizedAdapterEvent],
+    ) -> StateResult<AdapterReplayReport> {
+        let session = self
+            .state
+            .session(&refs.session_id)?
+            .ok_or_else(|| missing_read_model("session", &refs.session_id))?;
+        let task = self
+            .state
+            .task(&refs.task_id)?
+            .ok_or_else(|| missing_read_model("task", &refs.task_id))?;
+        let mut appended_event_count = 0;
+        let mut tool_event_count = 0;
+        let mut summary_event_count = 0;
+        let mut completed_turn_count = 0;
+
+        for (index, adapter_event) in adapter_events.iter().enumerate() {
+            let Some((event_kind, projection)) =
+                self.adapter_event_projection(refs, adapter_event, &session, &task)?
+            else {
+                continue;
+            };
+            let mut event = scoped_event(
+                &format!(
+                    "event-adapter-replay-{}-{}-{}",
+                    adapter_event.adapter_kind.as_str(),
+                    refs.session_id,
+                    index
+                ),
+                event_kind,
+                &self.project_id,
+                &refs.task_id,
+                &refs.agent_id,
+                &refs.session_id,
+                &refs.run_id,
+            );
+            event.turn_id = adapter_event
+                .timeline_key
+                .as_ref()
+                .map(|key| format!("turn-{}", slug(key)))
+                .or_else(|| Some("turn-adapter-replay".to_string()));
+            event.item_id = adapter_event.external_item_ref.clone();
+            event.payload_json = adapter_event_payload_json(adapter_event);
+            event.idempotency_key = adapter_event
+                .idempotency_key
+                .clone()
+                .or_else(|| Some(format!("adapter-replay:{}:{index}", refs.session_id)));
+            event.redaction_state = RedactionState::Safe;
+            let before = self.state.event_count()?;
+            self.state.append_event(event, &[projection])?;
+            if self.state.event_count()? > before {
+                appended_event_count += 1;
+                match adapter_event.kind.as_str() {
+                    "adapter.tool_call_requested"
+                    | "adapter.tool_call_started"
+                    | "adapter.tool_call_completed"
+                    | "adapter.tool_call_failed" => tool_event_count += 1,
+                    "adapter.item_completed" | "adapter.item_delta" | "adapter.plan_replaced" => {
+                        summary_event_count += 1
+                    }
+                    "adapter.turn_completed" => completed_turn_count += 1,
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(AdapterReplayReport {
+            input_event_count: adapter_events.len(),
+            appended_event_count,
+            tool_event_count,
+            summary_event_count,
+            completed_turn_count,
+        })
+    }
+
+    fn adapter_event_projection(
+        &self,
+        refs: &FakeRunRefs,
+        adapter_event: &NormalizedAdapterEvent,
+        session: &SessionProjection,
+        task: &TaskProjection,
+    ) -> StateResult<Option<(EventKind, ProjectionRecord)>> {
+        match adapter_event.kind.as_str() {
+            "adapter.item_completed" | "adapter.item_delta" | "adapter.plan_replaced" => {
+                let content_hash = adapter_event
+                    .content
+                    .as_ref()
+                    .map(|content| stable_hash(content.as_bytes()))
+                    .unwrap_or_else(|| adapter_event.raw_event_hash.clone());
+                Ok(Some((
+                    EventKind::SessionSummaryUpdated,
+                    ProjectionRecord::Session(SessionProjection {
+                        session_id: refs.session_id.clone(),
+                        project_id: self.project_id.clone(),
+                        task_id: Some(refs.task_id.clone()),
+                        agent_id: refs.agent_id.clone(),
+                        title: session.title.clone(),
+                        status: "active".to_string(),
+                        current_goal: session.current_goal.clone(),
+                        latest_summary: Some(format!(
+                            "Adapter {} {} observed content_hash={content_hash}",
+                            adapter_event.adapter_kind.as_str(),
+                            adapter_event.role.as_deref().unwrap_or("event")
+                        )),
+                        latest_confidence: Some(match adapter_event.timeline_confidence {
+                            capo_adapters::AdapterTimelineConfidence::Stable => 82,
+                            capo_adapters::AdapterTimelineConfidence::Heuristic => 60,
+                            capo_adapters::AdapterTimelineConfidence::None => 40,
+                        }),
+                        latest_blocker: None,
+                        updated_sequence: 0,
+                    }),
+                )))
+            }
+            "adapter.tool_call_requested"
+            | "adapter.tool_call_started"
+            | "adapter.tool_call_completed"
+            | "adapter.tool_call_failed" => {
+                let tool_call_id = ToolCallId::new(format!(
+                    "tool-adapter-{}",
+                    slug(
+                        adapter_event
+                            .external_item_ref
+                            .as_deref()
+                            .or(adapter_event.timeline_key.as_deref())
+                            .unwrap_or(&adapter_event.raw_event_hash)
+                    )
+                ));
+                let existing_tool_name = self
+                    .state
+                    .tool_calls_for_session(&refs.session_id)?
+                    .into_iter()
+                    .find(|tool| tool.tool_call_id == tool_call_id)
+                    .map(|tool| tool.tool_name);
+                let status = match adapter_event.kind.as_str() {
+                    "adapter.tool_call_requested" => "requested",
+                    "adapter.tool_call_started" => "started",
+                    "adapter.tool_call_completed" => "completed",
+                    "adapter.tool_call_failed" => "failed",
+                    _ => unreachable!("matched above"),
+                };
+                Ok(Some((
+                    match adapter_event.kind.as_str() {
+                        "adapter.tool_call_requested" => EventKind::ToolCallRequested,
+                        "adapter.tool_call_started" => EventKind::ToolInvocationStarted,
+                        "adapter.tool_call_completed" | "adapter.tool_call_failed" => {
+                            EventKind::ToolCallCompleted
+                        }
+                        _ => unreachable!("matched above"),
+                    },
+                    ProjectionRecord::ToolCall(capo_state::ToolCallProjection {
+                        tool_call_id,
+                        session_id: refs.session_id.clone(),
+                        turn_id: adapter_event
+                            .timeline_key
+                            .as_ref()
+                            .map(|key| format!("turn-{}", slug(key))),
+                        tool_name: adapter_event
+                            .tool_name
+                            .clone()
+                            .or(existing_tool_name)
+                            .unwrap_or_else(|| "adapter-native-tool".to_string()),
+                        tool_origin: format!(
+                            "adapter_native:{}",
+                            adapter_event.adapter_kind.as_str()
+                        ),
+                        status: status.to_string(),
+                        input_artifact_id: None,
+                        output_artifact_id: adapter_event.content.as_ref().map(|_| {
+                            format!("artifact-adapter-output-{}", adapter_event.raw_event_hash)
+                        }),
+                        updated_sequence: 0,
+                    }),
+                )))
+            }
+            "adapter.turn_completed" => Ok(Some((
+                EventKind::EvidenceRecorded,
+                ProjectionRecord::Evidence(capo_state::EvidenceProjection {
+                    evidence_id: EvidenceId::new(format!(
+                        "evidence-adapter-replay-{}-{}",
+                        adapter_event.adapter_kind.as_str(),
+                        refs.session_id
+                    )),
+                    project_id: self.project_id.clone(),
+                    task_id: Some(refs.task_id.clone()),
+                    session_id: Some(refs.session_id.clone()),
+                    run_id: Some(refs.run_id.clone()),
+                    kind: format!("adapter_replay:{}", adapter_event.adapter_kind.as_str()),
+                    artifact_id: None,
+                    confidence: if task.capo_execution_status == "active" {
+                        78
+                    } else {
+                        60
+                    },
+                    updated_sequence: 0,
+                }),
+            ))),
+            "adapter.session_started" | "adapter.raw_event" => Ok(None),
+            _ => Ok(None),
+        }
     }
 
     pub fn register_agent(&self, agent_name: &str) -> StateResult<FakeAgentRegistration> {
@@ -1274,6 +1479,15 @@ pub struct RecoveryReport {
     pub recovered_run_count: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterReplayReport {
+    pub input_event_count: usize,
+    pub appended_event_count: usize,
+    pub tool_event_count: usize,
+    pub summary_event_count: usize,
+    pub completed_turn_count: usize,
+}
+
 fn event(event_id: &str, kind: EventKind, project_id: &ProjectId) -> NewEvent {
     let mut event = NewEvent::new(event_id, kind, "capo-controller");
     event.project_id = Some(project_id.clone());
@@ -1366,6 +1580,32 @@ fn required_structured_arg<'a>(command: &'a CommandEnvelope, key: &str) -> State
 
 fn escape_json(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn adapter_event_payload_json(adapter_event: &NormalizedAdapterEvent) -> String {
+    let content_hash = adapter_event
+        .content
+        .as_ref()
+        .map(|content| stable_hash(content.as_bytes()));
+    format!(
+        "{{\"adapter_kind\":\"{}\",\"provider_event_kind\":\"{}\",\"normalized_kind\":\"{}\",\"external_session_ref\":\"{}\",\"external_item_ref\":\"{}\",\"timeline_key\":\"{}\",\"timeline_confidence\":\"{:?}\",\"tool_name\":\"{}\",\"status\":\"{}\",\"content_hash\":\"{}\",\"raw_event_hash\":\"{}\"}}",
+        adapter_event.adapter_kind.as_str(),
+        escape_json(&adapter_event.provider_event_kind),
+        escape_json(&adapter_event.kind),
+        escape_json(
+            adapter_event
+                .external_session_ref
+                .as_deref()
+                .unwrap_or("none")
+        ),
+        escape_json(adapter_event.external_item_ref.as_deref().unwrap_or("none")),
+        escape_json(adapter_event.timeline_key.as_deref().unwrap_or("none")),
+        adapter_event.timeline_confidence,
+        escape_json(adapter_event.tool_name.as_deref().unwrap_or("none")),
+        escape_json(adapter_event.status.as_deref().unwrap_or("none")),
+        content_hash.as_deref().unwrap_or("none"),
+        escape_json(&adapter_event.raw_event_hash)
+    )
 }
 
 fn stable_hash(bytes: &[u8]) -> String {
@@ -1645,6 +1885,130 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].status, "completed");
         assert_eq!(tool_calls[0].tool_origin, "adapter_native");
+    }
+
+    #[test]
+    fn codex_fixture_replay_updates_controller_read_models_without_raw_content_payloads() {
+        let root = temp_root();
+        let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), &root)
+            .expect("controller");
+        let registration = controller
+            .register_agent("real-codex-replay")
+            .expect("register replay agent");
+        let refs = controller
+            .send_task(&registration, "Replay a normalized Codex fixture")
+            .expect("send task");
+        let fixture = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../capo-adapters/fixtures/codex-exec.jsonl"
+        ))
+        .expect("read Codex fixture");
+        let parsed = capo_adapters::CodexExecAdapter::parse_jsonl(&fixture).expect("parse Codex");
+        let report = controller
+            .apply_normalized_adapter_events(&refs, &parsed.deduped_by_idempotency())
+            .expect("apply adapter replay");
+
+        assert_eq!(report.input_event_count, 5);
+        assert_eq!(report.summary_event_count, 1);
+        assert_eq!(report.tool_event_count, 2);
+        assert_eq!(report.completed_turn_count, 1);
+        let observation = controller.observe(&refs).expect("observe replay");
+        assert!(
+            observation
+                .session
+                .latest_summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("content_hash=")
+        );
+        let tools = controller
+            .state()
+            .tool_calls_for_session(&refs.session_id)
+            .expect("tool calls");
+        assert!(tools.iter().any(|tool| {
+            tool.tool_name == "exec_command"
+                && tool.tool_origin == "adapter_native:codex_exec"
+                && tool.status == "completed"
+        }));
+        let evidence = controller
+            .state()
+            .evidence_for_session(&refs.session_id)
+            .expect("evidence");
+        assert!(
+            evidence
+                .iter()
+                .any(|item| item.kind == "adapter_replay:codex_exec")
+        );
+        let events = controller
+            .state()
+            .recent_events_for_session(&refs.session_id, 16)
+            .expect("recent events");
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == "session.summary_updated")
+        );
+        for event in events {
+            assert!(!event.payload_json.contains("Codex fixture response."));
+            assert!(!event.payload_json.contains("cargo test"));
+            assert!(event.redaction_state != "contains_sensitive");
+        }
+    }
+
+    #[test]
+    fn claude_fixture_replay_updates_controller_read_models_without_raw_content_payloads() {
+        let root = temp_root();
+        let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), &root)
+            .expect("controller");
+        let registration = controller
+            .register_agent("real-claude-replay")
+            .expect("register replay agent");
+        let refs = controller
+            .send_task(&registration, "Replay a normalized Claude fixture")
+            .expect("send task");
+        let fixture = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../capo-adapters/fixtures/claude-code-stream.jsonl"
+        ))
+        .expect("read Claude fixture");
+        let parsed =
+            capo_adapters::ClaudeCodeAdapter::parse_stream_json(&fixture).expect("parse Claude");
+        let report = controller
+            .apply_normalized_adapter_events(&refs, &parsed.deduped_by_idempotency())
+            .expect("apply adapter replay");
+
+        assert_eq!(report.input_event_count, 5);
+        assert_eq!(report.summary_event_count, 1);
+        assert_eq!(report.tool_event_count, 2);
+        assert_eq!(report.completed_turn_count, 1);
+        let tools = controller
+            .state()
+            .tool_calls_for_session(&refs.session_id)
+            .expect("tool calls");
+        assert!(tools.iter().any(|tool| {
+            tool.tool_name == "Bash"
+                && tool.tool_origin == "adapter_native:claude_code"
+                && tool.status == "completed"
+        }));
+        let evidence = controller
+            .state()
+            .evidence_for_session(&refs.session_id)
+            .expect("evidence");
+        assert!(
+            evidence
+                .iter()
+                .any(|item| item.kind == "adapter_replay:claude_code")
+        );
+        let events = controller
+            .state()
+            .recent_events_for_session(&refs.session_id, 16)
+            .expect("recent events");
+        for event in events {
+            assert!(!event.payload_json.contains("Claude fixture response."));
+            assert!(!event.payload_json.contains("cargo test"));
+            assert!(!event.payload_json.contains("tests passed"));
+            assert!(event.redaction_state != "contains_sensitive");
+        }
     }
 
     fn temp_root() -> std::path::PathBuf {

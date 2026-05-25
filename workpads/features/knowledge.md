@@ -482,3 +482,23 @@ Verification:
 Follow-up:
 
 - Future real ASR/audio work must repeat this proof with audio/transcript artifacts and a stronger redaction pipeline before enabling durable transcript retention.
+
+## F1/AC3a - Deterministic Adapter Replay
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `FakeBoundaryController::apply_normalized_adapter_events` as the controller-owned replay seam for parsed provider/ACP streams.
+- Keep provider streams as adapter inputs, not controller truth. Replay writes Capo-owned event/projection rows for session summaries, adapter-native tool calls, and adapter replay evidence.
+- Store raw provider event hashes and content hashes in event payloads instead of raw provider message/tool text. This keeps the deterministic replay path useful for introspection without training the state model to persist provider output verbatim.
+- Preserve existing fake controller flows and adapter parser fixtures. Codex and Claude replay tests now prove normalized fixture events can update Capo read models without launching subscription-backed CLIs.
+- Do not mark real-agent readiness complete. The real Codex/Claude smoke remains opt-in gated and unrun.
+
+Verification:
+
+- `cargo test -p capo-controller replay -- --nocapture`: passed.
+
+Follow-up:
+
+- After explicit user opt-in, run a real subscription-backed adapter smoke and pass the resulting normalized stream through the same controller replay seam, then export evidence and scan it for credential/session markers.
