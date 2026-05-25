@@ -231,7 +231,7 @@ Follow-up:
 
 ## P7 - Real Local Adapter Smoke
 
-Status: in progress on 2026-05-25.
+Status: waiting on opt-in as of 2026-05-25.
 
 Decisions:
 
@@ -253,6 +253,33 @@ Skipped verification:
 
 - Real Codex smoke was not run because `CAPO_RUN_CODEX_LOCAL_SMOKE=1` was not set by the user.
 - Real Claude Code smoke was not run because restricted tool/permission arguments still need a local CLI verification pass before enabling it.
+
+## P8 - Capo Tools And Permission Audit
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `CapoToolRegistry` as the first non-fake `ToolExposure` variant while preserving `PermissionPolicy` as a separate boundary.
+- Register the first six Capo-owned tools from `tool-exposure.md`: `capo.task_status`, `capo.agent_status`, `capo.session_summary`, `capo.workpad_read`, `capo.evidence_record`, and `capo.capability_request`.
+- Keep first tool handlers simple and context-driven. They read supplied task/agent/session/workpad/evidence/capability context and return deterministic output; controller/state integration can replace those context inputs with live read-model queries in later slices.
+- Each tool definition records origin, handler kind, schema JSON, required scopes, risk, exposure, instrumentation level, status, and whether it mutates state.
+- Trusted-local permission still allows the call, but authorization emits permission request/decision audit events and returns a capability grant.
+- Tool invocation emits the full lifecycle required by the architecture: tool request, permission request, permission decision, grant use, invocation start, output artifact recorded, output observed, call completed, and result delivered.
+- Extend the fake controller e2e path so these lifecycle events are durable Capo events visible from session read-model inspection.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+- Tool tests cover the six definitions, required scopes, context output for all six tools, trusted-local permission allow, and audit lifecycle event ordering.
+- Controller tests cover durable session events for permission decision, grant creation/use, tool request, invocation, output artifact, output observation, completion, result delivery, memory packet, and evidence.
+
+Follow-up:
+
+- Later P8/P10 hardening should add typed `tool_invocations`, `tool_definitions`, and `tool_observations` read models instead of carrying the extra lifecycle only as event rows.
+- P9 should use the tool/evidence outputs as memory packet provenance inputs.
 
 ## Prototype Gate
 

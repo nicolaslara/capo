@@ -170,7 +170,7 @@ Evidence:
 
 ## P7 - Real Local Adapter Smoke
 
-Status: in_progress
+Status: waiting_on_opt_in
 
 Acceptance:
 
@@ -196,13 +196,22 @@ Remaining:
 
 ## P8 - Capo Tools And Permission Audit
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Implement `capo.task_status`, `capo.agent_status`, `capo.session_summary`, `capo.workpad_read`, `capo.evidence_record`, and `capo.capability_request`.
 - Prove tool request, permission decision, grant use, invocation, output artifact, and adapter result-delivery events.
 - Trusted local policy allows broadly but still emits auditable permission records.
+
+Evidence:
+
+- `crates/capo-tools/src/lib.rs`
+- `crates/capo-controller/src/lib.rs`
+- `crates/capo-state/src/lib.rs`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
 
 ## P9 - Memory Packet And Context Provenance
 

@@ -308,6 +308,42 @@ impl FakeBoundaryController {
 
         self.state.append_event(
             scoped_event(
+                &format!("event-permission-requested-{}", session_id),
+                EventKind::PermissionRequested,
+                &self.project_id,
+                &task_id,
+                &registration.agent_id,
+                &session_id,
+                &run_id,
+            )
+            .with_turn(turn_id.to_string())
+            .with_payload(format!(
+                "{{\"tool_call_id\":\"{}\",\"scope_json\":{}}}",
+                tool_call_id, permission.scope_json
+            )),
+            &[],
+        )?;
+
+        self.state.append_event(
+            scoped_event(
+                &format!("event-permission-decided-{}", session_id),
+                EventKind::PermissionDecided,
+                &self.project_id,
+                &task_id,
+                &registration.agent_id,
+                &session_id,
+                &run_id,
+            )
+            .with_turn(turn_id.to_string())
+            .with_payload(format!(
+                "{{\"tool_call_id\":\"{}\",\"effect\":\"{}\",\"capability_grant_id\":\"{}\"}}",
+                tool_call_id, permission.effect, permission.capability_grant_id
+            )),
+            &[],
+        )?;
+
+        self.state.append_event(
+            scoped_event(
                 &format!("event-capability-grant-{}", session_id),
                 EventKind::CapabilityGrantCreated,
                 &self.project_id,
@@ -360,6 +396,79 @@ impl FakeBoundaryController {
 
         self.state.append_event(
             scoped_event(
+                &format!("event-capability-grant-used-{}", session_id),
+                EventKind::CapabilityGrantUsed,
+                &self.project_id,
+                &task_id,
+                &registration.agent_id,
+                &session_id,
+                &run_id,
+            )
+            .with_turn(turn_id.to_string())
+            .with_payload(format!(
+                "{{\"capability_grant_id\":\"{}\",\"tool_call_id\":\"{}\"}}",
+                permission.capability_grant_id, tool_result.tool_call_id
+            )),
+            &[],
+        )?;
+
+        self.state.append_event(
+            scoped_event(
+                &format!("event-tool-invocation-started-{}", session_id),
+                EventKind::ToolInvocationStarted,
+                &self.project_id,
+                &task_id,
+                &registration.agent_id,
+                &session_id,
+                &run_id,
+            )
+            .with_turn(turn_id.to_string())
+            .with_payload(format!(
+                "{{\"tool_call_id\":\"{}\",\"tool\":\"{}\",\"instrumentation\":\"full\"}}",
+                tool_result.tool_call_id, tool_result.tool_name
+            )),
+            &[],
+        )?;
+
+        self.state.append_event(
+            scoped_event(
+                &format!("event-tool-output-artifact-{}", session_id),
+                EventKind::ToolOutputArtifactRecorded,
+                &self.project_id,
+                &task_id,
+                &registration.agent_id,
+                &session_id,
+                &run_id,
+            )
+            .with_turn(turn_id.to_string())
+            .with_payload(format!(
+                "{{\"tool_call_id\":\"{}\",\"output_artifact_id\":\"{}\",\"redaction_state\":\"safe\"}}",
+                tool_result.tool_call_id, tool_result.output_artifact_id
+            )),
+            &[],
+        )?;
+
+        self.state.append_event(
+            scoped_event(
+                &format!("event-tool-output-observed-{}", session_id),
+                EventKind::ToolOutputObserved,
+                &self.project_id,
+                &task_id,
+                &registration.agent_id,
+                &session_id,
+                &run_id,
+            )
+            .with_turn(turn_id.to_string())
+            .with_payload(format!(
+                "{{\"tool_call_id\":\"{}\",\"summary\":\"{}\"}}",
+                tool_result.tool_call_id,
+                escape_json(&tool_result.summary)
+            )),
+            &[],
+        )?;
+
+        self.state.append_event(
+            scoped_event(
                 &format!("event-tool-completed-{}", session_id),
                 EventKind::ToolCallCompleted,
                 &self.project_id,
@@ -384,6 +493,24 @@ impl FakeBoundaryController {
                 output_artifact_id: Some(tool_result.output_artifact_id.clone()),
                 updated_sequence: 0,
             })],
+        )?;
+
+        self.state.append_event(
+            scoped_event(
+                &format!("event-tool-result-delivered-{}", session_id),
+                EventKind::ToolResultDelivered,
+                &self.project_id,
+                &task_id,
+                &registration.agent_id,
+                &session_id,
+                &run_id,
+            )
+            .with_turn(turn_id.to_string())
+            .with_payload(format!(
+                "{{\"tool_call_id\":\"{}\",\"external_session_ref\":\"{}\",\"delivery\":\"fake-adapter-accepted\"}}",
+                tool_result.tool_call_id, adapter_session.external_session_ref
+            )),
+            &[],
         )?;
 
         self.state.append_event(
@@ -694,7 +821,7 @@ impl FakeBoundaryController {
                 .state
                 .run(&refs.run_id)?
                 .ok_or_else(|| missing_read_model("run", &refs.run_id))?,
-            recent_events: self.state.recent_events_for_session(&refs.session_id, 10)?,
+            recent_events: self.state.recent_events_for_session(&refs.session_id, 16)?,
         })
     }
 }
@@ -863,9 +990,15 @@ mod tests {
                 .any(|event| event.kind == "tool.call_completed")
         );
         for expected_kind in [
+            "permission.decided",
             "capability.grant_created",
+            "capability.grant_used",
             "tool.call_requested",
+            "tool.invocation_started",
+            "tool.output_artifact_recorded",
+            "tool.output_observed",
             "tool.call_completed",
+            "tool.result_delivered",
             "memory.packet_built",
             "evidence.recorded",
         ] {

@@ -117,3 +117,14 @@ Observed 2026-05-25.
 - Runtime safety source: `../architecture/runtime-tunnel.md`
 - Capability policy source: `../architecture/capability-permissions.md`
 - Real provider smoke not run yet; requires explicit opt-in environment flags before using local subscription-backed CLIs.
+
+## P8 Capo Tools And Permission Audit
+
+Observed 2026-05-25.
+
+- Capo tool registry and permission lifecycle tests: `../../crates/capo-tools/src/lib.rs`
+- Durable fake-controller tool audit event path: `../../crates/capo-controller/src/lib.rs`
+- Tool/permission event vocabulary: `../../crates/capo-state/src/lib.rs`
+- Tool architecture source: `../architecture/tool-exposure.md`
+- Capability and permission architecture source: `../architecture/capability-permissions.md`
+- No new third-party dependencies were added for P8.
