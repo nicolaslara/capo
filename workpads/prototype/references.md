@@ -106,3 +106,14 @@ Observed 2026-05-25.
 - ACP replay/dedupe architecture source: `../architecture/acp-replay-dedupe.md`
 - `serde` crate: version `1.0.228`, license `MIT OR Apache-2.0`, repository `https://github.com/serde-rs/serde`, observed via `cargo info serde`
 - `serde_json` crate: version `1.0.150`, license `MIT OR Apache-2.0`, repository `https://github.com/serde-rs/json`, observed via `cargo info serde_json`
+
+## P7 Local Adapter Smoke Harness
+
+Observed 2026-05-25.
+
+- Local adapter smoke harness and tests: `../../crates/capo-adapters/src/lib.rs`
+- Local runtime runner used by smoke harness: `../../crates/capo-runtime/src/lib.rs`
+- Subscription connector policy source: `../architecture/protocol-provider.md`
+- Runtime safety source: `../architecture/runtime-tunnel.md`
+- Capability policy source: `../architecture/capability-permissions.md`
+- Real provider smoke not run yet; requires explicit opt-in environment flags before using local subscription-backed CLIs.

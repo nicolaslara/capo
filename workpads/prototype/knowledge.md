@@ -229,6 +229,31 @@ Follow-up:
 - P7 should use these parser types as the safety gate before any opt-in real Codex or Claude Code local smoke.
 - P10 should move ACP replay batches/raw updates/idempotency enforcement into state so dedupe is durable across restart, not just parser-local.
 
+## P7 - Real Local Adapter Smoke
+
+Status: in progress on 2026-05-25.
+
+Decisions:
+
+- Add the local adapter smoke harness before executing any subscription-backed CLI. Real Codex and Claude Code calls must be explicitly opted in with environment flags.
+- Keep Codex launch defaults restrictive: `codex exec --json --sandbox read-only --ephemeral --ignore-user-config --ignore-rules --cd <isolated workspace>`.
+- Add a Claude Code smoke plan, but do not claim the real smoke is safe until the installed CLI's restricted permission/tool arguments are verified. The current planned shape uses stream JSON, plan permission mode, disallowed tools, and strict empty MCP config.
+- Route smoke execution through `LocalProcessRunner` rather than spawning provider CLIs directly from adapter code.
+- Scan stdout/stderr artifacts after execution and fail if unredacted credential/session markers appear. Redacted markers are allowed only when the artifact contains `[REDACTED]`.
+- Do not mark P7 complete until the real Codex opt-in smoke has been run and recorded. The current commit proves harness safety and local runtime integration with `/bin/echo` only.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+- Tests cover restrictive Codex smoke-plan arguments, restricted Claude smoke-plan arguments, explicit opt-in skip behavior, runtime-boundary execution with `/bin/echo`, and artifact secret-marker scanning.
+
+Skipped verification:
+
+- Real Codex smoke was not run because `CAPO_RUN_CODEX_LOCAL_SMOKE=1` was not set by the user.
+- Real Claude Code smoke was not run because restricted tool/permission arguments still need a local CLI verification pass before enabling it.
+
 ## Prototype Gate
 
 Status: not passed.

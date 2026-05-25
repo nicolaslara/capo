@@ -170,7 +170,7 @@ Evidence:
 
 ## P7 - Real Local Adapter Smoke
 
-Status: pending
+Status: in_progress
 
 Acceptance:
 
@@ -179,6 +179,20 @@ Acceptance:
 - Subscription-backed connector code remains local-only and never reads vendor credential material.
 - Use restrictive adapter launch defaults: isolated temp workspace, no MCP configs, no browser tools, no provider-native write/network tools unless explicitly scoped, Codex read-only sandbox by default, and Claude restricted `--allowedTools` / permission mode.
 - Fail the smoke if persistent artifacts are unclassified or contain credentials, cookies, tokens, raw sensitive transcripts, or unredacted provider/session material.
+
+Partial evidence:
+
+- `crates/capo-adapters/src/lib.rs`
+- `crates/capo-adapters/Cargo.toml`
+- `Cargo.lock`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+
+Remaining:
+
+- Run `CAPO_RUN_CODEX_LOCAL_SMOKE=1 cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture` or equivalent once the user explicitly opts in to using the local Codex subscription connector.
+- Run the Claude Code smoke only after the restricted `--permission-mode` / tool-disabling arguments are verified against the installed Claude Code CLI.
 
 ## P8 - Capo Tools And Permission Audit
 

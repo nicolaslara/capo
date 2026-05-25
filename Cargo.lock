@@ -19,6 +19,7 @@ name = "capo-adapters"
 version = "0.1.0"
 dependencies = [
  "capo-core",
+ "capo-runtime",
  "serde",
  "serde_json",
 ]

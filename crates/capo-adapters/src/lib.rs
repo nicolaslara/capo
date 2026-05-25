@@ -4,7 +4,15 @@
 //! parsers preserve provider-specific records as adapter facts and emit
 //! normalized adapter events for the controller pipeline.
 
-use capo_core::{BoundaryBinding, BoundaryKind, SessionId, TurnId};
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+
+use capo_core::{BoundaryBinding, BoundaryKind, RunId, SessionId, TurnId};
+use capo_runtime::{
+    LocalProcessConfig, LocalProcessOutcome, LocalProcessRequest, LocalProcessRunner,
+    RedactionRule, RuntimeError,
+};
 use serde_json::Value;
 
 /// Initial adapter variants named by the architecture.
@@ -207,6 +215,239 @@ impl FakeProviderConnector {
 pub struct FakeProviderInfo {
     pub provider_kind: String,
     pub auth_mode: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalAdapterSmokePlan {
+    pub adapter_kind: NormalizedAdapterKind,
+    pub opt_in_env: &'static str,
+    pub program: String,
+    pub argv: Vec<String>,
+    pub workspace_root: PathBuf,
+    pub artifact_root: PathBuf,
+    pub env_allowlist: Vec<String>,
+    pub redaction_rules: Vec<RedactionRule>,
+    pub output_limit_bytes: usize,
+    pub expected_output_marker: &'static str,
+}
+
+impl LocalAdapterSmokePlan {
+    pub fn runtime_config(&self) -> LocalProcessConfig {
+        LocalProcessConfig {
+            workspace_roots: vec![self.workspace_root.clone()],
+            artifact_root: self.artifact_root.clone(),
+            env_allowlist: self.env_allowlist.clone(),
+            redaction_rules: self.redaction_rules.clone(),
+            output_limit_bytes: self.output_limit_bytes,
+        }
+    }
+
+    pub fn runtime_request(&self, run_id: RunId) -> LocalProcessRequest {
+        LocalProcessRequest {
+            run_id,
+            program: self.program.clone(),
+            argv: self.argv.clone(),
+            cwd: self.workspace_root.clone(),
+            env: HashMap::new(),
+        }
+    }
+
+    pub fn is_opted_in(&self) -> bool {
+        std::env::var(self.opt_in_env).as_deref() == Ok("1")
+    }
+}
+
+#[derive(Debug)]
+pub enum LocalAdapterSmokeError {
+    Io(std::io::Error),
+    Runtime(RuntimeError),
+    NotOptedIn(&'static str),
+    SensitiveArtifact { path: PathBuf, marker: String },
+    MarkerMissing { marker: &'static str },
+}
+
+impl From<std::io::Error> for LocalAdapterSmokeError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<RuntimeError> for LocalAdapterSmokeError {
+    fn from(error: RuntimeError) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+pub type LocalAdapterSmokeResult<T> = Result<T, LocalAdapterSmokeError>;
+
+pub struct LocalAdapterSmokeRunner;
+
+impl LocalAdapterSmokeRunner {
+    pub fn run_if_opted_in(
+        plan: &LocalAdapterSmokePlan,
+    ) -> LocalAdapterSmokeResult<Option<LocalProcessOutcome>> {
+        if !plan.is_opted_in() {
+            return Ok(None);
+        }
+
+        Self::run(plan).map(Some)
+    }
+
+    pub fn run(plan: &LocalAdapterSmokePlan) -> LocalAdapterSmokeResult<LocalProcessOutcome> {
+        fs::create_dir_all(&plan.workspace_root)?;
+        fs::create_dir_all(&plan.artifact_root)?;
+        let runner = LocalProcessRunner::new(plan.runtime_config());
+        let outcome = runner.start_process(
+            plan.runtime_request(RunId::new(format!("{}-smoke", plan.adapter_kind.as_str()))),
+        )?;
+        scan_artifacts_for_sensitive_markers([&outcome.stdout.path, &outcome.stderr.path])?;
+        let stdout = fs::read_to_string(&outcome.stdout.path)?;
+        let stderr = fs::read_to_string(&outcome.stderr.path)?;
+        if !stdout.contains(plan.expected_output_marker)
+            && !stderr.contains(plan.expected_output_marker)
+        {
+            return Err(LocalAdapterSmokeError::MarkerMissing {
+                marker: plan.expected_output_marker,
+            });
+        }
+        Ok(outcome)
+    }
+}
+
+impl CodexExecAdapter {
+    pub fn local_smoke_plan(
+        workspace_root: PathBuf,
+        artifact_root: PathBuf,
+    ) -> LocalAdapterSmokePlan {
+        LocalAdapterSmokePlan {
+            adapter_kind: NormalizedAdapterKind::CodexExec,
+            opt_in_env: "CAPO_RUN_CODEX_LOCAL_SMOKE",
+            program: "codex".to_string(),
+            argv: vec![
+                "exec".to_string(),
+                "--json".to_string(),
+                "--sandbox".to_string(),
+                "read-only".to_string(),
+                "--ephemeral".to_string(),
+                "--ignore-user-config".to_string(),
+                "--ignore-rules".to_string(),
+                "--cd".to_string(),
+                workspace_root.to_string_lossy().to_string(),
+                "Reply with exactly CAPO_CODEX_SMOKE_OK and do not inspect files.".to_string(),
+            ],
+            workspace_root,
+            artifact_root,
+            env_allowlist: local_subscription_cli_env_allowlist(),
+            redaction_rules: local_adapter_redaction_rules(),
+            output_limit_bytes: 128 * 1024,
+            expected_output_marker: "CAPO_CODEX_SMOKE_OK",
+        }
+    }
+}
+
+impl ClaudeCodeAdapter {
+    pub fn local_smoke_plan(
+        workspace_root: PathBuf,
+        artifact_root: PathBuf,
+    ) -> LocalAdapterSmokePlan {
+        LocalAdapterSmokePlan {
+            adapter_kind: NormalizedAdapterKind::ClaudeCode,
+            opt_in_env: "CAPO_RUN_CLAUDE_LOCAL_SMOKE",
+            program: "claude".to_string(),
+            argv: vec![
+                "-p".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--verbose".to_string(),
+                "--permission-mode".to_string(),
+                "plan".to_string(),
+                "--disallowedTools".to_string(),
+                "*".to_string(),
+                "--mcp-config".to_string(),
+                "/dev/null".to_string(),
+                "--strict-mcp-config".to_string(),
+                "Reply with exactly CAPO_CLAUDE_SMOKE_OK and do not inspect files.".to_string(),
+            ],
+            workspace_root,
+            artifact_root,
+            env_allowlist: local_subscription_cli_env_allowlist(),
+            redaction_rules: local_adapter_redaction_rules(),
+            output_limit_bytes: 128 * 1024,
+            expected_output_marker: "CAPO_CLAUDE_SMOKE_OK",
+        }
+    }
+}
+
+pub fn scan_artifacts_for_sensitive_markers<'a>(
+    paths: impl IntoIterator<Item = &'a PathBuf>,
+) -> LocalAdapterSmokeResult<()> {
+    for path in paths {
+        let contents = fs::read_to_string(path)?;
+        if let Some(marker) = sensitive_marker(&contents) {
+            return Err(LocalAdapterSmokeError::SensitiveArtifact {
+                path: path.clone(),
+                marker,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn local_subscription_cli_env_allowlist() -> Vec<String> {
+    vec![
+        "HOME".to_string(),
+        "PATH".to_string(),
+        "TMPDIR".to_string(),
+        "USER".to_string(),
+        "LOGNAME".to_string(),
+        "SHELL".to_string(),
+        "LANG".to_string(),
+    ]
+}
+
+fn local_adapter_redaction_rules() -> Vec<RedactionRule> {
+    [
+        ("Authorization:", "Authorization: [REDACTED]"),
+        ("Cookie:", "Cookie: [REDACTED]"),
+        ("session_token", "session_[REDACTED]"),
+        ("api_key", "api_[REDACTED]"),
+        ("access_token", "access_[REDACTED]"),
+        ("refresh_token", "refresh_[REDACTED]"),
+    ]
+    .into_iter()
+    .map(|(pattern, replacement)| RedactionRule {
+        pattern: pattern.to_string(),
+        replacement: replacement.to_string(),
+    })
+    .collect()
+}
+
+fn sensitive_marker(contents: &str) -> Option<String> {
+    for line in contents.lines() {
+        if line.to_ascii_lowercase().contains("[redacted]") {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if let Some(marker) = [
+            "authorization:",
+            "cookie:",
+            "set-cookie:",
+            "session_token",
+            "access_token",
+            "refresh_token",
+            "oauth",
+            "api_key",
+            "anthropic_api_key",
+            "openai_api_key",
+            "sk-",
+        ]
+        .into_iter()
+        .find(|marker| lower.contains(marker))
+        {
+            return Some(marker.to_string());
+        }
+    }
+    None
 }
 
 pub type AdapterParseResult<T> = Result<T, AdapterParseError>;
@@ -717,6 +958,8 @@ fn stable_hash(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::*;
 
     #[test]
@@ -848,5 +1091,167 @@ mod tests {
 
         assert_eq!(before, 2);
         assert_eq!(after, 1);
+    }
+
+    #[test]
+    fn codex_local_smoke_plan_uses_restrictive_defaults() {
+        let workspace = temp_root("codex-workspace");
+        let artifacts = temp_root("codex-artifacts");
+        let plan = CodexExecAdapter::local_smoke_plan(workspace.clone(), artifacts.clone());
+
+        assert_eq!(plan.opt_in_env, "CAPO_RUN_CODEX_LOCAL_SMOKE");
+        assert_eq!(plan.program, "codex");
+        assert!(
+            plan.argv
+                .windows(2)
+                .any(|args| args == ["--sandbox", "read-only"])
+        );
+        assert!(plan.argv.iter().any(|arg| arg == "--ephemeral"));
+        assert!(plan.argv.iter().any(|arg| arg == "--ignore-user-config"));
+        assert!(plan.argv.iter().any(|arg| arg == "--ignore-rules"));
+        assert!(
+            plan.argv
+                .windows(2)
+                .any(|args| args == ["--cd", workspace.to_string_lossy().as_ref()])
+        );
+        assert_eq!(plan.workspace_root, workspace);
+        assert_eq!(plan.artifact_root, artifacts);
+        assert!(!plan.env_allowlist.iter().any(|name| name.contains("TOKEN")));
+    }
+
+    #[test]
+    fn claude_local_smoke_plan_disables_tools_and_mcp_by_default() {
+        let workspace = temp_root("claude-workspace");
+        let artifacts = temp_root("claude-artifacts");
+        let plan = ClaudeCodeAdapter::local_smoke_plan(workspace, artifacts);
+
+        assert_eq!(plan.opt_in_env, "CAPO_RUN_CLAUDE_LOCAL_SMOKE");
+        assert_eq!(plan.program, "claude");
+        assert!(
+            plan.argv
+                .windows(2)
+                .any(|args| args == ["--output-format", "stream-json"])
+        );
+        assert!(
+            plan.argv
+                .windows(2)
+                .any(|args| args == ["--permission-mode", "plan"])
+        );
+        assert!(
+            plan.argv
+                .windows(2)
+                .any(|args| args == ["--disallowedTools", "*"])
+        );
+        assert!(plan.argv.iter().any(|arg| arg == "--strict-mcp-config"));
+        assert!(!plan.env_allowlist.iter().any(|name| name.contains("TOKEN")));
+    }
+
+    #[test]
+    fn local_adapter_smoke_runner_skips_without_explicit_opt_in() {
+        let plan = LocalAdapterSmokePlan {
+            adapter_kind: NormalizedAdapterKind::CodexExec,
+            opt_in_env: "CAPO_TEST_UNSET_LOCAL_SMOKE",
+            program: "/bin/echo".to_string(),
+            argv: vec!["CAPO_CODEX_SMOKE_OK".to_string()],
+            workspace_root: temp_root("skip-workspace"),
+            artifact_root: temp_root("skip-artifacts"),
+            env_allowlist: Vec::new(),
+            redaction_rules: local_adapter_redaction_rules(),
+            output_limit_bytes: 1024,
+            expected_output_marker: "CAPO_CODEX_SMOKE_OK",
+        };
+
+        let outcome = LocalAdapterSmokeRunner::run_if_opted_in(&plan).unwrap();
+
+        assert!(outcome.is_none());
+    }
+
+    #[test]
+    fn local_adapter_smoke_runner_executes_through_runtime_boundary() {
+        let workspace = temp_root("echo-workspace");
+        let artifact_root = temp_root("echo-artifacts");
+        let plan = LocalAdapterSmokePlan {
+            adapter_kind: NormalizedAdapterKind::CodexExec,
+            opt_in_env: "CAPO_TEST_UNSET_LOCAL_SMOKE",
+            program: "/bin/echo".to_string(),
+            argv: vec!["CAPO_CODEX_SMOKE_OK".to_string()],
+            workspace_root: workspace,
+            artifact_root,
+            env_allowlist: Vec::new(),
+            redaction_rules: local_adapter_redaction_rules(),
+            output_limit_bytes: 1024,
+            expected_output_marker: "CAPO_CODEX_SMOKE_OK",
+        };
+
+        let outcome = LocalAdapterSmokeRunner::run(&plan).unwrap();
+
+        assert_eq!(outcome.process.status, "exited");
+        assert!(
+            fs::read_to_string(&outcome.stdout.path)
+                .unwrap()
+                .contains("CAPO_CODEX_SMOKE_OK")
+        );
+        assert!(outcome.events.iter().any(|event| {
+            event.kind == "runtime.output_artifact_recorded"
+                && event.status == outcome.stdout.redaction_state
+        }));
+    }
+
+    #[test]
+    #[ignore = "requires CAPO_RUN_CODEX_LOCAL_SMOKE=1 and local Codex login"]
+    fn local_codex_adapter_smoke() {
+        let plan = CodexExecAdapter::local_smoke_plan(
+            temp_root("real-codex-workspace"),
+            temp_root("real-codex-artifacts"),
+        );
+        let outcome = LocalAdapterSmokeRunner::run_if_opted_in(&plan)
+            .expect("codex local smoke should either skip or pass");
+
+        assert!(
+            outcome.is_some() || !plan.is_opted_in(),
+            "set CAPO_RUN_CODEX_LOCAL_SMOKE=1 to execute the Codex local smoke"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires CAPO_RUN_CLAUDE_LOCAL_SMOKE=1 and verified restricted Claude Code args"]
+    fn local_claude_adapter_smoke() {
+        let plan = ClaudeCodeAdapter::local_smoke_plan(
+            temp_root("real-claude-workspace"),
+            temp_root("real-claude-artifacts"),
+        );
+        let outcome = LocalAdapterSmokeRunner::run_if_opted_in(&plan)
+            .expect("claude local smoke should either skip or pass");
+
+        assert!(
+            outcome.is_some() || !plan.is_opted_in(),
+            "set CAPO_RUN_CLAUDE_LOCAL_SMOKE=1 after verifying restricted Claude Code args"
+        );
+    }
+
+    #[test]
+    fn artifact_scanner_allows_redacted_markers_and_rejects_raw_secrets() {
+        let root = temp_root("scan");
+        fs::create_dir_all(&root).unwrap();
+        let redacted = root.join("redacted.txt");
+        let raw = root.join("raw.txt");
+        fs::write(&redacted, "Authorization: [REDACTED]\n").unwrap();
+        fs::write(&raw, "Authorization: bearer secret\n").unwrap();
+
+        scan_artifacts_for_sensitive_markers([&redacted]).unwrap();
+        let error = scan_artifacts_for_sensitive_markers([&raw]).unwrap_err();
+
+        assert!(matches!(
+            error,
+            LocalAdapterSmokeError::SensitiveArtifact { marker, .. } if marker == "authorization:"
+        ));
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("capo-adapter-{name}-{nanos}"))
     }
 }
