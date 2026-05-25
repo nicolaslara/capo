@@ -4,11 +4,11 @@
 //! controller calls each boundary, persists Capo-owned events/projections, and
 //! answers inspection requests from SQLite read models.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use capo_adapters::{
-    AgentAdapter, FakeAdapterSessionRequest, FakeAdapterTurnRequest, NormalizedAdapterEvent,
-    ProviderConnector,
+    AgentAdapter, ClaudeCodeAdapter, CodexExecAdapter, FakeAdapterSessionRequest,
+    FakeAdapterTurnRequest, LocalAdapterLaunchPlan, NormalizedAdapterEvent, ProviderConnector,
 };
 use capo_core::{
     AgentId, CommandEnvelope, CommandIntent, EvidenceId, MemoryPacketId, ProjectId, RunId,
@@ -242,6 +242,48 @@ impl FakeBoundaryController {
             tool_event_count,
             summary_event_count,
             completed_turn_count,
+        })
+    }
+
+    pub fn plan_local_adapter_dispatch(
+        &self,
+        adapter: &str,
+        agent_name: &str,
+        goal: &str,
+        workspace_root: PathBuf,
+        artifact_root: PathBuf,
+    ) -> Result<LocalAdapterDispatchPlan, String> {
+        let registration = self
+            .registration_for_agent_name(agent_name)
+            .map_err(|error| format!("{error:?}"))?;
+        let session_id = SessionId::new(format!("session-{}", registration.agent_name));
+        let run_id = RunId::new(format!("run-{}", registration.agent_name));
+        let launch_plan = match adapter {
+            "codex" | "codex_exec" => {
+                CodexExecAdapter::local_launch_plan(workspace_root, artifact_root, goal)
+            }
+            "claude" | "claude_code" => {
+                ClaudeCodeAdapter::local_launch_plan(workspace_root, artifact_root, goal)
+            }
+            other => {
+                return Err(format!(
+                    "unsupported local adapter dispatch plan: {other}; expected codex or claude"
+                ));
+            }
+        };
+        launch_plan.assert_subscription_safe()?;
+        let runtime_request = launch_plan.runtime_request(run_id.clone());
+        Ok(LocalAdapterDispatchPlan {
+            project_id: self.project_id.clone(),
+            agent_id: registration.agent_id,
+            agent_name: registration.agent_name,
+            session_id,
+            run_id,
+            launch_plan,
+            runtime_program: runtime_request.program,
+            runtime_arg_count: runtime_request.argv.len(),
+            runtime_cwd: runtime_request.cwd,
+            request_env_count: runtime_request.env.len(),
         })
     }
 
@@ -1511,6 +1553,20 @@ pub struct AdapterReplayReport {
     pub completed_turn_count: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalAdapterDispatchPlan {
+    pub project_id: ProjectId,
+    pub agent_id: AgentId,
+    pub agent_name: String,
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    pub launch_plan: LocalAdapterLaunchPlan,
+    pub runtime_program: String,
+    pub runtime_arg_count: usize,
+    pub runtime_cwd: PathBuf,
+    pub request_env_count: usize,
+}
+
 fn event(event_id: &str, kind: EventKind, project_id: &ProjectId) -> NewEvent {
     let mut event = NewEvent::new(event_id, kind, "capo-controller");
     event.project_id = Some(project_id.clone());
@@ -1652,6 +1708,57 @@ mod tests {
     use super::*;
 
     static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn controller_plans_local_adapter_dispatch_without_runtime_execution() {
+        let state_root = temp_root();
+        let workspace = temp_root();
+        let artifacts = temp_root();
+        let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), &state_root)
+            .expect("open controller");
+        controller
+            .register_agent("codex-worker")
+            .expect("register agent");
+
+        let plan = controller
+            .plan_local_adapter_dispatch(
+                "codex",
+                "codex-worker",
+                "Summarize the current workpad.",
+                workspace.clone(),
+                artifacts.clone(),
+            )
+            .expect("plan dispatch");
+
+        assert_eq!(plan.agent_name, "codex-worker");
+        assert_eq!(plan.runtime_program, "codex");
+        assert_eq!(plan.runtime_cwd, workspace);
+        assert_eq!(plan.request_env_count, 0);
+        assert_eq!(plan.launch_plan.provider_kind, "codex_subscription");
+        assert_eq!(plan.launch_plan.credential_scope, "user_local_subscription");
+        assert_eq!(plan.launch_plan.artifact_root, artifacts);
+        assert!(plan.launch_plan.assert_subscription_safe().is_ok());
+        assert!(
+            plan.launch_plan
+                .argv
+                .windows(2)
+                .any(|args| args == ["--sandbox", "read-only"])
+        );
+        assert_eq!(controller.state().run(&plan.run_id).unwrap(), None);
+    }
+
+    #[test]
+    fn controller_rejects_unknown_local_adapter_dispatch_plan() {
+        let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), temp_root())
+            .expect("open controller");
+        controller.register_agent("worker").expect("register agent");
+
+        let error = controller
+            .plan_local_adapter_dispatch("unknown", "worker", "Do work.", temp_root(), temp_root())
+            .unwrap_err();
+
+        assert!(error.contains("unsupported local adapter dispatch plan"));
+    }
 
     #[test]
     fn fake_boundaries_drive_controller_state_and_interrupt_from_read_models() {

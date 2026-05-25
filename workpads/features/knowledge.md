@@ -252,6 +252,27 @@ Follow-up:
 
 - Wire the launch plan into the controller dispatch path only after the opt-in real Codex smoke produces clean evidence.
 
+## F1/AC10 - Controller Dispatch Planning
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `FakeBoundaryController::plan_local_adapter_dispatch(...)` as the controller-owned bridge from agent intent to local Codex/Claude runtime launch metadata.
+- Keep this path read-only with respect to provider execution. It resolves the registered agent, builds session/run IDs, validates the adapter launch plan, and returns runtime metadata, but it never calls `LocalProcessRunner`.
+- Add `capo adapter plan-launch --adapter codex|claude --agent NAME --goal GOAL` so operators can inspect the planned dispatch contract before running any subscription-backed smoke.
+- Do not render the raw prompt in CLI output. The output reports provider kind, credential scope, runtime program, arg counts, cwd/artifact paths, env/redaction counts, and `provider_cli_executed=false`.
+- Let the command auto-register the named agent if missing. This keeps launch planning usable during dogfood setup while real dispatch remains gated.
+
+Verification:
+
+- `cargo test -p capo-controller local_adapter_dispatch -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_plan_launch -- --nocapture`: passed.
+
+Follow-up:
+
+- After AC1 has clean opt-in Codex smoke evidence, the next controller slice can convert the launch plan into an audited runtime start and adapter stream consumption path.
+
 ## F3/DS1 - Query Surface Extraction
 
 Status: completed on 2026-05-25.

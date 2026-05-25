@@ -43,6 +43,7 @@ Usage:
   capo agent spawn --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent list [--state PATH]
   capo adapter readiness [--record] [--state PATH]
+  capo adapter plan-launch --adapter codex|claude --agent NAME --goal GOAL [--workspace PATH] [--artifacts PATH] [--state PATH]
   capo adapter dogfood-gate [--state PATH]
   capo adapter smoke-report scan --artifact-root PATH [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
@@ -109,6 +110,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "adapter" && command == "readiness" => {
             adapter_readiness(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "adapter" && command == "plan-launch" => {
+            plan_adapter_launch(&parsed, rest)
         }
         [area, command] if area == "adapter" && command == "dogfood-gate" => {
             adapter_dogfood_gate(&parsed)
@@ -465,6 +469,67 @@ fn adapter_readiness(parsed: &ParsedArgs, args: &[String]) -> Result<String, Str
             .unwrap_or_else(|| "none".to_string())
     ));
     Ok(output)
+}
+
+fn plan_adapter_launch(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let adapter = required_arg(args, "--adapter")?;
+    validate_local_launch_adapter(&adapter)?;
+    let agent = required_arg(args, "--agent")?;
+    let goal = required_arg(args, "--goal")?;
+    let state_root = parsed.state_root.clone();
+    let workspace = optional_arg(args, "--workspace")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_root.join("adapter-launch").join("workspace"));
+    let artifacts = optional_arg(args, "--artifacts")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_root.join("adapter-launch").join("artifacts"));
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--")
+            && !matches!(
+                arg.as_str(),
+                "--adapter" | "--agent" | "--goal" | "--workspace" | "--artifacts"
+            )
+    }) {
+        return Err(format!("unknown adapter plan-launch option: {unknown}"));
+    }
+    let controller = controller(parsed)?;
+    controller
+        .registration_for_agent_name(&agent)
+        .or_else(|_| controller.register_agent(&agent))
+        .map_err(debug_error)?;
+    let plan = controller
+        .plan_local_adapter_dispatch(&adapter, &agent, &goal, workspace, artifacts)
+        .map_err(|error| format!("adapter launch planning failed: {error}"))?;
+    let safe_prompt_arg_count = plan.runtime_arg_count.saturating_sub(1);
+    Ok(format!(
+        "adapter_launch_planned=true\nadapter={}\nprovider_kind={}\ncredential_scope={}\nagent={}\nagent_id={}\nsession_id={}\nrun_id={}\nruntime_program={}\nruntime_arg_count={}\nruntime_prompt_policy=not_rendered\nruntime_safe_arg_count={}\nruntime_cwd={}\nartifact_root={}\nrequest_env_count={}\nenv_allowlist={}\nredaction_rules={}\nstdout_format={}\nstderr_policy={}\nsubscription_safe=true\nprovider_cli_executed=false\n",
+        plan.launch_plan.adapter_kind.as_str(),
+        plan.launch_plan.provider_kind,
+        plan.launch_plan.credential_scope,
+        plan.agent_name,
+        plan.agent_id,
+        plan.session_id,
+        plan.run_id,
+        plan.runtime_program,
+        plan.runtime_arg_count,
+        safe_prompt_arg_count,
+        plan.runtime_cwd.display(),
+        plan.launch_plan.artifact_root.display(),
+        plan.request_env_count,
+        plan.launch_plan.env_allowlist.len(),
+        plan.launch_plan.redaction_rules.len(),
+        plan.launch_plan.stdout_format,
+        plan.launch_plan.stderr_policy,
+    ))
+}
+
+fn validate_local_launch_adapter(adapter: &str) -> Result<(), String> {
+    match adapter {
+        "codex" | "codex_exec" | "claude" | "claude_code" => Ok(()),
+        other => Err(format!(
+            "unsupported local adapter dispatch plan: {other}; expected codex or claude"
+        )),
+    }
 }
 
 fn render_adapter_readiness(plan: &LocalAdapterSmokePlan, opted_in: bool) -> String {
@@ -3282,12 +3347,79 @@ mod tests {
         assert!(HELP.contains("command envelopes"));
         assert!(HELP.contains("does not read provider credentials"));
         assert!(HELP.contains("adapter readiness"));
+        assert!(HELP.contains("adapter plan-launch"));
         assert!(HELP.contains("adapter dogfood-gate"));
         assert!(HELP.contains("workpad index"));
         assert!(HELP.contains("workpad next"));
         assert!(HELP.contains("workpad start-next"));
         assert!(HELP.contains("workpad propose"));
         assert!(HELP.contains("workpad apply"));
+    }
+
+    #[test]
+    fn adapter_plan_launch_builds_dispatch_contract_without_running_provider_cli() {
+        let state_root = temp_root("adapter-plan-launch-state");
+        let workspace = temp_root("adapter-plan-launch-workspace");
+        let artifacts = temp_root("adapter-plan-launch-artifacts");
+        let output = run_cli(vec![
+            "adapter".to_string(),
+            "plan-launch".to_string(),
+            "--adapter".to_string(),
+            "codex".to_string(),
+            "--agent".to_string(),
+            "codex-worker".to_string(),
+            "--goal".to_string(),
+            "Summarize this workpad without printing this prompt.".to_string(),
+            "--workspace".to_string(),
+            workspace.display().to_string(),
+            "--artifacts".to_string(),
+            artifacts.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("adapter plan launch");
+
+        assert!(output.contains("adapter_launch_planned=true"));
+        assert!(output.contains("adapter=codex_exec"));
+        assert!(output.contains("provider_kind=codex_subscription"));
+        assert!(output.contains("credential_scope=user_local_subscription"));
+        assert!(output.contains("runtime_program=codex"));
+        assert!(output.contains("runtime_prompt_policy=not_rendered"));
+        assert!(output.contains("request_env_count=0"));
+        assert!(output.contains("subscription_safe=true"));
+        assert!(output.contains("provider_cli_executed=false"));
+        assert!(output.contains(&format!("runtime_cwd={}", workspace.display())));
+        assert!(output.contains(&format!("artifact_root={}", artifacts.display())));
+        assert!(!output.contains("Summarize this workpad"));
+        assert!(!workspace.exists());
+        assert!(!artifacts.exists());
+    }
+
+    #[test]
+    fn adapter_plan_launch_rejects_unknown_adapter() {
+        let state_root = temp_root("adapter-plan-launch-unknown-state");
+        let error = run_cli(vec![
+            "adapter".to_string(),
+            "plan-launch".to_string(),
+            "--adapter".to_string(),
+            "unknown".to_string(),
+            "--agent".to_string(),
+            "worker".to_string(),
+            "--goal".to_string(),
+            "Do work.".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap_err();
+
+        assert!(error.contains("unsupported local adapter dispatch plan"));
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        assert!(
+            state
+                .agent_by_name("worker")
+                .expect("agent lookup after failed plan")
+                .is_none()
+        );
     }
 
     #[test]

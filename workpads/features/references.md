@@ -99,6 +99,17 @@ Observed 2026-05-25.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC9.
 
+## F1/AC10 Controller Dispatch Planning
+
+Observed 2026-05-25.
+
+- Controller dispatch planner and regression tests: `../../crates/capo-controller/src/lib.rs`
+- CLI `adapter plan-launch` operator surface and regression tests: `../../crates/capo-cli/src/main.rs`
+- Local adapter launch-plan contract reused by controller: `../../crates/capo-adapters/src/lib.rs`
+- Runtime request/config target types: `../../crates/capo-runtime/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC10.
+
 ## F3/DS1 Query Surface Extraction
 
 Observed 2026-05-25.

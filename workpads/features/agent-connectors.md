@@ -241,3 +241,28 @@ Decision:
 - Keep launch planning in `capo-adapters`, while actual process execution remains owned by `capo-runtime`.
 - Reuse the launch-plan shape for both smoke tests and future controller dispatch so Codex/Claude do not grow separate command-construction paths.
 - AC9 does not clear AC1 or AC3. Real subscription-backed execution remains gated on explicit user opt-in and artifact/state scanning.
+
+### AC10 - Controller Dispatch Planning
+
+Status: completed
+
+Acceptance:
+
+- Add a controller-owned path that resolves an agent plus Codex/Claude adapter selection into a local runtime launch plan without executing provider CLIs.
+- Expose an operator command to inspect the planned dispatch contract without rendering the raw prompt.
+- Preserve runtime ownership: the controller may plan a runtime request, but `capo-runtime` still owns process execution.
+- Do not create smoke workspaces/artifact directories or claim real-agent readiness.
+
+Evidence:
+
+- `FakeBoundaryController::plan_local_adapter_dispatch(...)` in `../../crates/capo-controller/src/lib.rs`.
+- CLI `capo adapter plan-launch --adapter codex|claude --agent NAME --goal GOAL` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-controller local_adapter_dispatch -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_plan_launch -- --nocapture`: passed.
+
+Decision:
+
+- Use `adapter plan-launch` as the first operator-visible bridge from Capo task intent to real-adapter runtime metadata.
+- The command auto-registers the named agent if needed so operators can inspect a launch contract before real connector proof.
+- The prompt is intentionally not rendered in command output. The output reports counts, policy, paths, and provider/runtime metadata only.
+- AC10 still does not clear AC1 or AC3. Real local adapter execution remains blocked on explicit opt-in smoke evidence.

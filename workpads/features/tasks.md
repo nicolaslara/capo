@@ -62,6 +62,7 @@ Progress:
 - AC7 dogfood readiness gate is completed. `capo adapter dogfood-gate` and `capo dashboard` now derive first real-agent dogfood readiness from recorded connector evidence without launching provider CLIs.
 - AC8 smoke artifact scan enforcement is completed. Passed smoke reports now require an artifact root that Capo scans for unredacted credential/session markers before recording the report.
 - AC9 local adapter launch contract is completed. Codex and Claude Code now share reusable launch-plan builders that produce runtime configs/requests without launching provider CLIs.
+- AC10 controller dispatch planning is completed. `capo adapter plan-launch` resolves agent intent into a safe, prompt-redacted local adapter runtime contract without executing provider CLIs.
 
 Evidence:
 
@@ -85,6 +86,8 @@ Evidence:
 - `cargo test -p capo-cli adapter_dogfood -- --nocapture`
 - `cargo test -p capo-cli adapter_smoke -- --nocapture`
 - `cargo test -p capo-adapters launch_plan -- --nocapture`
+- `cargo test -p capo-controller local_adapter_dispatch -- --nocapture`
+- `cargo test -p capo-cli adapter_plan_launch -- --nocapture`
 - Focused F1 connector safety review: no blocking findings; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge
