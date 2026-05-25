@@ -143,6 +143,7 @@ Progress:
 - DB4 next workpad selection is completed with a read-only `capo workpad next` command.
 - DB5 start-next dispatch is completed with explicit import plus fake-controller dispatch while preserving markdown.
 - DB6 dogfood readiness surface is completed with a shared query/CLI summary of connector, workpad, and dispatch-chain prerequisites.
+- DB7 dogfood readiness evidence export is completed with a Capo-marked markdown artifact and project-level evidence record.
 
 Evidence:
 
@@ -165,8 +166,10 @@ Evidence:
 - `capo workpad next [--path PATH]`
 - `capo workpad start-next --agent NAME [--path PATH]`
 - `capo dogfood readiness [--state PATH]`
+- `capo dogfood readiness --out DIR [--state PATH]`
 - `cargo test -p capo-query dogfood_readiness -- --nocapture`
 - `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`
 
 ## F3 - Query Surface And Dashboard Upgrade
 

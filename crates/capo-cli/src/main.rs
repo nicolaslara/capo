@@ -68,7 +68,7 @@ Usage:
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
   capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR] [--state PATH]
   capo adapter replay-dispatch --dispatch-plan DISPATCH_PLAN_ID --fixture PATH [--out DIR] [--state PATH]
-  capo dogfood readiness [--state PATH]
+  capo dogfood readiness [--out DIR] [--state PATH]
   capo task send --agent NAME --goal GOAL [--scenario NAME] [--state PATH]
   capo session status --agent NAME [--state PATH]
   capo session redirect --agent NAME --goal GOAL [--state PATH]
@@ -137,8 +137,8 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         [area, command, rest @ ..] if area == "adapter" && command == "replay-dispatch" => {
             replay_adapter_dispatch_fixture(&parsed, rest)
         }
-        [area, command] if area == "dogfood" && command == "readiness" => {
-            dogfood_readiness(&parsed)
+        [area, command, rest @ ..] if area == "dogfood" && command == "readiness" => {
+            dogfood_readiness(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "adapter" && command == "readiness" => {
             adapter_readiness(&parsed, rest)
@@ -1238,13 +1238,97 @@ fn adapter_dogfood_gate(parsed: &ParsedArgs) -> Result<String, String> {
     Ok(render_adapter_dogfood_gate(&dashboard.adapter_dogfood_gate))
 }
 
-fn dogfood_readiness(parsed: &ParsedArgs) -> Result<String, String> {
+fn dogfood_readiness(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let out = optional_arg(args, "--out").map(PathBuf::from);
+    if has_flag(args, "--out") && out.is_none() {
+        return Err("--out requires a value".to_string());
+    }
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--out"))
+    {
+        return Err(format!("unknown dogfood readiness option: {unknown}"));
+    }
     let state = state(parsed)?;
-    let dashboard =
-        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
-    Ok(render_dogfood_readiness(&project_dogfood_readiness(
-        &dashboard,
-    )))
+    let project_id = project_id();
+    let dashboard = project_dashboard(&state, ProjectDashboardQuery::new(project_id.clone()))
+        .map_err(debug_error)?;
+    let readiness = project_dogfood_readiness(&dashboard);
+    let mut output = render_dogfood_readiness(&readiness);
+    if let Some(out) = out {
+        let command = envelope(
+            "dogfood-readiness",
+            CommandTarget::Project(project_id.clone()),
+            CommandIntent::ExportEvidence,
+            Some(readiness.status.clone()),
+        );
+        let markdown = render_dogfood_readiness_evidence(&project_id, &readiness);
+        fs::create_dir_all(&out).map_err(|error| error.to_string())?;
+        let content_hash = stable_cli_hash(&markdown);
+        let artifact_id = format!("artifact-dogfood-readiness-{content_hash}");
+        let path = out.join(format!("{artifact_id}.md"));
+        write_dogfood_readiness_file(&path, &markdown)?;
+        state
+            .record_artifact(ArtifactRecord {
+                artifact_id: artifact_id.clone(),
+                project_id: Some(project_id.clone()),
+                session_id: None,
+                run_id: None,
+                kind: "dogfood_readiness".to_string(),
+                uri: path.display().to_string(),
+                content_hash: content_hash.clone(),
+                size_bytes: markdown.len() as i64,
+                redaction_state: RedactionState::Safe,
+            })
+            .map_err(debug_error)?;
+
+        let evidence_id = format!("evidence-{artifact_id}");
+        let sequence = state
+            .append_event(
+                NewEvent {
+                    event_id: format!("event-{evidence_id}"),
+                    kind: EventKind::EvidenceRecorded,
+                    actor: "cli".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some(evidence_id.clone()),
+                    payload_json: format!(
+                        "{{\"artifact_id\":\"{}\",\"content_hash\":\"{}\",\"ready\":{},\"status\":\"{}\"}}",
+                        escape_json(&artifact_id),
+                        escape_json(&content_hash),
+                        readiness.ready,
+                        escape_json(&readiness.status)
+                    ),
+                    idempotency_key: Some(format!(
+                        "dogfood-readiness:{}:{content_hash}",
+                        project_id
+                    )),
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::Evidence(EvidenceProjection {
+                    evidence_id: capo_core::EvidenceId::new(evidence_id.clone()),
+                    project_id: project_id.clone(),
+                    task_id: None,
+                    session_id: None,
+                    run_id: None,
+                    kind: "dogfood_readiness".to_string(),
+                    artifact_id: Some(artifact_id.clone()),
+                    confidence: dogfood_readiness_confidence(&readiness),
+                    updated_sequence: 0,
+                })],
+            )
+            .map_err(debug_error)?;
+        output.push_str(&format!(
+            "dogfood_readiness_evidence_exported=true\nevidence_id={evidence_id}\nartifact_id={artifact_id}\npath={}\ncontent_hash={content_hash}\nsequence={sequence}\ncommand_id={}\n",
+            path.display(),
+            command.command_id
+        ));
+    }
+    Ok(output)
 }
 
 fn adapter_dispatch_gate(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
@@ -2530,6 +2614,35 @@ fn render_dogfood_readiness(readiness: &ProjectDogfoodReadiness) -> String {
         readiness.dispatch_execution_count,
         readiness.blockers.join(","),
         readiness.next_actions.join(",")
+    )
+}
+
+fn dogfood_readiness_confidence(readiness: &ProjectDogfoodReadiness) -> i64 {
+    if readiness.ready { 90 } else { 65 }
+}
+
+fn render_dogfood_readiness_evidence(
+    project_id: &ProjectId,
+    readiness: &ProjectDogfoodReadiness,
+) -> String {
+    format!(
+        "<!-- capo:dogfood-readiness -->\n# Capo Dogfood Readiness - {}\n\n## Objective\n\nReview whether Capo is ready to move its own project workpads into Capo-managed dogfood.\n\n## Summary\n\n- Project: `{}`\n- Ready: `{}`\n- Status: `{}`\n- Real-agent connector ready: `{}`\n- Workpad bridge ready: `{}`\n- Dispatch chain ready: `{}`\n\n## Counts\n\n- Workpad tasks: `{}`\n- Observed-only workpad tasks: `{}`\n- Imported workpad tasks: `{}`\n- Dispatch plans: `{}`\n- Ready dispatch gates: `{}`\n- Dispatch replays: `{}`\n- Dispatch executions: `{}`\n\n## Blockers\n\n{}\n\n## Next Actions\n\n{}\n\n## Evidence Policy\n\n- This report is derived from persisted Capo read models only.\n- It does not run provider CLIs, inspect credentials, materialize prompts, open tunnels, or edit markdown.\n- Raw prompts, raw provider output, credentials, cookies, and subscription session material are not rendered.\n",
+        readiness.status,
+        project_id,
+        readiness.ready,
+        readiness.status,
+        readiness.real_agent_connector_ready,
+        readiness.workpad_bridge_ready,
+        readiness.dispatch_chain_ready,
+        readiness.workpad_task_count,
+        readiness.observed_workpad_task_count,
+        readiness.imported_workpad_task_count,
+        readiness.dispatch_plan_count,
+        readiness.ready_dispatch_gate_count,
+        readiness.dispatch_replay_count,
+        readiness.dispatch_execution_count,
+        markdown_list_or_none(&readiness.blockers),
+        markdown_list_or_none(&readiness.next_actions)
     )
 }
 
@@ -5826,6 +5939,24 @@ fn write_dispatch_evidence_file(path: &Path, markdown: &str) -> Result<(), Strin
     fs::write(path, markdown).map_err(|error| error.to_string())
 }
 
+fn write_dogfood_readiness_file(path: &Path, markdown: &str) -> Result<(), String> {
+    if let Ok(existing) = fs::read_to_string(path) {
+        if !existing.starts_with("<!-- capo:dogfood-readiness -->") {
+            return Err(format!(
+                "refusing to overwrite non-Capo dogfood readiness file: {}",
+                path.display()
+            ));
+        }
+        if existing != markdown {
+            return Err(format!(
+                "refusing to overwrite changed Capo dogfood readiness file: {}",
+                path.display()
+            ));
+        }
+    }
+    fs::write(path, markdown).map_err(|error| error.to_string())
+}
+
 fn write_task_outcome_report_file(path: &Path, markdown: &str) -> Result<(), String> {
     if let Ok(existing) = fs::read_to_string(path) {
         if !existing.starts_with("<!-- capo:task-outcome-report -->") {
@@ -6045,6 +6176,18 @@ fn comma_or_none(items: &[String]) -> String {
         "none".to_string()
     } else {
         items.join(",")
+    }
+}
+
+fn markdown_list_or_none(items: &[String]) -> String {
+    if items.is_empty() {
+        "- none".to_string()
+    } else {
+        items
+            .iter()
+            .map(|item| format!("- `{item}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -6703,6 +6846,8 @@ mod tests {
         let readiness = run_cli(vec![
             "dogfood".to_string(),
             "readiness".to_string(),
+            "--out".to_string(),
+            dispatch_evidence_dir.display().to_string(),
             "--state".to_string(),
             state_root.display().to_string(),
         ])
@@ -6717,6 +6862,23 @@ mod tests {
         assert!(readiness.contains("dispatch_executions=1"));
         assert!(readiness.contains("blockers=workpad_index_missing"));
         assert!(readiness.contains("next_actions=run_workpad_index"));
+        assert!(readiness.contains("dogfood_readiness_evidence_exported=true"));
+        assert!(readiness.contains("artifact_id=artifact-dogfood-readiness-"));
+        let readiness_path = readiness
+            .lines()
+            .find_map(|line| line.strip_prefix("path="))
+            .map(PathBuf::from)
+            .expect("dogfood readiness evidence path");
+        let readiness_markdown =
+            fs::read_to_string(&readiness_path).expect("read dogfood readiness evidence");
+        assert!(readiness_markdown.starts_with("<!-- capo:dogfood-readiness -->"));
+        assert!(readiness_markdown.contains("## Summary"));
+        assert!(readiness_markdown.contains("## Counts"));
+        assert!(readiness_markdown.contains("`workpad_index_missing`"));
+        assert!(readiness_markdown.contains("does not run provider CLIs"));
+        assert!(!readiness_markdown.contains("Do not render this dispatch prompt"));
+        assert!(!readiness_markdown.contains("Codex fixture response."));
+        assert!(!readiness_markdown.contains("cargo test"));
         assert_text_absent_in_tree(&state_root, "Do not render this dispatch prompt");
         assert_text_absent_in_tree(&state_root, "Codex fixture response.");
         assert_text_absent_in_tree(&state_root, "cargo test");

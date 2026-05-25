@@ -178,6 +178,26 @@ Follow-up:
 
 - Once a real opt-in Codex run is recorded, use `capo dogfood readiness` as the final checkpoint before moving the Capo project execution loop into Capo.
 
+## F2/DB7 - Dogfood Readiness Evidence Export
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Extend `capo dogfood readiness` with `--out DIR` so the same shared readiness query can produce a durable Capo-owned markdown report.
+- Use a project-level evidence record for readiness reports because the report is about migration readiness, not output from one agent session or provider run.
+- Keep the artifact prompt-redacted and read-model-derived. The export does not inspect credentials, run provider CLIs, materialize prompts, open tunnels, or edit source markdown.
+- Refuse to overwrite non-Capo files or changed Capo readiness reports; exact reruns remain idempotent because the artifact path includes the rendered content hash.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Follow-up:
+
+- Use readiness exports as the reviewed checkpoint artifact before switching the active project loop into Capo-managed dogfood.
+
 ## F1/AC1-AC2 - Local Connector Preflight
 
 Status: in progress on 2026-05-25.

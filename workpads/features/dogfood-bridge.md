@@ -182,3 +182,26 @@ Decision:
 - Treat dogfood readiness as a shared query contract, not a CLI-only checklist.
 - Require three independent signals before the summary reports ready: real-agent connector evidence, indexed workpad state, and a recorded dispatch chain.
 - The command does not run provider CLIs, inspect credentials, materialize prompts, create tunnels, or edit markdown.
+
+### DB7 - Dogfood Readiness Evidence Export
+
+Status: completed
+
+Acceptance:
+
+- Export the shared dogfood readiness query as a Capo-owned markdown evidence artifact.
+- Refuse to overwrite non-Capo or changed Capo readiness artifacts.
+- Record artifact and evidence rows without binding the report to a fake session or provider run.
+- Keep the report prompt-redacted and derived only from persisted read models.
+
+Evidence:
+
+- CLI `capo dogfood readiness --out DIR [--state PATH]` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Decision:
+
+- Readiness evidence uses the marker `<!-- capo:dogfood-readiness -->` and an artifact ID based on the rendered content hash.
+- The report is project-level evidence. It records connector, workpad, and dispatch-chain readiness without pretending a provider CLI ran or a session produced the artifact.
+- The artifact explicitly states that it does not run provider CLIs, inspect credentials, materialize prompts, open tunnels, or edit markdown.

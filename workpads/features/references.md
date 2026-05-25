@@ -88,6 +88,15 @@ Observed 2026-05-26.
 - Agent connector facts consumed by the readiness query: `agent-connectors.md`
 - No new third-party dependencies were added for DB6.
 
+## F2/DB7 Dogfood Readiness Evidence Export
+
+Observed 2026-05-26.
+
+- CLI `dogfood readiness --out DIR` artifact export and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared readiness query contract reused by the export: `../../crates/capo-query/src/lib.rs`
+- Dogfood bridge source workpad: `dogfood-bridge.md`
+- No new third-party dependencies were added for DB7.
+
 ## F1/AC1-AC2 Local Connector Preflight
 
 Observed 2026-05-25.
