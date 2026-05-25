@@ -243,6 +243,15 @@ Observed 2026-05-25.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC6.
 
+## F1/AC7 Dogfood Readiness Gate
+
+Observed 2026-05-25.
+
+- Shared adapter dogfood gate query contract and regression test: `../../crates/capo-query/src/lib.rs`
+- `capo adapter dogfood-gate`, dashboard gate rendering, and CLI regression test: `../../crates/capo-cli/src/main.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC7.
+
 ## F7/RR1 Loopback Remote Runtime Contract
 
 Observed 2026-05-25.

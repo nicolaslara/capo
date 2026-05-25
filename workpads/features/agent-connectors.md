@@ -168,3 +168,28 @@ Evidence:
 Decision:
 
 - AC6 is an evidence contract, not a real smoke. A skipped report preserves `dogfood_readiness_effect=real_subscription_smoke_not_recorded`.
+
+### AC7 - Dogfood Readiness Gate
+
+Status: completed
+
+Acceptance:
+
+- Add a deterministic gate that decides whether Capo may start first real-agent dogfood from recorded connector evidence.
+- Keep the gate read-only and do not run provider CLIs or inspect subscription credentials.
+- Require a successful Codex real-smoke report with clean credential scan and expected marker before clearing the first dogfood blocker.
+- Expose the gate through the shared query contract so CLI/dashboard/voice/web surfaces use the same readiness rule.
+
+Evidence:
+
+- `AdapterDogfoodGate` and shared gate computation in `../../crates/capo-query/src/lib.rs`.
+- `capo adapter dogfood-gate [--state PATH]` in `../../crates/capo-cli/src/main.rs`.
+- `capo dashboard` renders the same shared dogfood gate.
+- `cargo test -p capo-query adapter_dogfood -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dogfood -- --nocapture`: passed.
+
+Decision:
+
+- The first real-agent dogfood gate is cleared only by recorded Codex evidence with `smoke_status=passed`, `credential_scan_status=clean`, marker present, and `dogfood_readiness_effect=real_agent_connector_proven`.
+- The gate is read-only and evidence-derived. It does not launch Codex or Claude, inspect subscription state, or read credentials.
+- Claude remains a target connector, but first dogfood can start after Codex is proven because AC1 explicitly defines Codex as the first local connector proof.

@@ -151,6 +151,26 @@ Follow-up:
 - After explicit user opt-in, run `CAPO_RUN_CODEX_LOCAL_SMOKE=1 cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture`, inspect artifacts/state for credential markers, and decide whether Codex is safe enough for first dogfood.
 - If Codex passes, AC3 should route a real adapter event stream through controller/state/evidence instead of stopping at adapter-level smoke.
 
+## F1/AC7 - Dogfood Readiness Gate
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add a shared `AdapterDogfoodGate` in `capo-query` so operator surfaces consume one readiness rule instead of duplicating connector checks.
+- Keep the first real-agent dogfood gate evidence-derived and read-only. It checks persisted smoke reports; it does not run provider CLIs, inspect subscription state, or read credentials.
+- Require Codex proof for first dogfood: passed smoke report, clean credential scan, marker found, and `dogfood_readiness_effect=real_agent_connector_proven`.
+- Keep Claude as a first-class target connector, but do not block first dogfood on Claude because AC1 defines Codex as the first local connector proof.
+
+Verification:
+
+- `cargo test -p capo-query adapter_dogfood -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dogfood -- --nocapture`: passed.
+
+Follow-up:
+
+- After explicit Codex opt-in smoke, record the resulting smoke report and re-run `capo adapter dogfood-gate` before moving any Capo work into real-agent dogfood.
+
 ## F3/DS1 - Query Surface Extraction
 
 Status: completed on 2026-05-25.

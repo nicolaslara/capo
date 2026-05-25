@@ -13,7 +13,7 @@ use capo_core::{
     SessionId, TaskId, ToolCallId,
 };
 use capo_eval::TaskOutcomeReport;
-use capo_query::{ProjectDashboard, ProjectDashboardQuery, project_dashboard};
+use capo_query::{AdapterDogfoodGate, ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 use capo_state::{
     AdapterReadinessProjection, AdapterSmokeReportProjection, ArtifactRecord,
     CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection, MemoryPacketProjection,
@@ -43,6 +43,7 @@ Usage:
   capo agent spawn --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent list [--state PATH]
   capo adapter readiness [--record] [--state PATH]
+  capo adapter dogfood-gate [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
   capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR] [--state PATH]
   capo task send --agent NAME --goal GOAL [--scenario NAME] [--state PATH]
@@ -105,6 +106,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "adapter" && command == "readiness" => {
             adapter_readiness(&parsed, rest)
+        }
+        [area, command] if area == "adapter" && command == "dogfood-gate" => {
+            adapter_dogfood_gate(&parsed)
         }
         [area, command, action, rest @ ..]
             if area == "adapter" && command == "smoke-report" && action == "record" =>
@@ -574,6 +578,25 @@ fn record_adapter_smoke_report(parsed: &ParsedArgs, args: &[String]) -> Result<S
     ))
 }
 
+fn adapter_dogfood_gate(parsed: &ParsedArgs) -> Result<String, String> {
+    let state = state(parsed)?;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    Ok(render_adapter_dogfood_gate(&dashboard.adapter_dogfood_gate))
+}
+
+fn render_adapter_dogfood_gate(gate: &AdapterDogfoodGate) -> String {
+    format!(
+        "adapter_dogfood_gate=true\nready_for_first_real_agent_dogfood={}\nstatus={}\nrequired_adapters={}\nproven_adapters={}\nblocked_adapters={}\nreasons={}\n",
+        gate.ready,
+        gate.status,
+        comma_or_none(&gate.required_adapters),
+        comma_or_none(&gate.proven_adapters),
+        comma_or_none(&gate.blocked_adapters),
+        comma_or_none(&gate.reasons)
+    )
+}
+
 fn dashboard(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let query = dashboard_query(args)?;
     let command = envelope(
@@ -757,6 +780,9 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
             report.reason
         ));
     }
+    output.push_str(&render_adapter_dogfood_gate(
+        &dashboard.adapter_dogfood_gate,
+    ));
 
     output.push_str(&format!(
         "active_sessions={}\n",
@@ -2930,6 +2956,14 @@ fn debug_error(error: impl std::fmt::Debug) -> String {
     format!("{error:?}")
 }
 
+fn comma_or_none(items: &[String]) -> String {
+    if items.is_empty() {
+        "none".to_string()
+    } else {
+        items.join(",")
+    }
+}
+
 #[allow(dead_code)]
 fn path_exists(path: &Path) -> bool {
     path.exists()
@@ -2947,6 +2981,7 @@ mod tests {
         assert!(HELP.contains("command envelopes"));
         assert!(HELP.contains("does not read provider credentials"));
         assert!(HELP.contains("adapter readiness"));
+        assert!(HELP.contains("adapter dogfood-gate"));
         assert!(HELP.contains("workpad index"));
         assert!(HELP.contains("workpad propose"));
         assert!(HELP.contains("workpad apply"));
@@ -3054,6 +3089,59 @@ mod tests {
         assert!(dashboard.contains("adapter_smoke_reports=1"));
         assert!(dashboard.contains("adapter_smoke_report=adapter-smoke-codex_exec"));
         assert!(dashboard.contains("credential_scan_status=not_run"));
+    }
+
+    #[test]
+    fn adapter_dogfood_gate_requires_passed_codex_smoke_report() {
+        let state_root = temp_root("adapter-dogfood-gate-state");
+        let blocked = run_cli(vec![
+            "adapter".to_string(),
+            "dogfood-gate".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("blocked gate");
+        assert!(blocked.contains("adapter_dogfood_gate=true"));
+        assert!(blocked.contains("ready_for_first_real_agent_dogfood=false"));
+        assert!(blocked.contains("blocked_adapters=codex_exec"));
+
+        run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "record".to_string(),
+            "--adapter".to_string(),
+            "codex".to_string(),
+            "--status".to_string(),
+            "passed".to_string(),
+            "--credential-scan".to_string(),
+            "clean".to_string(),
+            "--marker-found".to_string(),
+            "--reason".to_string(),
+            "operator recorded clean opt-in smoke".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record passed smoke");
+
+        let ready = run_cli(vec![
+            "adapter".to_string(),
+            "dogfood-gate".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("ready gate");
+        assert!(ready.contains("ready_for_first_real_agent_dogfood=true"));
+        assert!(ready.contains("status=ready_for_first_real_agent_dogfood"));
+        assert!(ready.contains("proven_adapters=codex_exec"));
+
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard");
+        assert!(dashboard.contains("adapter_dogfood_gate=true"));
+        assert!(dashboard.contains("ready_for_first_real_agent_dogfood=true"));
     }
 
     #[test]

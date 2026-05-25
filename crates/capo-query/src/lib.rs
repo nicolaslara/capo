@@ -18,6 +18,7 @@ pub struct ProjectDashboard {
     pub connectivity_exposures: Vec<ConnectivityExposureProjection>,
     pub adapter_readiness: Vec<AdapterReadinessProjection>,
     pub adapter_smoke_reports: Vec<AdapterSmokeReportProjection>,
+    pub adapter_dogfood_gate: AdapterDogfoodGate,
 }
 
 impl ProjectDashboard {
@@ -43,6 +44,16 @@ pub struct SessionDashboardRow {
     pub tool_calls: Vec<ToolCallProjection>,
     pub memory_packets: Vec<MemoryPacketProjection>,
     pub recent_events: Vec<EventRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterDogfoodGate {
+    pub ready: bool,
+    pub status: String,
+    pub required_adapters: Vec<String>,
+    pub proven_adapters: Vec<String>,
+    pub blocked_adapters: Vec<String>,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -103,13 +114,58 @@ pub fn project_dashboard(
     let connectivity_exposures = state.connectivity_exposures(&query.project_id)?;
     let adapter_readiness = state.adapter_readiness(&query.project_id)?;
     let adapter_smoke_reports = state.adapter_smoke_reports(&query.project_id)?;
+    let adapter_dogfood_gate = adapter_dogfood_gate(&adapter_smoke_reports);
     Ok(ProjectDashboard {
         project_id: query.project_id,
         agents: rows,
         connectivity_exposures,
         adapter_readiness,
         adapter_smoke_reports,
+        adapter_dogfood_gate,
     })
+}
+
+pub fn adapter_dogfood_gate(smoke_reports: &[AdapterSmokeReportProjection]) -> AdapterDogfoodGate {
+    let required_adapters = vec!["codex_exec".to_string()];
+    let proven_adapters = required_adapters
+        .iter()
+        .filter(|adapter| {
+            smoke_reports.iter().any(|report| {
+                &report.adapter_kind == *adapter
+                    && report.smoke_status == "passed"
+                    && report.credential_scan_status == "clean"
+                    && report.marker_found
+                    && report.dogfood_readiness_effect == "real_agent_connector_proven"
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let blocked_adapters = required_adapters
+        .iter()
+        .filter(|adapter| !proven_adapters.contains(adapter))
+        .cloned()
+        .collect::<Vec<_>>();
+    let ready = blocked_adapters.is_empty();
+    let reasons = if ready {
+        vec!["required_real_smoke_evidence_recorded".to_string()]
+    } else {
+        blocked_adapters
+            .iter()
+            .map(|adapter| format!("{adapter}:real_subscription_smoke_not_recorded"))
+            .collect()
+    };
+    AdapterDogfoodGate {
+        ready,
+        status: if ready {
+            "ready_for_first_real_agent_dogfood".to_string()
+        } else {
+            "blocked_pending_real_smoke".to_string()
+        },
+        required_adapters,
+        proven_adapters,
+        blocked_adapters,
+        reasons,
+    }
 }
 
 fn session_dashboard(
@@ -155,9 +211,9 @@ mod tests {
     use super::*;
     use capo_core::{AgentId, EvidenceId, MemoryPacketId, RunId, TaskId, ToolCallId};
     use capo_state::{
-        AgentProjection, ConnectivityExposureProjection, EventKind, EvidenceProjection,
-        MemoryPacketProjection, NewEvent, ProjectionRecord, RedactionState, RunProjection,
-        SessionProjection, TaskProjection, ToolCallProjection,
+        AdapterSmokeReportProjection, AgentProjection, ConnectivityExposureProjection, EventKind,
+        EvidenceProjection, MemoryPacketProjection, NewEvent, ProjectionRecord, RedactionState,
+        RunProjection, SessionProjection, TaskProjection, ToolCallProjection,
     };
 
     #[test]
@@ -308,6 +364,47 @@ mod tests {
         assert_eq!(exposure.permission_scope, "network:connect:private_tunnel");
         assert_eq!(exposure.health_status, "unknown");
         assert!(!exposure.reachable);
+    }
+
+    #[test]
+    fn project_dashboard_includes_adapter_dogfood_gate() {
+        let root = temp_root("query-dashboard-adapter-gate");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        append_agent(&state, &project_id, "agent-idle", None);
+
+        let blocked = project_dashboard(&state, ProjectDashboardQuery::new(project_id.clone()))
+            .expect("blocked dashboard");
+        assert!(!blocked.adapter_dogfood_gate.ready);
+        assert_eq!(
+            blocked.adapter_dogfood_gate.status,
+            "blocked_pending_real_smoke"
+        );
+        assert_eq!(
+            blocked.adapter_dogfood_gate.blocked_adapters,
+            vec!["codex_exec"]
+        );
+
+        append_adapter_smoke_report(
+            &state,
+            &project_id,
+            "adapter-smoke-codex-clean",
+            "codex_exec",
+            "passed",
+            "clean",
+            true,
+        );
+        let ready = project_dashboard(&state, ProjectDashboardQuery::new(project_id))
+            .expect("ready dashboard");
+        assert!(ready.adapter_dogfood_gate.ready);
+        assert_eq!(
+            ready.adapter_dogfood_gate.status,
+            "ready_for_first_real_agent_dogfood"
+        );
+        assert_eq!(
+            ready.adapter_dogfood_gate.proven_adapters,
+            vec!["codex_exec"]
+        );
     }
 
     #[test]
@@ -593,6 +690,57 @@ mod tests {
                 )],
             )
             .expect("append connectivity exposure");
+    }
+
+    fn append_adapter_smoke_report(
+        state: &SqliteStateStore,
+        project_id: &ProjectId,
+        smoke_report_id: &str,
+        adapter_kind: &str,
+        smoke_status: &str,
+        credential_scan_status: &str,
+        marker_found: bool,
+    ) {
+        state
+            .append_event(
+                NewEvent {
+                    event_id: format!("event-{smoke_report_id}"),
+                    kind: EventKind::AdapterSmokeRecorded,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some(smoke_report_id.to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::AdapterSmokeReport(
+                    AdapterSmokeReportProjection {
+                        smoke_report_id: smoke_report_id.to_string(),
+                        project_id: project_id.clone(),
+                        adapter_kind: adapter_kind.to_string(),
+                        smoke_status: smoke_status.to_string(),
+                        credential_scan_status: credential_scan_status.to_string(),
+                        marker_found,
+                        artifact_root: None,
+                        reason: "test smoke evidence".to_string(),
+                        dogfood_readiness_effect: if smoke_status == "passed"
+                            && credential_scan_status == "clean"
+                            && marker_found
+                        {
+                            "real_agent_connector_proven".to_string()
+                        } else {
+                            "real_subscription_smoke_not_recorded".to_string()
+                        },
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append adapter smoke report");
     }
 
     fn temp_root(name: &str) -> std::path::PathBuf {
