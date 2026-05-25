@@ -109,7 +109,7 @@ Evidence:
 
 ## F3 - Query Surface And Dashboard Upgrade
 
-Status: pending
+Status: in_progress
 
 Source workpad: `dashboard.md`
 
@@ -118,6 +118,22 @@ Acceptance:
 - Extract dashboard/read-model aggregation out of `capo-cli`.
 - Keep CLI/dashboard/voice/web consumers on the same query contract.
 - Add richer dashboard view only after the query boundary is reusable.
+
+Progress:
+
+- DS1 query surface extraction is completed. DS2 richer operator dashboard view remains pending.
+
+Evidence:
+
+- `crates/capo-query/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
+- `cargo test -p capo-query`
+- `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence`
+- `cargo test -p capo-cli cli_drives_fake_controller_and_exports_evidence`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+- Focused DS1 query-boundary review: test coverage gap found and fixed
 
 ## F4 - Capability And Tool Hardening
 

@@ -71,3 +71,14 @@ Observed 2026-05-25.
 - Local adapter smoke plan and safety scanner implementation: `../../crates/capo-adapters/src/lib.rs`.
 - Agent connectors source workpad: `agent-connectors.md`.
 - No new third-party dependencies were added for AC1/AC2 preflight.
+
+## F3/DS1 Query Surface Extraction
+
+Observed 2026-05-25.
+
+- Query aggregation crate: `../../crates/capo-query/src/lib.rs`
+- Query crate manifest: `../../crates/capo-query/Cargo.toml`
+- Workspace manifest and lockfile: `../../Cargo.toml`, `../../Cargo.lock`
+- CLI dashboard rendering through query contract: `../../crates/capo-cli/src/main.rs`
+- Dashboard source workpad: `dashboard.md`
+- No new third-party dependencies were added for DS1.

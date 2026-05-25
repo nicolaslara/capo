@@ -150,3 +150,34 @@ Follow-up:
 
 - After explicit user opt-in, run `CAPO_RUN_CODEX_LOCAL_SMOKE=1 cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture`, inspect artifacts/state for credential markers, and decide whether Codex is safe enough for first dogfood.
 - If Codex passes, AC3 should route a real adapter event stream through controller/state/evidence instead of stopping at adapter-level smoke.
+
+## F3/DS1 - Query Surface Extraction
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo-query` as the shared read-model aggregation crate for operator surfaces.
+- Keep `capo-query` small and side-effect free. It depends on `capo-core` and `capo-state` only, avoiding controller/runtime/adapter dependencies.
+- Move dashboard aggregation out of `capo-cli` into `ProjectDashboard`, `AgentDashboardRow`, and `SessionDashboardRow`.
+- Keep terminal rendering in `capo-cli`; query structs are renderer-neutral so voice, web, mobile, and future TUI surfaces can consume the same contract.
+- Preserve the existing CLI dashboard output shape for P12/P13 compatibility.
+
+Verification:
+
+- `cargo test -p capo-query`: passed.
+- `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence`: passed.
+- `cargo test -p capo-cli cli_drives_fake_controller_and_exports_evidence`: passed.
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Review:
+
+- Focused review found no architecture blocker. It confirmed aggregation moved out of CLI, `capo-query` dependencies are clean, and renderer neutrality is preserved.
+- Review requested stronger query-contract coverage for project filtering, idle agents, custom recent-event limits, and missing current-session read models. Those tests were added before completion.
+
+Follow-up:
+
+- DS2 should extend the query contract before rendering new operator fields, especially tool-call and memory-packet details.
+- Voice integration should prefer `capo-query` dashboard/session structs over reading state projections directly.

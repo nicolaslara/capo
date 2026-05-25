@@ -33,6 +33,7 @@ dependencies = [
  "capo-core",
  "capo-eval",
  "capo-memory",
+ "capo-query",
  "capo-runtime",
  "capo-state",
  "capo-tools",
@@ -67,6 +68,14 @@ name = "capo-memory"
 version = "0.1.0"
 dependencies = [
  "capo-core",
+]
+
+[[package]]
+name = "capo-query"
+version = "0.1.0"
+dependencies = [
+ "capo-core",
+ "capo-state",
 ]
 
 [[package]]

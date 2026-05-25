@@ -1,0 +1,427 @@
+//! Reusable read-model queries for Capo operator surfaces.
+//!
+//! This crate owns aggregation over state projections. CLI, dashboards, voice,
+//! mobile, and web surfaces should render these structs instead of stitching
+//! SQLite read models together independently.
+
+use capo_core::{ProjectId, SessionId};
+use capo_state::{
+    AgentProjection, EventRecord, EvidenceProjection, RunProjection, SessionProjection,
+    SqliteStateStore, StateResult,
+};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectDashboard {
+    pub project_id: ProjectId,
+    pub agents: Vec<AgentDashboardRow>,
+}
+
+impl ProjectDashboard {
+    pub fn active_session_count(&self) -> usize {
+        self.agents
+            .iter()
+            .filter(|agent| agent.session.is_some())
+            .count()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentDashboardRow {
+    pub agent: AgentProjection,
+    pub session: Option<SessionDashboardRow>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionDashboardRow {
+    pub session: SessionProjection,
+    pub run: Option<RunProjection>,
+    pub evidence: Vec<EvidenceProjection>,
+    pub recent_events: Vec<EventRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectDashboardQuery {
+    pub project_id: ProjectId,
+    pub recent_event_limit: usize,
+}
+
+impl ProjectDashboardQuery {
+    pub fn new(project_id: ProjectId) -> Self {
+        Self {
+            project_id,
+            recent_event_limit: 5,
+        }
+    }
+}
+
+pub fn project_dashboard(
+    state: &SqliteStateStore,
+    query: ProjectDashboardQuery,
+) -> StateResult<ProjectDashboard> {
+    let mut rows = Vec::new();
+    for agent in state.agents()? {
+        if agent.project_id != query.project_id {
+            continue;
+        }
+        let session = agent
+            .current_session_id
+            .as_ref()
+            .map(|session_id| session_dashboard(state, session_id, query.recent_event_limit))
+            .transpose()?;
+        rows.push(AgentDashboardRow { agent, session });
+    }
+    Ok(ProjectDashboard {
+        project_id: query.project_id,
+        agents: rows,
+    })
+}
+
+fn session_dashboard(
+    state: &SqliteStateStore,
+    session_id: &SessionId,
+    recent_event_limit: usize,
+) -> StateResult<SessionDashboardRow> {
+    let session =
+        state
+            .session(session_id)?
+            .ok_or_else(|| capo_state::StateError::MissingReadModel {
+                kind: "session",
+                id: session_id.to_string(),
+            })?;
+    Ok(SessionDashboardRow {
+        run: state.run_for_session(session_id)?,
+        evidence: state.evidence_for_session(session_id)?,
+        recent_events: state.recent_events_for_session(session_id, recent_event_limit)?,
+        session,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use capo_core::{AgentId, EvidenceId, RunId, TaskId};
+    use capo_state::{
+        AgentProjection, EventKind, EvidenceProjection, NewEvent, ProjectionRecord, RedactionState,
+        RunProjection, SessionProjection, TaskProjection,
+    };
+
+    #[test]
+    fn project_dashboard_aggregates_agents_sessions_runs_evidence_and_events() {
+        let root = temp_root("query-dashboard");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        let task_id = TaskId::new("task-demo");
+        let agent_id = AgentId::new("agent-demo");
+        let session_id = SessionId::new("session-demo");
+        let run_id = RunId::new("run-demo");
+        let evidence_id = EvidenceId::new("evidence-demo");
+
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-dashboard-demo".to_string(),
+                    kind: EventKind::SessionStarted,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: Some(task_id.clone()),
+                    agent_id: Some(agent_id.clone()),
+                    session_id: Some(session_id.clone()),
+                    run_id: Some(run_id.clone()),
+                    turn_id: None,
+                    item_id: None,
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[
+                    ProjectionRecord::Task(TaskProjection {
+                        task_id: task_id.clone(),
+                        project_id: project_id.clone(),
+                        title: "Demo".to_string(),
+                        capo_execution_status: "active".to_string(),
+                        active_session_id: Some(session_id.clone()),
+                        latest_summary: None,
+                        evidence_id: Some(evidence_id.clone()),
+                        updated_sequence: 0,
+                    }),
+                    ProjectionRecord::Agent(AgentProjection {
+                        agent_id: agent_id.clone(),
+                        project_id: project_id.clone(),
+                        name: "demo".to_string(),
+                        status: "running".to_string(),
+                        current_session_id: Some(session_id.clone()),
+                        updated_sequence: 0,
+                    }),
+                    ProjectionRecord::Session(SessionProjection {
+                        session_id: session_id.clone(),
+                        project_id: project_id.clone(),
+                        task_id: Some(task_id.clone()),
+                        agent_id,
+                        title: "Demo session".to_string(),
+                        status: "active".to_string(),
+                        current_goal: "prove query".to_string(),
+                        latest_summary: Some("working".to_string()),
+                        latest_confidence: Some(80),
+                        latest_blocker: None,
+                        updated_sequence: 0,
+                    }),
+                    ProjectionRecord::Run(RunProjection {
+                        run_id: run_id.clone(),
+                        session_id: session_id.clone(),
+                        status: "running".to_string(),
+                        recovery_of_run_id: None,
+                        updated_sequence: 0,
+                    }),
+                    ProjectionRecord::Evidence(EvidenceProjection {
+                        evidence_id: evidence_id.clone(),
+                        project_id: project_id.clone(),
+                        task_id: Some(task_id),
+                        session_id: Some(session_id.clone()),
+                        run_id: Some(run_id),
+                        kind: "summary".to_string(),
+                        artifact_id: Some("artifact-demo".to_string()),
+                        confidence: 80,
+                        updated_sequence: 0,
+                    }),
+                ],
+            )
+            .expect("append dashboard source event");
+
+        let dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+
+        assert_eq!(dashboard.agents.len(), 1);
+        assert_eq!(dashboard.active_session_count(), 1);
+        let row = &dashboard.agents[0];
+        assert_eq!(row.agent.name, "demo");
+        let session = row.session.as_ref().expect("session row");
+        assert_eq!(session.session.current_goal, "prove query");
+        assert_eq!(
+            session.run.as_ref().map(|run| run.status.as_str()),
+            Some("running")
+        );
+        assert_eq!(session.evidence[0].evidence_id, evidence_id);
+        assert_eq!(session.recent_events[0].kind, "session.started");
+    }
+
+    #[test]
+    fn project_dashboard_filters_project_and_keeps_idle_agents() {
+        let root = temp_root("query-dashboard-filter");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        let other_project_id = ProjectId::new("project-other");
+
+        append_agent(&state, &project_id, "agent-active", Some("session-active"));
+        append_minimal_session(&state, &project_id, "agent-active", "session-active");
+        append_agent(&state, &project_id, "agent-idle", None);
+        append_agent(&state, &other_project_id, "agent-other", None);
+
+        let dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+
+        assert_eq!(dashboard.agents.len(), 2);
+        assert_eq!(dashboard.active_session_count(), 1);
+        assert!(
+            dashboard
+                .agents
+                .iter()
+                .any(|row| { row.agent.name == "agent-active" && row.session.is_some() })
+        );
+        assert!(
+            dashboard
+                .agents
+                .iter()
+                .any(|row| { row.agent.name == "agent-idle" && row.session.is_none() })
+        );
+        assert!(
+            !dashboard
+                .agents
+                .iter()
+                .any(|row| row.agent.name == "agent-other")
+        );
+    }
+
+    #[test]
+    fn project_dashboard_honors_recent_event_limit() {
+        let root = temp_root("query-dashboard-limit");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        let session_id = SessionId::new("session-limited");
+
+        append_agent(
+            &state,
+            &project_id,
+            "agent-limited",
+            Some(session_id.as_str()),
+        );
+        append_minimal_session(&state, &project_id, "agent-limited", session_id.as_str());
+        for index in 0..4 {
+            append_session_event(&state, &project_id, &session_id, index);
+        }
+
+        let mut query = ProjectDashboardQuery::new(project_id);
+        query.recent_event_limit = 2;
+        let dashboard = project_dashboard(&state, query).expect("dashboard");
+        let recent_events = &dashboard.agents[0]
+            .session
+            .as_ref()
+            .expect("session")
+            .recent_events;
+
+        assert_eq!(recent_events.len(), 2);
+        assert_eq!(recent_events[0].event_id, "event-extra-2");
+        assert_eq!(recent_events[1].event_id, "event-extra-3");
+    }
+
+    #[test]
+    fn project_dashboard_fails_closed_on_missing_current_session() {
+        let root = temp_root("query-dashboard-missing-session");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+
+        append_agent(&state, &project_id, "agent-stale", Some("session-missing"));
+
+        let error = project_dashboard(&state, ProjectDashboardQuery::new(project_id))
+            .expect_err("missing session should fail closed");
+
+        assert!(matches!(
+            error,
+            capo_state::StateError::MissingReadModel {
+                kind: "session",
+                ..
+            }
+        ));
+    }
+
+    fn append_agent(
+        state: &SqliteStateStore,
+        project_id: &ProjectId,
+        name: &str,
+        current_session_id: Option<&str>,
+    ) {
+        let agent_id = AgentId::new(name);
+        state
+            .append_event(
+                NewEvent {
+                    event_id: format!("event-agent-{name}"),
+                    kind: EventKind::AgentRegistered,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: Some(agent_id.clone()),
+                    session_id: current_session_id.map(SessionId::new),
+                    run_id: None,
+                    turn_id: None,
+                    item_id: None,
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::Agent(AgentProjection {
+                    agent_id,
+                    project_id: project_id.clone(),
+                    name: name.to_string(),
+                    status: if current_session_id.is_some() {
+                        "running".to_string()
+                    } else {
+                        "available".to_string()
+                    },
+                    current_session_id: current_session_id.map(SessionId::new),
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append agent");
+    }
+
+    fn append_minimal_session(
+        state: &SqliteStateStore,
+        project_id: &ProjectId,
+        agent_name: &str,
+        session_id: &str,
+    ) {
+        let task_id = TaskId::new(format!("task-{agent_name}"));
+        let run_id = RunId::new(format!("run-{agent_name}"));
+        let session_id = SessionId::new(session_id);
+        state
+            .append_event(
+                NewEvent {
+                    event_id: format!("event-session-{session_id}"),
+                    kind: EventKind::SessionStarted,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: Some(task_id.clone()),
+                    agent_id: Some(AgentId::new(agent_name)),
+                    session_id: Some(session_id.clone()),
+                    run_id: Some(run_id.clone()),
+                    turn_id: None,
+                    item_id: None,
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[
+                    ProjectionRecord::Session(SessionProjection {
+                        session_id: session_id.clone(),
+                        project_id: project_id.clone(),
+                        task_id: Some(task_id),
+                        agent_id: AgentId::new(agent_name),
+                        title: "Session".to_string(),
+                        status: "active".to_string(),
+                        current_goal: "prove query".to_string(),
+                        latest_summary: None,
+                        latest_confidence: None,
+                        latest_blocker: None,
+                        updated_sequence: 0,
+                    }),
+                    ProjectionRecord::Run(RunProjection {
+                        run_id,
+                        session_id,
+                        status: "running".to_string(),
+                        recovery_of_run_id: None,
+                        updated_sequence: 0,
+                    }),
+                ],
+            )
+            .expect("append session");
+    }
+
+    fn append_session_event(
+        state: &SqliteStateStore,
+        project_id: &ProjectId,
+        session_id: &SessionId,
+        index: usize,
+    ) {
+        state
+            .append_event(
+                NewEvent {
+                    event_id: format!("event-extra-{index}"),
+                    kind: EventKind::SessionSummaryUpdated,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: Some(session_id.clone()),
+                    run_id: None,
+                    turn_id: None,
+                    item_id: None,
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[],
+            )
+            .expect("append session event");
+    }
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        let mut root = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        root.push(format!("capo-{name}-{nanos}"));
+        root
+    }
+}

@@ -18,13 +18,38 @@ Move dashboard data access into a reusable query surface and build richer operat
 
 ### DS1 - Query Surface Extraction
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Extract agent/session/dashboard aggregation from `capo-cli` into a reusable controller or query crate/module.
 - Keep output independent from terminal rendering.
 - Preserve P12/P13 assertions through existing CLI commands.
+
+Evidence:
+
+- `crates/capo-query/src/lib.rs`
+- `crates/capo-query/Cargo.toml`
+- `crates/capo-cli/src/main.rs`
+- `Cargo.toml`
+- `Cargo.lock`
+- `cargo test -p capo-query`
+- `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence`
+- `cargo test -p capo-cli cli_drives_fake_controller_and_exports_evidence`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+
+Decision:
+
+- Add `capo-query` as the reusable read-model aggregation crate for operator surfaces.
+- Keep `capo-query` dependent only on `capo-core` and `capo-state`, so CLI, dashboard, voice, mobile, and web views can share the same query contract without coupling to terminal rendering or controller side effects.
+- Move project dashboard aggregation into `ProjectDashboard`, `AgentDashboardRow`, and `SessionDashboardRow`.
+- Keep CLI output formatting in `capo-cli`; it now renders the `capo-query` dashboard model instead of assembling SQLite projections directly.
+
+Review:
+
+- Focused review confirmed dashboard aggregation moved out of CLI and dependencies are clean. It requested stronger query-contract tests for project filtering, idle agents, event limits, and missing sessions; those tests were added before completion.
 
 ### DS2 - Operator Dashboard View
 

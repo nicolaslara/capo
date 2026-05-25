@@ -16,6 +16,7 @@ capo-controller.workspace = true
 capo-core.workspace = true
 capo-eval.workspace = true
 capo-memory.workspace = true
+capo-query.workspace = true
 capo-runtime.workspace = true
 capo-state.workspace = true
 capo-tools.workspace = true

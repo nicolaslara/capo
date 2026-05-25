@@ -8,6 +8,7 @@ use capo_core::{
     AgentId, CommandEnvelope, CommandId, CommandIntent, CommandTarget, InputOrigin, ProjectId,
     SessionId, TaskId,
 };
+use capo_query::{ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 use capo_state::{
     ArtifactRecord, EventKind, EventRecord, EvidenceProjection, MemoryPacketProjection, NewEvent,
     ProjectionRecord, RedactionState, RunProjection, SessionProjection, SqliteStateStore,
@@ -231,15 +232,20 @@ fn dashboard(parsed: &ParsedArgs) -> Result<String, String> {
         None,
     );
     let state = state(parsed)?;
-    let agents = state.agents().map_err(debug_error)?;
-    let mut active_session_count = 0usize;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    Ok(render_dashboard(&command, &dashboard))
+}
+
+fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> String {
     let mut output = format!(
         "command_id={}\nview=dashboard\nagents={}\n",
         command.command_id,
-        agents.len()
+        dashboard.agents.len()
     );
 
-    for agent in agents {
+    for row in &dashboard.agents {
+        let agent = &row.agent;
         output.push_str(&format!(
             "agent={} agent_status={} current_session={}\n",
             agent.name,
@@ -251,30 +257,23 @@ fn dashboard(parsed: &ParsedArgs) -> Result<String, String> {
                 .unwrap_or_else(|| "none".to_string())
         ));
 
-        let Some(session_id) = agent.current_session_id else {
+        let Some(session_row) = &row.session else {
             continue;
         };
-        active_session_count += 1;
-        let session = state
-            .session(&session_id)
-            .map_err(debug_error)?
-            .ok_or_else(|| format!("missing session read model: {session_id}"))?;
-        let run = state.run_for_session(&session_id).map_err(debug_error)?;
-        let evidence = state
-            .evidence_for_session(&session_id)
-            .map_err(debug_error)?;
-        let events = state
-            .recent_events_for_session(&session_id, 5)
-            .map_err(debug_error)?;
+        let session = &session_row.session;
 
         output.push_str(&format!(
             "session={} session_status={} run={} run_status={} goal={} blocker={} confidence={} evidence_refs={} recent_events={}\n",
             session.session_id,
             session.status,
-            run.as_ref()
+            session_row
+                .run
+                .as_ref()
                 .map(|item| item.run_id.to_string())
                 .unwrap_or_else(|| "none".to_string()),
-            run.as_ref()
+            session_row
+                .run
+                .as_ref()
                 .map(|item| item.status.clone())
                 .unwrap_or_else(|| "none".to_string()),
             session.current_goal,
@@ -283,20 +282,24 @@ fn dashboard(parsed: &ParsedArgs) -> Result<String, String> {
                 .latest_confidence
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "none".to_string()),
-            evidence
+            session_row
+                .evidence
                 .iter()
                 .map(|item| item.evidence_id.to_string())
                 .collect::<Vec<_>>()
                 .join(","),
-            events.len()
+            session_row.recent_events.len()
         ));
-        for event in events {
+        for event in &session_row.recent_events {
             output.push_str(&format!("event={} kind={}\n", event.sequence, event.kind));
         }
     }
 
-    output.push_str(&format!("active_sessions={active_session_count}\n"));
-    Ok(output)
+    output.push_str(&format!(
+        "active_sessions={}\n",
+        dashboard.active_session_count()
+    ));
+    output
 }
 
 fn send_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {

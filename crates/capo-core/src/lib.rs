@@ -18,6 +18,7 @@ pub const BOUNDARY_CRATES: &[&str] = &[
     "capo-controller",
     "capo-tools",
     "capo-memory",
+    "capo-query",
     "capo-eval",
     "capo-voice",
     "capo-workpads",
