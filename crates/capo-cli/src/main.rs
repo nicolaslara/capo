@@ -15,11 +15,11 @@ use capo_core::{
 use capo_eval::TaskOutcomeReport;
 use capo_query::{ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 use capo_state::{
-    ArtifactRecord, CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection,
-    MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection, NewEvent,
-    PermissionApprovalProjection, ProjectionRecord, RedactionState, ReviewFindingProjection,
-    RunProjection, SessionProjection, SqliteStateStore, ToolCallProjection, WorkpadFileProjection,
-    WorkpadIndexResetProjection, WorkpadTaskProjection,
+    AdapterReadinessProjection, ArtifactRecord, CapabilityGrantProjection, EventKind, EventRecord,
+    EvidenceProjection, MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
+    NewEvent, PermissionApprovalProjection, ProjectionRecord, RedactionState,
+    ReviewFindingProjection, RunProjection, SessionProjection, SqliteStateStore,
+    ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
 use capo_voice::{
     MemoryIngestionPolicy, TranscriptRetentionPolicy, VOICE_TRANSCRIPT_RETENTION_DEFAULT,
@@ -41,7 +41,7 @@ Usage:
   capo agent register --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent spawn --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent list [--state PATH]
-  capo adapter readiness [--state PATH]
+  capo adapter readiness [--record] [--state PATH]
   capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR] [--state PATH]
   capo task send --agent NAME --goal GOAL [--scenario NAME] [--state PATH]
   capo session status --agent NAME [--state PATH]
@@ -101,8 +101,8 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         [area, command, rest @ ..] if area == "adapter" && command == "replay-fixture" => {
             replay_adapter_fixture(&parsed, rest)
         }
-        [area, command] if area == "adapter" && command == "readiness" => {
-            adapter_readiness(&parsed)
+        [area, command, rest @ ..] if area == "adapter" && command == "readiness" => {
+            adapter_readiness(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "task" && command == "send" => {
             send_task(&parsed, rest)
@@ -356,7 +356,11 @@ fn adapter_label(adapter: &str) -> &'static str {
     }
 }
 
-fn adapter_readiness(parsed: &ParsedArgs) -> Result<String, String> {
+fn adapter_readiness(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let record = args.iter().any(|arg| arg == "--record");
+    if let Some(unknown) = args.iter().find(|arg| arg.as_str() != "--record") {
+        return Err(format!("unknown adapter readiness option: {unknown}"));
+    }
     let state_root = parsed.state_root.clone();
     let workspace_root = state_root.join("adapter-readiness").join("workspace");
     let artifact_root = state_root.join("adapter-readiness").join("artifacts");
@@ -375,14 +379,65 @@ fn adapter_readiness(parsed: &ParsedArgs) -> Result<String, String> {
         plans.len()
     );
     let mut all_opted_in = true;
+    let mut records = Vec::new();
     for plan in &plans {
         let opted_in = plan.is_opted_in();
         all_opted_in &= opted_in;
         output.push_str(&render_adapter_readiness(plan, opted_in));
+        records.push(adapter_readiness_projection(plan, opted_in));
     }
+    let recorded_sequence = if record {
+        let event = NewEvent {
+            event_id: format!(
+                "event-adapter-readiness-{}",
+                stable_cli_hash(&format!(
+                    "{}:{}",
+                    records
+                        .iter()
+                        .map(|record| format!(
+                            "{}:{}:{}",
+                            record.adapter_kind, record.opted_in, record.smoke_status
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("|"),
+                    records.len()
+                ))
+            ),
+            kind: EventKind::AdapterReadinessChecked,
+            actor: "local-cli".to_string(),
+            project_id: Some(project_id()),
+            task_id: None,
+            agent_id: None,
+            session_id: None,
+            run_id: None,
+            turn_id: None,
+            item_id: None,
+            payload_json: format!(
+                "{{\"adapter_count\":{},\"credential_policy\":\"not_inspected\",\"real_smoke_required_for_dogfood\":true}}",
+                records.len()
+            ),
+            idempotency_key: Some("adapter-readiness-check:v1".to_string()),
+            redaction_state: RedactionState::Safe,
+        };
+        let records = records
+            .into_iter()
+            .map(ProjectionRecord::AdapterReadiness)
+            .collect::<Vec<_>>();
+        Some(
+            state(parsed)?
+                .append_event(event, &records)
+                .map_err(debug_error)?,
+        )
+    } else {
+        None
+    };
     output.push_str(&format!(
-        "ready_to_run_all_real_smokes={}\nready_for_real_agent_dogfood=false\nblocked_reason=real_subscription_smoke_not_recorded\n",
-        all_opted_in
+        "ready_to_run_all_real_smokes={}\nready_for_real_agent_dogfood=false\nblocked_reason=real_subscription_smoke_not_recorded\nrecorded={}\nrecorded_sequence={}\n",
+        all_opted_in,
+        record,
+        recorded_sequence
+            .map(|sequence| sequence.to_string())
+            .unwrap_or_else(|| "none".to_string())
     ));
     Ok(output)
 }
@@ -406,6 +461,31 @@ fn render_adapter_readiness(plan: &LocalAdapterSmokePlan, opted_in: bool) -> Str
         plan.workspace_root.display(),
         plan.artifact_root.display()
     )
+}
+
+fn adapter_readiness_projection(
+    plan: &LocalAdapterSmokePlan,
+    opted_in: bool,
+) -> AdapterReadinessProjection {
+    AdapterReadinessProjection {
+        adapter_kind: plan.adapter_kind.as_str().to_string(),
+        project_id: project_id(),
+        program: plan.program.clone(),
+        opt_in_env: plan.opt_in_env.to_string(),
+        opted_in,
+        smoke_status: if opted_in {
+            "ready_to_run".to_string()
+        } else {
+            "waiting_on_opt_in".to_string()
+        },
+        credential_policy: "not_inspected".to_string(),
+        expected_marker: plan.expected_output_marker.to_string(),
+        env_allowlist_count: plan.env_allowlist.len() as i64,
+        redaction_rule_count: plan.redaction_rules.len() as i64,
+        output_limit_bytes: plan.output_limit_bytes as i64,
+        dogfood_blocker: Some("real_subscription_smoke_not_recorded".to_string()),
+        updated_sequence: 0,
+    }
 }
 
 fn dashboard(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
@@ -552,6 +632,26 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
             exposure.permission_scope,
             exposure.capability_grant_id.as_deref().unwrap_or("none"),
             exposure.revoked_at.as_deref().unwrap_or("none")
+        ));
+    }
+    output.push_str(&format!(
+        "adapter_readiness={}\n",
+        dashboard.adapter_readiness.len()
+    ));
+    for readiness in &dashboard.adapter_readiness {
+        output.push_str(&format!(
+            "adapter_readiness_row={} program={} opt_in_env={} opted_in={} smoke_status={} credential_policy={} expected_marker={} env_allowlist={} redaction_rules={} output_limit_bytes={} dogfood_blocker={}\n",
+            readiness.adapter_kind,
+            readiness.program,
+            readiness.opt_in_env,
+            readiness.opted_in,
+            readiness.smoke_status,
+            readiness.credential_policy,
+            readiness.expected_marker,
+            readiness.env_allowlist_count,
+            readiness.redaction_rule_count,
+            readiness.output_limit_bytes,
+            readiness.dogfood_blocker.as_deref().unwrap_or("none")
         ));
     }
 
@@ -2768,7 +2868,38 @@ mod tests {
         assert!(output.contains("opt_in_env=CAPO_RUN_CLAUDE_LOCAL_SMOKE"));
         assert!(output.contains("ready_for_real_agent_dogfood=false"));
         assert!(output.contains("blocked_reason=real_subscription_smoke_not_recorded"));
+        assert!(output.contains("recorded=false"));
         assert!(!state_root.join("adapter-readiness").exists());
+
+        let recorded = run_cli(vec![
+            "adapter".to_string(),
+            "readiness".to_string(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record adapter readiness");
+        assert!(recorded.contains("recorded=true"));
+        assert!(recorded.contains("recorded_sequence="));
+
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        let readiness = state
+            .adapter_readiness(&project_id())
+            .expect("adapter readiness rows");
+        assert_eq!(readiness.len(), 2);
+        assert!(readiness.iter().any(|row| row.adapter_kind == "codex_exec"
+            && row.smoke_status == "waiting_on_opt_in"
+            && row.credential_policy == "not_inspected"));
+
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard");
+        assert!(dashboard.contains("adapter_readiness=2"));
+        assert!(dashboard.contains("adapter_readiness_row=codex_exec"));
+        assert!(dashboard.contains("dogfood_blocker=real_subscription_smoke_not_recorded"));
     }
 
     #[test]

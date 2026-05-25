@@ -542,6 +542,27 @@ Follow-up:
 
 - After explicit user opt-in, the real smoke should write a durable readiness/evidence result that can change this dogfood blocker from `real_subscription_smoke_not_recorded`.
 
+## F1/AC5 - Durable Connector Readiness State
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `AdapterReadinessProjection` so connector readiness is queryable state, not only transient CLI text.
+- Add `capo adapter readiness --record` to write Codex/Claude readiness rows through `adapter.readiness_checked`.
+- Include recorded adapter readiness in the shared dashboard query and CLI dashboard rendering.
+- Keep the recorded status conservative: rows record opt-in status, smoke-plan metadata, credential policy, and `dogfood_blocker=real_subscription_smoke_not_recorded`; they do not claim that real agent execution is proven.
+- The command still does not launch provider CLIs, inspect subscriptions, or read credentials.
+
+Verification:
+
+- `cargo test -p capo-state adapter_readiness -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_readiness -- --nocapture`: passed.
+
+Follow-up:
+
+- A future opt-in smoke command should update or supersede these rows with real-smoke evidence and credential-scan results.
+
 ## F7/RR1 - Loopback Remote Runtime Contract
 
 Status: completed on 2026-05-25.

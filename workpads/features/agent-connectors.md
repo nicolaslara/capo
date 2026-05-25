@@ -123,3 +123,25 @@ Evidence:
 Decision:
 
 - This is an operator/readiness surface only. It does not satisfy AC1 or AC3 because no subscription-backed Codex or Claude process is run.
+
+### AC5 - Durable Connector Readiness State
+
+Status: completed
+
+Acceptance:
+
+- Persist adapter readiness rows when the operator explicitly records a readiness check.
+- Show recorded readiness in the shared dashboard/read-model path.
+- Keep the recorded status honest: readiness state may show smoke-plan gates and opt-in status, but it must not mark real-agent dogfood ready before a real smoke is recorded.
+
+Evidence:
+
+- `AdapterReadinessProjection`, `EventKind::AdapterReadinessChecked`, SQLite migration, rebuild codec, and read query in `../../crates/capo-state/src/lib.rs`.
+- `capo adapter readiness --record` writes Codex/Claude readiness rows without launching provider CLIs.
+- `capo dashboard` renders recorded adapter readiness rows with opt-in status, credential policy, smoke status, redaction/env policy counts, and dogfood blocker.
+- `cargo test -p capo-state adapter_readiness -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_readiness -- --nocapture`: passed.
+
+Decision:
+
+- Recorded readiness keeps `dogfood_blocker=real_subscription_smoke_not_recorded`. Only a future explicit real-smoke evidence path should clear it.

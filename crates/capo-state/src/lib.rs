@@ -787,6 +787,40 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn adapter_readiness(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<AdapterReadinessProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT adapter_kind, project_id, program, opt_in_env, opted_in, smoke_status,
+                    credential_policy, expected_marker, env_allowlist_count,
+                    redaction_rule_count, output_limit_bytes, dogfood_blocker, updated_sequence
+             FROM adapter_readiness
+             WHERE project_id = ?1
+             ORDER BY updated_sequence ASC, adapter_kind ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(AdapterReadinessProjection {
+                adapter_kind: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                program: row.get(2)?,
+                opt_in_env: row.get(3)?,
+                opted_in: row.get::<_, i64>(4)? != 0,
+                smoke_status: row.get(5)?,
+                credential_policy: row.get(6)?,
+                expected_marker: row.get(7)?,
+                env_allowlist_count: row.get(8)?,
+                redaction_rule_count: row.get(9)?,
+                output_limit_bytes: row.get(10)?,
+                dogfood_blocker: row.get(11)?,
+                updated_sequence: row.get(12)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn evidence_for_session(
         &self,
         session_id: &SessionId,
@@ -1261,6 +1295,7 @@ pub enum EventKind {
     ConnectivityExposureChanged,
     ConnectivityExposureRevoked,
     ConnectivityHealthChanged,
+    AdapterReadinessChecked,
     ToolCallRequested,
     ToolInvocationStarted,
     ToolOutputArtifactRecorded,
@@ -1302,6 +1337,7 @@ impl EventKind {
             Self::ConnectivityExposureChanged => "connectivity.exposure_changed",
             Self::ConnectivityExposureRevoked => "connectivity.exposure_revoked",
             Self::ConnectivityHealthChanged => "connectivity.health_changed",
+            Self::AdapterReadinessChecked => "adapter.readiness_checked",
             Self::ToolCallRequested => "tool.call_requested",
             Self::ToolInvocationStarted => "tool.invocation_started",
             Self::ToolOutputArtifactRecorded => "tool.output_artifact_recorded",
@@ -1395,6 +1431,7 @@ pub enum ProjectionRecord {
     CapabilityGrant(CapabilityGrantProjection),
     PermissionApproval(PermissionApprovalProjection),
     ConnectivityExposure(ConnectivityExposureProjection),
+    AdapterReadiness(AdapterReadinessProjection),
     ToolCall(ToolCallProjection),
     MemoryPacketRef(MemoryPacketProjection),
     MemoryRecord(Box<MemoryRecordProjection>),
@@ -1506,6 +1543,23 @@ pub struct ConnectivityExposureProjection {
     pub health_status: String,
     pub reachable: bool,
     pub revoked_at: Option<String>,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterReadinessProjection {
+    pub adapter_kind: String,
+    pub project_id: ProjectId,
+    pub program: String,
+    pub opt_in_env: String,
+    pub opted_in: bool,
+    pub smoke_status: String,
+    pub credential_policy: String,
+    pub expected_marker: String,
+    pub env_allowlist_count: i64,
+    pub redaction_rule_count: i64,
+    pub output_limit_bytes: i64,
+    pub dogfood_blocker: Option<String>,
     pub updated_sequence: i64,
 }
 
@@ -1858,6 +1912,22 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             revoked_at TEXT,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS adapter_readiness (
+            adapter_kind TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            program TEXT NOT NULL,
+            opt_in_env TEXT NOT NULL,
+            opted_in INTEGER NOT NULL,
+            smoke_status TEXT NOT NULL,
+            credential_policy TEXT NOT NULL,
+            expected_marker TEXT NOT NULL,
+            env_allowlist_count INTEGER NOT NULL,
+            redaction_rule_count INTEGER NOT NULL,
+            output_limit_bytes INTEGER NOT NULL,
+            dogfood_blocker TEXT,
+            updated_sequence INTEGER NOT NULL,
+            PRIMARY KEY(adapter_kind, project_id)
+        );
         CREATE TABLE IF NOT EXISTS tool_calls (
             tool_call_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
@@ -2047,6 +2117,7 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "capability_grants",
         "permission_approvals",
         "connectivity_exposures",
+        "adapter_readiness",
         "tool_calls",
         "memory_packet_refs",
         "memory_records",
@@ -2332,6 +2403,40 @@ fn apply_projection_record(
                 exposure.health_status,
                 if exposure.reachable { 1 } else { 0 },
                 exposure.revoked_at,
+                sequence,
+            ],
+        )?,
+        ProjectionRecord::AdapterReadiness(readiness) => transaction.execute(
+            "INSERT INTO adapter_readiness(
+                adapter_kind, project_id, program, opt_in_env, opted_in, smoke_status,
+                credential_policy, expected_marker, env_allowlist_count, redaction_rule_count,
+                output_limit_bytes, dogfood_blocker, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(adapter_kind, project_id) DO UPDATE SET
+                program = excluded.program,
+                opt_in_env = excluded.opt_in_env,
+                opted_in = excluded.opted_in,
+                smoke_status = excluded.smoke_status,
+                credential_policy = excluded.credential_policy,
+                expected_marker = excluded.expected_marker,
+                env_allowlist_count = excluded.env_allowlist_count,
+                redaction_rule_count = excluded.redaction_rule_count,
+                output_limit_bytes = excluded.output_limit_bytes,
+                dogfood_blocker = excluded.dogfood_blocker,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                readiness.adapter_kind,
+                readiness.project_id.as_str(),
+                readiness.program,
+                readiness.opt_in_env,
+                if readiness.opted_in { 1 } else { 0 },
+                readiness.smoke_status,
+                readiness.credential_policy,
+                readiness.expected_marker,
+                readiness.env_allowlist_count,
+                readiness.redaction_rule_count,
+                readiness.output_limit_bytes,
+                readiness.dogfood_blocker,
                 sequence,
             ],
         )?,
@@ -2785,6 +2890,24 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
             })
             .to_string(),
         },
+        ProjectionRecord::AdapterReadiness(readiness) => ProjectionRecordRow {
+            kind: "adapter_readiness",
+            record_id: readiness.adapter_kind.clone(),
+            a: Some(readiness.project_id.to_string()),
+            b: Some(readiness.program.clone()),
+            c: Some(readiness.opt_in_env.clone()),
+            d: Some(readiness.opted_in.to_string()),
+            e: Some(readiness.smoke_status.clone()),
+            f: Some(readiness.credential_policy.clone()),
+            g: Some(readiness.expected_marker.clone()),
+            h: readiness.dogfood_blocker.clone(),
+            payload_json: json!({
+                "env_allowlist_count": readiness.env_allowlist_count,
+                "redaction_rule_count": readiness.redaction_rule_count,
+                "output_limit_bytes": readiness.output_limit_bytes,
+            })
+            .to_string(),
+        },
         ProjectionRecord::ToolCall(tool_call) => ProjectionRecordRow {
             kind: "tool_call",
             record_id: tool_call.tool_call_id.to_string(),
@@ -3162,6 +3285,72 @@ fn projection_record_from_row(
                         ))
                     })?,
                     revoked_at: g,
+                    updated_sequence: 0,
+                },
+            ))
+        }
+        "adapter_readiness" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::AdapterReadiness(
+                AdapterReadinessProjection {
+                    adapter_kind: record_id,
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "adapter_readiness",
+                        a,
+                        "project_id",
+                    )?),
+                    program: required_field(&projection_kind, "adapter_readiness", b, "program")?,
+                    opt_in_env: required_field(
+                        &projection_kind,
+                        "adapter_readiness",
+                        c,
+                        "opt_in_env",
+                    )?,
+                    opted_in: required_field(&projection_kind, "adapter_readiness", d, "opted_in")?
+                        .parse::<bool>()
+                        .map_err(|error| {
+                            ProjectionDecodeError(format!(
+                                "invalid bool for adapter_readiness opted_in: {error}"
+                            ))
+                        })?,
+                    smoke_status: required_field(
+                        &projection_kind,
+                        "adapter_readiness",
+                        e,
+                        "smoke_status",
+                    )?,
+                    credential_policy: required_field(
+                        &projection_kind,
+                        "adapter_readiness",
+                        f,
+                        "credential_policy",
+                    )?,
+                    expected_marker: required_field(
+                        &projection_kind,
+                        "adapter_readiness",
+                        g,
+                        "expected_marker",
+                    )?,
+                    env_allowlist_count: required_payload_i64(
+                        &projection_kind,
+                        "adapter_readiness",
+                        &payload,
+                        "env_allowlist_count",
+                    )?,
+                    redaction_rule_count: required_payload_i64(
+                        &projection_kind,
+                        "adapter_readiness",
+                        &payload,
+                        "redaction_rule_count",
+                    )?,
+                    output_limit_bytes: required_payload_i64(
+                        &projection_kind,
+                        "adapter_readiness",
+                        &payload,
+                        "output_limit_bytes",
+                    )?,
+                    dogfood_blocker: h,
                     updated_sequence: 0,
                 },
             ))
@@ -4728,6 +4917,61 @@ mod tests {
         assert_eq!(revoked.health_status, "disabled");
         assert!(!revoked.reachable);
         assert_eq!(revoked.revoked_at.as_deref(), Some("2026-05-25T00:00:00Z"));
+    }
+
+    #[test]
+    fn adapter_readiness_is_persisted_and_rebuilt() {
+        let store = temp_store("adapter-readiness-rebuild");
+        let project_id = ProjectId::new("project-capo");
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-adapter-readiness".to_string(),
+                    kind: EventKind::AdapterReadinessChecked,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some("codex_exec".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::AdapterReadiness(
+                    AdapterReadinessProjection {
+                        adapter_kind: "codex_exec".to_string(),
+                        project_id: project_id.clone(),
+                        program: "codex".to_string(),
+                        opt_in_env: "CAPO_RUN_CODEX_LOCAL_SMOKE".to_string(),
+                        opted_in: false,
+                        smoke_status: "waiting_on_opt_in".to_string(),
+                        credential_policy: "not_inspected".to_string(),
+                        expected_marker: "CAPO_CODEX_SMOKE_OK".to_string(),
+                        env_allowlist_count: 7,
+                        redaction_rule_count: 6,
+                        output_limit_bytes: 131072,
+                        dogfood_blocker: Some("real_subscription_smoke_not_recorded".to_string()),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append adapter readiness");
+
+        store.rebuild_projections().expect("rebuild projections");
+        let readiness = store
+            .adapter_readiness(&project_id)
+            .expect("adapter readiness");
+        assert_eq!(readiness.len(), 1);
+        assert_eq!(readiness[0].adapter_kind, "codex_exec");
+        assert_eq!(readiness[0].credential_policy, "not_inspected");
+        assert_eq!(
+            readiness[0].dogfood_blocker.as_deref(),
+            Some("real_subscription_smoke_not_recorded")
+        );
     }
 
     #[test]
