@@ -508,12 +508,10 @@ fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> 
         return Ok(render_voice_header(&plan, None, false, false));
     }
     if plan.requires_visible_confirmation && !confirmed {
-        return Ok(render_voice_header(
-            &plan,
-            plan.command.as_ref(),
-            true,
-            false,
-        ));
+        let approval = queue_voice_permission_approval(parsed, &plan)?;
+        let mut output = render_voice_header(&plan, plan.command.as_ref(), true, false);
+        output.push_str(&render_voice_approval(&approval, None));
+        return Ok(output);
     }
 
     let mut output = render_voice_header(&plan, plan.command.as_ref(), false, false);
@@ -534,21 +532,268 @@ fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> 
             let dashboard = voice_dashboard(parsed, &plan)?;
             output.push_str(&render_voice_read_contract(&plan, &dashboard));
         }
-        VoiceIntentKind::StopSession => {
+        VoiceIntentKind::InterruptSession | VoiceIntentKind::StopSession => {
             let command = plan
                 .command
                 .as_ref()
-                .ok_or_else(|| "voice stop plan missing command".to_string())?;
-            controller(parsed)?
-                .stop_command(command)
-                .map_err(debug_error)?;
-            output = render_voice_header(&plan, Some(command), true, true);
+                .ok_or_else(|| "voice session-control plan missing command".to_string())?;
+            let approval = decide_voice_permission_approval(parsed, &plan, "allow_once")?;
+            let durable_reason = match plan.intent_kind {
+                VoiceIntentKind::InterruptSession => "voice interrupt confirmed",
+                VoiceIntentKind::StopSession => "voice stop confirmed",
+                _ => unreachable!("only privileged session-control intents reach this branch"),
+            };
+            let command = CommandEnvelope {
+                text: Some(durable_reason.to_string()),
+                ..command.clone()
+            };
+            let controller = controller(parsed)?;
+            let observation = match plan.intent_kind {
+                VoiceIntentKind::InterruptSession => controller
+                    .interrupt_command(&command)
+                    .map_err(debug_error)?,
+                VoiceIntentKind::StopSession => {
+                    controller.stop_command(&command).map_err(debug_error)?
+                }
+                _ => unreachable!("only privileged session-control intents reach this branch"),
+            };
+            output = render_voice_header(&plan, Some(&command), true, true);
+            output.push_str(&render_voice_approval(
+                &approval,
+                approval.decision.as_deref(),
+            ));
+            output.push_str(&format!(
+                "controlled_session={} session_status={} run_status={}\n",
+                observation.session.session_id, observation.session.status, observation.run.status
+            ));
             let dashboard = voice_dashboard(parsed, &plan)?;
             output.push_str(&render_voice_read_contract(&plan, &dashboard));
         }
         VoiceIntentKind::Unknown => {}
     }
     Ok(output)
+}
+
+fn queue_voice_permission_approval(
+    parsed: &ParsedArgs,
+    plan: &VoiceCommandPlan,
+) -> Result<PermissionApprovalProjection, String> {
+    let approval = voice_permission_approval(parsed, plan)?;
+    let state = state(parsed)?;
+    if let Some(existing) = state
+        .permission_approval(&approval.project_id, &approval.approval_id)
+        .map_err(debug_error)?
+    {
+        return Ok(existing);
+    }
+    let mut event = NewEvent::new(
+        format!(
+            "event-voice-permission-approval-queued-{}",
+            stable_cli_hash(&approval.approval_id)
+        ),
+        EventKind::PermissionApprovalQueued,
+        "capo-voice",
+    );
+    event.project_id = Some(approval.project_id.clone());
+    event.session_id = approval.session_id.clone();
+    event.payload_json = format!(
+        "{{\"approval_id\":\"{}\",\"capability_profile_id\":\"{}\",\"scope_json\":{},\"subject_json\":{},\"requested_by\":\"{}\",\"reason\":\"{}\",\"origin\":\"voice\"}}",
+        escape_json(&approval.approval_id),
+        escape_json(&approval.capability_profile_id),
+        approval.scope_json,
+        approval.subject_json,
+        escape_json(&approval.requested_by),
+        escape_json(&approval.reason)
+    );
+    event.idempotency_key = Some(format!(
+        "voice-permission-approval:{}",
+        approval.approval_id
+    ));
+    event.redaction_state = RedactionState::Safe;
+    state
+        .append_event(
+            event,
+            &[ProjectionRecord::PermissionApproval(approval.clone())],
+        )
+        .map_err(debug_error)?;
+    Ok(approval)
+}
+
+fn decide_voice_permission_approval(
+    parsed: &ParsedArgs,
+    plan: &VoiceCommandPlan,
+    decision: &str,
+) -> Result<PermissionApprovalProjection, String> {
+    let approval = queue_voice_permission_approval(parsed, plan)?;
+    if approval.status == "decided" {
+        return Ok(approval);
+    }
+    let (effect, persistence) = approval_decision_effect(decision)?;
+    let subject_json = approval_subject_json(&approval)?;
+    let grant_id = format!(
+        "grant-voice-approval-{}",
+        stable_cli_hash(&format!(
+            "{}:{}:{}:{}:{}",
+            approval.approval_id,
+            approval.capability_profile_id,
+            approval.scope_json,
+            subject_json,
+            decision
+        ))
+    );
+    let grant = CapabilityGrantProjection {
+        capability_grant_id: grant_id.clone(),
+        capability_profile_id: approval.capability_profile_id.clone(),
+        scope_json: approval.scope_json.clone(),
+        effect: effect.to_string(),
+        subject_json,
+        decision_source: "user_visible_voice_confirmation".to_string(),
+        persistence: persistence.to_string(),
+        explanation: format!(
+            "visible voice confirmation {decision} for {}",
+            approval.approval_id
+        ),
+        updated_sequence: 0,
+    };
+    let decided_approval = PermissionApprovalProjection {
+        status: "decided".to_string(),
+        decision: Some(decision.to_string()),
+        capability_grant_id: Some(grant.capability_grant_id.clone()),
+        updated_sequence: 0,
+        ..approval.clone()
+    };
+    let mut event = NewEvent::new(
+        format!(
+            "event-voice-permission-decided-{}",
+            stable_cli_hash(&format!("{}:{decision}:{grant_id}", approval.approval_id))
+        ),
+        EventKind::PermissionDecided,
+        "capo-voice",
+    );
+    event.project_id = Some(approval.project_id.clone());
+    event.session_id = approval.session_id.clone();
+    event.payload_json = format!(
+        "{{\"approval_id\":\"{}\",\"decision\":\"{}\",\"capability_grant_id\":\"{}\",\"effect\":\"{}\",\"persistence\":\"{}\",\"origin\":\"voice\"}}",
+        escape_json(&approval.approval_id),
+        escape_json(decision),
+        escape_json(&grant.capability_grant_id),
+        effect,
+        persistence
+    );
+    event.redaction_state = RedactionState::Safe;
+    let mut grant_event = NewEvent::new(
+        format!(
+            "event-voice-capability-grant-{}",
+            stable_cli_hash(&format!("{}:{decision}:{grant_id}", approval.approval_id))
+        ),
+        EventKind::CapabilityGrantCreated,
+        "capo-voice",
+    );
+    grant_event.project_id = Some(approval.project_id.clone());
+    grant_event.session_id = approval.session_id.clone();
+    grant_event.payload_json = format!(
+        "{{\"approval_id\":\"{}\",\"capability_grant_id\":\"{}\",\"effect\":\"{}\",\"decision_source\":\"{}\",\"persistence\":\"{}\",\"origin\":\"voice\"}}",
+        escape_json(&approval.approval_id),
+        escape_json(&grant.capability_grant_id),
+        escape_json(&grant.effect),
+        escape_json(&grant.decision_source),
+        escape_json(&grant.persistence)
+    );
+    grant_event.redaction_state = RedactionState::Safe;
+    state(parsed)?
+        .decide_permission_approval(
+            &approval.approval_id,
+            event,
+            Some(grant_event),
+            decided_approval.clone(),
+            Some(grant),
+        )
+        .map_err(debug_error)?;
+    Ok(decided_approval)
+}
+
+fn voice_permission_approval(
+    parsed: &ParsedArgs,
+    plan: &VoiceCommandPlan,
+) -> Result<PermissionApprovalProjection, String> {
+    let command = plan
+        .command
+        .as_ref()
+        .ok_or_else(|| "voice privileged plan missing command".to_string())?;
+    let session_id = voice_session_id(parsed, plan)?;
+    let voice_session_id = structured_arg_value(command, "voice_session_id")
+        .unwrap_or("voice-session")
+        .to_string();
+    let approval_id = format!(
+        "approval-voice-{}",
+        stable_cli_hash(&format!(
+            "{}:{}:{}:{}",
+            command.command_id,
+            command.actor_id,
+            session_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "none".to_string()),
+            voice_intent_label(plan.intent_kind)
+        ))
+    );
+    Ok(PermissionApprovalProjection {
+        approval_id,
+        project_id: command.project_id.clone(),
+        session_id,
+        tool_call_id: None,
+        capability_profile_id: "voice-control".to_string(),
+        scope_json: "[\"voice:approve:privileged\"]".to_string(),
+        subject_json: format!(
+            "{{\"actor\":\"{}\",\"origin\":\"voice\",\"voice_session_id\":\"{}\",\"command_id\":\"{}\",\"intent\":\"{}\"}}",
+            escape_json(&command.actor_id),
+            escape_json(&voice_session_id),
+            escape_json(command.command_id.as_str()),
+            voice_intent_label(plan.intent_kind)
+        ),
+        status: "pending".to_string(),
+        requested_by: format!("voice:{}", command.actor_id),
+        reason: format!(
+            "visible confirmation required for {}",
+            voice_intent_label(plan.intent_kind)
+        ),
+        decision: None,
+        capability_grant_id: None,
+        updated_sequence: 0,
+    })
+}
+
+fn voice_session_id(
+    parsed: &ParsedArgs,
+    plan: &VoiceCommandPlan,
+) -> Result<Option<SessionId>, String> {
+    match &plan.read_contract.query_scope {
+        VoiceReadScope::SessionForAgent { agent_name } | VoiceReadScope::Agent { agent_name } => {
+            let dashboard = voice_dashboard(parsed, plan)?;
+            Ok(dashboard
+                .agents
+                .iter()
+                .find(|row| row.agent.name == *agent_name)
+                .and_then(|row| row.session.as_ref())
+                .map(|row| row.session.session_id.clone()))
+        }
+        VoiceReadScope::ProjectDashboard | VoiceReadScope::None => Ok(None),
+    }
+}
+
+fn render_voice_approval(
+    approval: &PermissionApprovalProjection,
+    decision: Option<&str>,
+) -> String {
+    format!(
+        "permission_approval={}\npermission_status={}\npermission_decision={}\npermission_scope={}\npermission_requested_by={}\npermission_reason={}\n",
+        approval.approval_id,
+        approval.status,
+        decision.or(approval.decision.as_deref()).unwrap_or("none"),
+        approval.scope_json,
+        approval.requested_by,
+        approval.reason
+    )
 }
 
 fn voice_dashboard(
@@ -663,6 +908,7 @@ fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
         VoiceIntentKind::AgentStatus => "agent_status",
         VoiceIntentKind::DashboardSummary => "dashboard_summary",
         VoiceIntentKind::RedirectSession => "redirect_session",
+        VoiceIntentKind::InterruptSession => "interrupt_session",
         VoiceIntentKind::StopSession => "stop_session",
         VoiceIntentKind::Unknown => "unknown",
     }
@@ -682,6 +928,14 @@ fn memory_ingestion_label(policy: MemoryIngestionPolicy) -> &'static str {
         MemoryIngestionPolicy::None => "none",
         MemoryIngestionPolicy::ReviewedRedactedSummaryOnly => "reviewed_redacted_summary_only",
     }
+}
+
+fn structured_arg_value<'a>(command: &'a CommandEnvelope, key: &str) -> Option<&'a str> {
+    command
+        .structured_args
+        .iter()
+        .find(|(candidate, _)| candidate == key)
+        .map(|(_, value)| value.as_str())
 }
 
 fn recover(parsed: &ParsedArgs) -> Result<String, String> {
@@ -3176,7 +3430,7 @@ mod tests {
     }
 
     #[test]
-    fn voice_unknown_and_unconfirmed_stop_do_not_mutate_state() {
+    fn voice_unknown_does_not_mutate_and_unconfirmed_stop_only_queues_approval() {
         let state_root = temp_root("cli-voice-no-mutation");
         seed_running_agent(&state_root, "fake-codex", "Inspect the project");
         let state = SqliteStateStore::open(&state_root).expect("state");
@@ -3212,7 +3466,30 @@ mod tests {
         assert!(stop.contains("voice_plan=stop_session"));
         assert!(stop.contains("confirmation_required=true"));
         assert!(stop.contains("mutation_applied=false"));
-        assert_eq!(state.last_sequence().expect("after stop"), before_stop);
+        assert!(stop.contains("permission_status=pending"));
+        assert!(stop.contains("permission_scope=[\"voice:approve:privileged\"]"));
+        assert_eq!(state.last_sequence().expect("after stop"), before_stop + 1);
+        let approvals = state
+            .permission_approvals(&project_id())
+            .expect("voice approvals");
+        let approval = approvals
+            .iter()
+            .find(|approval| approval.requested_by == "voice:local-user")
+            .expect("voice approval");
+        assert_eq!(approval.status, "pending");
+        assert_eq!(
+            approval
+                .session_id
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("session-fake-codex")
+        );
+        assert_eq!(
+            approval.reason,
+            "visible confirmation required for stop_session"
+        );
+        assert!(!approval.reason.contains("smoke is done"));
 
         let status = run_cli(vec![
             "session".to_string(),
@@ -3225,6 +3502,130 @@ mod tests {
         .expect("status after unconfirmed stop");
         assert!(status.contains("status=active"));
         assert!(status.contains("run_status=running"));
+    }
+
+    #[test]
+    fn voice_confirmed_stop_audits_decision_before_controller_mutation() {
+        let state_root = temp_root("cli-voice-confirmed-stop");
+        seed_running_agent(&state_root, "fake-codex", "Inspect the project");
+
+        let stop = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "Stop fake-codex because smoke is done".to_string(),
+            "--voice-session".to_string(),
+            "voice-session-confirmed".to_string(),
+            "--confirm".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice confirmed stop");
+
+        assert!(stop.contains("voice_plan=stop_session"));
+        assert!(stop.contains("confirmation_required=true"));
+        assert!(stop.contains("mutation_applied=true"));
+        assert!(stop.contains("permission_status=decided"));
+        assert!(stop.contains("permission_decision=allow_once"));
+        assert!(stop.contains("spoken_agent=fake-codex agent_status=available"));
+        assert!(stop.contains("session_status=completed"));
+        assert!(!stop.contains("Stop fake-codex"));
+
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        let approvals = state
+            .permission_approvals(&project_id())
+            .expect("voice approvals");
+        assert_eq!(approvals.len(), 1);
+        let approval = &approvals[0];
+        assert_eq!(approval.status, "decided");
+        assert_eq!(approval.decision.as_deref(), Some("allow_once"));
+        assert_eq!(approval.capability_profile_id, "voice-control");
+        assert_eq!(approval.scope_json, "[\"voice:approve:privileged\"]");
+        assert_eq!(approval.requested_by, "voice:local-user");
+        assert!(approval.capability_grant_id.is_some());
+        let grants = state.capability_grants().expect("capability grants");
+        assert!(grants.iter().any(|grant| {
+            grant.capability_grant_id == approval.capability_grant_id.clone().unwrap()
+                && grant.decision_source == "user_visible_voice_confirmation"
+                && grant.persistence == "once"
+                && grant.subject_json.contains("voice-session-confirmed")
+        }));
+        let events = state
+            .recent_events_for_session(&SessionId::new("session-fake-codex"), 10)
+            .expect("recent events");
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == "permission.approval_queued")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == "permission.decided")
+        );
+        assert!(events.iter().any(|event| event.kind == "session.stopped"));
+        for event in events {
+            assert!(!event.payload_json.contains("Stop fake-codex"));
+            assert!(!event.payload_json.contains("smoke is done"));
+        }
+    }
+
+    #[test]
+    fn voice_confirmed_interrupt_audits_decision_before_controller_mutation() {
+        let state_root = temp_root("cli-voice-confirmed-interrupt");
+        seed_running_agent(&state_root, "fake-codex", "Inspect the project");
+
+        let interrupted = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "Interrupt fake-codex because output is stale".to_string(),
+            "--confirm".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice confirmed interrupt");
+
+        assert!(interrupted.contains("voice_plan=interrupt_session"));
+        assert!(interrupted.contains("mutation_applied=true"));
+        assert!(interrupted.contains("permission_status=decided"));
+        assert!(interrupted.contains("permission_decision=allow_once"));
+        assert!(interrupted.contains("controlled_session=session-fake-codex"));
+        assert!(interrupted.contains("session_status=canceled"));
+        assert!(interrupted.contains("run_status=stopping"));
+        assert!(!interrupted.contains("Interrupt fake-codex"));
+
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        let approvals = state
+            .permission_approvals(&project_id())
+            .expect("voice approvals");
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(
+            approvals[0].reason,
+            "visible confirmation required for interrupt_session"
+        );
+        let events = state
+            .recent_events_for_session(&SessionId::new("session-fake-codex"), 10)
+            .expect("recent events");
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == "permission.approval_queued")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == "permission.decided")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == "session.interrupted")
+        );
+        for event in events {
+            assert!(!event.payload_json.contains("Interrupt fake-codex"));
+            assert!(!event.payload_json.contains("output is stale"));
+        }
     }
 
     #[test]

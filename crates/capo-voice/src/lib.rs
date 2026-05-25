@@ -29,6 +29,7 @@ pub enum VoiceIntentKind {
     AgentStatus,
     DashboardSummary,
     RedirectSession,
+    InterruptSession,
     StopSession,
     Unknown,
 }
@@ -208,6 +209,37 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
         };
     }
 
+    if let Some((agent_name, reason)) = interrupt_agent(&normalized) {
+        let mut command = voice_command(
+            "voice-interrupt",
+            &input,
+            CommandTarget::Agent(AgentId::new(format!("agent-{agent_name}"))),
+            CommandIntent::InterruptSession,
+            Some(reason),
+        );
+        command
+            .structured_args
+            .push(("agent".to_string(), agent_name.clone()));
+        command.risk = RiskLevel::Medium;
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::InterruptSession,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::SessionForAgent { agent_name },
+                required_fields: vec![
+                    "session_id",
+                    "session_status",
+                    "run_status",
+                    "recent_events",
+                ],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: true,
+            assistant_reply_hint: "Ask for visible confirmation before interrupting the session."
+                .to_string(),
+        };
+    }
+
     VoiceCommandPlan {
         intent_kind: VoiceIntentKind::Unknown,
         command: None,
@@ -287,6 +319,15 @@ fn stop_agent(normalized: &str) -> Option<(String, String)> {
         .split_once(" because ")
         .map(|(agent, reason)| (agent, reason.to_string()))
         .unwrap_or((rest, "voice stop requested".to_string()));
+    Some((agent_slug(agent), reason.trim().to_string()))
+}
+
+fn interrupt_agent(normalized: &str) -> Option<(String, String)> {
+    let rest = normalized.strip_prefix("interrupt ")?;
+    let (agent, reason) = rest
+        .split_once(" because ")
+        .map(|(agent, reason)| (agent, reason.to_string()))
+        .unwrap_or((rest, "voice interrupt requested".to_string()));
     Some((agent_slug(agent), reason.trim().to_string()))
 }
 
@@ -389,6 +430,18 @@ mod tests {
         assert_eq!(command.intent, CommandIntent::InterruptSession);
         assert_eq!(command.risk, RiskLevel::Medium);
         assert_eq!(command.text.as_deref(), Some("smoke is done"));
+    }
+
+    #[test]
+    fn interrupt_transcript_requires_visible_confirmation() {
+        let plan = plan_dummy_transcript(input("Interrupt fake-codex because output is stale"));
+
+        assert_eq!(plan.intent_kind, VoiceIntentKind::InterruptSession);
+        assert!(plan.requires_visible_confirmation);
+        let command = plan.command.expect("voice command");
+        assert_eq!(command.intent, CommandIntent::InterruptSession);
+        assert_eq!(command.risk, RiskLevel::Medium);
+        assert_eq!(command.text.as_deref(), Some("output is stale"));
     }
 
     #[test]

@@ -170,3 +170,14 @@ Observed 2026-05-25.
 - Controller redirect/stop command handlers used by voice plans: `../../crates/capo-controller/src/lib.rs`
 - Voice source workpad: `voice.md`
 - No new third-party dependencies were added for V1; `capo-cli` now depends on the existing workspace crate `capo-voice`.
+
+## F6/V2 Voice Permission Confirmation
+
+Observed 2026-05-25.
+
+- Voice stop/interrupt planning and confirmation-required contract tests: `../../crates/capo-voice/src/lib.rs`
+- Voice confirmation queue/decision implementation and regression tests: `../../crates/capo-cli/src/main.rs`
+- Permission approval and capability grant projections reused by voice confirmation: `../../crates/capo-state/src/lib.rs`
+- Voice permission scopes and raw transcript policy source: `../architecture/capability-permissions.md`
+- Voice source workpad: `voice.md`
+- No new third-party dependencies were added for V2.

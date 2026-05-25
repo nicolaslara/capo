@@ -437,3 +437,25 @@ Follow-up:
 
 - V2 should add first-class voice-origin approval/audit records for visible confirmations instead of treating `--confirm` as a bare CLI flag.
 - V3 should prove retained summaries pass review/redaction before memory ingestion and that raw transcripts remain absent from state and evidence artifacts.
+
+## F6/V2 - Voice Permission Confirmation
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Privileged voice plans now use the existing permission approval projection instead of a parallel confirmation vocabulary.
+- Unconfirmed voice stop/interrupt requests queue a `voice-control` approval with `scope_json=[\"voice:approve:privileged\"]`, `requested_by=voice:<actor>`, and the active session ID when one is known. The queued approval uses only intent/session metadata, not the raw transcript.
+- Confirmed voice stop/interrupt requests create the approval if needed, record an `allow_once` decision, create a once-scoped capability grant with `decision_source=user_visible_voice_confirmation`, and only then call the controller stop/interrupt handler.
+- Controller stop/interrupt commands receive generic durable reasons such as `voice stop confirmed` or `voice interrupt confirmed`. This avoids persisting the raw transcript or the voice-derived reason from the dummy parser.
+- The first visible confirmation surface is still CLI `--confirm`; future voice/mobile UI can drive the same approval records directly.
+
+Verification:
+
+- `cargo test -p capo-voice`: passed.
+- `cargo test -p capo-cli voice -- --nocapture`: passed.
+
+Follow-up:
+
+- V3 should add retention/redaction smoke coverage for reviewed voice summaries before memory ingestion.
+- A future UI/API slice should make voice approvals visible outside CLI output, reusing the `permission_approvals` read model.

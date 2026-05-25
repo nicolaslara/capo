@@ -37,13 +37,21 @@ Evidence:
 
 ### V2 - Voice Permission Confirmation
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Require visible confirmation for stop/interrupt and other privileged voice actions.
 - Audit voice-origin permission requests and decisions.
 - Preserve raw-transcript non-retention.
+
+Evidence:
+
+- Unconfirmed privileged `capo voice submit` queues a `voice-control` permission approval and does not stop or interrupt the session.
+- Confirmed privileged voice stop/interrupt records `permission.approval_queued`, `permission.decided`, and a once-scoped voice confirmation grant before controller mutation.
+- Confirmed voice stop/interrupt dispatches a generic durable reason instead of persisting the raw transcript or the voice-derived "because ..." phrase.
+- `cargo test -p capo-voice`: passed.
+- `cargo test -p capo-cli voice -- --nocapture`: passed.
 
 ### V3 - Retention And Redaction Smoke
 
