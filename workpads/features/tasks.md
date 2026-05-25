@@ -56,10 +56,12 @@ Progress:
 - AC1 Codex smoke is waiting on explicit user opt-in. The local Codex CLI exists and the non-secret harness/preflight tests pass, but the real subscription-backed process has not been run.
 - AC2 Claude Code restricted-args verification is completed for installed `claude 2.1.150`.
 - AC3 deterministic normalized adapter replay through controller/state is completed for Codex and Claude fixtures, but the real-agent controller path remains pending until at least one real local adapter stream is run.
+- AC4 connector readiness surface is completed. `capo adapter readiness` reports configured Codex/Claude opt-in gates and smoke-plan safety metadata without launching provider CLIs or inspecting credentials.
 
 Evidence:
 
 - `crates/capo-adapters/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
 - `codex --version`: `codex-cli 0.133.0`
 - `codex exec --help`
 - `claude --version`: `2.1.150 (Claude Code)`
@@ -70,6 +72,7 @@ Evidence:
 - `cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture` without `CAPO_RUN_CODEX_LOCAL_SMOKE=1`
 - `cargo test -p capo-controller replay -- --nocapture`
 - `cargo test -p capo-cli adapter_fixture -- --nocapture`
+- `cargo test -p capo-cli adapter_readiness -- --nocapture`
 - Focused F1 connector safety review: no blocking findings; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge

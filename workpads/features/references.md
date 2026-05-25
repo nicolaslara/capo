@@ -214,6 +214,15 @@ Observed 2026-05-25.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC3b.
 
+## F1/AC4 Connector Readiness Surface
+
+Observed 2026-05-25.
+
+- CLI readiness command, help text, and regression tests: `../../crates/capo-cli/src/main.rs`
+- Smoke-plan source metadata rendered by readiness command: `../../crates/capo-adapters/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC4.
+
 ## F7/RR1 Loopback Remote Runtime Contract
 
 Observed 2026-05-25.

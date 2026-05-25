@@ -522,6 +522,26 @@ Follow-up:
 
 - Real opt-in Codex/Claude smoke should feed captured normalized streams into this same replay/evidence path and then run credential/session marker scans.
 
+## F1/AC4 - Connector Readiness Surface
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo adapter readiness` as a deterministic operator check for the subscription-backed connector gate.
+- The command renders Codex and Claude smoke-plan metadata: adapter kind, program, opt-in env var, opt-in state, expected marker, env allowlist count, redaction rule count, output limit, planned workspace path, and planned artifact path.
+- The command deliberately does not run Codex or Claude, inspect vendor subscription state, read provider credentials, or create smoke directories.
+- Keep `ready_for_real_agent_dogfood=false` until a real opt-in smoke is separately recorded and scanned. This prevents a readiness/config check from being mistaken for real connector proof.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_readiness -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Follow-up:
+
+- After explicit user opt-in, the real smoke should write a durable readiness/evidence result that can change this dogfood blocker from `real_subscription_smoke_not_recorded`.
+
 ## F7/RR1 - Loopback Remote Runtime Contract
 
 Status: completed on 2026-05-25.

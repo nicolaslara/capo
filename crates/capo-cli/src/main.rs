@@ -4,7 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use capo_adapters::{
-    AcpAdapter, AdapterFixtureParse, ClaudeCodeAdapter, CodexExecAdapter, NormalizedAdapterEvent,
+    AcpAdapter, AdapterFixtureParse, ClaudeCodeAdapter, CodexExecAdapter, LocalAdapterSmokePlan,
+    NormalizedAdapterEvent,
 };
 use capo_controller::FakeBoundaryController;
 use capo_core::{
@@ -40,6 +41,7 @@ Usage:
   capo agent register --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent spawn --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent list [--state PATH]
+  capo adapter readiness [--state PATH]
   capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR] [--state PATH]
   capo task send --agent NAME --goal GOAL [--scenario NAME] [--state PATH]
   capo session status --agent NAME [--state PATH]
@@ -98,6 +100,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         [area, command] if area == "agent" && command == "list" => list_agents(&parsed),
         [area, command, rest @ ..] if area == "adapter" && command == "replay-fixture" => {
             replay_adapter_fixture(&parsed, rest)
+        }
+        [area, command] if area == "adapter" && command == "readiness" => {
+            adapter_readiness(&parsed)
         }
         [area, command, rest @ ..] if area == "task" && command == "send" => {
             send_task(&parsed, rest)
@@ -349,6 +354,58 @@ fn adapter_label(adapter: &str) -> &'static str {
         "acp" => "acp",
         _ => "unknown",
     }
+}
+
+fn adapter_readiness(parsed: &ParsedArgs) -> Result<String, String> {
+    let state_root = parsed.state_root.clone();
+    let workspace_root = state_root.join("adapter-readiness").join("workspace");
+    let artifact_root = state_root.join("adapter-readiness").join("artifacts");
+    let plans = [
+        CodexExecAdapter::local_smoke_plan(
+            workspace_root.join("codex"),
+            artifact_root.join("codex"),
+        ),
+        ClaudeCodeAdapter::local_smoke_plan(
+            workspace_root.join("claude"),
+            artifact_root.join("claude"),
+        ),
+    ];
+    let mut output = format!(
+        "adapter_readiness=true\nadapters={}\ncredential_policy=not_inspected\nreal_smoke_required_for_dogfood=true\n",
+        plans.len()
+    );
+    let mut all_opted_in = true;
+    for plan in &plans {
+        let opted_in = plan.is_opted_in();
+        all_opted_in &= opted_in;
+        output.push_str(&render_adapter_readiness(plan, opted_in));
+    }
+    output.push_str(&format!(
+        "ready_to_run_all_real_smokes={}\nready_for_real_agent_dogfood=false\nblocked_reason=real_subscription_smoke_not_recorded\n",
+        all_opted_in
+    ));
+    Ok(output)
+}
+
+fn render_adapter_readiness(plan: &LocalAdapterSmokePlan, opted_in: bool) -> String {
+    format!(
+        "adapter={} program={} opt_in_env={} opted_in={} smoke_status={} expected_marker={} env_allowlist={} redaction_rules={} output_limit_bytes={} workspace={} artifacts={}\n",
+        plan.adapter_kind.as_str(),
+        plan.program,
+        plan.opt_in_env,
+        opted_in,
+        if opted_in {
+            "ready_to_run"
+        } else {
+            "waiting_on_opt_in"
+        },
+        plan.expected_output_marker,
+        plan.env_allowlist.len(),
+        plan.redaction_rules.len(),
+        plan.output_limit_bytes,
+        plan.workspace_root.display(),
+        plan.artifact_root.display()
+    )
 }
 
 fn dashboard(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
@@ -2686,9 +2743,32 @@ mod tests {
     fn help_mentions_command_envelopes_and_no_credentials() {
         assert!(HELP.contains("command envelopes"));
         assert!(HELP.contains("does not read provider credentials"));
+        assert!(HELP.contains("adapter readiness"));
         assert!(HELP.contains("workpad index"));
         assert!(HELP.contains("workpad propose"));
         assert!(HELP.contains("workpad apply"));
+    }
+
+    #[test]
+    fn adapter_readiness_reports_opt_in_gates_without_running_provider_clis() {
+        let state_root = temp_root("adapter-readiness-state");
+        let output = run_cli(vec![
+            "adapter".to_string(),
+            "readiness".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("adapter readiness");
+
+        assert!(output.contains("adapter_readiness=true"));
+        assert!(output.contains("credential_policy=not_inspected"));
+        assert!(output.contains("adapter=codex_exec"));
+        assert!(output.contains("opt_in_env=CAPO_RUN_CODEX_LOCAL_SMOKE"));
+        assert!(output.contains("adapter=claude_code"));
+        assert!(output.contains("opt_in_env=CAPO_RUN_CLAUDE_LOCAL_SMOKE"));
+        assert!(output.contains("ready_for_real_agent_dogfood=false"));
+        assert!(output.contains("blocked_reason=real_subscription_smoke_not_recorded"));
+        assert!(!state_root.join("adapter-readiness").exists());
     }
 
     #[test]

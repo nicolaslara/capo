@@ -102,3 +102,24 @@ Evidence:
 Skipped verification:
 
 - A real local Codex or Claude adapter process has still not been run because subscription-backed smokes require explicit user opt-in.
+
+### AC4 - Connector Readiness Surface
+
+Status: completed
+
+Acceptance:
+
+- Add a deterministic operator command that reports configured Codex/Claude smoke gates without launching provider CLIs.
+- Report opt-in env vars, restrictive smoke-plan metadata, redaction configuration, and dogfood blocker status.
+- Do not read provider credentials, inspect vendor subscription state, create smoke workspaces, or run real smokes.
+
+Evidence:
+
+- `capo adapter readiness [--state PATH]` in `../../crates/capo-cli/src/main.rs`.
+- The command reports `credential_policy=not_inspected`, the Codex and Claude opt-in env vars, smoke markers, env allowlist counts, redaction rule counts, and `ready_for_real_agent_dogfood=false` until a real subscription smoke is recorded separately.
+- `cargo test -p capo-cli adapter_readiness -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Decision:
+
+- This is an operator/readiness surface only. It does not satisfy AC1 or AC3 because no subscription-backed Codex or Claude process is run.
