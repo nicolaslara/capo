@@ -130,7 +130,7 @@ Evidence:
 
 ## P5 - Local Process Runtime
 
-Status: pending
+Status: completed
 
 Acceptance:
 
@@ -138,6 +138,13 @@ Acceptance:
 - Capture stdout/stderr as redacted artifacts and normalized runtime events.
 - Implement interrupt, terminate, kill, health, cleanup, and orphan recovery behavior.
 - Preserve runtime/connectivity separation.
+
+Evidence:
+
+- `crates/capo-runtime/src/lib.rs`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
 
 ## P6 - Adapter Fixture Parsers
 

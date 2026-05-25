@@ -171,6 +171,37 @@ Follow-up:
 - P5 should replace fake spawn semantics with local runtime process lifecycle.
 - P10 should harden repeated command idempotency and recovery behavior for multiple repeated CLI invocations in the same store.
 
+## P5 - Local Process Runtime
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `LocalProcessRunner` as the first real runtime boundary while keeping connectivity as a separate `ConnectivityTunnel` enum. `LocalLoopbackTunnel` is only a connectivity binding, not process execution.
+- Keep the local process API explicit: request records carry `program`, `argv`, `cwd`, and request environment overrides; config records carry workspace roots, artifact root, environment allowlist, redaction rules, and output byte limit.
+- Reject process working directories outside configured workspace roots before spawn.
+- Clear the child environment by default, then restore only configured allowlisted host variables and request overrides that are also allowlisted.
+- Capture stdout/stderr as bounded artifacts with deterministic content hashes and redaction metadata. Rule-based redaction marks artifacts as `redacted`; otherwise they are `safe`.
+- Emit normalized runtime events using the runtime architecture vocabulary: `runtime.start_requested`, `runtime.process_started`, `runtime.output_delta`, `runtime.output_artifact_recorded`, `runtime.process_exited`, and control events for interrupt, terminate, and kill.
+- Support both synchronous command execution and live child handles for health checks, kill, wait, and artifact collection. This is enough for P5; controller/state persistence of runtime refs remains a P10 hardening area.
+- Preserve captured artifact directories during cleanup and write a cleanup marker instead of deleting durable evidence.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+- Runtime tests cover redacted stdout/stderr artifact capture, normalized output artifact events, interrupt/terminate/kill control events, live child kill and wait, cwd rejection, env override rejection, health, cleanup, and orphan recovery behavior.
+
+Review:
+
+- A focused review found issues in an earlier draft: no live child handle, no external PID, misleading redaction metadata, request env allowlist bypass, non-architecture event names, artifact deletion during cleanup, and unstable content hashing. These were fixed before completion.
+
+Follow-up:
+
+- P10 should persist local runtime process refs as first-class read models when restart recovery and replay are implemented.
+- P7 should reuse the same runtime boundary for safe opt-in Codex and Claude Code local adapter smoke tests.
+
 ## Prototype Gate
 
 Status: not passed.

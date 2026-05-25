@@ -84,3 +84,12 @@ Observed 2026-05-25.
 - Controller command-envelope handlers: `../../crates/capo-controller/src/lib.rs`
 - SQLite agent/session/run/evidence read-model queries: `../../crates/capo-state/src/lib.rs`
 - Manual smoke used `cargo run -p capo-cli` with temporary state and evidence directories.
+
+## P5 Local Process Runtime
+
+Observed 2026-05-25.
+
+- Local process runtime implementation and tests: `../../crates/capo-runtime/src/lib.rs`
+- Runtime/tunnel architecture source: `../architecture/runtime-tunnel.md`
+- Runtime event vocabulary source: `../architecture/runtime-tunnel.md`
+- No new third-party dependencies were added for P5.
