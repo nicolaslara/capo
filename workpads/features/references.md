@@ -179,6 +179,16 @@ Observed 2026-05-25.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC17.
 
+## F1/AC18 Dispatch Execution Request Audit
+
+Observed 2026-05-25.
+
+- CLI `capo adapter execution-request` command and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Dispatch execution request projection, event kind, table, rebuild codec, and read query: `../../crates/capo-state/src/lib.rs`
+- Shared dashboard query field for execution request rows: `../../crates/capo-query/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC18.
+
 ## F3/DS1 Query Surface Extraction
 
 Observed 2026-05-25.

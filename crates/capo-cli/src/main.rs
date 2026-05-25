@@ -15,13 +15,13 @@ use capo_core::{
 use capo_eval::TaskOutcomeReport;
 use capo_query::{AdapterDogfoodGate, ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 use capo_state::{
-    AdapterDispatchGateProjection, AdapterDispatchPlanProjection, AdapterDispatchReplayProjection,
-    AdapterReadinessProjection, AdapterSmokeReportProjection, ArtifactRecord,
-    CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection, MemoryPacketProjection,
-    MemoryRecordProjection, MemorySourceProjection, NewEvent, PermissionApprovalProjection,
-    ProjectionRecord, RedactionState, ReviewFindingProjection, RunProjection, SessionProjection,
-    SqliteStateStore, ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection,
-    WorkpadTaskProjection,
+    AdapterDispatchExecutionRequestProjection, AdapterDispatchGateProjection,
+    AdapterDispatchPlanProjection, AdapterDispatchReplayProjection, AdapterReadinessProjection,
+    AdapterSmokeReportProjection, ArtifactRecord, CapabilityGrantProjection, EventKind,
+    EventRecord, EvidenceProjection, MemoryPacketProjection, MemoryRecordProjection,
+    MemorySourceProjection, NewEvent, PermissionApprovalProjection, ProjectionRecord,
+    RedactionState, ReviewFindingProjection, RunProjection, SessionProjection, SqliteStateStore,
+    ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
 use capo_voice::{
     MemoryIngestionPolicy, TranscriptRetentionPolicy, VOICE_TRANSCRIPT_RETENTION_DEFAULT,
@@ -47,6 +47,7 @@ Usage:
   capo adapter plan-launch --adapter codex|claude --agent NAME --goal GOAL [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
   capo adapter dispatch-gate --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter dispatch-status --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
+  capo adapter execution-request --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter dogfood-gate [--state PATH]
   capo adapter smoke-report scan --artifact-root PATH [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
@@ -127,6 +128,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "adapter" && command == "dispatch-status" => {
             adapter_dispatch_status(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "adapter" && command == "execution-request" => {
+            adapter_dispatch_execution_request(&parsed, rest)
         }
         [area, command] if area == "adapter" && command == "dogfood-gate" => {
             adapter_dogfood_gate(&parsed)
@@ -1146,6 +1150,144 @@ fn adapter_dispatch_status(parsed: &ParsedArgs, args: &[String]) -> Result<Strin
     ))
 }
 
+fn adapter_dispatch_execution_request(
+    parsed: &ParsedArgs,
+    args: &[String],
+) -> Result<String, String> {
+    let dispatch_plan_id = required_arg(args, "--dispatch-plan")?;
+    let record = has_flag(args, "--record");
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan" | "--record")
+    }) {
+        return Err(format!(
+            "unknown adapter execution-request option: {unknown}"
+        ));
+    }
+    let state = state(parsed)?;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    let plan = dashboard
+        .adapter_dispatch_plans
+        .iter()
+        .find(|plan| plan.dispatch_plan_id == dispatch_plan_id)
+        .ok_or_else(|| format!("unknown adapter dispatch plan: {dispatch_plan_id}"))?;
+    let latest_gate = dashboard
+        .adapter_dispatch_gates
+        .iter()
+        .rev()
+        .find(|gate| gate.dispatch_plan_id == plan.dispatch_plan_id);
+    let request = adapter_dispatch_execution_request_projection(plan, latest_gate);
+    let recorded_sequence = if record {
+        let event = NewEvent {
+            event_id: format!(
+                "event-adapter-dispatch-execution-request-{}",
+                stable_cli_hash(&request.execution_request_id)
+            ),
+            kind: EventKind::AdapterDispatchExecutionRequested,
+            actor: "local-cli".to_string(),
+            project_id: Some(request.project_id.clone()),
+            task_id: None,
+            agent_id: Some(plan.agent_id.clone()),
+            session_id: Some(plan.session_id.clone()),
+            run_id: Some(plan.run_id.clone()),
+            turn_id: None,
+            item_id: Some(request.execution_request_id.clone()),
+            payload_json: format!(
+                "{{\"dispatch_plan_id\":\"{}\",\"dispatch_gate_id\":\"{}\",\"provider_cli_execution_allowed\":{},\"provider_cli_executed\":false,\"status\":\"{}\"}}",
+                escape_json(&request.dispatch_plan_id),
+                escape_json(&request.dispatch_gate_id),
+                request.provider_cli_execution_allowed,
+                escape_json(&request.status)
+            ),
+            idempotency_key: Some(format!(
+                "adapter-dispatch-execution-request:{}:{}:{}",
+                request.project_id, request.dispatch_plan_id, request.status
+            )),
+            redaction_state: RedactionState::Safe,
+        };
+        Some(
+            state
+                .append_event(
+                    event,
+                    &[ProjectionRecord::AdapterDispatchExecutionRequest(
+                        request.clone(),
+                    )],
+                )
+                .map_err(debug_error)?,
+        )
+    } else {
+        None
+    };
+    Ok(render_adapter_dispatch_execution_request(
+        &request,
+        record,
+        recorded_sequence,
+    ))
+}
+
+fn adapter_dispatch_execution_request_projection(
+    plan: &AdapterDispatchPlanProjection,
+    latest_gate: Option<&AdapterDispatchGateProjection>,
+) -> AdapterDispatchExecutionRequestProjection {
+    let ready_gate = latest_gate.filter(|gate| {
+        gate.provider_cli_execution_allowed
+            && gate.status == "ready_for_execution"
+            && !gate.provider_cli_executed
+            && gate.runtime_prompt_policy == "not_rendered"
+    });
+    let opt_in_env = adapter_dispatch_opt_in_env(&plan.adapter_kind);
+    let (dispatch_gate_id, allowed, status, reason_codes) = if let Some(gate) = ready_gate {
+        (
+            gate.dispatch_gate_id.clone(),
+            true,
+            "waiting_on_explicit_provider_opt_in".to_string(),
+            "explicit_provider_execution_opt_in_required".to_string(),
+        )
+    } else if let Some(gate) = latest_gate {
+        (
+            gate.dispatch_gate_id.clone(),
+            false,
+            "blocked_by_dispatch_gate".to_string(),
+            gate.reason_codes.clone(),
+        )
+    } else {
+        (
+            "none".to_string(),
+            false,
+            "blocked_missing_ready_gate".to_string(),
+            "recorded_ready_dispatch_gate_missing".to_string(),
+        )
+    };
+
+    AdapterDispatchExecutionRequestProjection {
+        execution_request_id: format!(
+            "adapter-dispatch-execution-request-{}-{}",
+            stable_cli_hash(&plan.dispatch_plan_id),
+            stable_cli_hash(&format!("{status}:{dispatch_gate_id}"))
+        ),
+        project_id: plan.project_id.clone(),
+        dispatch_plan_id: plan.dispatch_plan_id.clone(),
+        dispatch_gate_id,
+        adapter_kind: plan.adapter_kind.clone(),
+        provider_cli_execution_allowed: allowed,
+        provider_cli_executed: false,
+        status,
+        opt_in_env,
+        runtime_prompt_policy: plan.runtime_prompt_policy.clone(),
+        reason_codes,
+        updated_sequence: 0,
+    }
+}
+
+fn adapter_dispatch_opt_in_env(adapter_kind: &str) -> String {
+    match adapter_kind {
+        "codex_exec" => "CAPO_RUN_CODEX_LOCAL_DISPATCH",
+        "claude_code" => "CAPO_RUN_CLAUDE_LOCAL_DISPATCH",
+        _ => "CAPO_RUN_LOCAL_ADAPTER_DISPATCH",
+    }
+    .to_string()
+}
+
 fn adapter_dispatch_gate_projection(
     plan: &AdapterDispatchPlanProjection,
     dogfood_gate: &AdapterDogfoodGate,
@@ -1292,6 +1434,30 @@ fn render_adapter_dispatch_status(
         replay_count,
         replay_raw_policy,
         next_action
+    )
+}
+
+fn render_adapter_dispatch_execution_request(
+    request: &AdapterDispatchExecutionRequestProjection,
+    recorded: bool,
+    recorded_sequence: Option<i64>,
+) -> String {
+    format!(
+        "adapter_dispatch_execution_request=true\nexecution_request={}\ndispatch_plan={}\ndispatch_gate={}\nadapter={}\nprovider_cli_execution_allowed={}\nprovider_cli_executed={}\nstatus={}\nopt_in_env={}\nruntime_prompt_policy={}\nreasons={}\nrecorded={}\nrecorded_sequence={}\n",
+        request.execution_request_id,
+        request.dispatch_plan_id,
+        request.dispatch_gate_id,
+        request.adapter_kind,
+        request.provider_cli_execution_allowed,
+        request.provider_cli_executed,
+        request.status,
+        request.opt_in_env,
+        request.runtime_prompt_policy,
+        request.reason_codes,
+        recorded,
+        recorded_sequence
+            .map(|sequence| sequence.to_string())
+            .unwrap_or_else(|| "none".to_string())
     )
 }
 
@@ -1562,6 +1728,25 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
             replay.completed_turn_count,
             replay.provider_cli_executed,
             replay.raw_content_policy
+        ));
+    }
+    output.push_str(&format!(
+        "adapter_dispatch_execution_requests={}\n",
+        dashboard.adapter_dispatch_execution_requests.len()
+    ));
+    for request in &dashboard.adapter_dispatch_execution_requests {
+        output.push_str(&format!(
+            "adapter_dispatch_execution_request={} dispatch_plan={} dispatch_gate={} adapter={} execution_status={} provider_cli_execution_allowed={} provider_cli_executed={} opt_in_env={} runtime_prompt_policy={} reasons={}\n",
+            request.execution_request_id,
+            request.dispatch_plan_id,
+            request.dispatch_gate_id,
+            request.adapter_kind,
+            request.status,
+            request.provider_cli_execution_allowed,
+            request.provider_cli_executed,
+            request.opt_in_env,
+            request.runtime_prompt_policy,
+            request.reason_codes
         ));
     }
     output.push_str(&render_adapter_dogfood_gate(
@@ -4076,6 +4261,7 @@ mod tests {
         assert!(HELP.contains("adapter plan-launch"));
         assert!(HELP.contains("adapter dispatch-gate"));
         assert!(HELP.contains("adapter dispatch-status"));
+        assert!(HELP.contains("adapter execution-request"));
         assert!(HELP.contains("adapter replay-dispatch"));
         assert!(HELP.contains("adapter dogfood-gate"));
         assert!(HELP.contains("workpad index"));
@@ -4278,6 +4464,22 @@ mod tests {
         assert!(blocked_status.contains("latest_dispatch_replay=none"));
         assert!(blocked_status.contains("next_action=record_clean_real_smoke_evidence"));
         assert!(!blocked_status.contains("Do not render this dispatch prompt"));
+        let blocked_execution_request = run_cli(vec![
+            "adapter".to_string(),
+            "execution-request".to_string(),
+            "--dispatch-plan".to_string(),
+            dispatch_plan_id.clone(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("blocked execution request");
+        assert!(blocked_execution_request.contains("adapter_dispatch_execution_request=true"));
+        assert!(blocked_execution_request.contains("provider_cli_execution_allowed=false"));
+        assert!(blocked_execution_request.contains("provider_cli_executed=false"));
+        assert!(blocked_execution_request.contains("status=blocked_missing_ready_gate"));
+        assert!(blocked_execution_request.contains("recorded=true"));
+        assert!(!blocked_execution_request.contains("Do not render this dispatch prompt"));
         let fixture = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../capo-adapters/fixtures/codex-exec.jsonl"
@@ -4368,6 +4570,39 @@ mod tests {
             "next_action=replay_dispatch_fixture_or_run_provider_execution_after_explicit_opt_in"
         ));
         assert!(!ready_status.contains("Do not render this dispatch prompt"));
+        let ready_execution_request = run_cli(vec![
+            "adapter".to_string(),
+            "execution-request".to_string(),
+            "--dispatch-plan".to_string(),
+            gates[0].dispatch_plan_id.clone(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("ready execution request");
+        assert!(ready_execution_request.contains("provider_cli_execution_allowed=true"));
+        assert!(ready_execution_request.contains("provider_cli_executed=false"));
+        assert!(ready_execution_request.contains("status=waiting_on_explicit_provider_opt_in"));
+        assert!(ready_execution_request.contains("opt_in_env=CAPO_RUN_CODEX_LOCAL_DISPATCH"));
+        assert!(
+            ready_execution_request.contains("reasons=explicit_provider_execution_opt_in_required")
+        );
+        assert!(!ready_execution_request.contains("Do not render this dispatch prompt"));
+        let execution_requests = SqliteStateStore::open(&state_root)
+            .expect("state")
+            .adapter_dispatch_execution_requests(&project_id())
+            .expect("dispatch execution requests");
+        assert_eq!(execution_requests.len(), 2);
+        assert!(
+            execution_requests
+                .iter()
+                .any(|request| request.status == "blocked_missing_ready_gate")
+        );
+        assert!(
+            execution_requests
+                .iter()
+                .any(|request| request.status == "waiting_on_explicit_provider_opt_in")
+        );
         let evidence_dir = temp_root("adapter-dispatch-gate-replay-evidence");
         let replay = run_cli(vec![
             "adapter".to_string(),
@@ -4411,6 +4646,8 @@ mod tests {
         ])
         .expect("dashboard after replay");
         assert!(replay_dashboard.contains("adapter_dispatch_replays=1"));
+        assert!(replay_dashboard.contains("adapter_dispatch_execution_requests=2"));
+        assert!(replay_dashboard.contains("execution_status=waiting_on_explicit_provider_opt_in"));
         assert!(replay_dashboard.contains("raw_content_policy=content_hashed_not_rendered"));
         assert!(!replay_dashboard.contains("Codex fixture response."));
         assert!(!replay_dashboard.contains("cargo test"));

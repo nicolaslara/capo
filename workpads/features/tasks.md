@@ -70,6 +70,7 @@ Progress:
 - AC15 dispatch fixture replay is completed. `capo adapter replay-dispatch` links recorded dispatch plans and ready gates to deterministic fixture replay without launching provider CLIs or retaining raw prompt/provider text.
 - AC16 dispatch replay read model is completed. Dispatch fixture replay outcomes are persisted, rebuilt, and surfaced through dashboard/query with fixture hashes, counts, session/run refs, and `provider_cli_executed=false`.
 - AC17 dispatch chain status is completed. `capo adapter dispatch-status` summarizes a recorded dispatch plan, latest gate, latest replay, and next safe action from shared read models without rendering raw prompts or fixture text.
+- AC18 dispatch execution request audit is completed. `capo adapter execution-request --record` persists blocked or waiting-on-opt-in real-dispatch requests separately from plans, gates, and fixture replays without launching provider CLIs.
 
 Evidence:
 
@@ -102,6 +103,8 @@ Evidence:
 - `cargo test -p capo-state adapter_dispatch_gate -- --nocapture`
 - `cargo test -p capo-state adapter_dispatch_replay -- --nocapture`
 - `capo adapter dispatch-status --dispatch-plan DISPATCH_PLAN_ID [--state PATH]`
+- `cargo test -p capo-state adapter_dispatch_execution_request -- --nocapture`
+- `capo adapter execution-request --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]`
 - Focused F1 connector safety review: no blocking findings; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge

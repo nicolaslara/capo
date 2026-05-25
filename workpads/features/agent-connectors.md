@@ -432,3 +432,29 @@ Decision:
 - Use `dispatch-status` as the operator introspection surface for the plan -> gate -> replay chain. It reports plan metadata, dogfood gate status, latest gate status/reasons, latest replay counts/raw-content policy, and the next safe action.
 - Keep the command read-only over `ProjectDashboard` so CLI, future dashboard, voice, and mobile surfaces can share the same state contract.
 - The command deliberately does not render raw dispatch prompts or raw fixture/provider text, and it preserves `provider_cli_executed=false` until a future explicit provider-running command exists.
+
+### AC18 - Dispatch Execution Request Audit
+
+Status: completed
+
+Acceptance:
+
+- Add an operator command that records a request to cross from a recorded dispatch plan/gate into real provider execution.
+- Keep the request fail-closed unless a latest recorded ready dispatch gate exists.
+- Persist execution-request rows as separate audit facts instead of overloading plans, gates, or fixture replays.
+- Keep provider CLIs unexecuted in this slice and require a future explicit opt-in env for actual execution.
+
+Evidence:
+
+- CLI `capo adapter execution-request --dispatch-plan DISPATCH_PLAN_ID [--record]` in `../../crates/capo-cli/src/main.rs`.
+- `AdapterDispatchExecutionRequestProjection`, `EventKind::AdapterDispatchExecutionRequested`, SQLite table, rebuild codec, and read query in `../../crates/capo-state/src/lib.rs`.
+- Shared dashboard query exposure in `../../crates/capo-query/src/lib.rs` and CLI dashboard rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-state adapter_dispatch_execution_request -- --nocapture`: passed.
+- `cargo test -p capo-query adapter_dispatch -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Treat execution requests as their own lifecycle fact: plans record intent, gates record whether execution would be allowed, replays record deterministic fixture ingestion, and execution requests record an operator request to cross the provider boundary.
+- The command records `provider_cli_executed=false` and `status=waiting_on_explicit_provider_opt_in` when the plan has a ready gate. Without a ready gate, it records a blocked request with the gate reason or `recorded_ready_dispatch_gate_missing`.
+- Actual provider execution remains deferred until the user explicitly authorizes the relevant opt-in environment variable, currently `CAPO_RUN_CODEX_LOCAL_DISPATCH` or `CAPO_RUN_CLAUDE_LOCAL_DISPATCH`.

@@ -416,6 +416,28 @@ Follow-up:
 
 - Future voice/web/mobile surfaces should use the same query/read-model facts for dispatch-chain summaries rather than reconstructing chain state from events.
 
+## F1/AC18 - Dispatch Execution Request Audit
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo adapter execution-request --dispatch-plan DISPATCH_PLAN_ID [--record]` as the first durable audit surface for an operator request to cross from planned/gated dispatch into real provider execution.
+- Keep execution requests separate from plans, gates, and fixture replays. This preserves the lifecycle vocabulary: plan intent, gate permission, replay fixture ingestion, execution request boundary-crossing intent.
+- Fail closed without a latest recorded ready gate. Blocked requests can still be recorded to explain why real execution did not start.
+- Even with a ready gate, this slice records `status=waiting_on_explicit_provider_opt_in` and `provider_cli_executed=false`. Actual provider CLI launch remains deferred behind explicit opt-in env vars.
+- Use adapter-specific future opt-in env names: `CAPO_RUN_CODEX_LOCAL_DISPATCH` and `CAPO_RUN_CLAUDE_LOCAL_DISPATCH`.
+
+Verification:
+
+- `cargo test -p capo-state adapter_dispatch_execution_request -- --nocapture`: passed.
+- `cargo test -p capo-query adapter_dispatch -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Follow-up:
+
+- The future provider-running command should require a recorded ready execution request plus explicit opt-in env before invoking `LocalProcessRunner`, then append a sibling execution-result projection with runtime process refs and adapter stream cursor refs.
+
 ## F3/DS1 - Query Surface Extraction
 
 Status: completed on 2026-05-25.
