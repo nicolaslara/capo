@@ -19,12 +19,20 @@ Add remote execution and connectivity adapters without collapsing the separation
 
 ### RR1 - Remote Runtime Contract Test
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Add a fake or loopback remote runtime contract test that proves runtime refs, health, interrupt, terminate, and recovery events.
 - Do not require Tailscale or cloud credentials.
+
+Evidence:
+
+- `RemoteProcessRunner` and `RemoteProcessConfig::loopback_for_test` in `../../crates/capo-runtime/src/lib.rs`.
+- Loopback remote process refs include remote target and endpoint identity separately from local process artifacts.
+- Runtime events include `runtime.remote_target_resolved`, `runtime.remote_process_started`, `runtime.remote_interrupt_sent`, and `runtime.remote_terminate_sent`.
+- Recovery reports `remote_recovered` for live refs and `remote_orphaned` for non-live refs.
+- `cargo test -p capo-runtime remote_runtime -- --nocapture`: passed.
 
 ### RR2 - Tunnel Adapter Stub
 

@@ -213,3 +213,12 @@ Observed 2026-05-25.
 - Normalized adapter fixtures: `../../crates/capo-adapters/fixtures/codex-exec.jsonl`, `../../crates/capo-adapters/fixtures/claude-code-stream.jsonl`, `../../crates/capo-adapters/fixtures/acp-replay.jsonl`
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC3b.
+
+## F7/RR1 Loopback Remote Runtime Contract
+
+Observed 2026-05-25.
+
+- Remote process runner, loopback config, lifecycle events, and contract test: `../../crates/capo-runtime/src/lib.rs`
+- Runtime/tunnel separation architecture: `../architecture/runtime-tunnel.md`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR1.

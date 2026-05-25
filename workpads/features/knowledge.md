@@ -521,3 +521,23 @@ Verification:
 Follow-up:
 
 - Real opt-in Codex/Claude smoke should feed captured normalized streams into this same replay/evidence path and then run credential/session marker scans.
+
+## F7/RR1 - Loopback Remote Runtime Contract
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `RuntimeRunner::RemoteProcess(RemoteProcessRunner)` and keep it separate from `ConnectivityTunnel`.
+- Start with a loopback remote runner that wraps `LocalProcessRunner` for deterministic tests. It proves remote-shaped refs and lifecycle semantics without SSH, Tailscale, cloud credentials, or public exposure.
+- Remote process refs include `remote_target_id` and `endpoint_ref` in the opaque runtime reference. This preserves the distinction between process ownership and endpoint reachability.
+- Remote lifecycle/control facts are emitted as runtime events: target resolution, remote process start, interrupt sent, terminate sent, and recovery classification.
+- Do not claim remote execution is production-ready. RR1 proves the contract shape only; RR2 still needs a tunnel adapter stub, and RR3 needs explicit exposure policy.
+
+Verification:
+
+- `cargo test -p capo-runtime remote_runtime -- --nocapture`: passed.
+
+Follow-up:
+
+- RR2 should add a tunnel/endpoint adapter stub and keep endpoint health/readiness records separate from runtime process refs.

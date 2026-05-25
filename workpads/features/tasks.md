@@ -241,7 +241,7 @@ Evidence:
 
 ## F7 - Remote Runtime And Tunnel
 
-Status: pending
+Status: in_progress
 
 Source workpad: `remote-runtime.md`
 
@@ -250,3 +250,12 @@ Acceptance:
 - Add a non-local runtime/tunnel adapter only after local real-agent behavior is stable.
 - Keep runtime process ownership separate from connectivity exposure.
 - Require explicit permission/audit for public or remote access.
+
+Progress:
+
+- RR1 loopback remote runtime contract is completed without Tailscale or cloud credentials.
+
+Evidence:
+
+- `crates/capo-runtime/src/lib.rs`
+- `cargo test -p capo-runtime remote_runtime -- --nocapture`

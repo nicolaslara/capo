@@ -13,7 +13,7 @@ use std::process::{Child, Command, Stdio};
 use capo_core::{BoundaryBinding, BoundaryKind, RunId};
 
 /// First runtime variants from the prototype plan.
-pub const PLANNED_RUNTIMES: &[&str] = &["fake", "local-process"];
+pub const PLANNED_RUNTIMES: &[&str] = &["fake", "local-process", "remote-process"];
 
 pub type RuntimeResult<T> = Result<T, RuntimeError>;
 
@@ -41,6 +41,7 @@ impl From<std::io::Error> for RuntimeError {
 pub enum RuntimeRunner {
     Fake(FakeRuntimeRunner),
     LocalProcess(LocalProcessRunner),
+    RemoteProcess(RemoteProcessRunner),
 }
 
 impl RuntimeRunner {
@@ -52,10 +53,15 @@ impl RuntimeRunner {
         Self::LocalProcess(LocalProcessRunner::new(config))
     }
 
+    pub fn remote_process(config: RemoteProcessConfig) -> Self {
+        Self::RemoteProcess(RemoteProcessRunner::new(config))
+    }
+
     pub fn binding(&self) -> BoundaryBinding {
         match self {
             Self::Fake(runner) => runner.binding(),
             Self::LocalProcess(runner) => runner.binding(),
+            Self::RemoteProcess(runner) => runner.binding(),
         }
     }
 
@@ -63,6 +69,7 @@ impl RuntimeRunner {
         match self {
             Self::Fake(runner) => runner.start(request),
             Self::LocalProcess(_) => FakeRuntimeRunner.start(request),
+            Self::RemoteProcess(_) => FakeRuntimeRunner.start(request),
         }
     }
 
@@ -70,6 +77,7 @@ impl RuntimeRunner {
         match self {
             Self::Fake(runner) => runner.interrupt(process, reason),
             Self::LocalProcess(_) => FakeRuntimeRunner.interrupt(process, reason),
+            Self::RemoteProcess(_) => FakeRuntimeRunner.interrupt(process, reason),
         }
     }
 
@@ -77,6 +85,7 @@ impl RuntimeRunner {
         match self {
             Self::Fake(runner) => runner.stop(process, reason),
             Self::LocalProcess(_) => FakeRuntimeRunner.stop(process, reason),
+            Self::RemoteProcess(_) => FakeRuntimeRunner.stop(process, reason),
         }
     }
 
@@ -84,6 +93,7 @@ impl RuntimeRunner {
         match self {
             Self::Fake(runner) => runner.attach_process(run_id, runtime_process_ref),
             Self::LocalProcess(_) => FakeRuntimeRunner.attach_process(run_id, runtime_process_ref),
+            Self::RemoteProcess(_) => FakeRuntimeRunner.attach_process(run_id, runtime_process_ref),
         }
     }
 
@@ -93,6 +103,7 @@ impl RuntimeRunner {
     ) -> RuntimeResult<LocalProcessOutcome> {
         match self {
             Self::LocalProcess(runner) => runner.start_process(request),
+            Self::RemoteProcess(runner) => runner.start_process(request),
             Self::Fake(_) => LocalProcessRunner::new(LocalProcessConfig::for_test(
                 std::env::current_dir()?,
                 std::env::temp_dir().join("capo-runtime-fake-local"),
@@ -707,6 +718,169 @@ pub struct OrphanRecovery {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteProcessConfig {
+    pub remote_target_id: String,
+    pub endpoint_ref: String,
+    pub local_loopback: LocalProcessConfig,
+}
+
+impl RemoteProcessConfig {
+    pub fn loopback_for_test(
+        remote_target_id: impl Into<String>,
+        endpoint_ref: impl Into<String>,
+        workspace_root: PathBuf,
+        artifact_root: PathBuf,
+    ) -> Self {
+        Self {
+            remote_target_id: remote_target_id.into(),
+            endpoint_ref: endpoint_ref.into(),
+            local_loopback: LocalProcessConfig::for_test(workspace_root, artifact_root),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteProcessRunner {
+    config: RemoteProcessConfig,
+    loopback: LocalProcessRunner,
+}
+
+impl RemoteProcessRunner {
+    pub fn new(config: RemoteProcessConfig) -> Self {
+        let loopback = LocalProcessRunner::new(config.local_loopback.clone());
+        Self { config, loopback }
+    }
+
+    pub fn binding(&self) -> BoundaryBinding {
+        BoundaryBinding {
+            kind: BoundaryKind::RuntimeRunner,
+            variant: "remote-process",
+            fake: false,
+        }
+    }
+
+    pub fn start_process(
+        &self,
+        request: LocalProcessRequest,
+    ) -> RuntimeResult<LocalProcessOutcome> {
+        let mut outcome = self.loopback.start_process(request)?;
+        outcome.process.runtime_process_ref = self.remote_ref(&outcome.process.runtime_process_ref);
+        prepend_remote_events(
+            &self.config,
+            &mut outcome.events,
+            &outcome.process.runtime_process_ref,
+        );
+        Ok(outcome)
+    }
+
+    pub fn interrupt(
+        &self,
+        process: &LocalRuntimeProcessRef,
+        reason: &str,
+    ) -> RuntimeControlResult {
+        self.remote_control(
+            process,
+            "interrupting",
+            "runtime.remote_interrupt_sent",
+            reason,
+        )
+    }
+
+    pub fn terminate(
+        &self,
+        process: &LocalRuntimeProcessRef,
+        reason: &str,
+    ) -> RuntimeControlResult {
+        self.remote_control(
+            process,
+            "terminating",
+            "runtime.remote_terminate_sent",
+            reason,
+        )
+    }
+
+    pub fn health(&self, process: &LocalRuntimeProcessRef) -> RuntimeHealth {
+        RuntimeHealth {
+            runtime_process_ref: process.runtime_process_ref.clone(),
+            status: format!("remote:{}:{}", self.config.remote_target_id, process.status),
+            live: process.status == "running",
+        }
+    }
+
+    pub fn recover_orphan(&self, process: &LocalRuntimeProcessRef) -> OrphanRecovery {
+        let health = self.health(process);
+        OrphanRecovery {
+            runtime_process_ref: process.runtime_process_ref.clone(),
+            recovered_status: if health.live {
+                "remote_recovered"
+            } else {
+                "remote_orphaned"
+            }
+            .to_string(),
+            detail: format!(
+                "remote target {} via endpoint {} reported {}",
+                self.config.remote_target_id, self.config.endpoint_ref, health.status
+            ),
+        }
+    }
+
+    fn remote_control(
+        &self,
+        process: &LocalRuntimeProcessRef,
+        status: &str,
+        event_kind: &str,
+        reason: &str,
+    ) -> RuntimeControlResult {
+        let process = LocalRuntimeProcessRef {
+            status: status.to_string(),
+            ..process.clone()
+        };
+        RuntimeControlResult {
+            process: process.clone(),
+            events: vec![RuntimeEvent {
+                kind: event_kind.to_string(),
+                status: status.to_string(),
+                detail: format!(
+                    "target={} endpoint={} reason={}",
+                    self.config.remote_target_id, self.config.endpoint_ref, reason
+                ),
+            }],
+        }
+    }
+
+    fn remote_ref(&self, local_ref: &str) -> String {
+        format!(
+            "remote-process:{}:{}:{}",
+            self.config.remote_target_id, self.config.endpoint_ref, local_ref
+        )
+    }
+}
+
+fn prepend_remote_events(
+    config: &RemoteProcessConfig,
+    events: &mut Vec<RuntimeEvent>,
+    runtime_process_ref: &str,
+) {
+    let mut prefixed = vec![
+        RuntimeEvent {
+            kind: "runtime.remote_target_resolved".to_string(),
+            status: "resolved".to_string(),
+            detail: format!(
+                "target={} endpoint={}",
+                config.remote_target_id, config.endpoint_ref
+            ),
+        },
+        RuntimeEvent {
+            kind: "runtime.remote_process_started".to_string(),
+            status: "started".to_string(),
+            detail: runtime_process_ref.to_string(),
+        },
+    ];
+    prefixed.append(events);
+    *events = prefixed;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConnectivityTunnel {
     Fake(FakeTunnel),
     LocalLoopback(LocalLoopbackTunnel),
@@ -787,7 +961,10 @@ mod tests {
 
     #[test]
     fn planned_runtimes_keep_fake_and_local_process() {
-        assert_eq!(PLANNED_RUNTIMES, ["fake", "local-process"]);
+        assert_eq!(
+            PLANNED_RUNTIMES,
+            ["fake", "local-process", "remote-process"]
+        );
     }
 
     #[test]
@@ -895,6 +1072,85 @@ mod tests {
                 .unwrap()
                 .contains("before-sleep")
         );
+    }
+
+    #[test]
+    fn loopback_remote_runtime_contract_keeps_runtime_refs_and_control_events() {
+        let workspace = temp_root("workspace-remote");
+        let artifacts = temp_root("artifacts-remote");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner = RemoteProcessRunner::new(RemoteProcessConfig::loopback_for_test(
+            "remote-target-1",
+            "endpoint-loopback-1",
+            workspace.clone(),
+            artifacts.clone(),
+        ));
+
+        assert_eq!(runner.binding().variant, "remote-process");
+        let outcome = runner
+            .start_process(LocalProcessRequest {
+                run_id: RunId::new("run-remote"),
+                program: "/bin/sh".to_string(),
+                argv: vec!["-c".to_string(), "printf remote-ok".to_string()],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("run remote loopback process");
+
+        assert_eq!(outcome.process.status, "exited");
+        assert!(
+            outcome
+                .process
+                .runtime_process_ref
+                .starts_with("remote-process:remote-target-1:endpoint-loopback-1:")
+        );
+        assert!(
+            outcome
+                .events
+                .iter()
+                .any(|event| event.kind == "runtime.remote_target_resolved")
+        );
+        assert!(
+            outcome
+                .events
+                .iter()
+                .any(|event| event.kind == "runtime.remote_process_started")
+        );
+        assert!(
+            outcome
+                .events
+                .iter()
+                .any(|event| event.kind == "runtime.process_exited")
+        );
+        assert_eq!(
+            fs::read_to_string(&outcome.stdout.path).unwrap(),
+            "remote-ok"
+        );
+
+        let running_ref = LocalRuntimeProcessRef {
+            status: "running".to_string(),
+            ..outcome.process.clone()
+        };
+        let health = runner.health(&running_ref);
+        assert!(health.live);
+        assert_eq!(health.status, "remote:remote-target-1:running");
+
+        let interrupted = runner.interrupt(&running_ref, "operator interrupt");
+        assert_eq!(interrupted.process.status, "interrupting");
+        assert_eq!(interrupted.events[0].kind, "runtime.remote_interrupt_sent");
+        assert!(interrupted.events[0].detail.contains("endpoint-loopback-1"));
+
+        let terminated = runner.terminate(&running_ref, "operator terminate");
+        assert_eq!(terminated.process.status, "terminating");
+        assert_eq!(terminated.events[0].kind, "runtime.remote_terminate_sent");
+
+        let recovered = runner.recover_orphan(&running_ref);
+        assert_eq!(recovered.recovered_status, "remote_recovered");
+        assert!(recovered.detail.contains("remote-target-1"));
+
+        let exited_recovery = runner.recover_orphan(&outcome.process);
+        assert_eq!(exited_recovery.recovered_status, "remote_orphaned");
+        assert!(artifacts.join("run-remote").exists());
     }
 
     #[test]
