@@ -13,7 +13,13 @@ dependencies = [
 name = "capo-cli"
 version = "0.1.0"
 dependencies = [
+ "capo-adapters",
  "capo-core",
+ "capo-eval",
+ "capo-memory",
+ "capo-runtime",
+ "capo-state",
+ "capo-tools",
 ]
 
 [[package]]

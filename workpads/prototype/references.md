@@ -40,3 +40,16 @@ Observed 2026-05-25.
 - Tool crate: `../../crates/capo-tools`
 - Memory crate: `../../crates/capo-memory`
 - Evaluation crate: `../../crates/capo-eval`
+
+## P1 Domain And Boundary Skeleton
+
+Observed 2026-05-25.
+
+- Core domain/controller preview: `../../crates/capo-core/src/lib.rs`
+- Fake adapter/provider boundary: `../../crates/capo-adapters/src/lib.rs`
+- Fake runtime/tunnel boundary: `../../crates/capo-runtime/src/lib.rs`
+- Fake state boundary: `../../crates/capo-state/src/lib.rs`
+- Fake tool/permission boundary: `../../crates/capo-tools/src/lib.rs`
+- Fake memory boundary: `../../crates/capo-memory/src/lib.rs`
+- Fake evaluation boundary: `../../crates/capo-eval/src/lib.rs`
+- Cross-boundary wiring test: `../../crates/capo-cli/src/main.rs`

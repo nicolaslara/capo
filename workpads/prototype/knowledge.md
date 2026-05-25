@@ -54,6 +54,36 @@ Follow-up:
 - P1 should replace scaffold constants with typed IDs, command envelopes, lifecycle records, and static dispatch boundary enums.
 - P0 intentionally did not add Clap, SQLite, async runtime, or serialization dependencies. Add dependencies only when the implementing task needs them and after recording current release/license context.
 
+## P1 - Core Domain And Boundary Skeleton
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- `capo-core` owns typed IDs, command envelopes, lifecycle/status vocabulary, core records, boundary binding metadata, and the persistence-free `CapoController` preview.
+- Boundary crates own their static dispatch enums and fake variants:
+  - `capo-adapters`: `AgentAdapter::Fake` and `ProviderConnector::Fake`
+  - `capo-runtime`: `RuntimeRunner::Fake` and `ConnectivityTunnel::Fake`
+  - `capo-state`: `StateStore::Fake`
+  - `capo-tools`: `ToolExposure::Fake` and `PermissionPolicy::Fake`
+  - `capo-memory`: `MemoryBackend::Fake`
+  - `capo-eval`: `EvaluationLayer::Fake`
+- `capo-core` does not depend on boundary crates. `capo-cli` depends on all boundary crates and owns the cross-boundary fake wiring test to avoid dependency cycles.
+- The P1 controller is deliberately a preview, not a real orchestrator. It proves command target validation and required boundary presence without persistence or side effects.
+- No new third-party dependencies were added.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed, including `fake_boundaries_wire_through_controller_without_persistence`.
+- `cargo run -p capo-cli -- --help`: passed and remains credential-free.
+
+Follow-up:
+
+- P2 should replace preview-only state with append-only event/store abstractions and projection records.
+- P3 should turn the fake boundary wiring into a real fake e2e loop through the controller/state store.
+
 ## Prototype Gate
 
 Status: not passed.

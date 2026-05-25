@@ -11,4 +11,10 @@ name = "capo"
 path = "src/main.rs"
 
 [dependencies]
+capo-adapters.workspace = true
 capo-core.workspace = true
+capo-eval.workspace = true
+capo-memory.workspace = true
+capo-runtime.workspace = true
+capo-state.workspace = true
+capo-tools.workspace = true

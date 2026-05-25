@@ -35,13 +35,28 @@ Evidence:
 
 ## P1 - Core Domain And Boundary Skeleton
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Define typed IDs, command envelopes, status vocabulary, and core agent/session/run/turn/tool/memory/evidence records.
 - Add static dispatch wrappers for fake adapter, runtime, tunnel, provider, permission, tool, memory, and evaluation variants.
 - Unit tests prove fake variants can be wired through the controller without persistence.
+
+Evidence:
+
+- `crates/capo-core/src/lib.rs`
+- `crates/capo-adapters/src/lib.rs`
+- `crates/capo-runtime/src/lib.rs`
+- `crates/capo-state/src/lib.rs`
+- `crates/capo-tools/src/lib.rs`
+- `crates/capo-memory/src/lib.rs`
+- `crates/capo-eval/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+- `cargo run -p capo-cli -- --help`
 
 ## P2 - SQLite Event Store And Projections
 
