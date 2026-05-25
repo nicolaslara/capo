@@ -60,6 +60,7 @@ Usage:
   capo permission decide --approval APPROVAL_ID --decision allow_once|allow_always|reject_once|reject_always [--state PATH]
   capo workpad index --root PATH [--state PATH]
   capo workpad next [--path PATH] [--state PATH]
+  capo workpad plan-next --agent NAME --adapter codex|claude [--path PATH] [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
   capo workpad start-next --agent NAME [--path PATH] [--state PATH]
   capo workpad import --workpad-task WORKPAD_TASK_ID [--expected-hash HASH] [--task TASK_ID] [--state PATH]
   capo workpad propose --workpad-task WORKPAD_TASK_ID --out DIR [--expected-hash HASH] [--task TASK_ID] [--summary TEXT] [--state PATH]
@@ -160,6 +161,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "workpad" && command == "next" => {
             next_workpad_task(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "workpad" && command == "plan-next" => {
+            plan_next_workpad_task(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "workpad" && command == "start-next" => {
             start_next_workpad_task(&parsed, rest)
@@ -493,16 +497,43 @@ fn plan_adapter_launch(parsed: &ParsedArgs, args: &[String]) -> Result<String, S
     }) {
         return Err(format!("unknown adapter plan-launch option: {unknown}"));
     }
+    let plan = recordable_adapter_dispatch_plan(
+        parsed, &adapter, &agent, &goal, workspace, artifacts, record,
+    )?;
+    Ok(format!(
+        "adapter_launch_planned=true\n{}\n",
+        render_adapter_dispatch_plan(&plan)
+    ))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordedAdapterDispatchPlan {
+    projection: AdapterDispatchPlanProjection,
+    runtime_safe_arg_count: usize,
+    subscription_safe: bool,
+    recorded: bool,
+    recorded_sequence: Option<i64>,
+}
+
+fn recordable_adapter_dispatch_plan(
+    parsed: &ParsedArgs,
+    adapter: &str,
+    agent: &str,
+    goal: &str,
+    workspace: PathBuf,
+    artifacts: PathBuf,
+    record: bool,
+) -> Result<RecordedAdapterDispatchPlan, String> {
     let controller = controller(parsed)?;
     controller
-        .registration_for_agent_name(&agent)
-        .or_else(|_| controller.register_agent(&agent))
+        .registration_for_agent_name(agent)
+        .or_else(|_| controller.register_agent(agent))
         .map_err(debug_error)?;
     let plan = controller
-        .plan_local_adapter_dispatch(&adapter, &agent, &goal, workspace, artifacts)
+        .plan_local_adapter_dispatch(adapter, agent, goal, workspace, artifacts)
         .map_err(|error| format!("adapter launch planning failed: {error}"))?;
     let safe_prompt_arg_count = plan.runtime_arg_count.saturating_sub(1);
-    let goal_hash = stable_cli_hash(&goal);
+    let goal_hash = stable_cli_hash(goal);
     let projection = adapter_dispatch_plan_projection(&plan, &goal_hash);
     let recorded_sequence = if record {
         let event = NewEvent {
@@ -539,36 +570,52 @@ fn plan_adapter_launch(parsed: &ParsedArgs, args: &[String]) -> Result<String, S
         };
         Some(
             state(parsed)?
-                .append_event(event, &[ProjectionRecord::AdapterDispatchPlan(projection)])
+                .append_event(
+                    event,
+                    &[ProjectionRecord::AdapterDispatchPlan(projection.clone())],
+                )
                 .map_err(debug_error)?,
         )
     } else {
         None
     };
-    Ok(format!(
-        "adapter_launch_planned=true\nadapter={}\nprovider_kind={}\ncredential_scope={}\nagent={}\nagent_id={}\nsession_id={}\nrun_id={}\nruntime_program={}\nruntime_arg_count={}\nruntime_prompt_policy=not_rendered\nruntime_safe_arg_count={}\nruntime_cwd={}\nartifact_root={}\nrequest_env_count={}\nenv_allowlist={}\nredaction_rules={}\nstdout_format={}\nstderr_policy={}\nsubscription_safe=true\nprovider_cli_executed=false\nrecorded={}\nrecorded_sequence={}\n",
-        plan.launch_plan.adapter_kind.as_str(),
-        plan.launch_plan.provider_kind,
-        plan.launch_plan.credential_scope,
-        plan.agent_name,
-        plan.agent_id,
-        plan.session_id,
-        plan.run_id,
-        plan.runtime_program,
-        plan.runtime_arg_count,
-        safe_prompt_arg_count,
-        plan.runtime_cwd.display(),
-        plan.launch_plan.artifact_root.display(),
-        plan.request_env_count,
-        plan.launch_plan.env_allowlist.len(),
-        plan.launch_plan.redaction_rules.len(),
-        plan.launch_plan.stdout_format,
-        plan.launch_plan.stderr_policy,
-        record,
-        recorded_sequence
+    Ok(RecordedAdapterDispatchPlan {
+        projection,
+        runtime_safe_arg_count: safe_prompt_arg_count,
+        subscription_safe: true,
+        recorded: record,
+        recorded_sequence,
+    })
+}
+
+fn render_adapter_dispatch_plan(plan: &RecordedAdapterDispatchPlan) -> String {
+    format!(
+        "adapter={}\nprovider_kind={}\ncredential_scope={}\nagent={}\nagent_id={}\nsession_id={}\nrun_id={}\nruntime_program={}\nruntime_arg_count={}\nruntime_prompt_policy={}\nruntime_safe_arg_count={}\nruntime_cwd={}\nartifact_root={}\nrequest_env_count={}\nenv_allowlist={}\nredaction_rules={}\nstdout_format={}\nstderr_policy={}\nsubscription_safe={}\nprovider_cli_executed={}\nrecorded={}\nrecorded_sequence={}",
+        plan.projection.adapter_kind,
+        plan.projection.provider_kind,
+        plan.projection.credential_scope,
+        plan.projection.agent_name,
+        plan.projection.agent_id,
+        plan.projection.session_id,
+        plan.projection.run_id,
+        plan.projection.runtime_program,
+        plan.projection.runtime_arg_count,
+        plan.projection.runtime_prompt_policy,
+        plan.runtime_safe_arg_count,
+        plan.projection.runtime_cwd,
+        plan.projection.artifact_root,
+        plan.projection.request_env_count,
+        plan.projection.env_allowlist_count,
+        plan.projection.redaction_rule_count,
+        plan.projection.stdout_format,
+        plan.projection.stderr_policy,
+        plan.subscription_safe,
+        plan.projection.provider_cli_executed,
+        plan.recorded,
+        plan.recorded_sequence
             .map(|sequence| sequence.to_string())
-            .unwrap_or_else(|| "none".to_string()),
-    ))
+            .unwrap_or_else(|| "none".to_string())
+    )
 }
 
 fn adapter_dispatch_plan_projection(
@@ -2111,6 +2158,42 @@ fn next_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, Str
     ))
 }
 
+fn plan_next_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let options = WorkpadPlanNextOptions::parse(args, &parsed.state_root)?;
+    validate_local_launch_adapter(&options.adapter)?;
+    let state = state(parsed)?;
+    let candidates = next_workpad_candidates(&state, options.path_filter.as_deref())?;
+    let next = candidates
+        .first()
+        .ok_or_else(|| "no actionable observed-only workpad task found".to_string())?
+        .clone();
+    let goal = workpad_task_goal(&next);
+    let plan = recordable_adapter_dispatch_plan(
+        parsed,
+        &options.adapter,
+        &options.agent,
+        &goal,
+        options.workspace,
+        options.artifacts,
+        options.record,
+    )?;
+    Ok(format!(
+        "workpad_next_planned=true\nagent={}\nadapter={}\nworkpad_task_id={}\ndefault_task_id={}\nsource={}#{}\ntitle={}\nobserved_status={}\ncapo_execution_status={}\ncandidate_count={}\npath_filter={}\n{}\n",
+        options.agent,
+        plan.projection.adapter_kind,
+        next.workpad_task_id,
+        default_workpad_task_id(&next.workpad_task_id),
+        next.path,
+        next.source_anchor,
+        next.title,
+        next.observed_status,
+        next.capo_execution_status,
+        candidates.len(),
+        options.path_filter.as_deref().unwrap_or("none"),
+        render_adapter_dispatch_plan(&plan)
+    ))
+}
+
 fn start_next_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let agent = required_arg(args, "--agent")?;
     let args_without_agent = remove_option(args, "--agent");
@@ -2169,6 +2252,13 @@ fn start_next_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<Strin
     ))
 }
 
+fn workpad_task_goal(task: &WorkpadTaskProjection) -> String {
+    format!(
+        "Work on {} from {}#{} (workpad_task_id={})",
+        task.title, task.path, task.source_anchor, task.workpad_task_id
+    )
+}
+
 fn workpad_path_filter(args: &[String]) -> Result<Option<String>, String> {
     let mut path_filter = None;
     let mut index = 0;
@@ -2186,6 +2276,90 @@ fn workpad_path_filter(args: &[String]) -> Result<Option<String>, String> {
         }
     }
     Ok(path_filter)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkpadPlanNextOptions {
+    agent: String,
+    adapter: String,
+    path_filter: Option<String>,
+    workspace: PathBuf,
+    artifacts: PathBuf,
+    record: bool,
+}
+
+impl WorkpadPlanNextOptions {
+    fn parse(args: &[String], state_root: &Path) -> Result<Self, String> {
+        let mut agent = None;
+        let mut adapter = None;
+        let mut path_filter = None;
+        let mut workspace = None;
+        let mut artifacts = None;
+        let mut record = false;
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--agent" => {
+                    agent = Some(
+                        args.get(index + 1)
+                            .filter(|value| !value.starts_with("--"))
+                            .ok_or_else(|| "--agent requires a value".to_string())?
+                            .clone(),
+                    );
+                    index += 2;
+                }
+                "--adapter" => {
+                    adapter = Some(
+                        args.get(index + 1)
+                            .filter(|value| !value.starts_with("--"))
+                            .ok_or_else(|| "--adapter requires a value".to_string())?
+                            .clone(),
+                    );
+                    index += 2;
+                }
+                "--path" => {
+                    path_filter = Some(
+                        args.get(index + 1)
+                            .filter(|value| !value.starts_with("--"))
+                            .ok_or_else(|| "--path requires a value".to_string())?
+                            .clone(),
+                    );
+                    index += 2;
+                }
+                "--workspace" => {
+                    workspace = Some(PathBuf::from(
+                        args.get(index + 1)
+                            .filter(|value| !value.starts_with("--"))
+                            .ok_or_else(|| "--workspace requires a value".to_string())?,
+                    ));
+                    index += 2;
+                }
+                "--artifacts" => {
+                    artifacts = Some(PathBuf::from(
+                        args.get(index + 1)
+                            .filter(|value| !value.starts_with("--"))
+                            .ok_or_else(|| "--artifacts requires a value".to_string())?,
+                    ));
+                    index += 2;
+                }
+                "--record" => {
+                    record = true;
+                    index += 1;
+                }
+                other => return Err(format!("unknown workpad plan-next option: {other}")),
+            }
+        }
+        Ok(Self {
+            agent: agent.ok_or_else(|| "--agent is required".to_string())?,
+            adapter: adapter.ok_or_else(|| "--adapter is required".to_string())?,
+            path_filter,
+            workspace: workspace
+                .unwrap_or_else(|| state_root.join("workpad-plan-next").join("workspace")),
+            artifacts: artifacts
+                .unwrap_or_else(|| state_root.join("workpad-plan-next").join("artifacts")),
+            record,
+        })
+    }
 }
 
 fn next_workpad_candidates(
@@ -3463,6 +3637,7 @@ mod tests {
         assert!(HELP.contains("adapter dogfood-gate"));
         assert!(HELP.contains("workpad index"));
         assert!(HELP.contains("workpad next"));
+        assert!(HELP.contains("workpad plan-next"));
         assert!(HELP.contains("workpad start-next"));
         assert!(HELP.contains("workpad propose"));
         assert!(HELP.contains("workpad apply"));
@@ -3985,6 +4160,47 @@ mod tests {
         assert!(dashboard_by_workpad.contains("workpad_tasks=1"));
         assert!(dashboard_by_workpad.contains("workpad_task=workpads:features:tasks.md#f2"));
         assert!(!dashboard_by_workpad.contains("workpad_task=TASKS.md#f2"));
+        let plan_next = run_cli(vec![
+            "workpad".to_string(),
+            "plan-next".to_string(),
+            "--agent".to_string(),
+            "codex-dogfood".to_string(),
+            "--adapter".to_string(),
+            "codex".to_string(),
+            "--path".to_string(),
+            "workpads/features/tasks.md".to_string(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("plan next workpad task for adapter");
+        assert!(plan_next.contains("workpad_next_planned=true"));
+        assert!(plan_next.contains("adapter=codex_exec"));
+        assert!(plan_next.contains("workpad_task_id=workpads:features:tasks.md#f2"));
+        assert!(plan_next.contains("runtime_prompt_policy=not_rendered"));
+        assert!(plan_next.contains("provider_cli_executed=false"));
+        assert!(plan_next.contains("recorded=true"));
+        assert!(!plan_next.contains("Work on Workpad Dogfood Bridge"));
+        let plans = state
+            .adapter_dispatch_plans(&project_id())
+            .expect("dispatch plans");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].adapter_kind, "codex_exec");
+        assert_eq!(plans[0].runtime_prompt_policy, "not_rendered");
+        assert!(!plans[0].provider_cli_executed);
+        let planned_workpad_task = state
+            .workpad_task(&project_id(), "workpads:features:tasks.md#f2")
+            .expect("planned workpad task query")
+            .expect("planned workpad task");
+        assert_eq!(planned_workpad_task.capo_execution_status, "observed_only");
+        let dashboard_after_plan = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard after plan-next");
+        assert!(dashboard_after_plan.contains("adapter_dispatch_plans=1"));
+        assert!(!dashboard_after_plan.contains("Work on Workpad Dogfood Bridge"));
         let source_hash = files
             .iter()
             .find(|file| file.path == "workpads/features/tasks.md")

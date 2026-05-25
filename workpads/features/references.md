@@ -120,6 +120,16 @@ Observed 2026-05-25.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC11.
 
+## F1/AC12 Workpad Next Adapter Plan
+
+Observed 2026-05-25.
+
+- CLI `workpad plan-next` command, dispatch-plan composition, prompt-redaction regression coverage: `../../crates/capo-cli/src/main.rs`
+- Workpad scanner/read models selected by `plan-next`: `../../crates/capo-workpads/src/lib.rs`, `../../crates/capo-state/src/lib.rs`
+- Adapter dispatch-plan projection reused by `plan-next`: `../../crates/capo-state/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC12.
+
 ## F3/DS1 Query Surface Extraction
 
 Observed 2026-05-25.

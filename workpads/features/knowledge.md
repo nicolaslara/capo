@@ -295,6 +295,25 @@ Follow-up:
 
 - A future real-dispatch slice should transition a recorded plan from `planned` into runtime start events only after AC1 records clean opt-in Codex smoke evidence.
 
+## F1/AC12 - Workpad Next Adapter Plan
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo workpad plan-next --agent NAME --adapter codex|claude` as the non-executing bridge from indexed markdown workpads into real-adapter dispatch planning.
+- Use the same prompt-redacted dispatch-plan projection as `adapter plan-launch --record`; the raw generated goal is hashed for identity but not rendered or stored.
+- Keep workpad source state unchanged. `plan-next` selects the next actionable `observed_only` workpad task but does not import it, start it, or update its Capo execution status.
+- Keep provider execution unclaimed. The recorded dispatch plan says `provider_cli_executed=false` and does not create runtime artifact directories.
+
+Verification:
+
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+
+Follow-up:
+
+- After real Codex smoke evidence clears AC1, `workpad plan-next` can become the preview step before an explicit real-adapter `workpad start-next` variant.
+
 ## F3/DS1 - Query Surface Extraction
 
 Status: completed on 2026-05-25.

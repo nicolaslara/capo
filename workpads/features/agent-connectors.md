@@ -292,3 +292,25 @@ Decision:
 - Make `plan-launch` non-mutating by default except for the existing safe agent registration behavior; require `--record` to persist the dispatch-plan projection.
 - Store runtime metadata, provider kind, credential scope, redaction/env counts, and `provider_cli_executed=false`, but do not store or render the raw prompt.
 - AC11 improves inspectability and restart/rebuild behavior for planned real-agent dispatch. It still does not satisfy AC1 or AC3 because no subscription-backed provider process is run.
+
+### AC12 - Workpad Next Adapter Plan
+
+Status: completed
+
+Acceptance:
+
+- Compose indexed workpad next-task selection with Codex/Claude adapter dispatch planning.
+- Allow operators to record a prompt-redacted dispatch plan for the next actionable observed-only workpad task.
+- Preserve markdown/workpad source truth: planning must not import, start, or mark the selected workpad task active.
+- Keep provider execution blocked and explicit: no provider CLI launch, no runtime artifact directory creation, and no real-agent readiness claim.
+
+Evidence:
+
+- CLI `capo workpad plan-next --agent NAME --adapter codex|claude [--path PATH] [--record]` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+
+Decision:
+
+- Add `workpad plan-next` as the dogfood bridge from Capo's markdown task queue into real-adapter dispatch planning.
+- Reuse the same dispatch-plan projection and prompt-redaction rules as `adapter plan-launch --record`.
+- Planning the next workpad task records adapter intent only. `workpad import`, `workpad start-next`, and future real adapter execution remain separate explicit mutation surfaces.
