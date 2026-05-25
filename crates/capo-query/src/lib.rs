@@ -7,11 +7,12 @@
 use capo_core::{ProjectId, SessionId};
 use capo_state::{
     AdapterDispatchExecutionRequestProjection, AdapterDispatchGateProjection,
-    AdapterDispatchPlanProjection, AdapterDispatchPromptSourceProjection,
-    AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
-    AgentProjection, ConnectivityExposureProjection, EventRecord, EvidenceProjection,
-    MemoryPacketProjection, RunProjection, SessionProjection, SqliteStateStore, StateResult,
-    ToolCallProjection, WorkpadTaskProjection,
+    AdapterDispatchPlanProjection, AdapterDispatchPromptMaterializationProjection,
+    AdapterDispatchPromptSourceProjection, AdapterDispatchReplayProjection,
+    AdapterReadinessProjection, AdapterSmokeReportProjection, AgentProjection,
+    ConnectivityExposureProjection, EventRecord, EvidenceProjection, MemoryPacketProjection,
+    RunProjection, SessionProjection, SqliteStateStore, StateResult, ToolCallProjection,
+    WorkpadTaskProjection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,6 +27,8 @@ pub struct ProjectDashboard {
     pub adapter_dispatch_replays: Vec<AdapterDispatchReplayProjection>,
     pub adapter_dispatch_execution_requests: Vec<AdapterDispatchExecutionRequestProjection>,
     pub adapter_dispatch_prompt_sources: Vec<AdapterDispatchPromptSourceProjection>,
+    pub adapter_dispatch_prompt_materializations:
+        Vec<AdapterDispatchPromptMaterializationProjection>,
     pub adapter_dogfood_gate: AdapterDogfoodGate,
     pub workpad_tasks: Vec<WorkpadTaskProjection>,
 }
@@ -144,6 +147,8 @@ pub fn project_dashboard(
         state.adapter_dispatch_execution_requests(&query.project_id)?;
     let adapter_dispatch_prompt_sources =
         state.adapter_dispatch_prompt_sources(&query.project_id)?;
+    let adapter_dispatch_prompt_materializations =
+        state.adapter_dispatch_prompt_materializations(&query.project_id)?;
     let adapter_dogfood_gate = adapter_dogfood_gate(&adapter_smoke_reports);
     let workpad_tasks = state
         .workpad_tasks(&query.project_id)?
@@ -176,6 +181,7 @@ pub fn project_dashboard(
         adapter_dispatch_replays,
         adapter_dispatch_execution_requests,
         adapter_dispatch_prompt_sources,
+        adapter_dispatch_prompt_materializations,
         adapter_dogfood_gate,
         workpad_tasks,
     })
@@ -475,6 +481,7 @@ mod tests {
         append_adapter_dispatch_replay(&state, &project_id);
         append_adapter_dispatch_execution_request(&state, &project_id);
         append_adapter_dispatch_prompt_source(&state, &project_id);
+        append_adapter_dispatch_prompt_materialization(&state, &project_id);
 
         let dashboard =
             project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
@@ -519,6 +526,14 @@ mod tests {
             "replayable_if_source_hash_matches"
         );
         assert_eq!(source.raw_prompt_policy, "not_rendered");
+        assert_eq!(dashboard.adapter_dispatch_prompt_materializations.len(), 1);
+        let materialization = &dashboard.adapter_dispatch_prompt_materializations[0];
+        assert_eq!(
+            materialization.dispatch_plan_id,
+            "adapter-dispatch-plan-codex"
+        );
+        assert_eq!(materialization.status, "ready_without_rendering_prompt");
+        assert_eq!(materialization.raw_prompt_policy, "not_rendered");
     }
 
     #[test]
@@ -1138,6 +1153,50 @@ mod tests {
                 )],
             )
             .expect("append adapter dispatch prompt source");
+    }
+
+    fn append_adapter_dispatch_prompt_materialization(
+        state: &SqliteStateStore,
+        project_id: &ProjectId,
+    ) {
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-adapter-dispatch-prompt-materialization-codex".to_string(),
+                    kind: EventKind::AdapterDispatchPromptMaterialized,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some("adapter-dispatch-prompt-materialization-codex".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::AdapterDispatchPromptMaterialization(
+                    AdapterDispatchPromptMaterializationProjection {
+                        materialization_id: "adapter-dispatch-prompt-materialization-codex"
+                            .to_string(),
+                        project_id: project_id.clone(),
+                        dispatch_plan_id: "adapter-dispatch-plan-codex".to_string(),
+                        prompt_source_id: "adapter-dispatch-prompt-source-codex".to_string(),
+                        source_kind: "workpad_task".to_string(),
+                        source_ref: Some("workpads/features/tasks.md#f1".to_string()),
+                        expected_source_hash: Some("source-hash".to_string()),
+                        observed_source_hash: Some("source-hash".to_string()),
+                        expected_prompt_hash: "prompt-hash".to_string(),
+                        materialized_prompt_hash: Some("prompt-hash".to_string()),
+                        status: "ready_without_rendering_prompt".to_string(),
+                        raw_prompt_policy: "not_rendered".to_string(),
+                        reason_codes: "prompt_hash_matches_source".to_string(),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append adapter dispatch prompt materialization");
     }
 
     fn append_workpad_task(

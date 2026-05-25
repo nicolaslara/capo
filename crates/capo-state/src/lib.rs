@@ -1035,6 +1035,42 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn adapter_dispatch_prompt_materializations(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<AdapterDispatchPromptMaterializationProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT materialization_id, project_id, dispatch_plan_id, prompt_source_id,
+                    source_kind, source_ref, expected_source_hash, observed_source_hash,
+                    expected_prompt_hash, materialized_prompt_hash, status,
+                    raw_prompt_policy, reason_codes, updated_sequence
+             FROM adapter_dispatch_prompt_materializations
+             WHERE project_id = ?1
+             ORDER BY updated_sequence ASC, materialization_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(AdapterDispatchPromptMaterializationProjection {
+                materialization_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                dispatch_plan_id: row.get(2)?,
+                prompt_source_id: row.get(3)?,
+                source_kind: row.get(4)?,
+                source_ref: row.get(5)?,
+                expected_source_hash: row.get(6)?,
+                observed_source_hash: row.get(7)?,
+                expected_prompt_hash: row.get(8)?,
+                materialized_prompt_hash: row.get(9)?,
+                status: row.get(10)?,
+                raw_prompt_policy: row.get(11)?,
+                reason_codes: row.get(12)?,
+                updated_sequence: row.get(13)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn evidence_for_session(
         &self,
         session_id: &SessionId,
@@ -1516,6 +1552,7 @@ pub enum EventKind {
     AdapterDispatchReplayed,
     AdapterDispatchExecutionRequested,
     AdapterDispatchPromptSourceRecorded,
+    AdapterDispatchPromptMaterialized,
     ToolCallRequested,
     ToolInvocationStarted,
     ToolOutputArtifactRecorded,
@@ -1564,6 +1601,7 @@ impl EventKind {
             Self::AdapterDispatchReplayed => "adapter.dispatch_replayed",
             Self::AdapterDispatchExecutionRequested => "adapter.dispatch_execution_requested",
             Self::AdapterDispatchPromptSourceRecorded => "adapter.dispatch_prompt_source_recorded",
+            Self::AdapterDispatchPromptMaterialized => "adapter.dispatch_prompt_materialized",
             Self::ToolCallRequested => "tool.call_requested",
             Self::ToolInvocationStarted => "tool.invocation_started",
             Self::ToolOutputArtifactRecorded => "tool.output_artifact_recorded",
@@ -1664,6 +1702,7 @@ pub enum ProjectionRecord {
     AdapterDispatchReplay(AdapterDispatchReplayProjection),
     AdapterDispatchExecutionRequest(AdapterDispatchExecutionRequestProjection),
     AdapterDispatchPromptSource(AdapterDispatchPromptSourceProjection),
+    AdapterDispatchPromptMaterialization(AdapterDispatchPromptMaterializationProjection),
     ToolCall(ToolCallProjection),
     MemoryPacketRef(MemoryPacketProjection),
     MemoryRecord(Box<MemoryRecordProjection>),
@@ -1898,6 +1937,24 @@ pub struct AdapterDispatchPromptSourceProjection {
     pub source_hash: Option<String>,
     pub materialization_status: String,
     pub raw_prompt_policy: String,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterDispatchPromptMaterializationProjection {
+    pub materialization_id: String,
+    pub project_id: ProjectId,
+    pub dispatch_plan_id: String,
+    pub prompt_source_id: String,
+    pub source_kind: String,
+    pub source_ref: Option<String>,
+    pub expected_source_hash: Option<String>,
+    pub observed_source_hash: Option<String>,
+    pub expected_prompt_hash: String,
+    pub materialized_prompt_hash: Option<String>,
+    pub status: String,
+    pub raw_prompt_policy: String,
+    pub reason_codes: String,
     pub updated_sequence: i64,
 }
 
@@ -2360,6 +2417,22 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             raw_prompt_policy TEXT NOT NULL,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS adapter_dispatch_prompt_materializations (
+            materialization_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            dispatch_plan_id TEXT NOT NULL,
+            prompt_source_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_ref TEXT,
+            expected_source_hash TEXT,
+            observed_source_hash TEXT,
+            expected_prompt_hash TEXT NOT NULL,
+            materialized_prompt_hash TEXT,
+            status TEXT NOT NULL,
+            raw_prompt_policy TEXT NOT NULL,
+            reason_codes TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS tool_calls (
             tool_call_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
@@ -2556,6 +2629,7 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "adapter_dispatch_replays",
         "adapter_dispatch_execution_requests",
         "adapter_dispatch_prompt_sources",
+        "adapter_dispatch_prompt_materializations",
         "tool_calls",
         "memory_packet_refs",
         "memory_records",
@@ -3100,6 +3174,46 @@ fn apply_projection_record(
                 sequence,
             ],
         )?,
+        ProjectionRecord::AdapterDispatchPromptMaterialization(materialization) => {
+            transaction.execute(
+                "INSERT INTO adapter_dispatch_prompt_materializations(
+                    materialization_id, project_id, dispatch_plan_id, prompt_source_id,
+                    source_kind, source_ref, expected_source_hash, observed_source_hash,
+                    expected_prompt_hash, materialized_prompt_hash, status,
+                    raw_prompt_policy, reason_codes, updated_sequence
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                 ON CONFLICT(materialization_id) DO UPDATE SET
+                    project_id = excluded.project_id,
+                    dispatch_plan_id = excluded.dispatch_plan_id,
+                    prompt_source_id = excluded.prompt_source_id,
+                    source_kind = excluded.source_kind,
+                    source_ref = excluded.source_ref,
+                    expected_source_hash = excluded.expected_source_hash,
+                    observed_source_hash = excluded.observed_source_hash,
+                    expected_prompt_hash = excluded.expected_prompt_hash,
+                    materialized_prompt_hash = excluded.materialized_prompt_hash,
+                    status = excluded.status,
+                    raw_prompt_policy = excluded.raw_prompt_policy,
+                    reason_codes = excluded.reason_codes,
+                    updated_sequence = excluded.updated_sequence",
+                params![
+                    materialization.materialization_id,
+                    materialization.project_id.as_str(),
+                    materialization.dispatch_plan_id,
+                    materialization.prompt_source_id,
+                    materialization.source_kind,
+                    materialization.source_ref,
+                    materialization.expected_source_hash,
+                    materialization.observed_source_hash,
+                    materialization.expected_prompt_hash,
+                    materialization.materialized_prompt_hash,
+                    materialization.status,
+                    materialization.raw_prompt_policy,
+                    materialization.reason_codes,
+                    sequence,
+                ],
+            )
+        }?,
         ProjectionRecord::ToolCall(tool_call) => transaction.execute(
             "INSERT INTO tool_calls(
                 tool_call_id, session_id, turn_id, tool_name, tool_origin, status,
@@ -3679,6 +3793,27 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
             h: Some(source.raw_prompt_policy.clone()),
             payload_json: "{}".to_string(),
         },
+        ProjectionRecord::AdapterDispatchPromptMaterialization(materialization) => {
+            ProjectionRecordRow {
+                kind: "adapter_dispatch_prompt_materialization",
+                record_id: materialization.materialization_id.clone(),
+                a: Some(materialization.project_id.to_string()),
+                b: Some(materialization.dispatch_plan_id.clone()),
+                c: Some(materialization.prompt_source_id.clone()),
+                d: Some(materialization.source_kind.clone()),
+                e: Some(materialization.expected_prompt_hash.clone()),
+                f: materialization.materialized_prompt_hash.clone(),
+                g: Some(materialization.status.clone()),
+                h: Some(materialization.raw_prompt_policy.clone()),
+                payload_json: json!({
+                    "source_ref": materialization.source_ref,
+                    "expected_source_hash": materialization.expected_source_hash,
+                    "observed_source_hash": materialization.observed_source_hash,
+                    "reason_codes": materialization.reason_codes,
+                })
+                .to_string(),
+            }
+        }
         ProjectionRecord::ToolCall(tool_call) => ProjectionRecordRow {
             kind: "tool_call",
             record_id: tool_call.tool_call_id.to_string(),
@@ -4614,6 +4749,67 @@ fn projection_record_from_row(
                 updated_sequence: 0,
             },
         )),
+        "adapter_dispatch_prompt_materialization" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::AdapterDispatchPromptMaterialization(
+                AdapterDispatchPromptMaterializationProjection {
+                    materialization_id: record_id,
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "adapter_dispatch_prompt_materialization",
+                        a,
+                        "project_id",
+                    )?),
+                    dispatch_plan_id: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_prompt_materialization",
+                        b,
+                        "dispatch_plan_id",
+                    )?,
+                    prompt_source_id: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_prompt_materialization",
+                        c,
+                        "prompt_source_id",
+                    )?,
+                    source_kind: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_prompt_materialization",
+                        d,
+                        "source_kind",
+                    )?,
+                    source_ref: payload_optional_string(&payload, "source_ref"),
+                    expected_source_hash: payload_optional_string(&payload, "expected_source_hash"),
+                    observed_source_hash: payload_optional_string(&payload, "observed_source_hash"),
+                    expected_prompt_hash: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_prompt_materialization",
+                        e,
+                        "expected_prompt_hash",
+                    )?,
+                    materialized_prompt_hash: f,
+                    status: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_prompt_materialization",
+                        g,
+                        "status",
+                    )?,
+                    raw_prompt_policy: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_prompt_materialization",
+                        h,
+                        "raw_prompt_policy",
+                    )?,
+                    reason_codes: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_prompt_materialization",
+                        &payload,
+                        "reason_codes",
+                    )?,
+                    updated_sequence: 0,
+                },
+            ))
+        }
         "tool_call" => Ok(ProjectionRecord::ToolCall(ToolCallProjection {
             tool_call_id: ToolCallId::new(record_id),
             session_id: SessionId::new(required_field(
@@ -6583,6 +6779,65 @@ mod tests {
             "replayable_if_source_hash_matches"
         );
         assert_eq!(sources[0].raw_prompt_policy, "not_rendered");
+    }
+
+    #[test]
+    fn adapter_dispatch_prompt_materialization_is_persisted_and_rebuilt() {
+        let store = temp_store("adapter-dispatch-prompt-materialization-rebuild");
+        let project_id = ProjectId::new("project-capo");
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-adapter-dispatch-prompt-materialization".to_string(),
+                    kind: EventKind::AdapterDispatchPromptMaterialized,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some("adapter-dispatch-prompt-materialization-codex".to_string()),
+                    payload_json:
+                        "{\"raw_prompt_policy\":\"not_rendered\",\"status\":\"ready_without_rendering_prompt\"}"
+                            .to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::AdapterDispatchPromptMaterialization(
+                    AdapterDispatchPromptMaterializationProjection {
+                        materialization_id: "adapter-dispatch-prompt-materialization-codex"
+                            .to_string(),
+                        project_id: project_id.clone(),
+                        dispatch_plan_id: "adapter-dispatch-plan-codex".to_string(),
+                        prompt_source_id: "adapter-dispatch-prompt-source-codex".to_string(),
+                        source_kind: "workpad_task".to_string(),
+                        source_ref: Some("workpads/features/tasks.md#f1".to_string()),
+                        expected_source_hash: Some("source-hash".to_string()),
+                        observed_source_hash: Some("source-hash".to_string()),
+                        expected_prompt_hash: "prompt-hash".to_string(),
+                        materialized_prompt_hash: Some("prompt-hash".to_string()),
+                        status: "ready_without_rendering_prompt".to_string(),
+                        raw_prompt_policy: "not_rendered".to_string(),
+                        reason_codes: "prompt_hash_matches_source".to_string(),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append adapter dispatch prompt materialization");
+
+        store.rebuild_projections().expect("rebuild projections");
+        let rows = store
+            .adapter_dispatch_prompt_materializations(&project_id)
+            .expect("adapter dispatch prompt materializations");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "ready_without_rendering_prompt");
+        assert_eq!(rows[0].raw_prompt_policy, "not_rendered");
+        assert_eq!(
+            rows[0].materialized_prompt_hash.as_deref(),
+            Some("prompt-hash")
+        );
     }
 
     #[test]

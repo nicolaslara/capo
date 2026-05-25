@@ -72,6 +72,7 @@ Progress:
 - AC17 dispatch chain status is completed. `capo adapter dispatch-status` summarizes a recorded dispatch plan, latest gate, latest replay, and next safe action from shared read models without rendering raw prompts or fixture text.
 - AC18 dispatch execution request audit is completed. `capo adapter execution-request --record` persists blocked or waiting-on-opt-in real-dispatch requests separately from plans, gates, and fixture replays without launching provider CLIs.
 - AC19 dispatch prompt source contract is completed. Recorded dispatch plans now get prompt-source rows that distinguish non-replayable inline prompts from hash-guarded workpad-derived prompts without storing raw prompt text.
+- AC20 dispatch prompt materialization dry run is completed. `capo adapter materialize-prompt --record` verifies prompt materialization readiness without rendering prompts or launching provider CLIs.
 
 Evidence:
 
@@ -107,6 +108,8 @@ Evidence:
 - `cargo test -p capo-state adapter_dispatch_execution_request -- --nocapture`
 - `capo adapter execution-request --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]`
 - `cargo test -p capo-state adapter_dispatch_prompt_source -- --nocapture`
+- `cargo test -p capo-state adapter_dispatch_prompt_materialization -- --nocapture`
+- `capo adapter materialize-prompt --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]`
 - Focused F1 connector safety review: no blocking findings; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge

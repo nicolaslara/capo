@@ -199,6 +199,16 @@ Observed 2026-05-25.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC19.
 
+## F1/AC20 Dispatch Prompt Materialization Dry Run
+
+Observed 2026-05-26.
+
+- CLI `capo adapter materialize-prompt` command and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Dispatch prompt materialization projection, event kind, table, rebuild codec, and read query: `../../crates/capo-state/src/lib.rs`
+- Shared dashboard query field for prompt materialization rows: `../../crates/capo-query/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC20.
+
 ## F3/DS1 Query Surface Extraction
 
 Observed 2026-05-25.

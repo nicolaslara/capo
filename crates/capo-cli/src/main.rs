@@ -16,13 +16,14 @@ use capo_eval::TaskOutcomeReport;
 use capo_query::{AdapterDogfoodGate, ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 use capo_state::{
     AdapterDispatchExecutionRequestProjection, AdapterDispatchGateProjection,
-    AdapterDispatchPlanProjection, AdapterDispatchPromptSourceProjection,
-    AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
-    ArtifactRecord, CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection,
-    MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection, NewEvent,
-    PermissionApprovalProjection, ProjectionRecord, RedactionState, ReviewFindingProjection,
-    RunProjection, SessionProjection, SqliteStateStore, ToolCallProjection, WorkpadFileProjection,
-    WorkpadIndexResetProjection, WorkpadTaskProjection,
+    AdapterDispatchPlanProjection, AdapterDispatchPromptMaterializationProjection,
+    AdapterDispatchPromptSourceProjection, AdapterDispatchReplayProjection,
+    AdapterReadinessProjection, AdapterSmokeReportProjection, ArtifactRecord,
+    CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection, MemoryPacketProjection,
+    MemoryRecordProjection, MemorySourceProjection, NewEvent, PermissionApprovalProjection,
+    ProjectionRecord, RedactionState, ReviewFindingProjection, RunProjection, SessionProjection,
+    SqliteStateStore, ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection,
+    WorkpadTaskProjection,
 };
 use capo_voice::{
     MemoryIngestionPolicy, TranscriptRetentionPolicy, VOICE_TRANSCRIPT_RETENTION_DEFAULT,
@@ -49,6 +50,7 @@ Usage:
   capo adapter dispatch-gate --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter dispatch-status --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
   capo adapter execution-request --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
+  capo adapter materialize-prompt --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter dogfood-gate [--state PATH]
   capo adapter smoke-report scan --artifact-root PATH [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
@@ -132,6 +134,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "adapter" && command == "execution-request" => {
             adapter_dispatch_execution_request(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "adapter" && command == "materialize-prompt" => {
+            adapter_dispatch_materialize_prompt(&parsed, rest)
         }
         [area, command] if area == "adapter" && command == "dogfood-gate" => {
             adapter_dogfood_gate(&parsed)
@@ -1347,6 +1352,202 @@ fn adapter_dispatch_execution_request(
     ))
 }
 
+fn adapter_dispatch_materialize_prompt(
+    parsed: &ParsedArgs,
+    args: &[String],
+) -> Result<String, String> {
+    let dispatch_plan_id = required_arg(args, "--dispatch-plan")?;
+    let record = has_flag(args, "--record");
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan" | "--record")
+    }) {
+        return Err(format!(
+            "unknown adapter materialize-prompt option: {unknown}"
+        ));
+    }
+    let state = state(parsed)?;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    let prompt_source = dashboard
+        .adapter_dispatch_prompt_sources
+        .iter()
+        .rev()
+        .find(|source| source.dispatch_plan_id == dispatch_plan_id)
+        .ok_or_else(|| {
+            format!("dispatch plan has no recorded prompt source: {dispatch_plan_id}")
+        })?;
+    let materialization =
+        adapter_dispatch_prompt_materialization_projection(&state, prompt_source)?;
+    let recorded_sequence = if record {
+        let event = NewEvent {
+            event_id: format!(
+                "event-adapter-dispatch-prompt-materialization-{}",
+                stable_cli_hash(&materialization.materialization_id)
+            ),
+            kind: EventKind::AdapterDispatchPromptMaterialized,
+            actor: "local-cli".to_string(),
+            project_id: Some(materialization.project_id.clone()),
+            task_id: None,
+            agent_id: None,
+            session_id: None,
+            run_id: None,
+            turn_id: None,
+            item_id: Some(materialization.materialization_id.clone()),
+            payload_json: format!(
+                "{{\"dispatch_plan_id\":\"{}\",\"prompt_source_id\":\"{}\",\"status\":\"{}\",\"raw_prompt_policy\":\"not_rendered\"}}",
+                escape_json(&materialization.dispatch_plan_id),
+                escape_json(&materialization.prompt_source_id),
+                escape_json(&materialization.status)
+            ),
+            idempotency_key: Some(format!(
+                "adapter-dispatch-prompt-materialization:{}:{}:{}:{}",
+                materialization.project_id,
+                materialization.prompt_source_id,
+                materialization.status,
+                materialization.materialization_id
+            )),
+            redaction_state: RedactionState::Safe,
+        };
+        Some(
+            state
+                .append_event(
+                    event,
+                    &[ProjectionRecord::AdapterDispatchPromptMaterialization(
+                        materialization.clone(),
+                    )],
+                )
+                .map_err(debug_error)?,
+        )
+    } else {
+        None
+    };
+    Ok(render_adapter_dispatch_prompt_materialization(
+        &materialization,
+        record,
+        recorded_sequence,
+    ))
+}
+
+fn adapter_dispatch_prompt_materialization_projection(
+    state: &SqliteStateStore,
+    source: &AdapterDispatchPromptSourceProjection,
+) -> Result<AdapterDispatchPromptMaterializationProjection, String> {
+    let mut observed_source_hash = None;
+    let mut materialized_prompt_hash = None;
+    let mut status = "blocked_non_replayable_prompt".to_string();
+    let mut reasons = vec!["manual_prompt_not_replayable".to_string()];
+
+    if source.source_kind == "workpad_task" {
+        reasons.clear();
+        let source_ref = source
+            .source_ref
+            .as_deref()
+            .ok_or_else(|| "workpad prompt source missing source_ref".to_string())?;
+        let (path, anchor) = split_source_ref(source_ref)?;
+        let workpad_file = state
+            .workpad_file(&source.project_id, path)
+            .map_err(debug_error)?;
+        let workpad_file = match workpad_file {
+            Some(file) => file,
+            None => {
+                status = "blocked_missing_source".to_string();
+                reasons.push("workpad_file_missing".to_string());
+                return Ok(prompt_materialization_row(
+                    source,
+                    observed_source_hash,
+                    materialized_prompt_hash,
+                    status,
+                    reasons,
+                ));
+            }
+        };
+        observed_source_hash = Some(workpad_file.content_hash.clone());
+        if source.source_hash.as_deref() != Some(workpad_file.content_hash.as_str()) {
+            status = "blocked_source_hash_mismatch".to_string();
+            reasons.push("workpad_source_hash_mismatch".to_string());
+            return Ok(prompt_materialization_row(
+                source,
+                observed_source_hash,
+                materialized_prompt_hash,
+                status,
+                reasons,
+            ));
+        }
+        let task = state
+            .workpad_tasks(&source.project_id)
+            .map_err(debug_error)?
+            .into_iter()
+            .find(|task| task.path == path && task.source_anchor == anchor);
+        let Some(task) = task else {
+            status = "blocked_missing_source".to_string();
+            reasons.push("workpad_task_missing".to_string());
+            return Ok(prompt_materialization_row(
+                source,
+                observed_source_hash,
+                materialized_prompt_hash,
+                status,
+                reasons,
+            ));
+        };
+        let prompt_hash = stable_cli_hash(&workpad_task_goal(&task));
+        materialized_prompt_hash = Some(prompt_hash.clone());
+        if prompt_hash == source.prompt_hash {
+            status = "ready_without_rendering_prompt".to_string();
+            reasons.push("prompt_hash_matches_source".to_string());
+        } else {
+            status = "blocked_prompt_hash_mismatch".to_string();
+            reasons.push("prompt_hash_mismatch".to_string());
+        }
+    }
+
+    Ok(prompt_materialization_row(
+        source,
+        observed_source_hash,
+        materialized_prompt_hash,
+        status,
+        reasons,
+    ))
+}
+
+fn prompt_materialization_row(
+    source: &AdapterDispatchPromptSourceProjection,
+    observed_source_hash: Option<String>,
+    materialized_prompt_hash: Option<String>,
+    status: String,
+    reasons: Vec<String>,
+) -> AdapterDispatchPromptMaterializationProjection {
+    AdapterDispatchPromptMaterializationProjection {
+        materialization_id: format!(
+            "adapter-dispatch-prompt-materialization-{}-{}",
+            stable_cli_hash(&source.prompt_source_id),
+            stable_cli_hash(&format!(
+                "{}:{}",
+                status,
+                observed_source_hash.as_deref().unwrap_or("none")
+            ))
+        ),
+        project_id: source.project_id.clone(),
+        dispatch_plan_id: source.dispatch_plan_id.clone(),
+        prompt_source_id: source.prompt_source_id.clone(),
+        source_kind: source.source_kind.clone(),
+        source_ref: source.source_ref.clone(),
+        expected_source_hash: source.source_hash.clone(),
+        observed_source_hash,
+        expected_prompt_hash: source.prompt_hash.clone(),
+        materialized_prompt_hash,
+        status,
+        raw_prompt_policy: "not_rendered".to_string(),
+        reason_codes: reasons.join(","),
+        updated_sequence: 0,
+    }
+}
+
+fn split_source_ref(source_ref: &str) -> Result<(&str, &str), String> {
+    source_ref
+        .split_once('#')
+        .ok_or_else(|| format!("invalid prompt source ref: {source_ref}"))
+}
+
 fn adapter_dispatch_execution_request_projection(
     plan: &AdapterDispatchPlanProjection,
     latest_gate: Option<&AdapterDispatchGateProjection>,
@@ -1576,6 +1777,41 @@ fn render_adapter_dispatch_execution_request(
         request.opt_in_env,
         request.runtime_prompt_policy,
         request.reason_codes,
+        recorded,
+        recorded_sequence
+            .map(|sequence| sequence.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    )
+}
+
+fn render_adapter_dispatch_prompt_materialization(
+    materialization: &AdapterDispatchPromptMaterializationProjection,
+    recorded: bool,
+    recorded_sequence: Option<i64>,
+) -> String {
+    format!(
+        "adapter_dispatch_prompt_materialization=true\nmaterialization={}\ndispatch_plan={}\nprompt_source={}\nsource_kind={}\nsource_ref={}\nexpected_source_hash={}\nobserved_source_hash={}\nexpected_prompt_hash={}\nmaterialized_prompt_hash={}\nstatus={}\nraw_prompt_policy={}\nreasons={}\nrecorded={}\nrecorded_sequence={}\n",
+        materialization.materialization_id,
+        materialization.dispatch_plan_id,
+        materialization.prompt_source_id,
+        materialization.source_kind,
+        materialization.source_ref.as_deref().unwrap_or("none"),
+        materialization
+            .expected_source_hash
+            .as_deref()
+            .unwrap_or("none"),
+        materialization
+            .observed_source_hash
+            .as_deref()
+            .unwrap_or("none"),
+        materialization.expected_prompt_hash,
+        materialization
+            .materialized_prompt_hash
+            .as_deref()
+            .unwrap_or("none"),
+        materialization.status,
+        materialization.raw_prompt_policy,
+        materialization.reason_codes,
         recorded,
         recorded_sequence
             .map(|sequence| sequence.to_string())
@@ -1885,6 +2121,22 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
             source.source_hash.as_deref().unwrap_or("none"),
             source.materialization_status,
             source.raw_prompt_policy
+        ));
+    }
+    output.push_str(&format!(
+        "adapter_dispatch_prompt_materializations={}\n",
+        dashboard.adapter_dispatch_prompt_materializations.len()
+    ));
+    for materialization in &dashboard.adapter_dispatch_prompt_materializations {
+        output.push_str(&format!(
+            "adapter_dispatch_prompt_materialization={} dispatch_plan={} prompt_source={} source_kind={} status={} raw_prompt_policy={} reasons={}\n",
+            materialization.materialization_id,
+            materialization.dispatch_plan_id,
+            materialization.prompt_source_id,
+            materialization.source_kind,
+            materialization.status,
+            materialization.raw_prompt_policy,
+            materialization.reason_codes
         ));
     }
     output.push_str(&render_adapter_dogfood_gate(
@@ -4410,6 +4662,7 @@ mod tests {
         assert!(HELP.contains("adapter dispatch-gate"));
         assert!(HELP.contains("adapter dispatch-status"));
         assert!(HELP.contains("adapter execution-request"));
+        assert!(HELP.contains("adapter materialize-prompt"));
         assert!(HELP.contains("adapter replay-dispatch"));
         assert!(HELP.contains("adapter dogfood-gate"));
         assert!(HELP.contains("workpad index"));
@@ -4480,6 +4733,20 @@ mod tests {
             "manual_prompt_not_replayable"
         );
         assert_eq!(prompt_sources[0].raw_prompt_policy, "not_rendered");
+        let materialize = run_cli(vec![
+            "adapter".to_string(),
+            "materialize-prompt".to_string(),
+            "--dispatch-plan".to_string(),
+            plans[0].dispatch_plan_id.clone(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("materialize inline prompt");
+        assert!(materialize.contains("adapter_dispatch_prompt_materialization=true"));
+        assert!(materialize.contains("status=blocked_non_replayable_prompt"));
+        assert!(materialize.contains("raw_prompt_policy=not_rendered"));
+        assert!(!materialize.contains("Summarize this workpad"));
         let dashboard = run_cli(vec![
             "dashboard".to_string(),
             "--state".to_string(),
@@ -4488,6 +4755,8 @@ mod tests {
         .expect("dashboard");
         assert!(dashboard.contains("adapter_dispatch_plans=1"));
         assert!(dashboard.contains("adapter_dispatch_prompt_sources=1"));
+        assert!(dashboard.contains("adapter_dispatch_prompt_materializations=1"));
+        assert!(dashboard.contains("status=blocked_non_replayable_prompt"));
         assert!(dashboard.contains("source_kind=inline_cli_prompt"));
         assert!(dashboard.contains("adapter_dispatch_plan=adapter-dispatch-plan-codex_exec"));
         assert!(!dashboard.contains("Summarize this workpad"));
@@ -5281,6 +5550,21 @@ mod tests {
             prompt_sources[0].materialization_status,
             "replayable_if_source_hash_matches"
         );
+        let materialize = run_cli(vec![
+            "adapter".to_string(),
+            "materialize-prompt".to_string(),
+            "--dispatch-plan".to_string(),
+            plans[0].dispatch_plan_id.clone(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("materialize workpad prompt");
+        assert!(materialize.contains("adapter_dispatch_prompt_materialization=true"));
+        assert!(materialize.contains("status=ready_without_rendering_prompt"));
+        assert!(materialize.contains("reasons=prompt_hash_matches_source"));
+        assert!(materialize.contains("raw_prompt_policy=not_rendered"));
+        assert!(!materialize.contains("Work on Workpad Dogfood Bridge"));
         let planned_workpad_task = state
             .workpad_task(&project_id(), "workpads:features:tasks.md#f2")
             .expect("planned workpad task query")
@@ -5294,6 +5578,8 @@ mod tests {
         .expect("dashboard after plan-next");
         assert!(dashboard_after_plan.contains("adapter_dispatch_plans=1"));
         assert!(dashboard_after_plan.contains("adapter_dispatch_prompt_sources=1"));
+        assert!(dashboard_after_plan.contains("adapter_dispatch_prompt_materializations=1"));
+        assert!(dashboard_after_plan.contains("status=ready_without_rendering_prompt"));
         assert!(dashboard_after_plan.contains("source_kind=workpad_task"));
         assert!(!dashboard_after_plan.contains("Work on Workpad Dogfood Bridge"));
         let source_hash = files

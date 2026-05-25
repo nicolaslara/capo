@@ -461,6 +461,29 @@ Follow-up:
 
 - A future provider-running command should materialize only hash-guarded workpad prompt sources or explicitly supplied one-shot prompt input; it should not reconstruct inline CLI prompts from historical state.
 
+## F1/AC20 - Dispatch Prompt Materialization Dry Run
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo adapter materialize-prompt --dispatch-plan DISPATCH_PLAN_ID [--record]` as a provider-free dry run over recorded prompt-source rows.
+- Keep output and state prompt-redacted. The command reports prompt/source hashes, status, raw prompt policy, and reason codes, but never renders the materialized prompt.
+- Inline CLI prompt sources fail closed with `blocked_non_replayable_prompt` because the raw prompt was intentionally not retained.
+- Workpad prompt sources become `ready_without_rendering_prompt` only when the indexed workpad file hash matches the recorded source hash and the derived `workpad_task_goal` hash matches the recorded prompt hash.
+- Prompt materialization is a separate read model from prompt source and execution requests, so future provider execution can require a recent ready materialization fact without overloading source metadata.
+
+Verification:
+
+- `cargo test -p capo-state adapter_dispatch_prompt_materialization -- --nocapture`: passed.
+- `cargo test -p capo-query adapter_dispatch -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_plan_launch -- --nocapture`: passed.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+
+Follow-up:
+
+- Future real dispatch execution should require `ready_without_rendering_prompt` before constructing provider argv, then perform the final provider launch only under the explicit opt-in env.
+
 ## F3/DS1 - Query Surface Extraction
 
 Status: completed on 2026-05-25.

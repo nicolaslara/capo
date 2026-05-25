@@ -486,3 +486,30 @@ Decision:
 - Preserve the raw prompt non-retention rule while still giving future real execution a materialization contract.
 - Inline CLI prompt dispatch plans are intentionally not replayable after recording because Capo does not keep the raw prompt.
 - Workpad-derived dispatch plans keep source path/anchor and source hash so a future runner can rederive the prompt from markdown only when the indexed source has not drifted.
+
+### AC20 - Dispatch Prompt Materialization Dry Run
+
+Status: completed
+
+Acceptance:
+
+- Add a provider-free command that checks whether a recorded dispatch prompt can be materialized without rendering the raw prompt.
+- Refuse inline CLI prompt history because Capo does not retain the raw prompt.
+- For workpad-derived prompt sources, require matching source hash and matching derived prompt hash before reporting readiness.
+- Persist materialization results as separate audit/read-model rows with hashes, status, raw prompt policy, and reasons only.
+
+Evidence:
+
+- CLI `capo adapter materialize-prompt --dispatch-plan DISPATCH_PLAN_ID [--record]` in `../../crates/capo-cli/src/main.rs`.
+- `AdapterDispatchPromptMaterializationProjection`, `EventKind::AdapterDispatchPromptMaterialized`, SQLite table, rebuild codec, and read query in `../../crates/capo-state/src/lib.rs`.
+- Shared dashboard query exposure in `../../crates/capo-query/src/lib.rs` and CLI dashboard rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-state adapter_dispatch_prompt_materialization -- --nocapture`: passed.
+- `cargo test -p capo-query adapter_dispatch -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_plan_launch -- --nocapture`: passed.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+
+Decision:
+
+- Treat prompt materialization as a dry-run audit fact before any provider execution. This lets Capo prove whether the future runner can build the prompt from source without exposing the prompt in CLI output, state, or dashboard.
+- Inline CLI plans materialize to `blocked_non_replayable_prompt`.
+- Workpad plans materialize to `ready_without_rendering_prompt` only when the current indexed source hash and derived prompt hash match the recorded prompt source.
