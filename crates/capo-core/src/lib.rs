@@ -19,6 +19,7 @@ pub const BOUNDARY_CRATES: &[&str] = &[
     "capo-tools",
     "capo-memory",
     "capo-eval",
+    "capo-voice",
 ];
 
 macro_rules! typed_id {

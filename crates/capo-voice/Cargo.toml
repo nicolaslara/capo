@@ -1,0 +1,10 @@
+[package]
+name = "capo-voice"
+description = "Conversational voice control contract scaffold for Capo."
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+capo-core.workspace = true

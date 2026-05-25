@@ -412,6 +412,33 @@ Follow-up:
 - P15 should decide whether this text dashboard is enough for first dogfood or whether a richer TUI/web view must be added before migration.
 - A future dashboard should probably move read-model aggregation out of `capo-cli` into a reusable controller/query surface before adding a web or full-screen TUI frontend.
 
+## P14 - Conversational Voice Spike
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo-voice` as a contract crate for conversational voice control. It does not capture audio, call ASR, retain recordings, or start a voice server.
+- Treat voice as a first-class Capo interaction surface, not dictation into another agent. Dummy transcripts lower into `CommandEnvelope` values with `InputOrigin::Voice` plus a `VoiceReadContract` describing the read-model fields Capo must use for the spoken response.
+- Support the first dummy intents for project dashboard status, single-agent status, session steering, and session stop. Unknown transcripts produce no command and ask for clarification.
+- Session stop is modeled as `InterruptSession`, marked medium risk, and requires visible confirmation before execution.
+- Raw transcripts are not retained by default. The command envelope only carries a voice session marker and `transcript_retention=raw_not_retained`.
+- Redaction is required for all voice-derived records before anything durable can be stored. Default memory ingestion is `None`.
+- The only modeled retention alternative is `RetainRedactedSummary`, which still does not retain raw transcripts and allows only reviewed, redacted summaries into memory.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+- Voice tests cover agent status questions, project dashboard questions, steering commands, stop confirmation, raw-transcript non-retention, and unknown transcripts producing no state mutation or memory ingestion.
+
+Follow-up:
+
+- P15 should decide whether this contract-only voice spike is enough before dogfood. It should not block first dogfood unless the gate requires conversational steering before migration.
+- Future voice implementation should integrate with the controller/query surface and permission policy before adding ASR, push-to-talk, streaming audio, or retained transcript summaries.
+- Production voice command IDs will need a turn or utterance ID rather than only `voice_session_id` to avoid deduping multiple same-intent commands from one voice session.
+
 ## Prototype Gate
 
 Status: not passed.

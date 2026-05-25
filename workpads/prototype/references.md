@@ -182,3 +182,17 @@ Observed 2026-05-25.
 - Prototype dashboard requirement: `spec.md`
 - Dogfood dashboard/read-model prerequisite source: `../architecture/prototype-plan.md`
 - No new third-party dependencies were added for P13.
+
+## P14 Conversational Voice Spike
+
+Observed 2026-05-25.
+
+- Voice command/read-model contract and tests: `../../crates/capo-voice/src/lib.rs`
+- Voice crate manifest: `../../crates/capo-voice/Cargo.toml`
+- Workspace manifest and lockfile: `../../Cargo.toml`, `../../Cargo.lock`
+- Core boundary crate registry: `../../crates/capo-core/src/lib.rs`
+- Input surface architecture source: `../research/findings/R7-input-surfaces.md`
+- Capability and confirmation source: `../architecture/capability-permissions.md`
+- Memory and transcript retention source: `../architecture/memory-architecture.md`
+- Boundary architecture source: `../architecture/boundaries.md`
+- No new third-party dependencies were added for P14.

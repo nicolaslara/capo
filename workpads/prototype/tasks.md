@@ -310,13 +310,24 @@ Evidence:
 
 ## P14 - Conversational Voice Spike
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Define the voice command/read-model contract for asking Capo about agent status and steering sessions.
 - Use dummy transcript/input data only.
 - Record transcript retention, redaction, and memory-ingestion decisions before any real voice capture.
+
+Evidence:
+
+- `crates/capo-voice/src/lib.rs`
+- `crates/capo-voice/Cargo.toml`
+- `Cargo.toml`
+- `Cargo.lock`
+- `crates/capo-core/src/lib.rs`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
 
 ## P15 - Prototype Gate Review
 
