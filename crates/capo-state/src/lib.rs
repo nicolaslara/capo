@@ -1004,6 +1004,50 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn adapter_dispatch_executions(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<AdapterDispatchExecutionProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT dispatch_execution_id, project_id, dispatch_plan_id,
+                    execution_request_id, adapter_kind, session_id, run_id,
+                    provider_cli_execution_allowed, provider_cli_executed, status,
+                    exit_code, runtime_process_ref, stdout_artifact_id,
+                    stderr_artifact_id, artifact_root, credential_scan_status,
+                    raw_prompt_policy, raw_output_policy, reason_codes, updated_sequence
+             FROM adapter_dispatch_executions
+             WHERE project_id = ?1
+             ORDER BY updated_sequence ASC, dispatch_execution_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(AdapterDispatchExecutionProjection {
+                dispatch_execution_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                dispatch_plan_id: row.get(2)?,
+                execution_request_id: row.get(3)?,
+                adapter_kind: row.get(4)?,
+                session_id: SessionId::new(row.get::<_, String>(5)?),
+                run_id: RunId::new(row.get::<_, String>(6)?),
+                provider_cli_execution_allowed: row.get::<_, i64>(7)? != 0,
+                provider_cli_executed: row.get::<_, i64>(8)? != 0,
+                status: row.get(9)?,
+                exit_code: row.get(10)?,
+                runtime_process_ref: row.get(11)?,
+                stdout_artifact_id: row.get(12)?,
+                stderr_artifact_id: row.get(13)?,
+                artifact_root: row.get(14)?,
+                credential_scan_status: row.get(15)?,
+                raw_prompt_policy: row.get(16)?,
+                raw_output_policy: row.get(17)?,
+                reason_codes: row.get(18)?,
+                updated_sequence: row.get(19)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn adapter_dispatch_prompt_sources(
         &self,
         project_id: &ProjectId,
@@ -1551,6 +1595,7 @@ pub enum EventKind {
     AdapterDispatchGateChecked,
     AdapterDispatchReplayed,
     AdapterDispatchExecutionRequested,
+    AdapterDispatchExecuted,
     AdapterDispatchPromptSourceRecorded,
     AdapterDispatchPromptMaterialized,
     ToolCallRequested,
@@ -1600,6 +1645,7 @@ impl EventKind {
             Self::AdapterDispatchGateChecked => "adapter.dispatch_gate_checked",
             Self::AdapterDispatchReplayed => "adapter.dispatch_replayed",
             Self::AdapterDispatchExecutionRequested => "adapter.dispatch_execution_requested",
+            Self::AdapterDispatchExecuted => "adapter.dispatch_executed",
             Self::AdapterDispatchPromptSourceRecorded => "adapter.dispatch_prompt_source_recorded",
             Self::AdapterDispatchPromptMaterialized => "adapter.dispatch_prompt_materialized",
             Self::ToolCallRequested => "tool.call_requested",
@@ -1701,6 +1747,7 @@ pub enum ProjectionRecord {
     AdapterDispatchGate(AdapterDispatchGateProjection),
     AdapterDispatchReplay(AdapterDispatchReplayProjection),
     AdapterDispatchExecutionRequest(AdapterDispatchExecutionRequestProjection),
+    AdapterDispatchExecution(AdapterDispatchExecutionProjection),
     AdapterDispatchPromptSource(AdapterDispatchPromptSourceProjection),
     AdapterDispatchPromptMaterialization(AdapterDispatchPromptMaterializationProjection),
     ToolCall(ToolCallProjection),
@@ -1922,6 +1969,30 @@ pub struct AdapterDispatchExecutionRequestProjection {
     pub status: String,
     pub opt_in_env: String,
     pub runtime_prompt_policy: String,
+    pub reason_codes: String,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterDispatchExecutionProjection {
+    pub dispatch_execution_id: String,
+    pub project_id: ProjectId,
+    pub dispatch_plan_id: String,
+    pub execution_request_id: String,
+    pub adapter_kind: String,
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    pub provider_cli_execution_allowed: bool,
+    pub provider_cli_executed: bool,
+    pub status: String,
+    pub exit_code: Option<i64>,
+    pub runtime_process_ref: Option<String>,
+    pub stdout_artifact_id: Option<String>,
+    pub stderr_artifact_id: Option<String>,
+    pub artifact_root: String,
+    pub credential_scan_status: String,
+    pub raw_prompt_policy: String,
+    pub raw_output_policy: String,
     pub reason_codes: String,
     pub updated_sequence: i64,
 }
@@ -2405,6 +2476,28 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             reason_codes TEXT NOT NULL,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS adapter_dispatch_executions (
+            dispatch_execution_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            dispatch_plan_id TEXT NOT NULL,
+            execution_request_id TEXT NOT NULL,
+            adapter_kind TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            provider_cli_execution_allowed INTEGER NOT NULL,
+            provider_cli_executed INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            exit_code INTEGER,
+            runtime_process_ref TEXT,
+            stdout_artifact_id TEXT,
+            stderr_artifact_id TEXT,
+            artifact_root TEXT NOT NULL,
+            credential_scan_status TEXT NOT NULL,
+            raw_prompt_policy TEXT NOT NULL,
+            raw_output_policy TEXT NOT NULL,
+            reason_codes TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS adapter_dispatch_prompt_sources (
             prompt_source_id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -2628,6 +2721,7 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "adapter_dispatch_gates",
         "adapter_dispatch_replays",
         "adapter_dispatch_execution_requests",
+        "adapter_dispatch_executions",
         "adapter_dispatch_prompt_sources",
         "adapter_dispatch_prompt_materializations",
         "tool_calls",
@@ -3142,6 +3236,58 @@ fn apply_projection_record(
                 request.opt_in_env,
                 request.runtime_prompt_policy,
                 request.reason_codes,
+                sequence,
+            ],
+        )?,
+        ProjectionRecord::AdapterDispatchExecution(execution) => transaction.execute(
+            "INSERT INTO adapter_dispatch_executions(
+                dispatch_execution_id, project_id, dispatch_plan_id,
+                execution_request_id, adapter_kind, session_id, run_id,
+                provider_cli_execution_allowed, provider_cli_executed, status,
+                exit_code, runtime_process_ref, stdout_artifact_id, stderr_artifact_id,
+                artifact_root, credential_scan_status, raw_prompt_policy,
+                raw_output_policy, reason_codes, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+             ON CONFLICT(dispatch_execution_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                dispatch_plan_id = excluded.dispatch_plan_id,
+                execution_request_id = excluded.execution_request_id,
+                adapter_kind = excluded.adapter_kind,
+                session_id = excluded.session_id,
+                run_id = excluded.run_id,
+                provider_cli_execution_allowed = excluded.provider_cli_execution_allowed,
+                provider_cli_executed = excluded.provider_cli_executed,
+                status = excluded.status,
+                exit_code = excluded.exit_code,
+                runtime_process_ref = excluded.runtime_process_ref,
+                stdout_artifact_id = excluded.stdout_artifact_id,
+                stderr_artifact_id = excluded.stderr_artifact_id,
+                artifact_root = excluded.artifact_root,
+                credential_scan_status = excluded.credential_scan_status,
+                raw_prompt_policy = excluded.raw_prompt_policy,
+                raw_output_policy = excluded.raw_output_policy,
+                reason_codes = excluded.reason_codes,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                execution.dispatch_execution_id,
+                execution.project_id.as_str(),
+                execution.dispatch_plan_id,
+                execution.execution_request_id,
+                execution.adapter_kind,
+                execution.session_id.as_str(),
+                execution.run_id.as_str(),
+                if execution.provider_cli_execution_allowed { 1 } else { 0 },
+                if execution.provider_cli_executed { 1 } else { 0 },
+                execution.status,
+                execution.exit_code,
+                execution.runtime_process_ref,
+                execution.stdout_artifact_id,
+                execution.stderr_artifact_id,
+                execution.artifact_root,
+                execution.credential_scan_status,
+                execution.raw_prompt_policy,
+                execution.raw_output_policy,
+                execution.reason_codes,
                 sequence,
             ],
         )?,
@@ -3777,6 +3923,31 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
             payload_json: json!({
                 "opt_in_env": request.opt_in_env,
                 "reason_codes": request.reason_codes,
+            })
+            .to_string(),
+        },
+        ProjectionRecord::AdapterDispatchExecution(execution) => ProjectionRecordRow {
+            kind: "adapter_dispatch_execution",
+            record_id: execution.dispatch_execution_id.clone(),
+            a: Some(execution.project_id.to_string()),
+            b: Some(execution.dispatch_plan_id.clone()),
+            c: Some(execution.execution_request_id.clone()),
+            d: Some(execution.adapter_kind.clone()),
+            e: Some(execution.session_id.to_string()),
+            f: Some(execution.run_id.to_string()),
+            g: Some(execution.provider_cli_executed.to_string()),
+            h: Some(execution.status.clone()),
+            payload_json: json!({
+                "provider_cli_execution_allowed": execution.provider_cli_execution_allowed,
+                "exit_code": execution.exit_code,
+                "runtime_process_ref": execution.runtime_process_ref,
+                "stdout_artifact_id": execution.stdout_artifact_id,
+                "stderr_artifact_id": execution.stderr_artifact_id,
+                "artifact_root": execution.artifact_root,
+                "credential_scan_status": execution.credential_scan_status,
+                "raw_prompt_policy": execution.raw_prompt_policy,
+                "raw_output_policy": execution.raw_output_policy,
+                "reason_codes": execution.reason_codes,
             })
             .to_string(),
         },
@@ -4698,6 +4869,120 @@ fn projection_record_from_row(
                     reason_codes: required_payload_string(
                         &projection_kind,
                         "adapter_dispatch_execution_request",
+                        &payload,
+                        "reason_codes",
+                    )?,
+                    updated_sequence: 0,
+                },
+            ))
+        }
+        "adapter_dispatch_execution" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::AdapterDispatchExecution(
+                AdapterDispatchExecutionProjection {
+                    dispatch_execution_id: record_id,
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "adapter_dispatch_execution",
+                        a,
+                        "project_id",
+                    )?),
+                    dispatch_plan_id: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_execution",
+                        b,
+                        "dispatch_plan_id",
+                    )?,
+                    execution_request_id: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_execution",
+                        c,
+                        "execution_request_id",
+                    )?,
+                    adapter_kind: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_execution",
+                        d,
+                        "adapter_kind",
+                    )?,
+                    session_id: SessionId::new(required_field(
+                        &projection_kind,
+                        "adapter_dispatch_execution",
+                        e,
+                        "session_id",
+                    )?),
+                    run_id: RunId::new(required_field(
+                        &projection_kind,
+                        "adapter_dispatch_execution",
+                        f,
+                        "run_id",
+                    )?),
+                    provider_cli_execution_allowed: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_execution",
+                        &payload,
+                        "provider_cli_execution_allowed",
+                    )?
+                    .parse::<bool>()
+                    .map_err(|error| {
+                        ProjectionDecodeError(format!(
+                            "invalid bool for adapter_dispatch_execution provider_cli_execution_allowed: {error}"
+                        ))
+                    })?,
+                    provider_cli_executed: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_execution",
+                        g,
+                        "provider_cli_executed",
+                    )?
+                    .parse::<bool>()
+                    .map_err(|error| {
+                        ProjectionDecodeError(format!(
+                            "invalid bool for adapter_dispatch_execution provider_cli_executed: {error}"
+                        ))
+                    })?,
+                    status: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_execution",
+                        h,
+                        "status",
+                    )?,
+                    exit_code: payload_optional_i64(
+                        &projection_kind,
+                        "adapter_dispatch_execution",
+                        &payload,
+                        "exit_code",
+                    )?,
+                    runtime_process_ref: payload_optional_string(&payload, "runtime_process_ref"),
+                    stdout_artifact_id: payload_optional_string(&payload, "stdout_artifact_id"),
+                    stderr_artifact_id: payload_optional_string(&payload, "stderr_artifact_id"),
+                    artifact_root: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_execution",
+                        &payload,
+                        "artifact_root",
+                    )?,
+                    credential_scan_status: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_execution",
+                        &payload,
+                        "credential_scan_status",
+                    )?,
+                    raw_prompt_policy: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_execution",
+                        &payload,
+                        "raw_prompt_policy",
+                    )?,
+                    raw_output_policy: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_execution",
+                        &payload,
+                        "raw_output_policy",
+                    )?,
+                    reason_codes: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_execution",
                         &payload,
                         "reason_codes",
                     )?,
@@ -6720,6 +7005,83 @@ mod tests {
         assert!(requests[0].provider_cli_execution_allowed);
         assert!(!requests[0].provider_cli_executed);
         assert_eq!(requests[0].runtime_prompt_policy, "not_rendered");
+    }
+
+    #[test]
+    fn adapter_dispatch_execution_is_persisted_and_rebuilt() {
+        let store = temp_store("adapter-dispatch-execution-rebuild");
+        let project_id = ProjectId::new("project-capo");
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-adapter-dispatch-execution".to_string(),
+                    kind: EventKind::AdapterDispatchExecuted,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: Some(AgentId::new("agent-codex")),
+                    session_id: Some(SessionId::new("session-codex")),
+                    run_id: Some(RunId::new("run-codex")),
+                    turn_id: None,
+                    item_id: Some("adapter-dispatch-execution-codex".to_string()),
+                    payload_json:
+                        "{\"provider_cli_executed\":true,\"raw_prompt_policy\":\"not_rendered\"}"
+                            .to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::AdapterDispatchExecution(
+                    AdapterDispatchExecutionProjection {
+                        dispatch_execution_id: "adapter-dispatch-execution-codex".to_string(),
+                        project_id: project_id.clone(),
+                        dispatch_plan_id: "adapter-dispatch-plan-codex".to_string(),
+                        execution_request_id: "adapter-dispatch-execution-request-codex"
+                            .to_string(),
+                        adapter_kind: "codex_exec".to_string(),
+                        session_id: SessionId::new("session-codex"),
+                        run_id: RunId::new("run-codex"),
+                        provider_cli_execution_allowed: true,
+                        provider_cli_executed: true,
+                        status: "exited".to_string(),
+                        exit_code: Some(0),
+                        runtime_process_ref: Some("local-process-run-codex".to_string()),
+                        stdout_artifact_id: Some("artifact-stdout".to_string()),
+                        stderr_artifact_id: Some("artifact-stderr".to_string()),
+                        artifact_root: "/tmp/capo-artifacts".to_string(),
+                        credential_scan_status: "clean".to_string(),
+                        raw_prompt_policy: "not_rendered".to_string(),
+                        raw_output_policy: "bounded_redacted_artifacts".to_string(),
+                        reason_codes: "provider_cli_executed_and_artifacts_scanned".to_string(),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append adapter dispatch execution");
+
+        store.rebuild_projections().expect("rebuild projections");
+        let executions = store
+            .adapter_dispatch_executions(&project_id)
+            .expect("adapter dispatch executions");
+        assert_eq!(executions.len(), 1);
+        assert_eq!(
+            executions[0].dispatch_plan_id,
+            "adapter-dispatch-plan-codex"
+        );
+        assert_eq!(
+            executions[0].execution_request_id,
+            "adapter-dispatch-execution-request-codex"
+        );
+        assert_eq!(executions[0].status, "exited");
+        assert_eq!(executions[0].exit_code, Some(0));
+        assert!(executions[0].provider_cli_execution_allowed);
+        assert!(executions[0].provider_cli_executed);
+        assert_eq!(executions[0].credential_scan_status, "clean");
+        assert_eq!(executions[0].raw_prompt_policy, "not_rendered");
+        assert_eq!(
+            executions[0].raw_output_policy,
+            "bounded_redacted_artifacts"
+        );
     }
 
     #[test]

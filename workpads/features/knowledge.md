@@ -1153,3 +1153,27 @@ Follow-up:
 
 - Persist local dispatch execution outcomes as dedicated state/query/dashboard rows before using `run-local` to satisfy AC3 real-agent controller path.
 - After explicit opt-in, run a small workpad-derived Codex dispatch, inspect artifact scans, and record the result without raw prompt/provider text.
+
+## F1/AC23 - Dispatch Execution Outcome Read Model
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `AdapterDispatchExecutionProjection` as the durable outcome row for `run-local`, separate from dispatch plans, gates, fixture replays, execution requests, prompt sources, and materialization rows.
+- Make blocked preflight outcomes recordable with `run-local --record` while keeping `provider_cli_executed=false`. This gives operator surfaces durable evidence without crossing the provider boundary.
+- Successful future provider executions record only runtime/process/artifact refs, exit code, scan status, and redaction policies. Raw prompts and provider output text stay out of inline state and dashboard rendering.
+- Add execution outcomes to the shared project dashboard query so CLI, voice, web, and mobile surfaces can inspect the same execution result contract.
+
+Verification:
+
+- `cargo test -p capo-state adapter_dispatch_execution -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Skipped verification:
+
+- Real Codex or Claude execution outcome recording was not smoke-tested because the provider execution env gates still require explicit user opt-in.
+
+Follow-up:
+
+- After explicit opt-in, run `capo adapter run-local --record` against a hash-verified workpad plan and verify that the successful execution row, artifact refs, and credential scan status rebuild correctly after restart.

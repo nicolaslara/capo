@@ -6,13 +6,13 @@
 
 use capo_core::{ProjectId, SessionId};
 use capo_state::{
-    AdapterDispatchExecutionRequestProjection, AdapterDispatchGateProjection,
-    AdapterDispatchPlanProjection, AdapterDispatchPromptMaterializationProjection,
-    AdapterDispatchPromptSourceProjection, AdapterDispatchReplayProjection,
-    AdapterReadinessProjection, AdapterSmokeReportProjection, AgentProjection,
-    ConnectivityExposureProjection, EventRecord, EvidenceProjection, MemoryPacketProjection,
-    RunProjection, SessionProjection, SqliteStateStore, StateResult, ToolCallProjection,
-    WorkpadTaskProjection,
+    AdapterDispatchExecutionProjection, AdapterDispatchExecutionRequestProjection,
+    AdapterDispatchGateProjection, AdapterDispatchPlanProjection,
+    AdapterDispatchPromptMaterializationProjection, AdapterDispatchPromptSourceProjection,
+    AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
+    AgentProjection, ConnectivityExposureProjection, EventRecord, EvidenceProjection,
+    MemoryPacketProjection, RunProjection, SessionProjection, SqliteStateStore, StateResult,
+    ToolCallProjection, WorkpadTaskProjection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,6 +26,7 @@ pub struct ProjectDashboard {
     pub adapter_dispatch_gates: Vec<AdapterDispatchGateProjection>,
     pub adapter_dispatch_replays: Vec<AdapterDispatchReplayProjection>,
     pub adapter_dispatch_execution_requests: Vec<AdapterDispatchExecutionRequestProjection>,
+    pub adapter_dispatch_executions: Vec<AdapterDispatchExecutionProjection>,
     pub adapter_dispatch_prompt_sources: Vec<AdapterDispatchPromptSourceProjection>,
     pub adapter_dispatch_prompt_materializations:
         Vec<AdapterDispatchPromptMaterializationProjection>,
@@ -145,6 +146,7 @@ pub fn project_dashboard(
     let adapter_dispatch_replays = state.adapter_dispatch_replays(&query.project_id)?;
     let adapter_dispatch_execution_requests =
         state.adapter_dispatch_execution_requests(&query.project_id)?;
+    let adapter_dispatch_executions = state.adapter_dispatch_executions(&query.project_id)?;
     let adapter_dispatch_prompt_sources =
         state.adapter_dispatch_prompt_sources(&query.project_id)?;
     let adapter_dispatch_prompt_materializations =
@@ -180,6 +182,7 @@ pub fn project_dashboard(
         adapter_dispatch_gates,
         adapter_dispatch_replays,
         adapter_dispatch_execution_requests,
+        adapter_dispatch_executions,
         adapter_dispatch_prompt_sources,
         adapter_dispatch_prompt_materializations,
         adapter_dogfood_gate,

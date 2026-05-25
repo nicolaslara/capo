@@ -570,3 +570,28 @@ Review:
 
 - Focused provider-safety review found one blocker: a failed credential marker scan could leave captured runtime artifacts on disk. The runner path now deletes captured stdout/stderr artifacts before returning the scan error.
 - The review also noted that `run-local` recomputes preflight from recorded facts rather than requiring a separately persisted preflight row. This is accepted for AC22 because there is no preflight projection yet and the command still requires the same recorded plan/request/materialization facts plus explicit opt-in.
+
+### AC23 - Dispatch Execution Outcome Read Model
+
+Status: completed
+
+Acceptance:
+
+- Persist local dispatch execution outcomes as separate Capo-owned audit/read-model rows.
+- Expose execution outcomes through the shared query/dashboard surface.
+- Let `run-local --record` record blocked preflight outcomes without launching provider CLIs.
+- When future opt-in execution succeeds, record runtime process ref, stdout/stderr artifact refs, exit code, credential scan status, raw prompt policy, and raw output policy without raw prompt/provider text.
+
+Evidence:
+
+- `AdapterDispatchExecutionProjection`, `EventKind::AdapterDispatchExecuted`, SQLite table, rebuild codec, and read query in `../../crates/capo-state/src/lib.rs`.
+- Shared dashboard query exposure in `../../crates/capo-query/src/lib.rs` and CLI dashboard rendering in `../../crates/capo-cli/src/main.rs`.
+- `capo adapter run-local --dispatch-plan DISPATCH_PLAN_ID --record` records blocked preflight outcomes with `provider_cli_executed=false`.
+- `cargo test -p capo-state adapter_dispatch_execution -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Treat local dispatch executions as a fourth durable fact after plans, gates, and execution requests. This keeps real provider side effects auditable instead of only returning transient CLI output.
+- Blocked execution outcomes are useful state: they let dashboard/voice/mobile surfaces explain why execution did not happen without re-running the command.
+- Successful execution outcome recording is wired into `run-local`, but real Codex/Claude execution remains skipped until explicit opt-in.

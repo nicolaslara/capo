@@ -21,14 +21,14 @@ use capo_runtime::{
     LocalProcessRunner,
 };
 use capo_state::{
-    AdapterDispatchExecutionRequestProjection, AdapterDispatchGateProjection,
-    AdapterDispatchPlanProjection, AdapterDispatchPromptMaterializationProjection,
-    AdapterDispatchPromptSourceProjection, AdapterDispatchReplayProjection,
-    AdapterReadinessProjection, AdapterSmokeReportProjection, ArtifactRecord,
-    CapabilityGrantProjection, ConnectivityExposureProjection, EventKind, EventRecord,
-    EvidenceProjection, MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
-    NewEvent, PermissionApprovalProjection, ProjectionRecord, RedactionState,
-    ReviewFindingProjection, RunProjection, SessionProjection, SqliteStateStore,
+    AdapterDispatchExecutionProjection, AdapterDispatchExecutionRequestProjection,
+    AdapterDispatchGateProjection, AdapterDispatchPlanProjection,
+    AdapterDispatchPromptMaterializationProjection, AdapterDispatchPromptSourceProjection,
+    AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
+    ArtifactRecord, CapabilityGrantProjection, ConnectivityExposureProjection, EventKind,
+    EventRecord, EvidenceProjection, MemoryPacketProjection, MemoryRecordProjection,
+    MemorySourceProjection, NewEvent, PermissionApprovalProjection, ProjectionRecord,
+    RedactionState, ReviewFindingProjection, RunProjection, SessionProjection, SqliteStateStore,
     ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
 use capo_voice::{
@@ -58,7 +58,7 @@ Usage:
   capo adapter execution-request --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter materialize-prompt --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter run-preflight --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
-  capo adapter run-local --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
+  capo adapter run-local --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter dogfood-gate [--state PATH]
   capo adapter smoke-report scan --artifact-root PATH [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
@@ -1506,10 +1506,10 @@ fn adapter_dispatch_run_preflight(parsed: &ParsedArgs, args: &[String]) -> Resul
 
 fn adapter_dispatch_run_local(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let dispatch_plan_id = required_arg(args, "--dispatch-plan")?;
-    if let Some(unknown) = args
-        .iter()
-        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan"))
-    {
+    let record = has_flag(args, "--record");
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan" | "--record")
+    }) {
         return Err(format!("unknown adapter run-local option: {unknown}"));
     }
     let state = state(parsed)?;
@@ -1532,7 +1532,22 @@ fn adapter_dispatch_run_local(parsed: &ParsedArgs, args: &[String]) -> Result<St
         .find(|row| row.dispatch_plan_id == plan.dispatch_plan_id);
     let preflight = dispatch_run_preflight(plan, execution_request, materialization);
     if !preflight.provider_cli_execution_allowed {
-        return Ok(render_adapter_dispatch_run_local_blocked(&preflight));
+        let execution = adapter_dispatch_execution_projection(
+            plan,
+            execution_request,
+            &preflight,
+            AdapterDispatchExecutionRuntimeOutcome::blocked(),
+        );
+        let recorded_sequence = if record {
+            Some(record_adapter_dispatch_execution(&state, plan, &execution)?)
+        } else {
+            None
+        };
+        return Ok(render_adapter_dispatch_run_local_blocked(
+            &preflight,
+            record,
+            recorded_sequence,
+        ));
     }
 
     let prompt_source = dashboard
@@ -1559,8 +1574,26 @@ fn adapter_dispatch_run_local(parsed: &ParsedArgs, args: &[String]) -> Result<St
         .map_err(format_smoke_scan_error)?;
     scan_dispatch_artifacts_or_delete([&outcome.stdout.path, &outcome.stderr.path])
         .map_err(format_smoke_scan_error)?;
+    let execution = adapter_dispatch_execution_projection(
+        plan,
+        execution_request,
+        &preflight,
+        AdapterDispatchExecutionRuntimeOutcome {
+            provider_cli_executed: true,
+            status: outcome.process.status.clone(),
+            exit_code: outcome.exit_code.map(i64::from),
+            runtime_process_ref: Some(outcome.process.runtime_process_ref.clone()),
+            stdout_artifact_id: Some(outcome.stdout.artifact_id.clone()),
+            stderr_artifact_id: Some(outcome.stderr.artifact_id.clone()),
+            credential_scan_status: "clean".to_string(),
+            raw_output_policy: "bounded_redacted_artifacts".to_string(),
+            reason_codes: "provider_cli_executed_and_artifacts_scanned".to_string(),
+        },
+    );
+    let recorded_sequence = record_adapter_dispatch_execution(&state, plan, &execution)?;
     Ok(format!(
-        "adapter_dispatch_run_local=true\ndispatch_plan={}\nadapter={}\nprovider_cli_execution_allowed=true\nprovider_cli_executed=true\nstatus={}\nruntime_process_ref={}\nexit_code={}\nstdout_artifact={}\nstderr_artifact={}\nartifact_root={}\nraw_prompt_policy={}\nraw_output_policy=bounded_redacted_artifacts\n",
+        "adapter_dispatch_run_local=true\ndispatch_execution={}\ndispatch_plan={}\nadapter={}\nprovider_cli_execution_allowed=true\nprovider_cli_executed=true\nstatus={}\nruntime_process_ref={}\nexit_code={}\nstdout_artifact={}\nstderr_artifact={}\nartifact_root={}\nraw_prompt_policy={}\nraw_output_policy=bounded_redacted_artifacts\nrecorded=true\nrecorded_sequence={}\n",
+        execution.dispatch_execution_id,
         plan.dispatch_plan_id,
         plan.adapter_kind,
         outcome.process.status,
@@ -1574,7 +1607,8 @@ fn adapter_dispatch_run_local(parsed: &ParsedArgs, args: &[String]) -> Result<St
         launch_plan.artifact_root.display(),
         materialization
             .map(|row| row.raw_prompt_policy.as_str())
-            .unwrap_or("none")
+            .unwrap_or("none"),
+        recorded_sequence
     ))
 }
 
@@ -1691,9 +1725,13 @@ fn render_adapter_dispatch_run_preflight(preflight: &AdapterDispatchRunPreflight
     )
 }
 
-fn render_adapter_dispatch_run_local_blocked(preflight: &AdapterDispatchRunPreflight) -> String {
+fn render_adapter_dispatch_run_local_blocked(
+    preflight: &AdapterDispatchRunPreflight,
+    recorded: bool,
+    recorded_sequence: Option<i64>,
+) -> String {
     format!(
-        "adapter_dispatch_run_local=true\ndispatch_plan={}\nadapter={}\nexecution_request={}\nprompt_materialization={}\nprovider_cli_execution_allowed=false\nprovider_cli_executed=false\nopt_in_env={}\nopt_in_set={}\nstatus={}\nruntime_prompt_policy={}\nraw_prompt_policy={}\nreasons={}\nnext_action={}\n",
+        "adapter_dispatch_run_local=true\ndispatch_plan={}\nadapter={}\nexecution_request={}\nprompt_materialization={}\nprovider_cli_execution_allowed=false\nprovider_cli_executed=false\nopt_in_env={}\nopt_in_set={}\nstatus={}\nruntime_prompt_policy={}\nraw_prompt_policy={}\nreasons={}\nnext_action={}\nrecorded={}\nrecorded_sequence={}\n",
         preflight.dispatch_plan_id,
         preflight.adapter_kind,
         preflight.execution_request_id,
@@ -1704,8 +1742,141 @@ fn render_adapter_dispatch_run_local_blocked(preflight: &AdapterDispatchRunPrefl
         preflight.runtime_prompt_policy,
         preflight.raw_prompt_policy,
         preflight.reasons.join(","),
-        preflight.next_action
+        preflight.next_action,
+        recorded,
+        recorded_sequence
+            .map(|sequence| sequence.to_string())
+            .unwrap_or_else(|| "none".to_string())
     )
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AdapterDispatchExecutionRuntimeOutcome {
+    provider_cli_executed: bool,
+    status: String,
+    exit_code: Option<i64>,
+    runtime_process_ref: Option<String>,
+    stdout_artifact_id: Option<String>,
+    stderr_artifact_id: Option<String>,
+    credential_scan_status: String,
+    raw_output_policy: String,
+    reason_codes: String,
+}
+
+impl AdapterDispatchExecutionRuntimeOutcome {
+    fn blocked() -> Self {
+        Self {
+            provider_cli_executed: false,
+            status: "blocked_by_preflight".to_string(),
+            exit_code: None,
+            runtime_process_ref: None,
+            stdout_artifact_id: None,
+            stderr_artifact_id: None,
+            credential_scan_status: "not_run".to_string(),
+            raw_output_policy: "not_captured".to_string(),
+            reason_codes: "preflight_blocked_provider_execution".to_string(),
+        }
+    }
+}
+
+fn adapter_dispatch_execution_projection(
+    plan: &AdapterDispatchPlanProjection,
+    execution_request: Option<&AdapterDispatchExecutionRequestProjection>,
+    preflight: &AdapterDispatchRunPreflight,
+    outcome: AdapterDispatchExecutionRuntimeOutcome,
+) -> AdapterDispatchExecutionProjection {
+    let reason_codes = if outcome.provider_cli_executed {
+        outcome.reason_codes
+    } else {
+        preflight.reasons.join(",")
+    };
+    AdapterDispatchExecutionProjection {
+        dispatch_execution_id: format!(
+            "adapter-dispatch-execution-{}-{}",
+            stable_cli_hash(&plan.dispatch_plan_id),
+            stable_cli_hash(&format!(
+                "{}:{}:{}:{}:{}",
+                preflight.status,
+                outcome.provider_cli_executed,
+                reason_codes,
+                outcome.runtime_process_ref.as_deref().unwrap_or("none"),
+                outcome.stdout_artifact_id.as_deref().unwrap_or("none")
+            ))
+        ),
+        project_id: plan.project_id.clone(),
+        dispatch_plan_id: plan.dispatch_plan_id.clone(),
+        execution_request_id: execution_request
+            .map(|request| request.execution_request_id.clone())
+            .unwrap_or_else(|| "none".to_string()),
+        adapter_kind: plan.adapter_kind.clone(),
+        session_id: plan.session_id.clone(),
+        run_id: plan.run_id.clone(),
+        provider_cli_execution_allowed: preflight.provider_cli_execution_allowed,
+        provider_cli_executed: outcome.provider_cli_executed,
+        status: if outcome.provider_cli_executed {
+            outcome.status
+        } else {
+            preflight.status.clone()
+        },
+        exit_code: outcome.exit_code,
+        runtime_process_ref: outcome.runtime_process_ref,
+        stdout_artifact_id: outcome.stdout_artifact_id,
+        stderr_artifact_id: outcome.stderr_artifact_id,
+        artifact_root: plan.artifact_root.clone(),
+        credential_scan_status: outcome.credential_scan_status,
+        raw_prompt_policy: preflight.raw_prompt_policy.clone(),
+        raw_output_policy: outcome.raw_output_policy,
+        reason_codes,
+        updated_sequence: 0,
+    }
+}
+
+fn record_adapter_dispatch_execution(
+    state: &SqliteStateStore,
+    plan: &AdapterDispatchPlanProjection,
+    execution: &AdapterDispatchExecutionProjection,
+) -> Result<i64, String> {
+    let event = NewEvent {
+        event_id: format!(
+            "event-adapter-dispatch-execution-{}",
+            stable_cli_hash(&execution.dispatch_execution_id)
+        ),
+        kind: EventKind::AdapterDispatchExecuted,
+        actor: "local-cli".to_string(),
+        project_id: Some(execution.project_id.clone()),
+        task_id: None,
+        agent_id: Some(plan.agent_id.clone()),
+        session_id: Some(execution.session_id.clone()),
+        run_id: Some(execution.run_id.clone()),
+        turn_id: None,
+        item_id: Some(execution.dispatch_execution_id.clone()),
+        payload_json: format!(
+            "{{\"dispatch_plan_id\":\"{}\",\"execution_request_id\":\"{}\",\"provider_cli_executed\":{},\"status\":\"{}\",\"raw_prompt_policy\":\"{}\",\"raw_output_policy\":\"{}\"}}",
+            escape_json(&execution.dispatch_plan_id),
+            escape_json(&execution.execution_request_id),
+            execution.provider_cli_executed,
+            escape_json(&execution.status),
+            escape_json(&execution.raw_prompt_policy),
+            escape_json(&execution.raw_output_policy)
+        ),
+        idempotency_key: Some(format!(
+            "adapter-dispatch-execution:{}:{}:{}:{}:{}",
+            execution.project_id,
+            execution.dispatch_plan_id,
+            execution.execution_request_id,
+            execution.status,
+            execution.dispatch_execution_id
+        )),
+        redaction_state: RedactionState::Safe,
+    };
+    state
+        .append_event(
+            event,
+            &[ProjectionRecord::AdapterDispatchExecution(
+                execution.clone(),
+            )],
+        )
+        .map_err(debug_error)
 }
 
 fn build_dispatch_run_launch_plan(
@@ -2433,6 +2604,36 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
             request.opt_in_env,
             request.runtime_prompt_policy,
             request.reason_codes
+        ));
+    }
+    output.push_str(&format!(
+        "adapter_dispatch_executions={}\n",
+        dashboard.adapter_dispatch_executions.len()
+    ));
+    for execution in &dashboard.adapter_dispatch_executions {
+        output.push_str(&format!(
+            "adapter_dispatch_execution={} dispatch_plan={} execution_request={} adapter={} session={} run={} execution_status={} provider_cli_execution_allowed={} provider_cli_executed={} exit_code={} runtime_process_ref={} stdout_artifact={} stderr_artifact={} artifact_root={} credential_scan_status={} raw_prompt_policy={} raw_output_policy={} reasons={}\n",
+            execution.dispatch_execution_id,
+            execution.dispatch_plan_id,
+            execution.execution_request_id,
+            execution.adapter_kind,
+            execution.session_id,
+            execution.run_id,
+            execution.status,
+            execution.provider_cli_execution_allowed,
+            execution.provider_cli_executed,
+            execution
+                .exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            execution.runtime_process_ref.as_deref().unwrap_or("none"),
+            execution.stdout_artifact_id.as_deref().unwrap_or("none"),
+            execution.stderr_artifact_id.as_deref().unwrap_or("none"),
+            execution.artifact_root,
+            execution.credential_scan_status,
+            execution.raw_prompt_policy,
+            execution.raw_output_policy,
+            execution.reason_codes
         ));
     }
     output.push_str(&format!(
@@ -5951,6 +6152,7 @@ mod tests {
             "run-local".to_string(),
             "--dispatch-plan".to_string(),
             gates[0].dispatch_plan_id.clone(),
+            "--record".to_string(),
             "--state".to_string(),
             state_root.display().to_string(),
         ])
@@ -5961,7 +6163,29 @@ mod tests {
                 .contains("status=blocked_missing_prompt_materialization")
         );
         assert!(run_local_without_materialization.contains("provider_cli_executed=false"));
+        assert!(run_local_without_materialization.contains("recorded=true"));
         assert!(!run_local_without_materialization.contains("Do not render this dispatch prompt"));
+        let executions = SqliteStateStore::open(&state_root)
+            .expect("state")
+            .adapter_dispatch_executions(&project_id())
+            .expect("dispatch executions");
+        assert_eq!(executions.len(), 1);
+        assert_eq!(
+            executions[0].status,
+            "blocked_missing_prompt_materialization"
+        );
+        assert!(!executions[0].provider_cli_executed);
+        assert_eq!(executions[0].credential_scan_status, "not_run");
+        let execution_dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard after blocked local run");
+        assert!(execution_dashboard.contains("adapter_dispatch_executions=1"));
+        assert!(
+            execution_dashboard.contains("execution_status=blocked_missing_prompt_materialization")
+        );
         let inline_materialization = run_cli(vec![
             "adapter".to_string(),
             "materialize-prompt".to_string(),
