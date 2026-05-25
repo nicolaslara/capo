@@ -60,6 +60,7 @@ Progress:
 - AC5 durable connector readiness state is completed. `capo adapter readiness --record` persists readiness rows and the dashboard renders the remaining dogfood blocker.
 - AC6 real smoke evidence contract is completed. `capo adapter smoke-report record` can persist skipped/failed/passed smoke reports and refuses passed reports without a clean credential scan plus expected marker.
 - AC7 dogfood readiness gate is completed. `capo adapter dogfood-gate` and `capo dashboard` now derive first real-agent dogfood readiness from recorded connector evidence without launching provider CLIs.
+- AC8 smoke artifact scan enforcement is completed. Passed smoke reports now require an artifact root that Capo scans for unredacted credential/session markers before recording the report.
 
 Evidence:
 
@@ -81,6 +82,7 @@ Evidence:
 - `cargo test -p capo-cli adapter_smoke -- --nocapture`
 - `cargo test -p capo-query adapter_dogfood -- --nocapture`
 - `cargo test -p capo-cli adapter_dogfood -- --nocapture`
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`
 - Focused F1 connector safety review: no blocking findings; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge

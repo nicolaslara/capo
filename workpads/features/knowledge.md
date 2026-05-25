@@ -171,6 +171,26 @@ Follow-up:
 
 - After explicit Codex opt-in smoke, record the resulting smoke report and re-run `capo adapter dogfood-gate` before moving any Capo work into real-agent dogfood.
 
+## F1/AC8 - Smoke Artifact Scan Enforcement
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo adapter smoke-report scan --artifact-root PATH` as a provider-free artifact scan command for local smoke outputs.
+- Enforce the same scan before accepting any `passed` smoke report. A passed report now requires `--artifact-root`; skipped and failed reports remain recordable without artifacts so blockers can still be documented.
+- Reuse the adapter-layer sensitive marker scanner so the scan policy remains shared between the actual smoke runner and the operator evidence contract.
+- Keep `--credential-scan clean` in the command as an explicit operator-facing assertion, but make it insufficient on its own for passed reports.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dogfood -- --nocapture`: passed.
+
+Follow-up:
+
+- After the opt-in Codex smoke runs, use the generated artifact root directly with the smoke report command rather than relying on manual inspection notes.
+
 ## F3/DS1 - Query Surface Extraction
 
 Status: completed on 2026-05-25.

@@ -193,3 +193,27 @@ Decision:
 - The first real-agent dogfood gate is cleared only by recorded Codex evidence with `smoke_status=passed`, `credential_scan_status=clean`, marker present, and `dogfood_readiness_effect=real_agent_connector_proven`.
 - The gate is read-only and evidence-derived. It does not launch Codex or Claude, inspect subscription state, or read credentials.
 - Claude remains a target connector, but first dogfood can start after Codex is proven because AC1 explicitly defines Codex as the first local connector proof.
+
+### AC8 - Smoke Artifact Scan Enforcement
+
+Status: completed
+
+Acceptance:
+
+- Expose a command that scans smoke artifact files for credential/session markers without launching provider CLIs.
+- Require the scan to pass before accepting any `passed` smoke report.
+- Keep failed/skipped smoke reports recordable without an artifact directory so operators can document blockers.
+- Cover raw secret marker rejection and clean artifact acceptance with CLI tests.
+
+Evidence:
+
+- `capo adapter smoke-report scan --artifact-root PATH` in `../../crates/capo-cli/src/main.rs`.
+- `capo adapter smoke-report record --status passed ... --artifact-root PATH` now scans the artifact directory before accepting a passed report.
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dogfood -- --nocapture`: passed.
+
+Decision:
+
+- A passed smoke report must include an artifact root and the artifact scan must pass. Operators can still record skipped/failed reports without artifacts to document blockers.
+- The scan reuses the adapter-layer sensitive marker scanner and does not launch provider CLIs, inspect subscriptions, or read credential stores.
+- This makes the dogfood readiness gate depend on a Capo-verified artifact scan rather than only an operator-provided `--credential-scan clean` flag.

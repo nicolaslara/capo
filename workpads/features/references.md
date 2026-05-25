@@ -252,6 +252,15 @@ Observed 2026-05-25.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC7.
 
+## F1/AC8 Smoke Artifact Scan Enforcement
+
+Observed 2026-05-25.
+
+- Smoke artifact scan command, passed-report scan enforcement, and CLI regression tests: `../../crates/capo-cli/src/main.rs`
+- Shared sensitive marker scanner reused by CLI enforcement: `../../crates/capo-adapters/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC8.
+
 ## F7/RR1 Loopback Remote Runtime Contract
 
 Observed 2026-05-25.

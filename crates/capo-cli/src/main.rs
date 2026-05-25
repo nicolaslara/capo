@@ -4,8 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use capo_adapters::{
-    AcpAdapter, AdapterFixtureParse, ClaudeCodeAdapter, CodexExecAdapter, LocalAdapterSmokePlan,
-    NormalizedAdapterEvent,
+    AcpAdapter, AdapterFixtureParse, ClaudeCodeAdapter, CodexExecAdapter, LocalAdapterSmokeError,
+    LocalAdapterSmokePlan, NormalizedAdapterEvent, scan_artifacts_for_sensitive_markers,
 };
 use capo_controller::FakeBoundaryController;
 use capo_core::{
@@ -44,6 +44,7 @@ Usage:
   capo agent list [--state PATH]
   capo adapter readiness [--record] [--state PATH]
   capo adapter dogfood-gate [--state PATH]
+  capo adapter smoke-report scan --artifact-root PATH [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
   capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR] [--state PATH]
   capo task send --agent NAME --goal GOAL [--scenario NAME] [--state PATH]
@@ -109,6 +110,11 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command] if area == "adapter" && command == "dogfood-gate" => {
             adapter_dogfood_gate(&parsed)
+        }
+        [area, command, action, rest @ ..]
+            if area == "adapter" && command == "smoke-report" && action == "scan" =>
+        {
+            scan_adapter_smoke_artifacts(rest)
         }
         [area, command, action, rest @ ..]
             if area == "adapter" && command == "smoke-report" && action == "record" =>
@@ -523,6 +529,12 @@ fn record_adapter_smoke_report(parsed: &ParsedArgs, args: &[String]) -> Result<S
             "passed smoke reports require --credential-scan clean and --marker-found".to_string(),
         );
     }
+    if smoke_status == "passed" {
+        let artifact_root = artifact_root
+            .as_ref()
+            .ok_or_else(|| "passed smoke reports require --artifact-root".to_string())?;
+        scan_artifact_root(Path::new(artifact_root))?;
+    }
     let smoke_report_id = format!(
         "adapter-smoke-{}-{}",
         adapter,
@@ -576,6 +588,96 @@ fn record_adapter_smoke_report(parsed: &ParsedArgs, args: &[String]) -> Result<S
         "adapter_smoke_report_recorded=true\nsmoke_report_id={smoke_report_id}\nadapter={adapter}\nsmoke_status={smoke_status}\ncredential_scan_status={credential_scan_status}\nmarker_found={marker_found}\ndogfood_readiness_effect={dogfood_readiness_effect}\nartifact_root={}\nsequence={sequence}\n",
         artifact_root.as_deref().unwrap_or("none")
     ))
+}
+
+fn scan_adapter_smoke_artifacts(args: &[String]) -> Result<String, String> {
+    let artifact_root = required_arg(args, "--artifact-root")?;
+    let scan = scan_artifact_root(Path::new(&artifact_root))?;
+    Ok(format!(
+        "adapter_smoke_artifact_scan=true\ncredential_scan_status=clean\nartifact_root={artifact_root}\nfiles_scanned={}\n",
+        scan.files_scanned
+    ))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ArtifactScanSummary {
+    files_scanned: usize,
+}
+
+fn scan_artifact_root(root: &Path) -> Result<ArtifactScanSummary, String> {
+    if !root.is_dir() {
+        return Err(format!(
+            "artifact root does not exist or is not a directory: {}",
+            root.display()
+        ));
+    }
+    let files = collect_regular_files(root)?;
+    if files.is_empty() {
+        return Err(format!(
+            "artifact root contains no files: {}",
+            root.display()
+        ));
+    }
+    scan_artifacts_for_sensitive_markers(files.iter()).map_err(format_smoke_scan_error)?;
+    Ok(ArtifactScanSummary {
+        files_scanned: files.len(),
+    })
+}
+
+fn collect_regular_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("failed to read artifact path {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "artifact scan refuses symlink path: {}",
+                path.display()
+            ));
+        }
+        if metadata.is_dir() {
+            for entry in fs::read_dir(&path).map_err(|error| {
+                format!(
+                    "failed to read artifact directory {}: {error}",
+                    path.display()
+                )
+            })? {
+                let entry = entry.map_err(|error| {
+                    format!(
+                        "failed to read artifact directory entry {}: {error}",
+                        path.display()
+                    )
+                })?;
+                pending.push(entry.path());
+            }
+        } else if metadata.is_file() {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn format_smoke_scan_error(error: LocalAdapterSmokeError) -> String {
+    match error {
+        LocalAdapterSmokeError::SensitiveArtifact { path, marker } => format!(
+            "credential scan blocked artifact {} because marker `{marker}` was not redacted",
+            path.display()
+        ),
+        LocalAdapterSmokeError::Io(error) => {
+            format!("credential scan failed to read artifact: {error}")
+        }
+        LocalAdapterSmokeError::Runtime(error) => {
+            format!("credential scan runtime error: {error:?}")
+        }
+        LocalAdapterSmokeError::NotOptedIn(env) => {
+            format!("credential scan unexpectedly hit opt-in gate: {env}")
+        }
+        LocalAdapterSmokeError::MarkerMissing { marker } => {
+            format!("credential scan unexpectedly checked marker: {marker}")
+        }
+    }
 }
 
 fn adapter_dogfood_gate(parsed: &ParsedArgs) -> Result<String, String> {
@@ -3043,6 +3145,13 @@ mod tests {
     #[test]
     fn adapter_smoke_report_records_skipped_and_blocks_invalid_pass() {
         let state_root = temp_root("adapter-smoke-report-state");
+        let artifact_root = temp_root("adapter-smoke-report-artifacts");
+        fs::create_dir_all(&artifact_root).expect("artifact dir");
+        fs::write(
+            artifact_root.join("stdout.txt"),
+            "CAPO_CODEX_SMOKE_OK\nAuthorization: [REDACTED]\n",
+        )
+        .expect("clean artifact");
         let skipped = run_cli(vec![
             "adapter".to_string(),
             "smoke-report".to_string(),
@@ -3080,20 +3189,142 @@ mod tests {
         .expect_err("passed report requires clean scan and marker");
         assert!(invalid_pass.contains("passed smoke reports require"));
 
+        let passed = run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "record".to_string(),
+            "--adapter".to_string(),
+            "codex".to_string(),
+            "--status".to_string(),
+            "passed".to_string(),
+            "--credential-scan".to_string(),
+            "clean".to_string(),
+            "--marker-found".to_string(),
+            "--artifact-root".to_string(),
+            artifact_root.display().to_string(),
+            "--reason".to_string(),
+            "clean opt-in smoke artifacts".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record passed smoke");
+        assert!(passed.contains("dogfood_readiness_effect=real_agent_connector_proven"));
+
         let dashboard = run_cli(vec![
             "dashboard".to_string(),
             "--state".to_string(),
             state_root.display().to_string(),
         ])
         .expect("dashboard");
-        assert!(dashboard.contains("adapter_smoke_reports=1"));
+        assert!(dashboard.contains("adapter_smoke_reports=2"));
         assert!(dashboard.contains("adapter_smoke_report=adapter-smoke-codex_exec"));
         assert!(dashboard.contains("credential_scan_status=not_run"));
     }
 
     #[test]
+    fn adapter_smoke_artifact_scan_blocks_raw_secret_markers() {
+        let clean_root = temp_root("adapter-clean-artifacts");
+        fs::create_dir_all(clean_root.join("nested")).expect("clean artifact dir");
+        fs::write(
+            clean_root.join("nested").join("stdout.txt"),
+            "Cookie: [REDACTED]\n",
+        )
+        .expect("clean artifact");
+        let clean = run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "scan".to_string(),
+            "--artifact-root".to_string(),
+            clean_root.display().to_string(),
+        ])
+        .expect("clean scan");
+        assert!(clean.contains("adapter_smoke_artifact_scan=true"));
+        assert!(clean.contains("credential_scan_status=clean"));
+        assert!(clean.contains("files_scanned=1"));
+
+        let blocked_root = temp_root("adapter-blocked-artifacts");
+        fs::create_dir_all(&blocked_root).expect("blocked artifact dir");
+        fs::write(
+            blocked_root.join("stderr.txt"),
+            "Authorization: Bearer secret\n",
+        )
+        .expect("blocked artifact");
+        let blocked = run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "scan".to_string(),
+            "--artifact-root".to_string(),
+            blocked_root.display().to_string(),
+        ])
+        .expect_err("raw secret marker should block scan");
+        assert!(blocked.contains("credential scan blocked artifact"));
+        assert!(blocked.contains("authorization:"));
+
+        let state_root = temp_root("adapter-blocked-report-state");
+        let blocked_report = run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "record".to_string(),
+            "--adapter".to_string(),
+            "codex".to_string(),
+            "--status".to_string(),
+            "passed".to_string(),
+            "--credential-scan".to_string(),
+            "clean".to_string(),
+            "--marker-found".to_string(),
+            "--artifact-root".to_string(),
+            blocked_root.display().to_string(),
+            "--reason".to_string(),
+            "should fail scan".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("passed report should enforce scan");
+        assert!(blocked_report.contains("credential scan blocked artifact"));
+    }
+
+    #[test]
+    fn adapter_smoke_artifact_scan_refuses_symlinks() {
+        let artifact_root = temp_root("adapter-symlink-artifacts");
+        fs::create_dir_all(&artifact_root).expect("artifact dir");
+        fs::write(artifact_root.join("stdout.txt"), "CAPO_CODEX_SMOKE_OK\n").expect("artifact");
+        let outside = temp_root("adapter-symlink-outside");
+        fs::create_dir_all(&outside).expect("outside dir");
+        fs::write(
+            outside.join("session.txt"),
+            "Authorization: Bearer secret\n",
+        )
+        .expect("outside secret");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            outside.join("session.txt"),
+            artifact_root.join("session-link"),
+        )
+        .expect("symlink");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(
+            outside.join("session.txt"),
+            artifact_root.join("session-link"),
+        )
+        .expect("symlink");
+
+        let blocked = run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "scan".to_string(),
+            "--artifact-root".to_string(),
+            artifact_root.display().to_string(),
+        ])
+        .expect_err("symlink should be refused");
+        assert!(blocked.contains("artifact scan refuses symlink path"));
+    }
+
+    #[test]
     fn adapter_dogfood_gate_requires_passed_codex_smoke_report() {
         let state_root = temp_root("adapter-dogfood-gate-state");
+        let artifact_root = temp_root("adapter-dogfood-gate-artifacts");
+        fs::create_dir_all(&artifact_root).expect("artifact dir");
+        fs::write(artifact_root.join("stdout.txt"), "CAPO_CODEX_SMOKE_OK\n").expect("artifact");
         let blocked = run_cli(vec![
             "adapter".to_string(),
             "dogfood-gate".to_string(),
@@ -3116,6 +3347,8 @@ mod tests {
             "--credential-scan".to_string(),
             "clean".to_string(),
             "--marker-found".to_string(),
+            "--artifact-root".to_string(),
+            artifact_root.display().to_string(),
             "--reason".to_string(),
             "operator recorded clean opt-in smoke".to_string(),
             "--state".to_string(),
