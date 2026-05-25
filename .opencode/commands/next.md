@@ -16,10 +16,11 @@ Read these files first:
 8. `workpads/{active-workpad}/references.md`
 9. `workpads/architecture/boundaries.md` - when active workpad is `architecture`, `prototype`, `features`, or `dogfood`
 10. `workpads/architecture/state-model.md` - when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A2 is complete
-11. `workpads/prototype/spec.md` - when active workpad is `prototype` or `dogfood`
-12. `workpads/research/knowledge.md` - when active workpad is `architecture`
-13. `workpads/architecture/knowledge.md` - when active workpad is `prototype`
-14. `workpads/prototype/knowledge.md` - when active workpad is `features` or `dogfood`
+11. `workpads/architecture/acp-replay-dedupe.md` - when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A2a is complete
+12. `workpads/prototype/spec.md` - when active workpad is `prototype` or `dogfood`
+13. `workpads/research/knowledge.md` - when active workpad is `architecture`
+14. `workpads/architecture/knowledge.md` - when active workpad is `prototype`
+15. `workpads/prototype/knowledge.md` - when active workpad is `features` or `dogfood`
 
 ## Step 2: Resolve Active Workpad
 

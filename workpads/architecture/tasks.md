@@ -51,7 +51,7 @@ Evidence:
 
 ## A2a - ACP Streaming Replay And Dedupe Research
 
-Status: pending
+Status: completed
 
 Context:
 
@@ -65,6 +65,13 @@ Acceptance:
 - Define how Capo stores partial streaming updates, chunk finalization, tool-call updates, and replay markers.
 - Define dedupe/idempotency rules for ACP replay, Capo restart recovery, and UI projections.
 - Record recommendation in `knowledge.md` and any protocol notes in `references.md`.
+
+Evidence:
+
+- `workpads/architecture/acp-replay-dedupe.md`
+- `workpads/architecture/state-model.md` adapter replay additions
+- `workpads/architecture/knowledge.md` A2a section
+- `workpads/architecture/references.md` Protocol section
 
 ## A3 - Capability And Permission Model
 

@@ -15,7 +15,7 @@ This is the A2 architecture artifact. It refines the `StateStore` boundary from 
 - Raw adapter/runtime/provider records are inputs and artifacts, not the projected product state.
 - Read models are rebuildable from events plus artifacts.
 - Projection code must tolerate duplicate raw inputs by using idempotency keys and external references.
-- A2 defines the generic model; ACP-specific replay and partial-streaming details remain in A2a.
+- ACP-specific replay and partial-streaming details live in `acp-replay-dedupe.md`.
 
 ## Storage Authority
 
@@ -28,6 +28,8 @@ This is the A2 architecture artifact. It refines the `StateStore` boundary from 
 | Streaming messages/items/tool calls | SQLite events | Raw chunks may also be artifact records. |
 | Runtime stdout/stderr/PTY logs | File artifacts plus event pointers | Avoid unbounded blobs in event rows. |
 | Raw adapter events | File artifacts or raw-event table | Used for replay/debug/dedupe, not UI truth. |
+| Adapter replay batches | SQLite plus raw-update artifacts | Used to reconcile ACP `session/load` and restart recovery without duplicate UI state. |
+| Adapter replay candidates | SQLite staging table | Non-projecting records used during replay reconciliation before accepted Capo events are appended. |
 | Capability grants and permission decisions | SQLite events | A3 will expand exact scopes. |
 | Human decisions and review/evidence | SQLite events plus artifacts | Links back to workpad evidence where applicable. |
 | Derived memory | Memory layer | Must reference event/file provenance. |
@@ -154,10 +156,16 @@ Fields:
 - `turn_id`
 - `kind`
 - `status`
+- `stream_state?`
 - `ordinal`
 - `summary?`
 - `artifact_id?`
 - `external_item_ref?`
+- `content_hash?`
+- `chunk_count?`
+- `message_boundary_confidence?`
+- `adapter_timeline_key_id?`
+- `import_confidence?`
 
 Prototype kinds:
 
@@ -196,7 +204,7 @@ Fields:
 - `output_artifact_id?`
 - `external_tool_ref?`
 
-Prototype status values: `requested`, `approved`, `started`, `output`, `completed`, `failed`, `denied`, `observed_only`.
+Prototype status values: `requested`, `approved`, `started`, `output`, `completed`, `failed`, `denied`, `canceled`, `observed_only`.
 
 ### PermissionDecision
 
@@ -389,6 +397,19 @@ Uniqueness rules:
 | `run.orphaned` | Restart detected process without owner | `runs` |
 | `run.recovered` | New run mapped to previous state | `runs`, `sessions` |
 
+### Adapter Replay And Attach
+
+| Event kind | Payload summary | Projects to |
+| --- | --- | --- |
+| `adapter.replay_started` | Replay/import source, external session, batch ID | `adapter_replay_batches`, `sessions` |
+| `adapter.raw_update_observed` | Raw update artifact/hash/index | `adapter_raw_updates` |
+| `adapter.replay_duplicate_detected` | Existing item/tool matched by timeline key or content hash | `adapter_replay_batches`, `items` |
+| `adapter.replay_ambiguous` | Low-confidence replay match requiring caution/review | `adapter_replay_batches`, `items` |
+| `adapter.replay_completed` | Imported/duplicate/ambiguous counts and event range | `adapter_replay_batches`, `sessions` |
+| `adapter.attach_started` | External session and attach method such as ACP `session/resume` | `sessions` |
+| `adapter.attach_completed` | Attach result metadata | `sessions` |
+| `adapter.attach_failed` | Attach error and resumability status | `sessions` |
+
 ### Command, Turn, And Items
 
 | Event kind | Payload summary | Projects to |
@@ -417,6 +438,7 @@ Uniqueness rules:
 | `tool.output_observed` | Output artifact/ref | `tool_calls`, `items` |
 | `tool.call_completed` | Result metadata, output artifact/ref | `tool_calls`, `items` |
 | `tool.call_failed` | Error and retryability | `tool_calls`, `items` |
+| `tool.call_canceled` | Actor/source and cancellation reason | `tool_calls`, `items` |
 | `tool.result_delivered` | Adapter delivery status for a tool result | `tool_calls`, `items` |
 
 ### Memory, Evaluation, And Checkpoints
@@ -532,7 +554,7 @@ agents(agent_id, project_id, name, adapter_id, runtime_target_id, provider_id, c
 sessions(session_id, project_id, task_id, agent_id, title, status, external_session_ref_json, latest_summary, last_sequence, updated_at)
 runs(run_id, session_id, runtime_process_ref_json, adapter_instance_ref_json, status, started_at, ended_at, exit_status_json, recovery_of_run_id, updated_at)
 turns(turn_id, session_id, run_id, origin_command_id, role, status, created_at, completed_at)
-items(item_id, turn_id, kind, status, ordinal, summary, artifact_id, external_item_ref_json, updated_at)
+items(item_id, turn_id, kind, status, stream_state, ordinal, summary, artifact_id, external_item_ref_json, content_hash, chunk_count, message_boundary_confidence, adapter_timeline_key_id, import_confidence, updated_at)
 tool_calls(tool_call_id, session_id, turn_id, item_id, tool_name, tool_origin, permission_decision_id, status, started_at, completed_at, latency_ms, input_artifact_id, output_artifact_id, external_tool_ref_json)
 permission_decisions(permission_decision_id, request_id, session_id, run_id, tool_call_id, capability_profile_id, decision, persistence, source, scope_json, expires_at, revoked_at, created_at)
 permission_requests(permission_request_id, session_id, run_id, tool_call_id, capability_profile_id, scope_json, risk, source, adapter_options_json, status, created_at, decided_at)
@@ -542,6 +564,10 @@ evidence(evidence_id, project_id, task_id, session_id, run_id, kind, artifact_id
 evaluations(evaluation_id, project_id, task_id, session_id, run_id, status, criteria_json, result_json, reviewer, evidence_id, created_at)
 memory_refs(memory_ref_id, project_id, source_event_id, source_artifact_id, memory_record_id, status, provenance_json, created_at)
 recovery_attempts(recovery_attempt_id, started_at, completed_at, status, emitted_sequence_start, emitted_sequence_end, notes_json)
+adapter_replay_batches(acp_replay_batch_id, session_id, external_session_ref_json, source, started_at, completed_at, load_request_id, prompt_request_id, recovery_attempt_id, raw_update_count, normalized_sequence_start, normalized_sequence_end, status, summary_json)
+adapter_raw_updates(acp_raw_update_id, acp_replay_batch_id, external_session_ref_json, batch_index, jsonrpc_method, session_update_kind, external_item_ref_json, payload_hash, payload_artifact_id, observed_at, dedupe_confidence)
+adapter_replay_candidates(adapter_replay_candidate_id, acp_replay_batch_id, adapter_timeline_key_id, candidate_kind, payload_hash, payload_artifact_id, status, match_event_id, created_at)
+adapter_timeline_keys(adapter_timeline_key_id, session_id, external_session_ref_json, kind, stable_ref, synthetic_ref, confidence, first_sequence, last_sequence)
 ```
 
 Minimum indexes:
@@ -554,11 +580,17 @@ Minimum indexes:
 - `raw_events(source, payload_hash)`
 - `raw_events(adapter_id, external_ref_json)` where stable external refs exist
 - `items(turn_id, ordinal)`
+- `items(adapter_timeline_key_id)`
 - `tool_calls(session_id, status)`
 - `permission_requests(status, created_at)`
 - `permission_decisions(session_id, revoked_at)`
 - `evidence(task_id, created_at)`
 - `recovery_attempts(started_at)`
+- `adapter_replay_batches(session_id, source, started_at)`
+- `adapter_raw_updates(acp_replay_batch_id, batch_index)` unique
+- `adapter_replay_candidates(acp_replay_batch_id, status)`
+- `adapter_timeline_keys(session_id, kind, stable_ref)`
+- `adapter_timeline_keys(session_id, kind, synthetic_ref)` where `stable_ref` is null
 
 ## Artifact Rules
 
@@ -619,7 +651,7 @@ Recovery invariants:
 
 ## Streaming And Dedupe Baseline
 
-A2 uses a conservative baseline that A2a will refine for ACP:
+Generic adapter rules:
 
 - Each adapter event should produce a stable `idempotency_key` when possible.
 - Streaming chunks append to an `item_id` chosen by Capo when the adapter cannot provide stable item IDs.
@@ -628,9 +660,14 @@ A2 uses a conservative baseline that A2a will refine for ACP:
 - Adapter replays are treated as input streams and run through the same idempotency path as live streams.
 - If the adapter cannot provide stable IDs, Capo uses `(session_id, turn_id, item ordinal, chunk ordinal, payload_hash)` as a best-effort key and records confidence as low in the raw event metadata.
 
-Known gap:
+ACP-specific rules:
 
-- ACP `session/load` and `session/update` semantics need deeper research before this baseline becomes a final protocol-specific replay design. That is A2a.
+- ACP `session/resume` is preferred over `session/load` when Capo already has local event history and only needs to reconnect.
+- ACP `session/load` opens an adapter replay batch, persists raw updates, stages non-projecting candidates, reconciles duplicates, appends only accepted events, then advances read-model watermarks.
+- ACP tool calls use `toolCallId` as a stable timeline key.
+- ACP plans are replacement projections.
+- ACP message chunks in stable v1 lack stable message IDs, so Capo finalizes content hashes and records boundary confidence.
+- See `acp-replay-dedupe.md` for the complete A2a design.
 
 ## Prototype E2E State Flow
 
@@ -649,7 +686,6 @@ The first fake-agent e2e test should prove this flow:
 
 ## Open Questions For Later Tasks
 
-- A2a: exact ACP replay and partial-stream identity rules.
 - A3: complete capability scope vocabulary and approval persistence semantics.
 - A5/A5a: exact Codex/Claude event mapping and native tool observability limits.
 - A6: exact derived-memory schema and invalidation rules.
@@ -664,4 +700,4 @@ A2 is complete when:
 - Prototype read models are specified.
 - SQLite and artifact layout are specified.
 - Restart recovery behavior is specified.
-- ACP-specific replay unknowns are explicitly deferred to A2a.
+- ACP-specific replay and dedupe rules are linked through `acp-replay-dedupe.md`.

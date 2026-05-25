@@ -143,6 +143,31 @@ Review findings accepted:
 - Added interrupt and stop event families needed by the prototype minimum.
 - Updated routing docs so future agents load `state-model.md` after A2.
 
+## A2a - ACP Streaming Replay And Dedupe
+
+Status: completed on 2026-05-25.
+
+Primary recommendation:
+
+- Treat ACP as an adapter input stream, not as Capo's UI/read-model truth.
+- Prefer ACP `session/resume` over `session/load` when Capo already has complete local event history and the agent supports resume.
+- Use ACP `session/load` for foreign session import, repair/reconciliation, or agents that cannot resume.
+- Persist raw ACP updates in replay batches, stage candidate normalized records outside the projecting event log, reconcile them, and append only accepted import/update events or replay marker events.
+- UI surfaces consume Capo sequence/read-model watermarks only; they never render raw ACP replay directly.
+
+Identity and dedupe decisions:
+
+- ACP `toolCallId` is a stable timeline key within an ACP session and is the main reliable tool-call dedupe anchor.
+- ACP plan updates are complete replacement projections; keep event history but render the latest plan.
+- Stable ACP v1 message chunks do not have stable `messageId` in the main schema. Capo must use content hashes, surrounding anchors, and boundary confidence for message replay dedupe.
+- `_meta.messageId` is not generic ACP identity. It can only be used as adapter-specific, opt-in heuristic evidence when a concrete adapter documents and tests it.
+- Replay duplicate, ambiguous, attach, and replay-completion events are explicit so restart recovery and ACP replay remain auditable.
+
+Residual risk:
+
+- Message-boundary dedupe without stable message IDs is inherently medium confidence. Prototype ACP fixtures must cover same-history `session/load`, foreign import, consecutive same-type chunks, plan replacement, repeated tool updates, and cancellation with pending permissions.
+- If ACP stabilizes message IDs later, Capo should support them opportunistically without making them required for correctness.
+
 ## Architecture Gate
 
 Status: not passed.
@@ -161,6 +186,6 @@ Required evidence:
 
 - Should the core process be a long-running server from day one, or a CLI that later grows a daemon?
 - Should the first UI be TUI, web dashboard, or both?
-- How should partial streaming updates be persisted and replayed without duplicate UI state across ACP `session/load` and Capo restart recovery?
+- How should low-confidence ACP message-boundary matches be surfaced in dashboard/review UX without creating noisy false alarms?
 - What is the exact vocabulary for `project`, `agent`, `adapter`, `runtime`, `session`, `run`, `turn`, `task`, `event`, `item`, `tool_call`, `artifact`, and `checkpoint`?
 - Which data belongs only in SQLite, which belongs in markdown workpads, and which is mirrored between them?

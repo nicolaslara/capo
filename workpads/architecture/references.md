@@ -27,6 +27,14 @@ Observed 2026-05-25. Local clones are gitignored under `workpads/references/repo
 
 - Agent Client Protocol repo: https://github.com/agentclientprotocol/agent-client-protocol
 - Agent Client Protocol docs: https://agentclientprotocol.com/
+- Local ACP clone for A2a: `workpads/references/repos/agent-client-protocol`, observed 2026-05-25 at commit `ec66afe2f0f9fce4e3348b38f8007b5583e4b20f`, Apache-2.0.
+- ACP replay/dedupe architecture artifact: `acp-replay-dedupe.md` (created 2026-05-25)
+- ACP session setup/load/resume docs: https://agentclientprotocol.com/protocol/session-setup
+- ACP prompt turn docs: https://agentclientprotocol.com/protocol/prompt-turn
+- ACP tool call docs: https://agentclientprotocol.com/protocol/tool-calls
+- ACP agent plan docs: https://agentclientprotocol.com/protocol/agent-plan
+- ACP session resume announcement: https://agentclientprotocol.com/announcements/session-resume-stabilized
+- ACP Message ID RFD: https://agentclientprotocol.com/rfds/message-id
 
 ## Runtime And Connectivity
 
