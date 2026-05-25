@@ -307,6 +307,55 @@ Residual risks:
 - Exact Codex and Claude native-tool visibility remains medium confidence until fixture captures show which structured fields are exposed.
 - Shell/file/git wrappers are intentionally deferred; prototype tests must not claim runtime enforcement until wrappers exist.
 
+## A6 - Memory Architecture
+
+Status: completed on 2026-05-25.
+
+Decision:
+
+- Use `workpads/architecture/memory-architecture.md` as the implementation-facing memory model.
+- Keep operational truth in SQLite events/projections/artifacts and human project truth in markdown workpads.
+- Treat memory as derived, rebuildable context with provenance, confidence, scope, review state, validity windows, and invalidation metadata.
+- Start v0 with markdown source pointers, SQLite memory records, and fake packet building; defer FTS, embeddings, vector stores, graph memory, and external sync until dogfood traces justify them.
+- Use static dispatch for memory backends: markdown, SQLite FTS, external adapter, and fake.
+
+Memory boundary:
+
+- `MemoryRecord` captures reusable facts, decisions, warnings, lessons, summaries, and retrieval hints.
+- `MemorySource` links every record to local events, artifacts, markdown anchors, or explicit external imports.
+- `MemoryIndexEntry` is rebuildable metadata for FTS/embedding/graph indexes.
+- `MemoryPacket` is the task-specific fraction of memory attached to a run/turn, with included/excluded item reasons and source refs.
+- `MemoryJob` tracks extraction, indexing, packet building, export, and rebuild jobs.
+
+Safety and privacy:
+
+- Raw voice transcripts, credentials, subscription sessions, browser cookies, and vendor credential material are excluded from long-term memory by default.
+- Raw transcript artifact retention is separate from memory ingestion. Long-term memory stores reviewed/redacted transcript summaries only unless a future high-risk feature explicitly adds raw transcript memory ingestion.
+- External memory sync/export is disabled by default and requires explicit `memory:sync:external` or `memory:export:project` scope.
+- Generated memory must be promoted/reviewed before it can be treated as durable project decision memory.
+
+Implementation implications:
+
+- The first e2e prototype should build a source-linked memory packet for a fake run/turn, not attempt semantic search.
+- Memory packet read models should make inclusion reasons visible so dashboard/voice can explain why context was supplied.
+- Search and packet authorization filter through typed `scope_owner_ref`, `subject_ref`, and `sensitivity_classification`, not free-text memory facts.
+- A `MemoryPacket` row requires a packet artifact, making injected prompt context exactly replayable while preserving source events/workpads as factual authority.
+- `memory_refs` remains a compatibility/provenance projection, while the detailed schema lives in `memory_records`, `memory_sources`, `memory_index_entries`, `memory_packets`, and `memory_jobs`.
+
+Review findings accepted:
+
+- Added typed owner/resource refs and sensitivity classification to memory records.
+- Required replayable packet artifacts before memory packets can be attached or injected.
+- Renamed broad extraction jobs to `MemoryJob` / `memory_jobs`.
+- Added a state-model entity section for memory jobs.
+- Clarified raw transcript artifact retention is not the same as long-term memory ingestion.
+- Aligned the memory backend `search` contract across architecture files.
+
+Residual risks:
+
+- Exact v1 retrieval backend remains undecided until real dogfood traces show whether FTS, embeddings, or temporal graph queries are needed.
+- Generated-memory review UX is deferred, so prototype memory promotion should stay conservative.
+
 ## Architecture Gate
 
 Status: not passed.

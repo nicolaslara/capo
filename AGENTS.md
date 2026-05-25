@@ -21,6 +21,7 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 | `workpads/architecture/runtime-tunnel.md` | Runtime runners, process lifecycle, tunnels, connectivity, and exposure policy |
 | `workpads/architecture/protocol-provider.md` | Codex, Claude Code, ACP adapter shape, provider connectors, and subscription policy |
 | `workpads/architecture/tool-exposure.md` | Capo tool registry, wrapper tools, instrumentation, ACP/MCP tool mapping |
+| `workpads/architecture/memory-architecture.md` | Memory records, provenance, indexes, packets, and external adapter path |
 | `.cursor/commands/next.md` / `.opencode/commands/next.md` | `/next` task-execution command |
 | `.agents/skills/next/SKILL.md` | Codex `$next` task-execution skill |
 
@@ -50,12 +51,13 @@ Before task work:
 8. `workpads/architecture/runtime-tunnel.md` for runtime, tunnel, protocol, provider, prototype, features, and dogfood work once A4 is complete
 9. `workpads/architecture/protocol-provider.md` for protocol, provider, adapter, prototype, features, and dogfood work once A5 is complete
 10. `workpads/architecture/tool-exposure.md` for tool, ACP client capability, MCP, runtime wrapper, prototype, features, and dogfood work once A5a is complete
-11. `workpads/prototype/spec.md` for prototype and dogfood work
-12. Pick a pending task and mark it `in_progress`
-13. Complete the acceptance criteria with the smallest correct change
-14. Record findings in `knowledge.md` and source links in `references.md`
-15. Review per `WORKING.md`
-16. Mark complete only after evidence is recorded
+11. `workpads/architecture/memory-architecture.md` for memory, retrieval, prompt context, prototype, features, and dogfood work once A6 is complete
+12. `workpads/prototype/spec.md` for prototype and dogfood work
+13. Pick a pending task and mark it `in_progress`
+14. Complete the acceptance criteria with the smallest correct change
+15. Record findings in `knowledge.md` and source links in `references.md`
+16. Review per `WORKING.md`
+17. Mark complete only after evidence is recorded
 
 ## Git Rules
 

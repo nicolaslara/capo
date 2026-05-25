@@ -21,10 +21,11 @@ Read these files first:
 13. `workpads/architecture/runtime-tunnel.md` - when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A4 is complete
 14. `workpads/architecture/protocol-provider.md` - when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A5 is complete
 15. `workpads/architecture/tool-exposure.md` - when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A5a is complete
-16. `workpads/prototype/spec.md` - when active workpad is `prototype` or `dogfood`
-17. `workpads/research/knowledge.md` - when active workpad is `architecture`
-18. `workpads/architecture/knowledge.md` - when active workpad is `prototype`
-19. `workpads/prototype/knowledge.md` - when active workpad is `features` or `dogfood`
+16. `workpads/architecture/memory-architecture.md` - when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A6 is complete
+17. `workpads/prototype/spec.md` - when active workpad is `prototype` or `dogfood`
+18. `workpads/research/knowledge.md` - when active workpad is `architecture`
+19. `workpads/architecture/knowledge.md` - when active workpad is `prototype`
+20. `workpads/prototype/knowledge.md` - when active workpad is `features` or `dogfood`
 
 ## Step 2: Resolve Active Workpad
 

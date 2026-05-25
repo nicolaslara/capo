@@ -147,13 +147,21 @@ Evidence:
 
 ## A6 - Memory Architecture
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Define v0 memory storage and indexing.
 - Define how operational state references memory.
 - Define migration path toward layered/fractional memory.
+
+Evidence:
+
+- `workpads/architecture/memory-architecture.md`
+- `workpads/architecture/state-model.md` memory record/source/index/packet/job additions
+- `workpads/architecture/capability-permissions.md` memory scopes
+- `workpads/architecture/knowledge.md` A6 section
+- `workpads/architecture/references.md` State And Memory section
 
 ## A7 - Prototype Plan
 

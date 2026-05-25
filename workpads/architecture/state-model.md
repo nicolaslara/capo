@@ -37,7 +37,7 @@ This is the A2 architecture artifact. It refines the `StateStore` boundary from 
 | Capability profiles, grants, and permission decisions | SQLite events and read models | Detailed scope and policy model lives in `capability-permissions.md`. |
 | Tool definitions, invocations, and observations | SQLite events and read models | Detailed wrapper/instrumentation model lives in `tool-exposure.md`. |
 | Human decisions and review/evidence | SQLite events plus artifacts | Links back to workpad evidence where applicable. |
-| Derived memory | Memory layer | Must reference event/file provenance. |
+| Derived memory | SQLite events/read models plus rebuildable memory indexes | Must reference event/file provenance. Detailed model lives in `memory-architecture.md`. |
 | Recovery attempts | SQLite events plus recovery metadata | Used only to make restart reconciliation idempotent. |
 
 ## Core Entities
@@ -582,6 +582,110 @@ Fields:
 - `emitted_sequence_end?`
 - `notes`
 
+### MemoryRecord
+
+Derived reusable memory item with provenance, confidence, review state, and validity metadata.
+
+Fields:
+
+- `memory_record_id`
+- `project_id`
+- `scope`
+- `scope_owner_ref`
+- `subject_ref?`
+- `sensitivity_classification`
+- `record_kind`
+- `subject`
+- `predicate`
+- `object`
+- `body`
+- `confidence`
+- `review_state`
+- `source_count`
+- `valid_from?`
+- `valid_until?`
+- `supersedes_memory_record_id?`
+- `revoked_by_memory_record_id?`
+- `redaction_state`
+- `created_at`
+- `updated_at`
+
+Permission checks and packet filtering use `scope_owner_ref`, `subject_ref`, and `sensitivity_classification`; free-text subject/predicate/object fields are not authorization inputs.
+
+### MemorySource
+
+Provenance edge from a memory record to a source event, artifact, markdown section, or external import.
+
+Fields:
+
+- `memory_source_id`
+- `memory_record_id`
+- `source_kind`: `event`, `artifact`, `markdown`, `external_import`
+- `source_event_id?`
+- `source_artifact_id?`
+- `source_path?`
+- `source_anchor?`
+- `source_content_hash?`
+- `source_sequence?`
+- `quote_artifact_id?`
+- `observed_at`
+
+### MemoryIndexEntry
+
+Rebuildable index metadata for FTS, semantic, or graph indexes.
+
+Fields:
+
+- `memory_index_entry_id`
+- `memory_record_id`
+- `index_kind`
+- `index_version`
+- `indexed_text_hash`
+- `backend_ref?`
+- `status`
+- `indexed_at`
+
+### MemoryPacket
+
+Task-specific context packet assembled for an agent/session/turn.
+
+Fields:
+
+- `memory_packet_id`
+- `project_id`
+- `task_id?`
+- `agent_id?`
+- `session_id?`
+- `run_id?`
+- `turn_id?`
+- `purpose`
+- `budget_tokens`
+- `selection_policy`
+- `included_items`
+- `excluded_items`
+- `explanation_artifact_id?`
+- `packet_artifact_id`
+- `created_at`
+
+`MemoryPacket` rows are created only after `packet_artifact_id` exists. Draft packet planning belongs to `MemoryJob`. The packet artifact is prompt-input evidence; source events and workpads remain factual authority.
+
+### MemoryJob
+
+Async or inline memory operation job.
+
+Fields:
+
+- `memory_job_id`
+- `project_id`
+- `source_query`
+- `job_kind`: `extract_facts`, `index_fts`, `build_packet`, `invalidate`, `export`, `rebuild`
+- `status`
+- `started_at?`
+- `completed_at?`
+- `emitted_sequence_start?`
+- `emitted_sequence_end?`
+- `error?`
+
 ## Capo Event Envelope
 
 Every event row uses the cross-cutting envelope from `boundaries.md`:
@@ -766,8 +870,17 @@ Uniqueness rules:
 
 | Event kind | Payload summary | Projects to |
 | --- | --- | --- |
-| `memory.record_ingested` | Source refs, provenance | `memory_refs` |
-| `memory.record_invalidated` | Record ID, reason | `memory_refs` |
+| `memory.job_requested` | Source query and operation job metadata | `memory_jobs` |
+| `memory.job_completed` | Operation result counts and emitted range | `memory_jobs` |
+| `memory.record_ingested` | Memory fields, source refs, provenance | `memory_records`, `memory_sources`, `memory_refs` |
+| `memory.record_promoted` | Review decision and reviewed state | `memory_records` |
+| `memory.record_invalidated` | Record ID, reason, actor | `memory_records`, `memory_refs` |
+| `memory.record_superseded` | Old/new memory record relation | `memory_records` |
+| `memory.index_updated` | Index kind/version/status | `memory_index_entries` |
+| `memory.packet_built` | Packet purpose, budget, included/excluded refs | `memory_packets` |
+| `memory.packet_attached` | Packet attached to run/turn/session | `memory_packets`, `sessions`, `runs`, `turns` |
+| `memory.export_requested` | Export format, scope, destination metadata | `memory_jobs` |
+| `memory.export_completed` | Export artifact and counts | `memory_jobs`, `artifacts` |
 | `evaluation.requested` | Criteria and target | `evaluations` |
 | `evaluation.recorded` | Result, reviewer, evidence refs | `evaluations` |
 | `evidence.recorded` | Evidence kind, artifact/source refs, confidence | `evidence` |
@@ -843,6 +956,21 @@ Includes:
 
 Tool catalog rows are display and routing projections over `tool_definitions`, not independent authority.
 
+### MemoryRecordReadModel
+
+Includes:
+
+- Memory record kind, scope, confidence, review state, validity window, and redaction state.
+- Source refs to events, artifacts, markdown anchors, or external imports.
+- Supersession/invalidation links.
+
+### MemoryPacketReadModel
+
+Includes:
+
+- Packet purpose, target task/session/run/turn, budget, included item counts, and explanation artifact.
+- Inclusion/exclusion reasons for debugging prompt context.
+
 ### EventStream
 
 Includes:
@@ -907,6 +1035,11 @@ checkpoints(checkpoint_id, project_id, session_id, run_id, kind, artifact_id, cr
 commands(command_id, project_id, actor_id, origin, target_json, intent, status, idempotency_key, received_at, completed_at)
 evidence(evidence_id, project_id, task_id, session_id, run_id, kind, artifact_id, source_ref_json, confidence, created_at)
 evaluations(evaluation_id, project_id, task_id, session_id, run_id, status, criteria_json, result_json, reviewer, evidence_id, created_at)
+memory_records(memory_record_id, project_id, scope, scope_owner_ref_json, subject_ref_json, sensitivity_classification, record_kind, subject, predicate, object, body, confidence, review_state, source_count, valid_from, valid_until, supersedes_memory_record_id, revoked_by_memory_record_id, redaction_state, created_at, updated_at)
+memory_sources(memory_source_id, memory_record_id, source_kind, source_event_id, source_artifact_id, source_path, source_anchor, source_content_hash, source_sequence, quote_artifact_id, observed_at)
+memory_index_entries(memory_index_entry_id, memory_record_id, index_kind, index_version, indexed_text_hash, backend_ref, status, indexed_at)
+memory_packets(memory_packet_id, project_id, task_id, agent_id, session_id, run_id, turn_id, purpose, budget_tokens, selection_policy, included_items_json, excluded_items_json, explanation_artifact_id, packet_artifact_id, created_at)
+memory_jobs(memory_job_id, project_id, source_query_json, job_kind, status, started_at, completed_at, emitted_sequence_start, emitted_sequence_end, error)
 memory_refs(memory_ref_id, project_id, source_event_id, source_artifact_id, memory_record_id, status, provenance_json, created_at)
 recovery_attempts(recovery_attempt_id, started_at, completed_at, status, emitted_sequence_start, emitted_sequence_end, notes_json)
 adapter_replay_batches(acp_replay_batch_id, session_id, external_session_ref_json, source, started_at, completed_at, load_request_id, prompt_request_id, recovery_attempt_id, raw_update_count, normalized_sequence_start, normalized_sequence_end, status, summary_json)
@@ -948,6 +1081,18 @@ Minimum indexes:
 - `capability_grants(capability_profile_id, revoked_at, expires_at)`
 - `capability_grant_uses(capability_grant_id, used_at)`
 - `evidence(task_id, created_at)`
+- `memory_records(project_id, scope, review_state)`
+- `memory_records(project_id, scope_owner_ref_json, review_state)`
+- `memory_records(project_id, sensitivity_classification, review_state)`
+- `memory_records(project_id, record_kind, confidence)`
+- `memory_sources(memory_record_id)`
+- `memory_sources(source_event_id)`
+- `memory_sources(source_artifact_id)`
+- `memory_sources(source_path, source_anchor)`
+- `memory_index_entries(memory_record_id, index_kind, status)`
+- `memory_packets(session_id, created_at)`
+- `memory_packets(task_id, created_at)`
+- `memory_jobs(project_id, status, started_at)`
 - `recovery_attempts(started_at)`
 - `adapter_replay_batches(session_id, source, started_at)`
 - `adapter_raw_updates(acp_replay_batch_id, batch_index)` unique
@@ -963,6 +1108,7 @@ Minimum indexes:
 - Every artifact records a content hash.
 - Artifacts that may contain secrets must carry `redaction_state`: `unknown`, `redacted`, `contains_sensitive`, or `safe`.
 - Raw voice transcripts are not retained by default; if retained for a reviewed feature, they must be explicit artifacts with sensitive redaction state.
+- Generated memory artifacts live under `.capo/artifacts/memory/` and remain derived from source events/files.
 
 ## Projection Rules
 

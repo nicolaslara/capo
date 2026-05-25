@@ -81,10 +81,13 @@ Observed 2026-05-25. Local clones are gitignored under `workpads/references/repo
 Local architecture artifacts:
 
 - State model: `state-model.md` (created 2026-05-25)
-
-To research:
-
-- SQLite event sourcing patterns
-- Zep/Graphiti
-- mem0
-- Letta
+- Memory architecture: `memory-architecture.md` (created 2026-05-25)
+- Memory research finding: `../research/findings/R5-memory.md`
+- Memory primary sources observed during research on 2026-05-25:
+  - SQLite overview: https://www.sqlite.org/about.html
+  - SQLite FTS5: https://www.sqlite.org/fts5.html
+  - Graphiti: https://github.com/getzep/graphiti
+  - mem0: https://github.com/mem0ai/mem0
+  - Letta: https://github.com/letta-ai/letta
+  - Chroma OSS: https://docs.trychroma.com/docs/overview/oss
+  - pgvector: https://github.com/pgvector/pgvector

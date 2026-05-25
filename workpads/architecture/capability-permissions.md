@@ -305,6 +305,26 @@ Prototype behavior:
 - Launching subscription-backed local CLIs is allowed only through connector/runtime boundaries that scrub environment and logs.
 - Enforceable `resource_ref` is a secret handle or connector ID, never raw secret material.
 
+### Memory
+
+Scopes:
+
+- `memory:read:record`
+- `memory:search:project`
+- `memory:build_packet:session`
+- `memory:write:generated`
+- `memory:promote:reviewed`
+- `memory:invalidate:record`
+- `memory:export:project`
+- `memory:sync:external`
+
+Prototype behavior:
+
+- Trusted local profile can allow project memory read/search/packet build, but every use still records permission and grant-use events.
+- External memory sync/export is separate from local search and requires explicit scope.
+- Credential material, subscription session material, and raw voice transcripts are not valid long-term memory sources by default. Raw transcript artifacts may be retained only under explicit voice policy; long-term memory stores reviewed/redacted transcript summaries unless a future high-risk feature adds raw transcript memory ingestion.
+- Enforceable `resource_ref` is memory record ID, packet ID, project ID, external adapter ID, or source event/artifact ref.
+
 ### Voice
 
 Scopes:

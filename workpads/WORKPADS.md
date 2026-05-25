@@ -64,6 +64,7 @@ workpads/architecture/capability-permissions.md
 workpads/architecture/runtime-tunnel.md
 workpads/architecture/protocol-provider.md
 workpads/architecture/tool-exposure.md
+workpads/architecture/memory-architecture.md
 workpads/research/knowledge.md
 ```
 
@@ -76,6 +77,7 @@ workpads/research/knowledge.md
 - `runtime-tunnel.md` runtime runners, local process lifecycle, remote runtime abstraction, connectivity/tunnel boundary, and exposure policy
 - `protocol-provider.md` Codex, Claude Code, ACP adapter shape, provider connectors, credential scopes, and subscription policy
 - `tool-exposure.md` Capo tool registry, wrapper tools, instrumentation, ACP/MCP tool mapping, and observed-only native tools
+- `memory-architecture.md` memory records, provenance, indexing, memory packets, and external adapter path
 - `tasks.md` A0-A8: event model, capability model, runtime, security, prototype plan
 - `knowledge.md` Architecture gate section
 
@@ -108,6 +110,7 @@ workpads/architecture/capability-permissions.md
 workpads/architecture/runtime-tunnel.md
 workpads/architecture/protocol-provider.md
 workpads/architecture/tool-exposure.md
+workpads/architecture/memory-architecture.md
 workpads/architecture/knowledge.md
 ```
 
@@ -145,6 +148,7 @@ workpads/architecture/capability-permissions.md
 workpads/architecture/runtime-tunnel.md
 workpads/architecture/protocol-provider.md
 workpads/architecture/tool-exposure.md
+workpads/architecture/memory-architecture.md
 workpads/prototype/knowledge.md
 ```
 
@@ -177,6 +181,7 @@ workpads/architecture/capability-permissions.md
 workpads/architecture/runtime-tunnel.md
 workpads/architecture/protocol-provider.md
 workpads/architecture/tool-exposure.md
+workpads/architecture/memory-architecture.md
 ```
 
 **Rules:**

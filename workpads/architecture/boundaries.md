@@ -653,13 +653,16 @@ checkpoint(CheckpointRecord) -> CheckpointId
 
 Stores distilled reusable context, separate from operational state.
 
+Detailed memory records, provenance, indexes, packets, privacy rules, and external adapter path live in `memory-architecture.md`.
+
 Initial variants:
 
 ```text
 MemoryBackend =
-  MarkdownMemory
-  | SQLiteFtsMemory
+  MarkdownMemoryBackend
+  | SqliteFtsMemoryBackend
   | ExternalMemoryAdapter
+  | FakeMemoryBackend
 ```
 
 Prototype starts with markdown pointers plus optional SQLite FTS later.
@@ -668,10 +671,15 @@ Prototype starts with markdown pointers plus optional SQLite FTS later.
 
 ```text
 ingest(MemorySourceRef) -> MemoryRecordId
-search(MemoryQuery) -> Vec<MemoryHit>
+extract(MemoryExtractionRequest) -> Vec<MemoryRecordCandidate>
+index(MemoryRecordId, IndexPolicy) -> IndexResult
+search(MemoryQuery, MemoryBudget) -> Vec<MemoryHit>
 build_packet(TaskContext, MemoryBudget) -> MemoryPacket
-explain(MemoryHitId) -> MemoryExplanation
+explain(MemoryHitId | MemoryPacketId) -> MemoryExplanation
 invalidate(MemoryRecordId, Reason) -> InvalidationResult
+promote(MemoryRecordId, ReviewDecision) -> PromotionResult
+export(MemoryExportRequest) -> MemoryExportResult
+rebuild(MemoryRebuildRequest) -> RebuildResult
 ```
 
 ### Responsibilities
@@ -762,7 +770,7 @@ enum ProviderConnector { CodexSubscription(CodexSubscriptionConnector), ClaudeSu
 enum PermissionPolicy { AllowTrustedLocalProfile(AllowTrustedLocalProfilePolicy), Static(StaticPolicy), UserApproval(UserApprovalPolicy), SecurityAgent(SecurityAgentPolicy), Fake(FakePermissionPolicy) }
 enum ToolExposure { Capo(CapoToolRegistry), Runtime(RuntimeToolWrappers), AdapterNative(AdapterNativeToolObserver), ProviderNative(ProviderNativeToolObserver), Mcp(McpToolBridge), Fake(FakeToolExposure) }
 enum StateStore { Sqlite(SqliteStateStore), InMemory(InMemoryStateStore), Fake(FakeStateStore) }
-enum MemoryBackend { Markdown(MarkdownMemory), SqliteFts(SqliteFtsMemory) }
+enum MemoryBackend { Markdown(MarkdownMemoryBackend), SqliteFts(SqliteFtsMemoryBackend), External(ExternalMemoryAdapter), Fake(FakeMemoryBackend) }
 enum EvaluationLayer { Local(LocalEvaluationLayer), Fake(FakeEvaluationLayer) }
 ```
 
