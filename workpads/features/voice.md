@@ -55,9 +55,19 @@ Evidence:
 
 ### V3 - Retention And Redaction Smoke
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Prove retained summaries are reviewed and redacted before memory ingestion.
 - Confirm raw transcripts are absent from state and evidence artifacts.
+
+Evidence:
+
+- `capo voice submit --redacted-summary TEXT --reviewed-summary` writes a reviewed/redacted `MemoryRecord` plus replayable `MemorySource`.
+- `--redacted-summary` without `--reviewed-summary` fails before memory ingestion.
+- Regression coverage scans the test state tree and memory/event projections for the raw voice phrase.
+- `cargo test -p capo-cli voice -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.

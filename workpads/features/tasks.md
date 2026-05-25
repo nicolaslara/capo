@@ -211,7 +211,7 @@ Evidence:
 
 ## F6 - Voice Control Integration
 
-Status: pending
+Status: completed
 
 Source workpad: `voice.md`
 
@@ -220,6 +220,22 @@ Acceptance:
 - Route P14 voice command plans through the controller/query/permission boundaries.
 - Use dummy transcripts until retention/redaction paths are proven.
 - Require visible confirmation for privileged voice actions.
+
+Progress:
+
+- V1 controller integration is completed.
+- V2 voice permission confirmation is completed.
+- V3 retention and redaction smoke is completed.
+
+Evidence:
+
+- `crates/capo-voice/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
+- `cargo test -p capo-voice`
+- `cargo test -p capo-cli voice -- --nocapture`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
 
 ## F7 - Remote Runtime And Tunnel
 

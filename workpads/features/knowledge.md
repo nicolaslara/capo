@@ -459,3 +459,26 @@ Follow-up:
 
 - V3 should add retention/redaction smoke coverage for reviewed voice summaries before memory ingestion.
 - A future UI/API slice should make voice approvals visible outside CLI output, reusing the `permission_approvals` read model.
+
+## F6/V3 - Voice Retention And Redaction Smoke
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add an explicit dummy retention path to `capo voice submit`: `--redacted-summary TEXT --reviewed-summary`.
+- Refuse redacted-summary retention unless the caller also marks the summary reviewed. This keeps generated or unreviewed voice summaries out of memory records.
+- Store retained voice summaries as existing `MemoryRecordProjection` / `MemorySourceProjection` rows with `review_state=reviewed`, `redaction_state=redacted`, `record_kind=summary`, and source anchor `voice:redacted-summary`.
+- Do not create raw transcript artifacts. The memory ingest event stores record ID, intent, voice session ID, and summary hash, not transcript text.
+- The smoke test scans the state tree for a raw phrase that appeared only in the submitted dummy transcript, proving the current CLI path did not persist it in SQLite or artifacts.
+
+Verification:
+
+- `cargo test -p capo-cli voice -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Follow-up:
+
+- Future real ASR/audio work must repeat this proof with audio/transcript artifacts and a stronger redaction pipeline before enabling durable transcript retention.

@@ -12,13 +12,14 @@ use capo_eval::TaskOutcomeReport;
 use capo_query::{ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 use capo_state::{
     ArtifactRecord, CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection,
-    MemoryPacketProjection, NewEvent, PermissionApprovalProjection, ProjectionRecord,
-    RedactionState, ReviewFindingProjection, RunProjection, SessionProjection, SqliteStateStore,
-    ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
+    MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection, NewEvent,
+    PermissionApprovalProjection, ProjectionRecord, RedactionState, ReviewFindingProjection,
+    RunProjection, SessionProjection, SqliteStateStore, ToolCallProjection, WorkpadFileProjection,
+    WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
 use capo_voice::{
-    MemoryIngestionPolicy, VOICE_TRANSCRIPT_RETENTION_DEFAULT, VoiceCommandPlan, VoiceIntentKind,
-    VoiceReadScope, VoiceTranscriptInput, plan_dummy_transcript,
+    MemoryIngestionPolicy, TranscriptRetentionPolicy, VOICE_TRANSCRIPT_RETENTION_DEFAULT,
+    VoiceCommandPlan, VoiceIntentKind, VoiceReadScope, VoiceTranscriptInput, plan_dummy_transcript,
 };
 use capo_workpads::{WorkpadIndex, index_project_workpads};
 
@@ -41,7 +42,7 @@ Usage:
   capo session redirect --agent NAME --goal GOAL [--state PATH]
   capo session interrupt --agent NAME --reason REASON [--state PATH]
   capo session stop --agent NAME --reason REASON [--state PATH]
-  capo voice submit --transcript TEXT [--voice-session SESSION_ID] [--actor ACTOR] [--confirm] [--state PATH]
+  capo voice submit --transcript TEXT [--voice-session SESSION_ID] [--actor ACTOR] [--confirm] [--redacted-summary TEXT --reviewed-summary] [--state PATH]
   capo recover [--state PATH]
   capo permission request --approval APPROVAL_ID --scope-json JSON --reason REASON [--profile PROFILE] [--session SESSION_ID] [--tool-call TOOL_CALL_ID] [--subject-json JSON] [--requested-by ACTOR] [--state PATH]
   capo permission list [--state PATH]
@@ -495,22 +496,46 @@ fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> 
         optional_arg(args, "--voice-session").unwrap_or_else(|| "voice-session-cli".to_string());
     let actor_id = optional_arg(args, "--actor").unwrap_or_else(|| "local-user".to_string());
     let confirmed = has_flag(args, "--confirm");
+    let redacted_summary = optional_arg(args, "--redacted-summary");
+    let retention_policy = if redacted_summary.is_some() {
+        TranscriptRetentionPolicy::RetainRedactedSummary
+    } else {
+        VOICE_TRANSCRIPT_RETENTION_DEFAULT
+    };
+    if redacted_summary.is_some() && !has_flag(args, "--reviewed-summary") {
+        return Err(
+            "--redacted-summary requires --reviewed-summary before memory ingestion".to_string(),
+        );
+    }
     let plan = plan_dummy_transcript(VoiceTranscriptInput {
         voice_session_id,
         actor_id,
         project_id: project_id(),
         transcript_text: transcript,
         asr_confidence: None,
-        retention_policy: VOICE_TRANSCRIPT_RETENTION_DEFAULT,
+        retention_policy,
     });
 
+    let retained_memory = if let Some(summary) = redacted_summary {
+        Some(ingest_reviewed_voice_summary(parsed, &plan, &summary)?)
+    } else {
+        None
+    };
+
     if plan.intent_kind == VoiceIntentKind::Unknown {
-        return Ok(render_voice_header(&plan, None, false, false));
+        let mut output = render_voice_header(&plan, None, false, false);
+        if let Some(record) = &retained_memory {
+            output.push_str(&render_voice_memory_retention(record));
+        }
+        return Ok(output);
     }
     if plan.requires_visible_confirmation && !confirmed {
         let approval = queue_voice_permission_approval(parsed, &plan)?;
         let mut output = render_voice_header(&plan, plan.command.as_ref(), true, false);
         output.push_str(&render_voice_approval(&approval, None));
+        if let Some(record) = &retained_memory {
+            output.push_str(&render_voice_memory_retention(record));
+        }
         return Ok(output);
     }
 
@@ -571,7 +596,105 @@ fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> 
         }
         VoiceIntentKind::Unknown => {}
     }
+    if let Some(record) = &retained_memory {
+        output.push_str(&render_voice_memory_retention(record));
+    }
     Ok(output)
+}
+
+fn ingest_reviewed_voice_summary(
+    parsed: &ParsedArgs,
+    plan: &VoiceCommandPlan,
+    redacted_summary: &str,
+) -> Result<MemoryRecordProjection, String> {
+    let command = plan
+        .command
+        .as_ref()
+        .ok_or_else(|| "reviewed voice summary requires a planned command".to_string())?;
+    if redacted_summary.trim().is_empty() {
+        return Err("--redacted-summary cannot be empty".to_string());
+    }
+    if !plan.transcript_policy.redaction_required
+        || plan.transcript_policy.memory_ingestion
+            != MemoryIngestionPolicy::ReviewedRedactedSummaryOnly
+    {
+        return Err(
+            "voice summary memory ingestion requires reviewed redacted summary policy".to_string(),
+        );
+    }
+    let voice_session_id = structured_arg_value(command, "voice_session_id")
+        .unwrap_or("voice-session")
+        .to_string();
+    let summary_hash = stable_cli_hash(redacted_summary);
+    let record_id = format!(
+        "memory-voice-summary-{}",
+        stable_cli_hash(&format!(
+            "{}:{}:{}",
+            command.project_id, voice_session_id, summary_hash
+        ))
+    );
+    let source_id = format!("source-{record_id}");
+    let event_id = format!("event-memory-voice-summary-{summary_hash}");
+    let record = MemoryRecordProjection {
+        memory_record_id: record_id.clone(),
+        project_id: command.project_id.clone(),
+        scope: "project".to_string(),
+        scope_owner_ref: command.project_id.to_string(),
+        subject_ref: Some(voice_session_id.clone()),
+        sensitivity_classification: "internal".to_string(),
+        record_kind: "summary".to_string(),
+        subject: "voice_conversation".to_string(),
+        predicate: "retained_reviewed_summary".to_string(),
+        object: voice_intent_label(plan.intent_kind).to_string(),
+        body: redacted_summary.trim().to_string(),
+        confidence: "medium".to_string(),
+        review_state: "reviewed".to_string(),
+        source_count: 1,
+        valid_from: None,
+        valid_until: None,
+        supersedes_memory_record_id: None,
+        revoked_by_memory_record_id: None,
+        redaction_state: RedactionState::Redacted.as_str().to_string(),
+        invalidated_at: None,
+        invalidation_reason: None,
+        packet_item_ref: Some(format!("memory-record:{record_id}")),
+        updated_sequence: 0,
+    };
+    let source = MemorySourceProjection {
+        memory_source_id: source_id,
+        memory_record_id: record_id.clone(),
+        source_kind: "event".to_string(),
+        source_event_id: Some(event_id.clone()),
+        source_artifact_id: None,
+        source_path: None,
+        source_anchor: Some("voice:redacted-summary".to_string()),
+        source_content_hash: Some(summary_hash.to_string()),
+        source_sequence: None,
+        quote_artifact_id: None,
+        observed_at: Some("cli".to_string()),
+        updated_sequence: 0,
+    };
+    let mut event = NewEvent::new(event_id, EventKind::MemoryRecordIngested, "capo-voice");
+    event.project_id = Some(command.project_id.clone());
+    event.payload_json = format!(
+        "{{\"memory_record_id\":\"{}\",\"origin\":\"voice\",\"review_state\":\"reviewed\",\"redaction_state\":\"redacted\",\"voice_session_id\":\"{}\",\"intent\":\"{}\",\"summary_hash\":{}}}",
+        escape_json(&record.memory_record_id),
+        escape_json(&voice_session_id),
+        voice_intent_label(plan.intent_kind),
+        summary_hash
+    );
+    event.idempotency_key = Some(format!("voice-summary-memory:{record_id}"));
+    event.redaction_state = RedactionState::Redacted;
+    state(parsed)?
+        .append_event(
+            event,
+            &[
+                ProjectionRecord::MemoryRecord(Box::new(record.clone())),
+                ProjectionRecord::MemorySource(source),
+            ],
+        )
+        .map_err(debug_error)?;
+    Ok(record)
 }
 
 fn queue_voice_permission_approval(
@@ -793,6 +916,13 @@ fn render_voice_approval(
         approval.scope_json,
         approval.requested_by,
         approval.reason
+    )
+}
+
+fn render_voice_memory_retention(record: &MemoryRecordProjection) -> String {
+    format!(
+        "memory_record={}\nmemory_review_state={}\nmemory_redaction_state={}\nmemory_ingestion=reviewed_redacted_summary_only\n",
+        record.memory_record_id, record.review_state, record.redaction_state
     )
 }
 
@@ -3629,6 +3759,86 @@ mod tests {
     }
 
     #[test]
+    fn voice_reviewed_redacted_summary_ingests_memory_without_raw_transcript() {
+        let state_root = temp_root("cli-voice-memory");
+        seed_running_agent(&state_root, "fake-codex", "Inspect the project");
+        let raw_phrase = "raw-private-voice-token";
+        let redacted_summary = "User asked to stop fake-codex after a redacted reason.";
+
+        let output = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            format!("Stop fake-codex because {raw_phrase}"),
+            "--redacted-summary".to_string(),
+            redacted_summary.to_string(),
+            "--reviewed-summary".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice summary memory");
+
+        assert!(output.contains("voice_plan=stop_session"));
+        assert!(output.contains("memory_ingestion=reviewed_redacted_summary_only"));
+        assert!(output.contains("memory_review_state=reviewed"));
+        assert!(output.contains("memory_redaction_state=redacted"));
+        assert!(!output.contains(raw_phrase));
+
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        let records = state
+            .memory_records_for_project(&project_id())
+            .expect("memory records");
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.review_state, "reviewed");
+        assert_eq!(record.redaction_state, "redacted");
+        assert_eq!(record.record_kind, "summary");
+        assert_eq!(record.body, redacted_summary);
+        assert!(!record.body.contains(raw_phrase));
+        let sources = state
+            .memory_sources_for_record(&record.memory_record_id)
+            .expect("memory sources");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].source_kind, "event");
+        assert_eq!(
+            sources[0].source_anchor.as_deref(),
+            Some("voice:redacted-summary")
+        );
+        assert!(sources[0].source_content_hash.is_some());
+        let eligible = state
+            .packet_eligible_memory_records(&project_id())
+            .expect("packet eligible records");
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].memory_record_id, record.memory_record_id);
+        assert_text_absent_in_tree(&state_root, raw_phrase);
+    }
+
+    #[test]
+    fn voice_redacted_summary_requires_review_before_memory_ingestion() {
+        let state_root = temp_root("cli-voice-memory-review-required");
+        seed_running_agent(&state_root, "fake-codex", "Inspect the project");
+
+        let error = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What is fake-codex doing?".to_string(),
+            "--redacted-summary".to_string(),
+            "User asked for a redacted status summary.".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap_err();
+
+        assert!(error.contains("--redacted-summary requires --reviewed-summary"));
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        let records = state
+            .memory_records_for_project(&project_id())
+            .expect("memory records");
+        assert!(records.is_empty());
+    }
+
+    #[test]
     fn evidence_export_handles_completed_runs_and_refuses_foreign_files() {
         let state_root = temp_root("cli-completed-state");
         let evidence_dir = temp_root("cli-completed-evidence");
@@ -4027,6 +4237,28 @@ mod tests {
                 let bytes = fs::read(&path).expect("read scan file");
                 let contents = String::from_utf8_lossy(&bytes);
                 assert_no_sensitive_markers(&contents);
+            }
+        }
+    }
+
+    fn assert_text_absent_in_tree(root: &Path, needle: &str) {
+        if !root.exists() {
+            return;
+        }
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                for entry in fs::read_dir(&path).expect("read scan dir") {
+                    stack.push(entry.expect("scan dir entry").path());
+                }
+            } else if path.is_file() {
+                let bytes = fs::read(&path).expect("read scan file");
+                let contents = String::from_utf8_lossy(&bytes);
+                assert!(
+                    !contents.contains(needle),
+                    "unexpected raw text in {}",
+                    path.display()
+                );
             }
         }
     }

@@ -181,3 +181,15 @@ Observed 2026-05-25.
 - Voice permission scopes and raw transcript policy source: `../architecture/capability-permissions.md`
 - Voice source workpad: `voice.md`
 - No new third-party dependencies were added for V2.
+
+## F6/V3 Voice Retention And Redaction Smoke
+
+Observed 2026-05-25.
+
+- Reviewed/redacted voice summary ingestion and regression tests: `../../crates/capo-cli/src/main.rs`
+- Memory record/source projection model reused by voice retention smoke: `../../crates/capo-state/src/lib.rs`
+- Voice retention policy contract: `../../crates/capo-voice/src/lib.rs`
+- Memory architecture source for reviewed/redacted voice summary policy: `../architecture/memory-architecture.md`
+- Capability model source for raw voice transcript exclusion: `../architecture/capability-permissions.md`
+- Voice source workpad: `voice.md`
+- No new third-party dependencies were added for V3.
