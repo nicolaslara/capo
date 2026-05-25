@@ -7,10 +7,11 @@
 use capo_core::{ProjectId, SessionId};
 use capo_state::{
     AdapterDispatchExecutionRequestProjection, AdapterDispatchGateProjection,
-    AdapterDispatchPlanProjection, AdapterDispatchReplayProjection, AdapterReadinessProjection,
-    AdapterSmokeReportProjection, AgentProjection, ConnectivityExposureProjection, EventRecord,
-    EvidenceProjection, MemoryPacketProjection, RunProjection, SessionProjection, SqliteStateStore,
-    StateResult, ToolCallProjection, WorkpadTaskProjection,
+    AdapterDispatchPlanProjection, AdapterDispatchPromptSourceProjection,
+    AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
+    AgentProjection, ConnectivityExposureProjection, EventRecord, EvidenceProjection,
+    MemoryPacketProjection, RunProjection, SessionProjection, SqliteStateStore, StateResult,
+    ToolCallProjection, WorkpadTaskProjection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -24,6 +25,7 @@ pub struct ProjectDashboard {
     pub adapter_dispatch_gates: Vec<AdapterDispatchGateProjection>,
     pub adapter_dispatch_replays: Vec<AdapterDispatchReplayProjection>,
     pub adapter_dispatch_execution_requests: Vec<AdapterDispatchExecutionRequestProjection>,
+    pub adapter_dispatch_prompt_sources: Vec<AdapterDispatchPromptSourceProjection>,
     pub adapter_dogfood_gate: AdapterDogfoodGate,
     pub workpad_tasks: Vec<WorkpadTaskProjection>,
 }
@@ -140,6 +142,8 @@ pub fn project_dashboard(
     let adapter_dispatch_replays = state.adapter_dispatch_replays(&query.project_id)?;
     let adapter_dispatch_execution_requests =
         state.adapter_dispatch_execution_requests(&query.project_id)?;
+    let adapter_dispatch_prompt_sources =
+        state.adapter_dispatch_prompt_sources(&query.project_id)?;
     let adapter_dogfood_gate = adapter_dogfood_gate(&adapter_smoke_reports);
     let workpad_tasks = state
         .workpad_tasks(&query.project_id)?
@@ -171,6 +175,7 @@ pub fn project_dashboard(
         adapter_dispatch_gates,
         adapter_dispatch_replays,
         adapter_dispatch_execution_requests,
+        adapter_dispatch_prompt_sources,
         adapter_dogfood_gate,
         workpad_tasks,
     })
@@ -469,6 +474,7 @@ mod tests {
         append_adapter_dispatch_gate(&state, &project_id);
         append_adapter_dispatch_replay(&state, &project_id);
         append_adapter_dispatch_execution_request(&state, &project_id);
+        append_adapter_dispatch_prompt_source(&state, &project_id);
 
         let dashboard =
             project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
@@ -504,6 +510,15 @@ mod tests {
         assert_eq!(request.opt_in_env, "CAPO_RUN_CODEX_LOCAL_DISPATCH");
         assert!(request.provider_cli_execution_allowed);
         assert!(!request.provider_cli_executed);
+        assert_eq!(dashboard.adapter_dispatch_prompt_sources.len(), 1);
+        let source = &dashboard.adapter_dispatch_prompt_sources[0];
+        assert_eq!(source.dispatch_plan_id, "adapter-dispatch-plan-codex");
+        assert_eq!(source.source_kind, "workpad_task");
+        assert_eq!(
+            source.materialization_status,
+            "replayable_if_source_hash_matches"
+        );
+        assert_eq!(source.raw_prompt_policy, "not_rendered");
     }
 
     #[test]
@@ -1087,6 +1102,42 @@ mod tests {
                 )],
             )
             .expect("append adapter dispatch execution request");
+    }
+
+    fn append_adapter_dispatch_prompt_source(state: &SqliteStateStore, project_id: &ProjectId) {
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-adapter-dispatch-prompt-source-codex".to_string(),
+                    kind: EventKind::AdapterDispatchPromptSourceRecorded,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: Some(AgentId::new("agent-codex")),
+                    session_id: Some(SessionId::new("session-codex")),
+                    run_id: Some(RunId::new("run-codex")),
+                    turn_id: None,
+                    item_id: Some("adapter-dispatch-prompt-source-codex".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::AdapterDispatchPromptSource(
+                    AdapterDispatchPromptSourceProjection {
+                        prompt_source_id: "adapter-dispatch-prompt-source-codex".to_string(),
+                        project_id: project_id.clone(),
+                        dispatch_plan_id: "adapter-dispatch-plan-codex".to_string(),
+                        prompt_hash: "prompt-hash".to_string(),
+                        source_kind: "workpad_task".to_string(),
+                        source_ref: Some("workpads/features/tasks.md#f1".to_string()),
+                        source_hash: Some("source-hash".to_string()),
+                        materialization_status: "replayable_if_source_hash_matches".to_string(),
+                        raw_prompt_policy: "not_rendered".to_string(),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append adapter dispatch prompt source");
     }
 
     fn append_workpad_task(

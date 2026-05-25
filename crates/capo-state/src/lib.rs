@@ -1004,6 +1004,37 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn adapter_dispatch_prompt_sources(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<AdapterDispatchPromptSourceProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT prompt_source_id, project_id, dispatch_plan_id, prompt_hash,
+                    source_kind, source_ref, source_hash, materialization_status,
+                    raw_prompt_policy, updated_sequence
+             FROM adapter_dispatch_prompt_sources
+             WHERE project_id = ?1
+             ORDER BY updated_sequence ASC, prompt_source_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(AdapterDispatchPromptSourceProjection {
+                prompt_source_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                dispatch_plan_id: row.get(2)?,
+                prompt_hash: row.get(3)?,
+                source_kind: row.get(4)?,
+                source_ref: row.get(5)?,
+                source_hash: row.get(6)?,
+                materialization_status: row.get(7)?,
+                raw_prompt_policy: row.get(8)?,
+                updated_sequence: row.get(9)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn evidence_for_session(
         &self,
         session_id: &SessionId,
@@ -1484,6 +1515,7 @@ pub enum EventKind {
     AdapterDispatchGateChecked,
     AdapterDispatchReplayed,
     AdapterDispatchExecutionRequested,
+    AdapterDispatchPromptSourceRecorded,
     ToolCallRequested,
     ToolInvocationStarted,
     ToolOutputArtifactRecorded,
@@ -1531,6 +1563,7 @@ impl EventKind {
             Self::AdapterDispatchGateChecked => "adapter.dispatch_gate_checked",
             Self::AdapterDispatchReplayed => "adapter.dispatch_replayed",
             Self::AdapterDispatchExecutionRequested => "adapter.dispatch_execution_requested",
+            Self::AdapterDispatchPromptSourceRecorded => "adapter.dispatch_prompt_source_recorded",
             Self::ToolCallRequested => "tool.call_requested",
             Self::ToolInvocationStarted => "tool.invocation_started",
             Self::ToolOutputArtifactRecorded => "tool.output_artifact_recorded",
@@ -1630,6 +1663,7 @@ pub enum ProjectionRecord {
     AdapterDispatchGate(AdapterDispatchGateProjection),
     AdapterDispatchReplay(AdapterDispatchReplayProjection),
     AdapterDispatchExecutionRequest(AdapterDispatchExecutionRequestProjection),
+    AdapterDispatchPromptSource(AdapterDispatchPromptSourceProjection),
     ToolCall(ToolCallProjection),
     MemoryPacketRef(MemoryPacketProjection),
     MemoryRecord(Box<MemoryRecordProjection>),
@@ -1850,6 +1884,20 @@ pub struct AdapterDispatchExecutionRequestProjection {
     pub opt_in_env: String,
     pub runtime_prompt_policy: String,
     pub reason_codes: String,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterDispatchPromptSourceProjection {
+    pub prompt_source_id: String,
+    pub project_id: ProjectId,
+    pub dispatch_plan_id: String,
+    pub prompt_hash: String,
+    pub source_kind: String,
+    pub source_ref: Option<String>,
+    pub source_hash: Option<String>,
+    pub materialization_status: String,
+    pub raw_prompt_policy: String,
     pub updated_sequence: i64,
 }
 
@@ -2300,6 +2348,18 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             reason_codes TEXT NOT NULL,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS adapter_dispatch_prompt_sources (
+            prompt_source_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            dispatch_plan_id TEXT NOT NULL,
+            prompt_hash TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_ref TEXT,
+            source_hash TEXT,
+            materialization_status TEXT NOT NULL,
+            raw_prompt_policy TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS tool_calls (
             tool_call_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
@@ -2495,6 +2555,7 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "adapter_dispatch_gates",
         "adapter_dispatch_replays",
         "adapter_dispatch_execution_requests",
+        "adapter_dispatch_prompt_sources",
         "tool_calls",
         "memory_packet_refs",
         "memory_records",
@@ -3007,6 +3068,35 @@ fn apply_projection_record(
                 request.opt_in_env,
                 request.runtime_prompt_policy,
                 request.reason_codes,
+                sequence,
+            ],
+        )?,
+        ProjectionRecord::AdapterDispatchPromptSource(source) => transaction.execute(
+            "INSERT INTO adapter_dispatch_prompt_sources(
+                prompt_source_id, project_id, dispatch_plan_id, prompt_hash,
+                source_kind, source_ref, source_hash, materialization_status,
+                raw_prompt_policy, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(prompt_source_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                dispatch_plan_id = excluded.dispatch_plan_id,
+                prompt_hash = excluded.prompt_hash,
+                source_kind = excluded.source_kind,
+                source_ref = excluded.source_ref,
+                source_hash = excluded.source_hash,
+                materialization_status = excluded.materialization_status,
+                raw_prompt_policy = excluded.raw_prompt_policy,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                source.prompt_source_id,
+                source.project_id.as_str(),
+                source.dispatch_plan_id,
+                source.prompt_hash,
+                source.source_kind,
+                source.source_ref,
+                source.source_hash,
+                source.materialization_status,
+                source.raw_prompt_policy,
                 sequence,
             ],
         )?,
@@ -3575,6 +3665,19 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
                 "reason_codes": request.reason_codes,
             })
             .to_string(),
+        },
+        ProjectionRecord::AdapterDispatchPromptSource(source) => ProjectionRecordRow {
+            kind: "adapter_dispatch_prompt_source",
+            record_id: source.prompt_source_id.clone(),
+            a: Some(source.project_id.to_string()),
+            b: Some(source.dispatch_plan_id.clone()),
+            c: Some(source.prompt_hash.clone()),
+            d: Some(source.source_kind.clone()),
+            e: source.source_ref.clone(),
+            f: source.source_hash.clone(),
+            g: Some(source.materialization_status.clone()),
+            h: Some(source.raw_prompt_policy.clone()),
+            payload_json: "{}".to_string(),
         },
         ProjectionRecord::ToolCall(tool_call) => ProjectionRecordRow {
             kind: "tool_call",
@@ -4467,6 +4570,50 @@ fn projection_record_from_row(
                 },
             ))
         }
+        "adapter_dispatch_prompt_source" => Ok(ProjectionRecord::AdapterDispatchPromptSource(
+            AdapterDispatchPromptSourceProjection {
+                prompt_source_id: record_id,
+                project_id: ProjectId::new(required_field(
+                    &projection_kind,
+                    "adapter_dispatch_prompt_source",
+                    a,
+                    "project_id",
+                )?),
+                dispatch_plan_id: required_field(
+                    &projection_kind,
+                    "adapter_dispatch_prompt_source",
+                    b,
+                    "dispatch_plan_id",
+                )?,
+                prompt_hash: required_field(
+                    &projection_kind,
+                    "adapter_dispatch_prompt_source",
+                    c,
+                    "prompt_hash",
+                )?,
+                source_kind: required_field(
+                    &projection_kind,
+                    "adapter_dispatch_prompt_source",
+                    d,
+                    "source_kind",
+                )?,
+                source_ref: e,
+                source_hash: f,
+                materialization_status: required_field(
+                    &projection_kind,
+                    "adapter_dispatch_prompt_source",
+                    g,
+                    "materialization_status",
+                )?,
+                raw_prompt_policy: required_field(
+                    &projection_kind,
+                    "adapter_dispatch_prompt_source",
+                    h,
+                    "raw_prompt_policy",
+                )?,
+                updated_sequence: 0,
+            },
+        )),
         "tool_call" => Ok(ProjectionRecord::ToolCall(ToolCallProjection {
             tool_call_id: ToolCallId::new(record_id),
             session_id: SessionId::new(required_field(
@@ -6377,6 +6524,65 @@ mod tests {
         assert!(requests[0].provider_cli_execution_allowed);
         assert!(!requests[0].provider_cli_executed);
         assert_eq!(requests[0].runtime_prompt_policy, "not_rendered");
+    }
+
+    #[test]
+    fn adapter_dispatch_prompt_source_is_persisted_and_rebuilt() {
+        let store = temp_store("adapter-dispatch-prompt-source-rebuild");
+        let project_id = ProjectId::new("project-capo");
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-adapter-dispatch-prompt-source".to_string(),
+                    kind: EventKind::AdapterDispatchPromptSourceRecorded,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: Some(AgentId::new("agent-codex")),
+                    session_id: Some(SessionId::new("session-codex")),
+                    run_id: Some(RunId::new("run-codex")),
+                    turn_id: None,
+                    item_id: Some("adapter-dispatch-prompt-source-codex".to_string()),
+                    payload_json:
+                        "{\"raw_prompt_policy\":\"not_rendered\",\"source_kind\":\"workpad_task\"}"
+                            .to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::AdapterDispatchPromptSource(
+                    AdapterDispatchPromptSourceProjection {
+                        prompt_source_id: "adapter-dispatch-prompt-source-codex".to_string(),
+                        project_id: project_id.clone(),
+                        dispatch_plan_id: "adapter-dispatch-plan-codex".to_string(),
+                        prompt_hash: "prompt-hash".to_string(),
+                        source_kind: "workpad_task".to_string(),
+                        source_ref: Some("workpads/features/tasks.md#f1".to_string()),
+                        source_hash: Some("source-hash".to_string()),
+                        materialization_status: "replayable_if_source_hash_matches".to_string(),
+                        raw_prompt_policy: "not_rendered".to_string(),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append adapter dispatch prompt source");
+
+        store.rebuild_projections().expect("rebuild projections");
+        let sources = store
+            .adapter_dispatch_prompt_sources(&project_id)
+            .expect("adapter dispatch prompt sources");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].dispatch_plan_id, "adapter-dispatch-plan-codex");
+        assert_eq!(sources[0].source_kind, "workpad_task");
+        assert_eq!(
+            sources[0].source_ref.as_deref(),
+            Some("workpads/features/tasks.md#f1")
+        );
+        assert_eq!(
+            sources[0].materialization_status,
+            "replayable_if_source_hash_matches"
+        );
+        assert_eq!(sources[0].raw_prompt_policy, "not_rendered");
     }
 
     #[test]

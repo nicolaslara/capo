@@ -438,6 +438,29 @@ Follow-up:
 
 - The future provider-running command should require a recorded ready execution request plus explicit opt-in env before invoking `LocalProcessRunner`, then append a sibling execution-result projection with runtime process refs and adapter stream cursor refs.
 
+## F1/AC19 - Dispatch Prompt Source Contract
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add prompt-source records as separate facts from dispatch plans. This avoids expanding the plan table into raw prompt storage while still telling future runners whether a prompt can be safely materialized.
+- Keep `raw_prompt_policy=not_rendered` for all recorded prompt sources.
+- Mark plain `adapter plan-launch --record` prompts as `source_kind=inline_cli_prompt` and `materialization_status=manual_prompt_not_replayable`.
+- Mark `workpad plan-next --record` prompts as `source_kind=workpad_task` and `materialization_status=replayable_if_source_hash_matches`, with source path/anchor and indexed source hash.
+- Future real execution should refuse to materialize a workpad prompt if the current workpad hash differs from the prompt-source `source_hash`.
+
+Verification:
+
+- `cargo test -p capo-state adapter_dispatch_prompt_source -- --nocapture`: passed.
+- `cargo test -p capo-query adapter_dispatch -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_plan_launch -- --nocapture`: passed.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+
+Follow-up:
+
+- A future provider-running command should materialize only hash-guarded workpad prompt sources or explicitly supplied one-shot prompt input; it should not reconstruct inline CLI prompts from historical state.
+
 ## F3/DS1 - Query Surface Extraction
 
 Status: completed on 2026-05-25.

@@ -458,3 +458,31 @@ Decision:
 - Treat execution requests as their own lifecycle fact: plans record intent, gates record whether execution would be allowed, replays record deterministic fixture ingestion, and execution requests record an operator request to cross the provider boundary.
 - The command records `provider_cli_executed=false` and `status=waiting_on_explicit_provider_opt_in` when the plan has a ready gate. Without a ready gate, it records a blocked request with the gate reason or `recorded_ready_dispatch_gate_missing`.
 - Actual provider execution remains deferred until the user explicitly authorizes the relevant opt-in environment variable, currently `CAPO_RUN_CODEX_LOCAL_DISPATCH` or `CAPO_RUN_CLAUDE_LOCAL_DISPATCH`.
+
+### AC19 - Dispatch Prompt Source Contract
+
+Status: completed
+
+Acceptance:
+
+- Record prompt-source metadata for dispatch plans without storing raw prompt text.
+- Distinguish non-replayable inline CLI prompts from workpad-derived prompts that can be materialized only if the source hash still matches.
+- Expose prompt-source rows through shared query/dashboard surfaces for future runner and operator inspection.
+- Keep prompt source recording separate from provider CLI execution and runtime artifact creation.
+
+Evidence:
+
+- `AdapterDispatchPromptSourceProjection`, `EventKind::AdapterDispatchPromptSourceRecorded`, SQLite table, rebuild codec, and read query in `../../crates/capo-state/src/lib.rs`.
+- Shared dashboard query exposure in `../../crates/capo-query/src/lib.rs` and CLI dashboard rendering in `../../crates/capo-cli/src/main.rs`.
+- `capo adapter plan-launch --record` records `source_kind=inline_cli_prompt` with `materialization_status=manual_prompt_not_replayable`.
+- `capo workpad plan-next --record` records `source_kind=workpad_task` with `materialization_status=replayable_if_source_hash_matches`.
+- `cargo test -p capo-state adapter_dispatch_prompt_source -- --nocapture`: passed.
+- `cargo test -p capo-query adapter_dispatch -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_plan_launch -- --nocapture`: passed.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+
+Decision:
+
+- Preserve the raw prompt non-retention rule while still giving future real execution a materialization contract.
+- Inline CLI prompt dispatch plans are intentionally not replayable after recording because Capo does not keep the raw prompt.
+- Workpad-derived dispatch plans keep source path/anchor and source hash so a future runner can rederive the prompt from markdown only when the indexed source has not drifted.

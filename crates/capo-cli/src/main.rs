@@ -16,12 +16,13 @@ use capo_eval::TaskOutcomeReport;
 use capo_query::{AdapterDogfoodGate, ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 use capo_state::{
     AdapterDispatchExecutionRequestProjection, AdapterDispatchGateProjection,
-    AdapterDispatchPlanProjection, AdapterDispatchReplayProjection, AdapterReadinessProjection,
-    AdapterSmokeReportProjection, ArtifactRecord, CapabilityGrantProjection, EventKind,
-    EventRecord, EvidenceProjection, MemoryPacketProjection, MemoryRecordProjection,
-    MemorySourceProjection, NewEvent, PermissionApprovalProjection, ProjectionRecord,
-    RedactionState, ReviewFindingProjection, RunProjection, SessionProjection, SqliteStateStore,
-    ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
+    AdapterDispatchPlanProjection, AdapterDispatchPromptSourceProjection,
+    AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
+    ArtifactRecord, CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection,
+    MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection, NewEvent,
+    PermissionApprovalProjection, ProjectionRecord, RedactionState, ReviewFindingProjection,
+    RunProjection, SessionProjection, SqliteStateStore, ToolCallProjection, WorkpadFileProjection,
+    WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
 use capo_voice::{
     MemoryIngestionPolicy, TranscriptRetentionPolicy, VOICE_TRANSCRIPT_RETENTION_DEFAULT,
@@ -657,7 +658,16 @@ fn plan_adapter_launch(parsed: &ParsedArgs, args: &[String]) -> Result<String, S
         return Err(format!("unknown adapter plan-launch option: {unknown}"));
     }
     let plan = recordable_adapter_dispatch_plan(
-        parsed, &adapter, &agent, &goal, workspace, artifacts, record,
+        parsed,
+        DispatchPlanRecordRequest {
+            adapter: &adapter,
+            agent: &agent,
+            goal: &goal,
+            workspace,
+            artifacts,
+            prompt_source: DispatchPromptSourceInput::inline_cli_prompt(),
+            record,
+        },
     )?;
     Ok(format!(
         "adapter_launch_planned=true\n{}\n",
@@ -668,33 +678,47 @@ fn plan_adapter_launch(parsed: &ParsedArgs, args: &[String]) -> Result<String, S
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RecordedAdapterDispatchPlan {
     projection: AdapterDispatchPlanProjection,
+    prompt_source: AdapterDispatchPromptSourceProjection,
     runtime_safe_arg_count: usize,
     subscription_safe: bool,
     recorded: bool,
     recorded_sequence: Option<i64>,
 }
 
-fn recordable_adapter_dispatch_plan(
-    parsed: &ParsedArgs,
-    adapter: &str,
-    agent: &str,
-    goal: &str,
+struct DispatchPlanRecordRequest<'a> {
+    adapter: &'a str,
+    agent: &'a str,
+    goal: &'a str,
     workspace: PathBuf,
     artifacts: PathBuf,
+    prompt_source: DispatchPromptSourceInput,
     record: bool,
+}
+
+fn recordable_adapter_dispatch_plan(
+    parsed: &ParsedArgs,
+    request: DispatchPlanRecordRequest<'_>,
 ) -> Result<RecordedAdapterDispatchPlan, String> {
     let controller = controller(parsed)?;
     controller
-        .registration_for_agent_name(agent)
-        .or_else(|_| controller.register_agent(agent))
+        .registration_for_agent_name(request.agent)
+        .or_else(|_| controller.register_agent(request.agent))
         .map_err(debug_error)?;
     let plan = controller
-        .plan_local_adapter_dispatch(adapter, agent, goal, workspace, artifacts)
+        .plan_local_adapter_dispatch(
+            request.adapter,
+            request.agent,
+            request.goal,
+            request.workspace,
+            request.artifacts,
+        )
         .map_err(|error| format!("adapter launch planning failed: {error}"))?;
     let safe_prompt_arg_count = plan.runtime_arg_count.saturating_sub(1);
-    let goal_hash = stable_cli_hash(goal);
+    let goal_hash = stable_cli_hash(request.goal);
     let projection = adapter_dispatch_plan_projection(&plan, &goal_hash);
-    let recorded_sequence = if record {
+    let prompt_source_projection =
+        adapter_dispatch_prompt_source_projection(&projection, &goal_hash, request.prompt_source);
+    let recorded_sequence = if request.record {
         let event = NewEvent {
             event_id: format!(
                 "event-adapter-dispatch-plan-{}",
@@ -727,11 +751,49 @@ fn recordable_adapter_dispatch_plan(
             )),
             redaction_state: RedactionState::Safe,
         };
+        let prompt_source_event = NewEvent {
+            event_id: format!(
+                "event-adapter-dispatch-prompt-source-{}",
+                stable_cli_hash(&prompt_source_projection.prompt_source_id)
+            ),
+            kind: EventKind::AdapterDispatchPromptSourceRecorded,
+            actor: "local-cli".to_string(),
+            project_id: Some(project_id()),
+            task_id: None,
+            agent_id: Some(projection.agent_id.clone()),
+            session_id: Some(projection.session_id.clone()),
+            run_id: Some(projection.run_id.clone()),
+            turn_id: None,
+            item_id: Some(prompt_source_projection.prompt_source_id.clone()),
+            payload_json: format!(
+                "{{\"dispatch_plan_id\":\"{}\",\"prompt_hash\":\"{}\",\"source_kind\":\"{}\",\"raw_prompt_policy\":\"not_rendered\"}}",
+                escape_json(&projection.dispatch_plan_id),
+                prompt_source_projection.prompt_hash,
+                escape_json(&prompt_source_projection.source_kind)
+            ),
+            idempotency_key: Some(format!(
+                "adapter-dispatch-prompt-source:{}:{}:{}:{}",
+                prompt_source_projection.project_id,
+                prompt_source_projection.dispatch_plan_id,
+                prompt_source_projection.prompt_hash,
+                prompt_source_projection.source_kind
+            )),
+            redaction_state: RedactionState::Safe,
+        };
+        let state = state(parsed)?;
+        state
+            .append_event(
+                event,
+                &[ProjectionRecord::AdapterDispatchPlan(projection.clone())],
+            )
+            .map_err(debug_error)?;
         Some(
-            state(parsed)?
+            state
                 .append_event(
-                    event,
-                    &[ProjectionRecord::AdapterDispatchPlan(projection.clone())],
+                    prompt_source_event,
+                    &[ProjectionRecord::AdapterDispatchPromptSource(
+                        prompt_source_projection.clone(),
+                    )],
                 )
                 .map_err(debug_error)?,
         )
@@ -740,16 +802,17 @@ fn recordable_adapter_dispatch_plan(
     };
     Ok(RecordedAdapterDispatchPlan {
         projection,
+        prompt_source: prompt_source_projection,
         runtime_safe_arg_count: safe_prompt_arg_count,
         subscription_safe: true,
-        recorded: record,
+        recorded: request.record,
         recorded_sequence,
     })
 }
 
 fn render_adapter_dispatch_plan(plan: &RecordedAdapterDispatchPlan) -> String {
     format!(
-        "adapter={}\nprovider_kind={}\ncredential_scope={}\nagent={}\nagent_id={}\nsession_id={}\nrun_id={}\nruntime_program={}\nruntime_arg_count={}\nruntime_prompt_policy={}\nruntime_safe_arg_count={}\nruntime_cwd={}\nartifact_root={}\nrequest_env_count={}\nenv_allowlist={}\nredaction_rules={}\nstdout_format={}\nstderr_policy={}\nsubscription_safe={}\nprovider_cli_executed={}\nrecorded={}\nrecorded_sequence={}",
+        "adapter={}\nprovider_kind={}\ncredential_scope={}\nagent={}\nagent_id={}\nsession_id={}\nrun_id={}\nruntime_program={}\nruntime_arg_count={}\nruntime_prompt_policy={}\nruntime_prompt_source={}\nruntime_prompt_source_kind={}\nruntime_prompt_materialization={}\nruntime_safe_arg_count={}\nruntime_cwd={}\nartifact_root={}\nrequest_env_count={}\nenv_allowlist={}\nredaction_rules={}\nstdout_format={}\nstderr_policy={}\nsubscription_safe={}\nprovider_cli_executed={}\nrecorded={}\nrecorded_sequence={}",
         plan.projection.adapter_kind,
         plan.projection.provider_kind,
         plan.projection.credential_scope,
@@ -760,6 +823,9 @@ fn render_adapter_dispatch_plan(plan: &RecordedAdapterDispatchPlan) -> String {
         plan.projection.runtime_program,
         plan.projection.runtime_arg_count,
         plan.projection.runtime_prompt_policy,
+        plan.prompt_source.prompt_source_id,
+        plan.prompt_source.source_kind,
+        plan.prompt_source.materialization_status,
         plan.runtime_safe_arg_count,
         plan.projection.runtime_cwd,
         plan.projection.artifact_root,
@@ -814,6 +880,62 @@ fn adapter_dispatch_plan_projection(
         stderr_policy: plan.launch_plan.stderr_policy.clone(),
         provider_cli_executed: false,
         status: "planned".to_string(),
+        updated_sequence: 0,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DispatchPromptSourceInput {
+    source_kind: String,
+    source_ref: Option<String>,
+    source_hash: Option<String>,
+    materialization_status: String,
+}
+
+impl DispatchPromptSourceInput {
+    fn inline_cli_prompt() -> Self {
+        Self {
+            source_kind: "inline_cli_prompt".to_string(),
+            source_ref: None,
+            source_hash: None,
+            materialization_status: "manual_prompt_not_replayable".to_string(),
+        }
+    }
+
+    fn workpad_task(task: &WorkpadTaskProjection, source_hash: String) -> Self {
+        Self {
+            source_kind: "workpad_task".to_string(),
+            source_ref: Some(format!("{}#{}", task.path, task.source_anchor)),
+            source_hash: Some(source_hash),
+            materialization_status: "replayable_if_source_hash_matches".to_string(),
+        }
+    }
+}
+
+fn adapter_dispatch_prompt_source_projection(
+    plan: &AdapterDispatchPlanProjection,
+    prompt_hash: &str,
+    input: DispatchPromptSourceInput,
+) -> AdapterDispatchPromptSourceProjection {
+    AdapterDispatchPromptSourceProjection {
+        prompt_source_id: format!(
+            "adapter-dispatch-prompt-source-{}-{}",
+            stable_cli_hash(&plan.dispatch_plan_id),
+            stable_cli_hash(&format!(
+                "{}:{}:{}",
+                prompt_hash,
+                input.source_kind,
+                input.source_ref.as_deref().unwrap_or("none")
+            ))
+        ),
+        project_id: plan.project_id.clone(),
+        dispatch_plan_id: plan.dispatch_plan_id.clone(),
+        prompt_hash: prompt_hash.to_string(),
+        source_kind: input.source_kind,
+        source_ref: input.source_ref,
+        source_hash: input.source_hash,
+        materialization_status: input.materialization_status,
+        raw_prompt_policy: "not_rendered".to_string(),
         updated_sequence: 0,
     }
 }
@@ -1747,6 +1869,22 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
             request.opt_in_env,
             request.runtime_prompt_policy,
             request.reason_codes
+        ));
+    }
+    output.push_str(&format!(
+        "adapter_dispatch_prompt_sources={}\n",
+        dashboard.adapter_dispatch_prompt_sources.len()
+    ));
+    for source in &dashboard.adapter_dispatch_prompt_sources {
+        output.push_str(&format!(
+            "adapter_dispatch_prompt_source={} dispatch_plan={} source_kind={} source_ref={} source_hash={} materialization_status={} raw_prompt_policy={}\n",
+            source.prompt_source_id,
+            source.dispatch_plan_id,
+            source.source_kind,
+            source.source_ref.as_deref().unwrap_or("none"),
+            source.source_hash.as_deref().unwrap_or("none"),
+            source.materialization_status,
+            source.raw_prompt_policy
         ));
     }
     output.push_str(&render_adapter_dogfood_gate(
@@ -2792,15 +2930,25 @@ fn plan_next_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String
         .first()
         .ok_or_else(|| "no actionable observed-only workpad task found".to_string())?
         .clone();
+    let workpad_file = state
+        .workpad_file(&project_id(), &next.path)
+        .map_err(debug_error)?
+        .ok_or_else(|| format!("missing workpad file read model: {}", next.path))?;
     let goal = workpad_task_goal(&next);
     let plan = recordable_adapter_dispatch_plan(
         parsed,
-        &options.adapter,
-        &options.agent,
-        &goal,
-        options.workspace,
-        options.artifacts,
-        options.record,
+        DispatchPlanRecordRequest {
+            adapter: &options.adapter,
+            agent: &options.agent,
+            goal: &goal,
+            workspace: options.workspace,
+            artifacts: options.artifacts,
+            prompt_source: DispatchPromptSourceInput::workpad_task(
+                &next,
+                workpad_file.content_hash,
+            ),
+            record: options.record,
+        },
     )?;
     Ok(format!(
         "workpad_next_planned=true\nagent={}\nadapter={}\nworkpad_task_id={}\ndefault_task_id={}\nsource={}#{}\ntitle={}\nobserved_status={}\ncapo_execution_status={}\ncandidate_count={}\npath_filter={}\n{}\n",
@@ -4302,6 +4450,8 @@ mod tests {
         assert!(output.contains("credential_scope=user_local_subscription"));
         assert!(output.contains("runtime_program=codex"));
         assert!(output.contains("runtime_prompt_policy=not_rendered"));
+        assert!(output.contains("runtime_prompt_source_kind=inline_cli_prompt"));
+        assert!(output.contains("runtime_prompt_materialization=manual_prompt_not_replayable"));
         assert!(output.contains("request_env_count=0"));
         assert!(output.contains("subscription_safe=true"));
         assert!(output.contains("provider_cli_executed=false"));
@@ -4319,6 +4469,17 @@ mod tests {
         assert_eq!(plans[0].adapter_kind, "codex_exec");
         assert_eq!(plans[0].runtime_prompt_policy, "not_rendered");
         assert!(!plans[0].provider_cli_executed);
+        let prompt_sources = SqliteStateStore::open(&state_root)
+            .expect("state")
+            .adapter_dispatch_prompt_sources(&project_id())
+            .expect("dispatch prompt sources");
+        assert_eq!(prompt_sources.len(), 1);
+        assert_eq!(prompt_sources[0].source_kind, "inline_cli_prompt");
+        assert_eq!(
+            prompt_sources[0].materialization_status,
+            "manual_prompt_not_replayable"
+        );
+        assert_eq!(prompt_sources[0].raw_prompt_policy, "not_rendered");
         let dashboard = run_cli(vec![
             "dashboard".to_string(),
             "--state".to_string(),
@@ -4326,6 +4487,8 @@ mod tests {
         ])
         .expect("dashboard");
         assert!(dashboard.contains("adapter_dispatch_plans=1"));
+        assert!(dashboard.contains("adapter_dispatch_prompt_sources=1"));
+        assert!(dashboard.contains("source_kind=inline_cli_prompt"));
         assert!(dashboard.contains("adapter_dispatch_plan=adapter-dispatch-plan-codex_exec"));
         assert!(!dashboard.contains("Summarize this workpad"));
     }
@@ -4362,6 +4525,12 @@ mod tests {
             .expect("dispatch plans");
         assert_eq!(plans.len(), 2);
         assert_ne!(plans[0].dispatch_plan_id, plans[1].dispatch_plan_id);
+        let prompt_sources = SqliteStateStore::open(&state_root)
+            .expect("state")
+            .adapter_dispatch_prompt_sources(&project_id())
+            .expect("dispatch prompt sources");
+        assert_eq!(prompt_sources.len(), 2);
+        assert_ne!(prompt_sources[0].prompt_hash, prompt_sources[1].prompt_hash);
         let dashboard = run_cli(vec![
             "dashboard".to_string(),
             "--state".to_string(),
@@ -5085,6 +5254,10 @@ mod tests {
         assert!(plan_next.contains("adapter=codex_exec"));
         assert!(plan_next.contains("workpad_task_id=workpads:features:tasks.md#f2"));
         assert!(plan_next.contains("runtime_prompt_policy=not_rendered"));
+        assert!(plan_next.contains("runtime_prompt_source_kind=workpad_task"));
+        assert!(
+            plan_next.contains("runtime_prompt_materialization=replayable_if_source_hash_matches")
+        );
         assert!(plan_next.contains("provider_cli_executed=false"));
         assert!(plan_next.contains("recorded=true"));
         assert!(!plan_next.contains("Work on Workpad Dogfood Bridge"));
@@ -5095,6 +5268,19 @@ mod tests {
         assert_eq!(plans[0].adapter_kind, "codex_exec");
         assert_eq!(plans[0].runtime_prompt_policy, "not_rendered");
         assert!(!plans[0].provider_cli_executed);
+        let prompt_sources = state
+            .adapter_dispatch_prompt_sources(&project_id())
+            .expect("dispatch prompt sources");
+        assert_eq!(prompt_sources.len(), 1);
+        assert_eq!(prompt_sources[0].source_kind, "workpad_task");
+        assert_eq!(
+            prompt_sources[0].source_ref.as_deref(),
+            Some("workpads/features/tasks.md#F2 - Workpad Dogfood Bridge")
+        );
+        assert_eq!(
+            prompt_sources[0].materialization_status,
+            "replayable_if_source_hash_matches"
+        );
         let planned_workpad_task = state
             .workpad_task(&project_id(), "workpads:features:tasks.md#f2")
             .expect("planned workpad task query")
@@ -5107,6 +5293,8 @@ mod tests {
         ])
         .expect("dashboard after plan-next");
         assert!(dashboard_after_plan.contains("adapter_dispatch_plans=1"));
+        assert!(dashboard_after_plan.contains("adapter_dispatch_prompt_sources=1"));
+        assert!(dashboard_after_plan.contains("source_kind=workpad_task"));
         assert!(!dashboard_after_plan.contains("Work on Workpad Dogfood Bridge"));
         let source_hash = files
             .iter()
