@@ -181,3 +181,35 @@ Follow-up:
 
 - DS2 should extend the query contract before rendering new operator fields, especially tool-call and memory-packet details.
 - Voice integration should prefer `capo-query` dashboard/session structs over reading state projections directly.
+
+## F3/DS2 - Operator Dashboard View
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Extend `ProjectDashboardQuery` and `SessionDashboardRow` rather than adding a parallel CLI-only dashboard path.
+- Include tool-call projections and memory-packet refs in the shared dashboard query contract so CLI, voice, web, mobile, and future TUI views can render the same operator facts.
+- Keep the DS2 rendering surface as the existing text CLI dashboard. This preserves a useful dogfood operator view without adding a premature UI dependency.
+- Add `capo dashboard --project PROJECT_ID`, `--session SESSION_ID`, and `--status STATUS`.
+- Treat `--status` as an any-status filter over agent, session, and run status for v0. This is broad but useful for the current text dashboard; split into status domains later if dogfood usage shows ambiguity.
+- Reject unknown dashboard flags and missing filter values. Operator filters should fail closed instead of showing a broader state view than requested.
+
+Verification:
+
+- `cargo test -p capo-query`: passed.
+- `cargo test -p capo-cli dashboard_rejects_malformed_filters`: passed.
+- `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence`: passed.
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Review:
+
+- Focused dashboard review found two medium blockers: the CLI had no user-facing project filter, and malformed filters could silently widen dashboard output. Both were fixed before completion.
+- The review also identified broad status matching as a low residual risk. It is documented as intentional v0 behavior.
+
+Follow-up:
+
+- If `--status` becomes confusing during dogfood, split it into explicit `--agent-status`, `--session-status`, and `--run-status` filters.
+- Future web/TUI work should consume `capo-query` structs directly rather than adding state reads in a UI crate.

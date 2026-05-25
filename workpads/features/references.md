@@ -82,3 +82,12 @@ Observed 2026-05-25.
 - CLI dashboard rendering through query contract: `../../crates/capo-cli/src/main.rs`
 - Dashboard source workpad: `dashboard.md`
 - No new third-party dependencies were added for DS1.
+
+## F3/DS2 Operator Dashboard View
+
+Observed 2026-05-25.
+
+- Shared dashboard query contract with tool-call and memory-packet refs: `../../crates/capo-query/src/lib.rs`
+- CLI dashboard filters and text rendering: `../../crates/capo-cli/src/main.rs`
+- Dashboard source workpad: `dashboard.md`
+- No new third-party dependencies were added for DS2.

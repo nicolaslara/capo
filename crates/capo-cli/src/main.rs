@@ -26,7 +26,7 @@ Usage:
   capo --help
   capo version
   capo init [--state PATH]
-  capo dashboard [--state PATH]
+  capo dashboard [--project PROJECT_ID] [--session SESSION_ID] [--status STATUS] [--state PATH]
   capo agent register --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent spawn --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent list [--state PATH]
@@ -71,7 +71,7 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             Ok(HELP.to_string())
         }
         [command] if command == "init" => init(&parsed),
-        [command] if command == "dashboard" => dashboard(&parsed),
+        [command, rest @ ..] if command == "dashboard" => dashboard(&parsed, rest),
         [area, command, rest @ ..] if area == "agent" && command == "register" => {
             register_agent(&parsed, rest)
         }
@@ -224,17 +224,50 @@ fn list_agents(parsed: &ParsedArgs) -> Result<String, String> {
     Ok(output)
 }
 
-fn dashboard(parsed: &ParsedArgs) -> Result<String, String> {
+fn dashboard(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let query = dashboard_query(args)?;
     let command = envelope(
         "dashboard",
-        CommandTarget::Project(project_id()),
+        CommandTarget::Project(query.project_id.clone()),
         CommandIntent::QueryStatus,
         None,
     );
+    let command = CommandEnvelope {
+        project_id: query.project_id.clone(),
+        ..command
+    };
     let state = state(parsed)?;
-    let dashboard =
-        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    let dashboard = project_dashboard(&state, query).map_err(debug_error)?;
     Ok(render_dashboard(&command, &dashboard))
+}
+
+fn dashboard_query(args: &[String]) -> Result<ProjectDashboardQuery, String> {
+    let mut project_id = project_id();
+    let mut session_id = None;
+    let mut status = None;
+    let mut index = 0;
+    while index < args.len() {
+        let key = args[index].as_str();
+        let value = args
+            .get(index + 1)
+            .filter(|value| !value.starts_with("--"))
+            .ok_or_else(|| format!("{key} requires a value"))?;
+        match key {
+            "--project" => project_id = ProjectId::new(value),
+            "--session" => session_id = Some(SessionId::new(value)),
+            "--status" => status = Some(value.clone()),
+            other => return Err(format!("unknown dashboard filter: {other}")),
+        }
+        index += 2;
+    }
+    let mut query = ProjectDashboardQuery::new(project_id);
+    if let Some(session_id) = session_id {
+        query = query.with_session_id(session_id);
+    }
+    if let Some(status) = status {
+        query = query.with_status(status);
+    }
+    Ok(query)
 }
 
 fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> String {
@@ -263,7 +296,7 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
         let session = &session_row.session;
 
         output.push_str(&format!(
-            "session={} session_status={} run={} run_status={} goal={} blocker={} confidence={} evidence_refs={} recent_events={}\n",
+            "session={} session_status={} run={} run_status={} goal={} blocker={} confidence={} evidence_refs={} tool_calls={} memory_packet_refs={} recent_events={}\n",
             session.session_id,
             session.status,
             session_row
@@ -288,8 +321,29 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
                 .map(|item| item.evidence_id.to_string())
                 .collect::<Vec<_>>()
                 .join(","),
+            session_row.tool_calls.len(),
+            session_row.memory_packets.len(),
             session_row.recent_events.len()
         ));
+        for tool_call in &session_row.tool_calls {
+            output.push_str(&format!(
+                "tool_call={} tool={} tool_origin={} tool_status={} input_artifact={} output_artifact={}\n",
+                tool_call.tool_call_id,
+                tool_call.tool_name,
+                tool_call.tool_origin,
+                tool_call.status,
+                tool_call.input_artifact_id.as_deref().unwrap_or("none"),
+                tool_call.output_artifact_id.as_deref().unwrap_or("none")
+            ));
+        }
+        for packet in &session_row.memory_packets {
+            output.push_str(&format!(
+                "memory_packet={} purpose={} artifact={}\n",
+                packet.memory_packet_id,
+                packet.purpose,
+                packet.packet_artifact_id.as_deref().unwrap_or("none")
+            ));
+        }
         for event in &session_row.recent_events {
             output.push_str(&format!("event={} kind={}\n", event.sequence, event.kind));
         }
@@ -1640,6 +1694,39 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_rejects_malformed_filters() {
+        let state_root = temp_root("cli-dashboard-filters");
+
+        let missing_session = run_cli(vec![
+            "dashboard".to_string(),
+            "--session".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap_err();
+        assert!(missing_session.contains("--session requires a value"));
+
+        let missing_status = run_cli(vec![
+            "dashboard".to_string(),
+            "--status".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap_err();
+        assert!(missing_status.contains("--status requires a value"));
+
+        let unknown = run_cli(vec![
+            "dashboard".to_string(),
+            "--agent".to_string(),
+            "fake-codex".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap_err();
+        assert!(unknown.contains("unknown dashboard filter: --agent"));
+    }
+
+    #[test]
     fn evidence_export_handles_completed_runs_and_refuses_foreign_files() {
         let state_root = temp_root("cli-completed-state");
         let evidence_dir = temp_root("cli-completed-evidence");
@@ -1794,8 +1881,24 @@ mod tests {
         assert!(dashboard.contains("goal=Inspect the project"));
         assert!(dashboard.contains("blocker=none"));
         assert!(dashboard.contains("evidence_refs=evidence-fake-codex"));
+        assert!(dashboard.contains("tool_calls=1"));
+        assert!(dashboard.contains("tool_call=tool-fake-codex tool=capo.session_summary"));
+        assert!(dashboard.contains("memory_packet_refs=1"));
+        assert!(dashboard.contains("memory_packet=packet-fake-codex purpose=turn_context"));
         assert!(dashboard.contains("kind=tool.result_delivered"));
         assert!(dashboard.contains("agent=fake-reviewer agent_status=running"));
+        let session_dashboard = run(vec!["dashboard", "--session", "session-fake-codex"]);
+        assert!(session_dashboard.contains("agents=1"));
+        assert!(session_dashboard.contains("agent=fake-codex agent_status=running"));
+        assert!(!session_dashboard.contains("agent=fake-reviewer agent_status=running"));
+        let running_dashboard = run(vec!["dashboard", "--status", "running"]);
+        assert!(running_dashboard.contains("agents=2"));
+        let missing_dashboard = run(vec!["dashboard", "--status", "waiting_for_input"]);
+        assert!(missing_dashboard.contains("agents=0"));
+        assert!(missing_dashboard.contains("active_sessions=0"));
+        let other_project_dashboard = run(vec!["dashboard", "--project", "project-other"]);
+        assert!(other_project_dashboard.contains("agents=0"));
+        assert!(other_project_dashboard.contains("active_sessions=0"));
 
         let codex_status = run(vec!["session", "status", "--agent", "fake-codex"]);
         assert!(codex_status.contains("current_goal=Inspect the project"));

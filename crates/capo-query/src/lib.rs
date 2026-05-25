@@ -6,8 +6,8 @@
 
 use capo_core::{ProjectId, SessionId};
 use capo_state::{
-    AgentProjection, EventRecord, EvidenceProjection, RunProjection, SessionProjection,
-    SqliteStateStore, StateResult,
+    AgentProjection, EventRecord, EvidenceProjection, MemoryPacketProjection, RunProjection,
+    SessionProjection, SqliteStateStore, StateResult, ToolCallProjection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -36,12 +36,16 @@ pub struct SessionDashboardRow {
     pub session: SessionProjection,
     pub run: Option<RunProjection>,
     pub evidence: Vec<EvidenceProjection>,
+    pub tool_calls: Vec<ToolCallProjection>,
+    pub memory_packets: Vec<MemoryPacketProjection>,
     pub recent_events: Vec<EventRecord>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectDashboardQuery {
     pub project_id: ProjectId,
+    pub session_id: Option<SessionId>,
+    pub status: Option<String>,
     pub recent_event_limit: usize,
 }
 
@@ -49,8 +53,20 @@ impl ProjectDashboardQuery {
     pub fn new(project_id: ProjectId) -> Self {
         Self {
             project_id,
+            session_id: None,
+            status: None,
             recent_event_limit: 5,
         }
+    }
+
+    pub fn with_session_id(mut self, session_id: SessionId) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+
+    pub fn with_status(mut self, status: impl Into<String>) -> Self {
+        self.status = Some(status.into());
+        self
     }
 }
 
@@ -68,6 +84,16 @@ pub fn project_dashboard(
             .as_ref()
             .map(|session_id| session_dashboard(state, session_id, query.recent_event_limit))
             .transpose()?;
+        if let Some(session_id) = &query.session_id
+            && session.as_ref().map(|row| &row.session.session_id) != Some(session_id)
+        {
+            continue;
+        }
+        if let Some(status) = &query.status
+            && !dashboard_row_matches_status(&agent, session.as_ref(), status)
+        {
+            continue;
+        }
         rows.push(AgentDashboardRow { agent, session });
     }
     Ok(ProjectDashboard {
@@ -91,9 +117,25 @@ fn session_dashboard(
     Ok(SessionDashboardRow {
         run: state.run_for_session(session_id)?,
         evidence: state.evidence_for_session(session_id)?,
+        tool_calls: state.tool_calls_for_session(session_id)?,
+        memory_packets: state.memory_packets_for_session(session_id)?,
         recent_events: state.recent_events_for_session(session_id, recent_event_limit)?,
         session,
     })
+}
+
+fn dashboard_row_matches_status(
+    agent: &AgentProjection,
+    session: Option<&SessionDashboardRow>,
+    status: &str,
+) -> bool {
+    agent.status == status
+        || session
+            .map(|row| {
+                row.session.status == status
+                    || row.run.as_ref().is_some_and(|run| run.status == status)
+            })
+            .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -101,10 +143,11 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use capo_core::{AgentId, EvidenceId, RunId, TaskId};
+    use capo_core::{AgentId, EvidenceId, MemoryPacketId, RunId, TaskId, ToolCallId};
     use capo_state::{
-        AgentProjection, EventKind, EvidenceProjection, NewEvent, ProjectionRecord, RedactionState,
-        RunProjection, SessionProjection, TaskProjection,
+        AgentProjection, EventKind, EvidenceProjection, MemoryPacketProjection, NewEvent,
+        ProjectionRecord, RedactionState, RunProjection, SessionProjection, TaskProjection,
+        ToolCallProjection,
     };
 
     #[test]
@@ -177,12 +220,35 @@ mod tests {
                     ProjectionRecord::Evidence(EvidenceProjection {
                         evidence_id: evidence_id.clone(),
                         project_id: project_id.clone(),
-                        task_id: Some(task_id),
+                        task_id: Some(task_id.clone()),
                         session_id: Some(session_id.clone()),
-                        run_id: Some(run_id),
+                        run_id: Some(run_id.clone()),
                         kind: "summary".to_string(),
                         artifact_id: Some("artifact-demo".to_string()),
                         confidence: 80,
+                        updated_sequence: 0,
+                    }),
+                    ProjectionRecord::ToolCall(ToolCallProjection {
+                        tool_call_id: ToolCallId::new("tool-demo"),
+                        session_id: session_id.clone(),
+                        turn_id: Some("turn-demo".to_string()),
+                        tool_name: "capo.session_summary".to_string(),
+                        tool_origin: "capo".to_string(),
+                        status: "completed".to_string(),
+                        input_artifact_id: None,
+                        output_artifact_id: Some("artifact-tool-demo".to_string()),
+                        updated_sequence: 0,
+                    }),
+                    ProjectionRecord::MemoryPacketRef(MemoryPacketProjection {
+                        memory_packet_id: MemoryPacketId::new("packet-demo"),
+                        project_id: project_id.clone(),
+                        task_id: Some(task_id),
+                        agent_id: Some(AgentId::new("agent-demo")),
+                        session_id: Some(session_id.clone()),
+                        run_id: Some(run_id),
+                        turn_id: Some("turn-demo".to_string()),
+                        packet_artifact_id: Some("artifact-memory-demo".to_string()),
+                        purpose: "turn_context".to_string(),
                         updated_sequence: 0,
                     }),
                 ],
@@ -203,6 +269,14 @@ mod tests {
             Some("running")
         );
         assert_eq!(session.evidence[0].evidence_id, evidence_id);
+        assert_eq!(
+            session.tool_calls[0].tool_call_id,
+            ToolCallId::new("tool-demo")
+        );
+        assert_eq!(
+            session.memory_packets[0].memory_packet_id,
+            MemoryPacketId::new("packet-demo")
+        );
         assert_eq!(session.recent_events[0].kind, "session.started");
     }
 
@@ -273,6 +347,42 @@ mod tests {
         assert_eq!(recent_events.len(), 2);
         assert_eq!(recent_events[0].event_id, "event-extra-2");
         assert_eq!(recent_events[1].event_id, "event-extra-3");
+    }
+
+    #[test]
+    fn project_dashboard_filters_by_session_and_status() {
+        let root = temp_root("query-dashboard-session-filter");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+
+        append_agent(&state, &project_id, "agent-active", Some("session-active"));
+        append_minimal_session(&state, &project_id, "agent-active", "session-active");
+        append_agent(&state, &project_id, "agent-idle", None);
+
+        let by_session = project_dashboard(
+            &state,
+            ProjectDashboardQuery::new(project_id.clone())
+                .with_session_id(SessionId::new("session-active")),
+        )
+        .expect("dashboard by session");
+        assert_eq!(by_session.agents.len(), 1);
+        assert_eq!(by_session.agents[0].agent.name, "agent-active");
+
+        let by_agent_status = project_dashboard(
+            &state,
+            ProjectDashboardQuery::new(project_id.clone()).with_status("available"),
+        )
+        .expect("dashboard by agent status");
+        assert_eq!(by_agent_status.agents.len(), 1);
+        assert_eq!(by_agent_status.agents[0].agent.name, "agent-idle");
+
+        let by_session_status = project_dashboard(
+            &state,
+            ProjectDashboardQuery::new(project_id).with_status("active"),
+        )
+        .expect("dashboard by session status");
+        assert_eq!(by_session_status.agents.len(), 1);
+        assert_eq!(by_session_status.agents[0].agent.name, "agent-active");
     }
 
     #[test]

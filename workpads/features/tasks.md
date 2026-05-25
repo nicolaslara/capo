@@ -109,7 +109,7 @@ Evidence:
 
 ## F3 - Query Surface And Dashboard Upgrade
 
-Status: in_progress
+Status: completed
 
 Source workpad: `dashboard.md`
 
@@ -121,19 +121,22 @@ Acceptance:
 
 Progress:
 
-- DS1 query surface extraction is completed. DS2 richer operator dashboard view remains pending.
+- DS1 query surface extraction is completed.
+- DS2 richer operator dashboard view is completed with project/session/status filters, tool-call refs, memory-packet refs, and fail-closed filter parsing.
 
 Evidence:
 
 - `crates/capo-query/src/lib.rs`
 - `crates/capo-cli/src/main.rs`
 - `cargo test -p capo-query`
+- `cargo test -p capo-cli dashboard_rejects_malformed_filters`
 - `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence`
 - `cargo test -p capo-cli cli_drives_fake_controller_and_exports_evidence`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`
 - Focused DS1 query-boundary review: test coverage gap found and fixed
+- Focused DS2 dashboard review: project-filter and malformed-filter blockers found and fixed; broad any-status filter documented as intentional v0 behavior
 
 ## F4 - Capability And Tool Hardening
 

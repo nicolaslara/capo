@@ -53,10 +53,34 @@ Review:
 
 ### DS2 - Operator Dashboard View
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Show active agents, sessions, goals, blockers, confidence, evidence refs, tool calls, and memory packet refs.
 - Add filtering by project/session/status.
 - Keep dashboard rendering read-only.
+
+Evidence:
+
+- `crates/capo-query/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
+- `cargo test -p capo-query`
+- `cargo test -p capo-cli dashboard_rejects_malformed_filters`
+- `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+
+Decision:
+
+- Extend the reusable `capo-query` dashboard contract with tool-call and memory-packet refs before rendering richer operator output.
+- Keep `capo dashboard` as a read-only text operator view for this slice; defer TUI/web presentation until the shared query shape is more stable.
+- Support `capo dashboard --project PROJECT_ID`, `--session SESSION_ID`, and `--status STATUS`.
+- Treat `--status` as an any-status filter over agent, session, and run status in this first operator view. Split status domains later if this becomes ambiguous in dogfood use.
+- Reject malformed or unknown dashboard filters rather than silently widening the displayed state.
+
+Review:
+
+- Focused dashboard review found two completion blockers: no user-facing project filter and malformed filters that could be silently ignored. Both were fixed with CLI regression coverage before completion.
+- The same review noted broad `--status` semantics as a low residual risk. The behavior is documented above and left intentionally broad for the first CLI operator view.
