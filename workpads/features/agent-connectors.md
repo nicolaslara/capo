@@ -617,3 +617,27 @@ Decision:
 
 - Treat `dispatch-status` as the compact operator surface for the full dispatch chain: plan, gate, replay, and execution outcome.
 - Execution outcome introspection is read-only and query-derived. It does not recompute preflight, rematerialize prompts, or cross the provider boundary.
+
+### AC25 - Dispatch Chain Evidence Export
+
+Status: completed
+
+Acceptance:
+
+- Add a provider-free command that exports a prompt-redacted dispatch-chain evidence artifact.
+- Include plan, latest gate, latest fixture replay, latest local execution outcome, and dogfood gate status.
+- Record the exported markdown as a Capo artifact plus evidence projection linked to the dispatch session/run.
+- Refuse to render raw prompts, raw provider fixture text, or raw provider output.
+
+Evidence:
+
+- CLI `capo adapter dispatch-evidence --dispatch-plan DISPATCH_PLAN_ID --out DIR` in `../../crates/capo-cli/src/main.rs`.
+- Exported artifacts use the `<!-- capo:adapter-dispatch-evidence -->` marker and guarded overwrite behavior.
+- Artifact records use `kind=adapter_dispatch_evidence`; evidence projections use `kind=adapter_dispatch_evidence`.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Treat dispatch-chain evidence as a review artifact, not a new execution step. The command reads existing projections and writes only Capo-owned evidence metadata/artifacts.
+- Use artifact IDs and policy fields instead of raw output in the report. Runtime stdout/stderr remain referenced by artifact ID only.
+- This prepares the real opt-in execution path for review without weakening the provider boundary.

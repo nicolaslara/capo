@@ -1196,3 +1196,23 @@ Verification:
 Follow-up:
 
 - After an explicit real provider opt-in run, verify that `dispatch-status` reports successful execution artifact refs and points the operator toward evidence export/review.
+
+## F1/AC25 - Dispatch Chain Evidence Export
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo adapter dispatch-evidence` as the review artifact surface for the dispatch chain.
+- Keep the command provider-free: it reads shared query projections and writes a Capo-owned markdown artifact plus evidence projection. It does not run providers, recompute preflight, materialize prompts, or inspect credentials.
+- Include enough state to review the chain: dispatch plan metadata, dogfood gate, latest dispatch gate, latest fixture replay, and latest local execution outcome.
+- Keep raw prompts, raw fixture text, and raw provider output out of the artifact. Runtime stdout/stderr are referenced by artifact ID only.
+- Use a specific artifact marker, `<!-- capo:adapter-dispatch-evidence -->`, and refuse changed or non-Capo overwrites.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Follow-up:
+
+- After explicit provider opt-in, use the same export command to review a successful local execution row before using it as dogfood evidence.

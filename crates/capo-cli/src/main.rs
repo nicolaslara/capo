@@ -55,6 +55,7 @@ Usage:
   capo adapter plan-launch --adapter codex|claude --agent NAME --goal GOAL [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
   capo adapter dispatch-gate --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter dispatch-status --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
+  capo adapter dispatch-evidence --dispatch-plan DISPATCH_PLAN_ID --out DIR [--state PATH]
   capo adapter execution-request --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter materialize-prompt --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter run-preflight --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
@@ -143,6 +144,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "adapter" && command == "dispatch-status" => {
             adapter_dispatch_status(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "adapter" && command == "dispatch-evidence" => {
+            adapter_dispatch_evidence(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "adapter" && command == "execution-request" => {
             adapter_dispatch_execution_request(&parsed, rest)
@@ -1325,6 +1329,123 @@ fn adapter_dispatch_status(parsed: &ParsedArgs, args: &[String]) -> Result<Strin
         latest_replay,
         latest_execution,
         &dashboard.adapter_dogfood_gate,
+    ))
+}
+
+fn adapter_dispatch_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let dispatch_plan_id = required_arg(args, "--dispatch-plan")?;
+    let out = PathBuf::from(required_arg(args, "--out")?);
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan" | "--out"))
+    {
+        return Err(format!(
+            "unknown adapter dispatch-evidence option: {unknown}"
+        ));
+    }
+    let state = state(parsed)?;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    let plan = dashboard
+        .adapter_dispatch_plans
+        .iter()
+        .find(|plan| plan.dispatch_plan_id == dispatch_plan_id)
+        .ok_or_else(|| format!("unknown adapter dispatch plan: {dispatch_plan_id}"))?;
+    let latest_gate = dashboard
+        .adapter_dispatch_gates
+        .iter()
+        .rev()
+        .find(|gate| gate.dispatch_plan_id == plan.dispatch_plan_id);
+    let latest_replay = dashboard
+        .adapter_dispatch_replays
+        .iter()
+        .rev()
+        .find(|replay| replay.dispatch_plan_id == plan.dispatch_plan_id);
+    let latest_execution = dashboard
+        .adapter_dispatch_executions
+        .iter()
+        .rev()
+        .find(|execution| execution.dispatch_plan_id == plan.dispatch_plan_id);
+    let command = envelope(
+        "adapter-dispatch-evidence",
+        CommandTarget::Session(plan.session_id.clone()),
+        CommandIntent::ExportEvidence,
+        Some(dispatch_plan_id.clone()),
+    );
+    let markdown = render_adapter_dispatch_evidence(
+        plan,
+        latest_gate,
+        latest_replay,
+        latest_execution,
+        &dashboard.adapter_dogfood_gate,
+    );
+    fs::create_dir_all(&out).map_err(|error| error.to_string())?;
+    let content_hash = stable_cli_hash(&markdown);
+    let artifact_id = format!(
+        "artifact-adapter-dispatch-evidence-{}-{}",
+        stable_cli_hash(&plan.dispatch_plan_id),
+        content_hash
+    );
+    let path = out.join(format!("{artifact_id}.md"));
+    write_dispatch_evidence_file(&path, &markdown)?;
+    state
+        .record_artifact(ArtifactRecord {
+            artifact_id: artifact_id.clone(),
+            project_id: Some(plan.project_id.clone()),
+            session_id: Some(plan.session_id.clone()),
+            run_id: Some(plan.run_id.clone()),
+            kind: "adapter_dispatch_evidence".to_string(),
+            uri: path.display().to_string(),
+            content_hash: content_hash.clone(),
+            size_bytes: markdown.len() as i64,
+            redaction_state: RedactionState::Safe,
+        })
+        .map_err(debug_error)?;
+
+    let evidence_id = format!("evidence-{artifact_id}");
+    let sequence = state
+        .append_event(
+            NewEvent {
+                event_id: format!("event-{evidence_id}"),
+                kind: EventKind::EvidenceRecorded,
+                actor: "cli".to_string(),
+                project_id: Some(plan.project_id.clone()),
+                task_id: None,
+                agent_id: Some(plan.agent_id.clone()),
+                session_id: Some(plan.session_id.clone()),
+                run_id: Some(plan.run_id.clone()),
+                turn_id: None,
+                item_id: Some(evidence_id.clone()),
+                payload_json: format!(
+                    "{{\"dispatch_plan_id\":\"{}\",\"artifact_id\":\"{}\",\"content_hash\":\"{}\"}}",
+                    escape_json(&plan.dispatch_plan_id),
+                    escape_json(&artifact_id),
+                    escape_json(&content_hash)
+                ),
+                idempotency_key: Some(format!(
+                    "adapter-dispatch-evidence:{}:{}",
+                    plan.dispatch_plan_id, content_hash
+                )),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Evidence(EvidenceProjection {
+                evidence_id: capo_core::EvidenceId::new(evidence_id.clone()),
+                project_id: plan.project_id.clone(),
+                task_id: None,
+                session_id: Some(plan.session_id.clone()),
+                run_id: Some(plan.run_id.clone()),
+                kind: "adapter_dispatch_evidence".to_string(),
+                artifact_id: Some(artifact_id.clone()),
+                confidence: dispatch_evidence_confidence(latest_execution, latest_replay),
+                updated_sequence: 0,
+            })],
+        )
+        .map_err(debug_error)?;
+    Ok(format!(
+        "adapter_dispatch_evidence_exported=true\ndispatch_plan={}\nevidence_id={evidence_id}\nartifact_id={artifact_id}\npath={}\ncontent_hash={content_hash}\nsequence={sequence}\ncommand_id={}\n",
+        plan.dispatch_plan_id,
+        path.display(),
+        command.command_id
     ))
 }
 
@@ -5465,6 +5586,117 @@ fn render_evidence(
     markdown
 }
 
+fn dispatch_evidence_confidence(
+    latest_execution: Option<&AdapterDispatchExecutionProjection>,
+    latest_replay: Option<&AdapterDispatchReplayProjection>,
+) -> i64 {
+    if latest_execution
+        .map(|execution| execution.provider_cli_executed)
+        .unwrap_or(false)
+    {
+        85
+    } else if latest_replay.is_some() {
+        75
+    } else if latest_execution.is_some() {
+        65
+    } else {
+        55
+    }
+}
+
+fn render_adapter_dispatch_evidence(
+    plan: &AdapterDispatchPlanProjection,
+    latest_gate: Option<&AdapterDispatchGateProjection>,
+    latest_replay: Option<&AdapterDispatchReplayProjection>,
+    latest_execution: Option<&AdapterDispatchExecutionProjection>,
+    dogfood_gate: &AdapterDogfoodGate,
+) -> String {
+    let mut markdown = format!(
+        "<!-- capo:adapter-dispatch-evidence -->\n# Capo Adapter Dispatch Evidence - {}\n\n## Objective\n\nReview a prompt-redacted dispatch chain before treating provider execution as dogfood evidence.\n\n## Dispatch Plan\n\n- Project: `{}`\n- Dispatch plan: `{}`\n- Adapter: `{}`\n- Provider: `{}`\n- Credential scope: `{}`\n- Agent: `{}` `{}`\n- Session: `{}`\n- Run: `{}`\n- Plan status: `{}`\n- Runtime program: `{}`\n- Runtime arg count: `{}`\n- Runtime cwd: `{}`\n- Artifact root: `{}`\n- Runtime prompt policy: `{}`\n- Provider CLI executed in plan: `{}`\n\n## Dogfood Gate\n\n- Status: `{}`\n- Ready: `{}`\n- Reasons: `{}`\n\n",
+        plan.dispatch_plan_id,
+        plan.project_id,
+        plan.dispatch_plan_id,
+        plan.adapter_kind,
+        plan.provider_kind,
+        plan.credential_scope,
+        plan.agent_id,
+        plan.agent_name,
+        plan.session_id,
+        plan.run_id,
+        plan.status,
+        plan.runtime_program,
+        plan.runtime_arg_count,
+        plan.runtime_cwd,
+        plan.artifact_root,
+        plan.runtime_prompt_policy,
+        plan.provider_cli_executed,
+        dogfood_gate.status,
+        dogfood_gate.ready,
+        dogfood_gate.reasons.join(",")
+    );
+    markdown.push_str("## Latest Dispatch Gate\n\n");
+    if let Some(gate) = latest_gate {
+        markdown.push_str(&format!(
+            "- Gate: `{}`\n- Status: `{}`\n- Provider execution allowed: `{}`\n- Required dogfood gate: `{}`\n- Runtime prompt policy: `{}`\n- Provider CLI executed: `{}`\n- Reasons: `{}`\n\n",
+            gate.dispatch_gate_id,
+            gate.status,
+            gate.provider_cli_execution_allowed,
+            gate.required_dogfood_gate,
+            gate.runtime_prompt_policy,
+            gate.provider_cli_executed,
+            gate.reason_codes
+        ));
+    } else {
+        markdown.push_str("- none\n\n");
+    }
+    markdown.push_str("## Latest Fixture Replay\n\n");
+    if let Some(replay) = latest_replay {
+        markdown.push_str(&format!(
+            "- Replay: `{}`\n- Gate: `{}`\n- Fixture path: `{}`\n- Fixture hash: `{}`\n- Input events: `{}`\n- Appended events: `{}`\n- Tool events: `{}`\n- Summary events: `{}`\n- Completed turns: `{}`\n- Provider CLI executed: `{}`\n- Raw content policy: `{}`\n\n",
+            replay.dispatch_replay_id,
+            replay.dispatch_gate_id,
+            replay.fixture_path,
+            replay.fixture_hash,
+            replay.input_event_count,
+            replay.appended_event_count,
+            replay.tool_event_count,
+            replay.summary_event_count,
+            replay.completed_turn_count,
+            replay.provider_cli_executed,
+            replay.raw_content_policy
+        ));
+    } else {
+        markdown.push_str("- none\n\n");
+    }
+    markdown.push_str("## Latest Local Execution\n\n");
+    if let Some(execution) = latest_execution {
+        markdown.push_str(&format!(
+            "- Execution: `{}`\n- Request: `{}`\n- Status: `{}`\n- Provider execution allowed: `{}`\n- Provider CLI executed: `{}`\n- Exit code: `{}`\n- Runtime process ref: `{}`\n- Stdout artifact: `{}`\n- Stderr artifact: `{}`\n- Artifact root: `{}`\n- Credential scan: `{}`\n- Raw prompt policy: `{}`\n- Raw output policy: `{}`\n- Reasons: `{}`\n\n",
+            execution.dispatch_execution_id,
+            execution.execution_request_id,
+            execution.status,
+            execution.provider_cli_execution_allowed,
+            execution.provider_cli_executed,
+            execution
+                .exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            execution.runtime_process_ref.as_deref().unwrap_or("none"),
+            execution.stdout_artifact_id.as_deref().unwrap_or("none"),
+            execution.stderr_artifact_id.as_deref().unwrap_or("none"),
+            execution.artifact_root,
+            execution.credential_scan_status,
+            execution.raw_prompt_policy,
+            execution.raw_output_policy,
+            execution.reason_codes
+        ));
+    } else {
+        markdown.push_str("- none\n\n");
+    }
+    markdown.push_str("## Redaction Policy\n\n- Raw dispatch prompts are not rendered.\n- Raw provider output is not rendered.\n- Runtime stdout/stderr are referenced by artifact IDs only.\n");
+    markdown
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_review_finding_artifact(
     session: &SessionProjection,
@@ -5536,6 +5768,24 @@ fn write_evidence_file(path: &Path, markdown: &str) -> Result<(), String> {
             "refusing to overwrite non-Capo evidence file: {}",
             path.display()
         ));
+    }
+    fs::write(path, markdown).map_err(|error| error.to_string())
+}
+
+fn write_dispatch_evidence_file(path: &Path, markdown: &str) -> Result<(), String> {
+    if let Ok(existing) = fs::read_to_string(path) {
+        if !existing.starts_with("<!-- capo:adapter-dispatch-evidence -->") {
+            return Err(format!(
+                "refusing to overwrite non-Capo adapter dispatch evidence file: {}",
+                path.display()
+            ));
+        }
+        if existing != markdown {
+            return Err(format!(
+                "refusing to overwrite changed Capo adapter dispatch evidence file: {}",
+                path.display()
+            ));
+        }
     }
     fs::write(path, markdown).map_err(|error| error.to_string())
 }
@@ -5782,6 +6032,7 @@ mod tests {
         assert!(HELP.contains("adapter plan-launch"));
         assert!(HELP.contains("adapter dispatch-gate"));
         assert!(HELP.contains("adapter dispatch-status"));
+        assert!(HELP.contains("adapter dispatch-evidence"));
         assert!(HELP.contains("adapter execution-request"));
         assert!(HELP.contains("adapter materialize-prompt"));
         assert!(HELP.contains("adapter run-preflight"));
@@ -6369,11 +6620,57 @@ mod tests {
         assert!(!replay_status.contains("Do not render this dispatch prompt"));
         assert!(!replay_status.contains("Codex fixture response."));
         assert!(!replay_status.contains("cargo test"));
+        let dispatch_evidence_dir = temp_root("adapter-dispatch-chain-evidence");
+        let dispatch_evidence = run_cli(vec![
+            "adapter".to_string(),
+            "dispatch-evidence".to_string(),
+            "--dispatch-plan".to_string(),
+            replays[0].dispatch_plan_id.clone(),
+            "--out".to_string(),
+            dispatch_evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("export dispatch evidence");
+        assert!(dispatch_evidence.contains("adapter_dispatch_evidence_exported=true"));
+        assert!(dispatch_evidence.contains("evidence_id="));
+        assert!(dispatch_evidence.contains("artifact_id=artifact-adapter-dispatch-evidence-"));
+        let dispatch_evidence_path = dispatch_evidence
+            .lines()
+            .find_map(|line| line.strip_prefix("path="))
+            .map(PathBuf::from)
+            .expect("dispatch evidence path");
+        let dispatch_evidence_markdown =
+            fs::read_to_string(&dispatch_evidence_path).expect("read dispatch evidence");
+        assert!(dispatch_evidence_markdown.starts_with("<!-- capo:adapter-dispatch-evidence -->"));
+        assert!(dispatch_evidence_markdown.contains("## Dispatch Plan"));
+        assert!(dispatch_evidence_markdown.contains("## Latest Dispatch Gate"));
+        assert!(dispatch_evidence_markdown.contains("## Latest Fixture Replay"));
+        assert!(dispatch_evidence_markdown.contains("## Latest Local Execution"));
+        assert!(dispatch_evidence_markdown.contains("Raw dispatch prompts are not rendered"));
+        assert!(
+            dispatch_evidence_markdown.contains("Status: `blocked_missing_prompt_materialization`")
+        );
+        assert!(!dispatch_evidence_markdown.contains("Do not render this dispatch prompt"));
+        assert!(!dispatch_evidence_markdown.contains("Codex fixture response."));
+        assert!(!dispatch_evidence_markdown.contains("cargo test"));
+        let dispatch_evidence_rows = SqliteStateStore::open(&state_root)
+            .expect("state")
+            .evidence_for_session(&replays[0].session_id)
+            .expect("dispatch evidence rows");
+        assert!(
+            dispatch_evidence_rows
+                .iter()
+                .any(|evidence| evidence.kind == "adapter_dispatch_evidence")
+        );
         assert_text_absent_in_tree(&state_root, "Do not render this dispatch prompt");
         assert_text_absent_in_tree(&state_root, "Codex fixture response.");
         assert_text_absent_in_tree(&state_root, "cargo test");
         assert_text_absent_in_tree(&evidence_dir, "Codex fixture response.");
         assert_text_absent_in_tree(&evidence_dir, "cargo test");
+        assert_text_absent_in_tree(&dispatch_evidence_dir, "Do not render this dispatch prompt");
+        assert_text_absent_in_tree(&dispatch_evidence_dir, "Codex fixture response.");
+        assert_text_absent_in_tree(&dispatch_evidence_dir, "cargo test");
         assert!(!workspace.exists());
         assert!(!artifacts.exists());
     }

@@ -524,3 +524,13 @@ Observed 2026-05-26.
 - Dispatch execution projection source: `../../crates/capo-state/src/lib.rs`
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC24.
+
+## F1/AC25 Dispatch Chain Evidence Export
+
+Observed 2026-05-26.
+
+- CLI `dispatch-evidence` command, markdown renderer, guarded writer, and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared dashboard projections consumed by the export: `../../crates/capo-query/src/lib.rs`
+- Evidence and artifact projection types reused by the export: `../../crates/capo-state/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC25.
