@@ -93,3 +93,16 @@ Observed 2026-05-25.
 - Runtime/tunnel architecture source: `../architecture/runtime-tunnel.md`
 - Runtime event vocabulary source: `../architecture/runtime-tunnel.md`
 - No new third-party dependencies were added for P5.
+
+## P6 Adapter Fixture Parsers
+
+Observed 2026-05-25.
+
+- Adapter parser implementation and tests: `../../crates/capo-adapters/src/lib.rs`
+- Codex non-secret golden stream: `../../crates/capo-adapters/fixtures/codex-exec.jsonl`
+- Claude Code non-secret golden stream: `../../crates/capo-adapters/fixtures/claude-code-stream.jsonl`
+- ACP replay golden stream: `../../crates/capo-adapters/fixtures/acp-replay.jsonl`
+- Adapter/protocol architecture source: `../architecture/protocol-provider.md`
+- ACP replay/dedupe architecture source: `../architecture/acp-replay-dedupe.md`
+- `serde` crate: version `1.0.228`, license `MIT OR Apache-2.0`, repository `https://github.com/serde-rs/serde`, observed via `cargo info serde`
+- `serde_json` crate: version `1.0.150`, license `MIT OR Apache-2.0`, repository `https://github.com/serde-rs/json`, observed via `cargo info serde_json`

@@ -1,0 +1,5 @@
+{"type":"system","session_id":"claude-session-1","subtype":"init"}
+{"type":"assistant","session_id":"claude-session-1","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"Claude fixture response."}],"usage":{"input_tokens":13,"output_tokens":8}}}
+{"type":"tool_use","session_id":"claude-session-1","id":"toolu_1","name":"Bash","input":{"command":"cargo test"}}
+{"type":"tool_result","session_id":"claude-session-1","tool_use_id":"toolu_1","content":"tests passed","is_error":false}
+{"type":"result","session_id":"claude-session-1","subtype":"success","usage":{"input_tokens":13,"output_tokens":8}}

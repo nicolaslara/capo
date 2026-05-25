@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"codex-thread-1"}
+{"type":"item.completed","thread_id":"codex-thread-1","item":{"id":"codex-item-1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Codex fixture response."}]}}
+{"type":"exec_command.begin","thread_id":"codex-thread-1","call_id":"codex-tool-1","tool_name":"exec_command","command":"cargo test"}
+{"type":"exec_command.end","thread_id":"codex-thread-1","call_id":"codex-tool-1","tool_name":"exec_command","exit_code":0}
+{"type":"turn.completed","thread_id":"codex-thread-1","usage":{"input_tokens":11,"output_tokens":7}}

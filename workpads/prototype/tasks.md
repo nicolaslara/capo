@@ -148,13 +148,25 @@ Evidence:
 
 ## P6 - Adapter Fixture Parsers
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Add non-secret golden streams for Codex `exec --json`, Claude Code `-p --output-format stream-json`, and ACP replay fixtures.
 - Map fixtures into normalized adapter events without making provider-specific fields controller truth.
 - Include duplicate/replay fixture tests where stable identifiers exist.
+
+Evidence:
+
+- `crates/capo-adapters/src/lib.rs`
+- `crates/capo-adapters/fixtures/codex-exec.jsonl`
+- `crates/capo-adapters/fixtures/claude-code-stream.jsonl`
+- `crates/capo-adapters/fixtures/acp-replay.jsonl`
+- `crates/capo-adapters/Cargo.toml`
+- `Cargo.lock`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
 
 ## P7 - Real Local Adapter Smoke
 

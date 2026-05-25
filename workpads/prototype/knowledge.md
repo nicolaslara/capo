@@ -202,6 +202,33 @@ Follow-up:
 - P10 should persist local runtime process refs as first-class read models when restart recovery and replay are implemented.
 - P7 should reuse the same runtime boundary for safe opt-in Codex and Claude Code local adapter smoke tests.
 
+## P6 - Adapter Fixture Parsers
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add fixture parsers to `capo-adapters` for Codex JSONL, Claude Code stream JSON, and ACP replay JSONL before attempting real local subscription-backed smoke tests.
+- Add `serde 1.0.228` and `serde_json 1.0.150` only to `capo-adapters`. `cargo info` reported both as `MIT OR Apache-2.0`.
+- Parse provider streams with `serde_json::Value` for the prototype. The point of P6 is normalization boundaries and replay evidence, not claiming complete vendor schemas.
+- Normalize all fixture records into `NormalizedAdapterEvent` records carrying adapter kind, normalized kind, external refs, timeline key, timeline confidence, content/tool/status/usage fields, raw event hash, and optional idempotency key.
+- Keep provider-specific event kinds in `provider_event_kind`; controller code should consume normalized event fields rather than Codex, Claude, or ACP raw fields.
+- Treat Codex item/tool IDs and Claude message/tool IDs as stable fixture timeline keys.
+- Treat ACP `toolCallId` as stable, and ACP message chunks as heuristic because stable ACP v1 message chunks do not provide a message ID.
+- Add a dedupe helper keyed by normalized idempotency keys and prove duplicate ACP tool updates collapse while raw fixture observations remain countable.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+- Adapter tests cover Codex session/message/tool/usage normalization, Claude session/message/tool/usage normalization, ACP session/message/plan/tool normalization, heuristic ACP message timeline confidence, stable ACP tool timeline confidence, and duplicate ACP tool update dedupe by idempotency key.
+
+Follow-up:
+
+- P7 should use these parser types as the safety gate before any opt-in real Codex or Claude Code local smoke.
+- P10 should move ACP replay batches/raw updates/idempotency enforcement into state so dedupe is durable across restart, not just parser-local.
+
 ## Prototype Gate
 
 Status: not passed.
