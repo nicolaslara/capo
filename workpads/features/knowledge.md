@@ -563,6 +563,27 @@ Follow-up:
 
 - A future opt-in smoke command should update or supersede these rows with real-smoke evidence and credential-scan results.
 
+## F1/AC6 - Real Smoke Evidence Contract
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `AdapterSmokeReportProjection` so real-smoke outcomes have a durable state contract before any subscription-backed smoke is run.
+- Add `capo adapter smoke-report record` for explicit operator/test recording of skipped, failed, or passed smoke results.
+- Refuse `status=passed` unless `--credential-scan clean` and `--marker-found` are both present. This prevents a passing connector claim without the two evidence gates AC1 requires.
+- Render smoke reports in `capo dashboard` through the shared query contract.
+- The command records evidence only; it does not launch provider CLIs or scan artifacts itself.
+
+Verification:
+
+- `cargo test -p capo-state adapter_smoke -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`: passed.
+
+Follow-up:
+
+- The opt-in real smoke runner should write a passed or failed `AdapterSmokeReportProjection` from actual runtime artifacts after marker and credential scans.
+
 ## F7/RR1 - Loopback Remote Runtime Contract
 
 Status: completed on 2026-05-25.

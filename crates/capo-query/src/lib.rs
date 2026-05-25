@@ -6,9 +6,9 @@
 
 use capo_core::{ProjectId, SessionId};
 use capo_state::{
-    AdapterReadinessProjection, AgentProjection, ConnectivityExposureProjection, EventRecord,
-    EvidenceProjection, MemoryPacketProjection, RunProjection, SessionProjection, SqliteStateStore,
-    StateResult, ToolCallProjection,
+    AdapterReadinessProjection, AdapterSmokeReportProjection, AgentProjection,
+    ConnectivityExposureProjection, EventRecord, EvidenceProjection, MemoryPacketProjection,
+    RunProjection, SessionProjection, SqliteStateStore, StateResult, ToolCallProjection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -17,6 +17,7 @@ pub struct ProjectDashboard {
     pub agents: Vec<AgentDashboardRow>,
     pub connectivity_exposures: Vec<ConnectivityExposureProjection>,
     pub adapter_readiness: Vec<AdapterReadinessProjection>,
+    pub adapter_smoke_reports: Vec<AdapterSmokeReportProjection>,
 }
 
 impl ProjectDashboard {
@@ -101,11 +102,13 @@ pub fn project_dashboard(
     }
     let connectivity_exposures = state.connectivity_exposures(&query.project_id)?;
     let adapter_readiness = state.adapter_readiness(&query.project_id)?;
+    let adapter_smoke_reports = state.adapter_smoke_reports(&query.project_id)?;
     Ok(ProjectDashboard {
         project_id: query.project_id,
         agents: rows,
         connectivity_exposures,
         adapter_readiness,
+        adapter_smoke_reports,
     })
 }
 

@@ -821,6 +821,37 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn adapter_smoke_reports(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<AdapterSmokeReportProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT smoke_report_id, project_id, adapter_kind, smoke_status,
+                    credential_scan_status, marker_found, artifact_root, reason,
+                    dogfood_readiness_effect, updated_sequence
+             FROM adapter_smoke_reports
+             WHERE project_id = ?1
+             ORDER BY updated_sequence ASC, smoke_report_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(AdapterSmokeReportProjection {
+                smoke_report_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                adapter_kind: row.get(2)?,
+                smoke_status: row.get(3)?,
+                credential_scan_status: row.get(4)?,
+                marker_found: row.get::<_, i64>(5)? != 0,
+                artifact_root: row.get(6)?,
+                reason: row.get(7)?,
+                dogfood_readiness_effect: row.get(8)?,
+                updated_sequence: row.get(9)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn evidence_for_session(
         &self,
         session_id: &SessionId,
@@ -1296,6 +1327,7 @@ pub enum EventKind {
     ConnectivityExposureRevoked,
     ConnectivityHealthChanged,
     AdapterReadinessChecked,
+    AdapterSmokeRecorded,
     ToolCallRequested,
     ToolInvocationStarted,
     ToolOutputArtifactRecorded,
@@ -1338,6 +1370,7 @@ impl EventKind {
             Self::ConnectivityExposureRevoked => "connectivity.exposure_revoked",
             Self::ConnectivityHealthChanged => "connectivity.health_changed",
             Self::AdapterReadinessChecked => "adapter.readiness_checked",
+            Self::AdapterSmokeRecorded => "adapter.smoke_recorded",
             Self::ToolCallRequested => "tool.call_requested",
             Self::ToolInvocationStarted => "tool.invocation_started",
             Self::ToolOutputArtifactRecorded => "tool.output_artifact_recorded",
@@ -1432,6 +1465,7 @@ pub enum ProjectionRecord {
     PermissionApproval(PermissionApprovalProjection),
     ConnectivityExposure(ConnectivityExposureProjection),
     AdapterReadiness(AdapterReadinessProjection),
+    AdapterSmokeReport(AdapterSmokeReportProjection),
     ToolCall(ToolCallProjection),
     MemoryPacketRef(MemoryPacketProjection),
     MemoryRecord(Box<MemoryRecordProjection>),
@@ -1560,6 +1594,20 @@ pub struct AdapterReadinessProjection {
     pub redaction_rule_count: i64,
     pub output_limit_bytes: i64,
     pub dogfood_blocker: Option<String>,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterSmokeReportProjection {
+    pub smoke_report_id: String,
+    pub project_id: ProjectId,
+    pub adapter_kind: String,
+    pub smoke_status: String,
+    pub credential_scan_status: String,
+    pub marker_found: bool,
+    pub artifact_root: Option<String>,
+    pub reason: String,
+    pub dogfood_readiness_effect: String,
     pub updated_sequence: i64,
 }
 
@@ -1928,6 +1976,18 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             updated_sequence INTEGER NOT NULL,
             PRIMARY KEY(adapter_kind, project_id)
         );
+        CREATE TABLE IF NOT EXISTS adapter_smoke_reports (
+            smoke_report_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            adapter_kind TEXT NOT NULL,
+            smoke_status TEXT NOT NULL,
+            credential_scan_status TEXT NOT NULL,
+            marker_found INTEGER NOT NULL,
+            artifact_root TEXT,
+            reason TEXT NOT NULL,
+            dogfood_readiness_effect TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS tool_calls (
             tool_call_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
@@ -2118,6 +2178,7 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "permission_approvals",
         "connectivity_exposures",
         "adapter_readiness",
+        "adapter_smoke_reports",
         "tool_calls",
         "memory_packet_refs",
         "memory_records",
@@ -2437,6 +2498,35 @@ fn apply_projection_record(
                 readiness.redaction_rule_count,
                 readiness.output_limit_bytes,
                 readiness.dogfood_blocker,
+                sequence,
+            ],
+        )?,
+        ProjectionRecord::AdapterSmokeReport(report) => transaction.execute(
+            "INSERT INTO adapter_smoke_reports(
+                smoke_report_id, project_id, adapter_kind, smoke_status,
+                credential_scan_status, marker_found, artifact_root, reason,
+                dogfood_readiness_effect, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(smoke_report_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                adapter_kind = excluded.adapter_kind,
+                smoke_status = excluded.smoke_status,
+                credential_scan_status = excluded.credential_scan_status,
+                marker_found = excluded.marker_found,
+                artifact_root = excluded.artifact_root,
+                reason = excluded.reason,
+                dogfood_readiness_effect = excluded.dogfood_readiness_effect,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                report.smoke_report_id,
+                report.project_id.as_str(),
+                report.adapter_kind,
+                report.smoke_status,
+                report.credential_scan_status,
+                if report.marker_found { 1 } else { 0 },
+                report.artifact_root,
+                report.reason,
+                report.dogfood_readiness_effect,
                 sequence,
             ],
         )?,
@@ -2908,6 +2998,22 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
             })
             .to_string(),
         },
+        ProjectionRecord::AdapterSmokeReport(report) => ProjectionRecordRow {
+            kind: "adapter_smoke_report",
+            record_id: report.smoke_report_id.clone(),
+            a: Some(report.project_id.to_string()),
+            b: Some(report.adapter_kind.clone()),
+            c: Some(report.smoke_status.clone()),
+            d: Some(report.credential_scan_status.clone()),
+            e: Some(report.marker_found.to_string()),
+            f: report.artifact_root.clone(),
+            g: Some(report.dogfood_readiness_effect.clone()),
+            h: None,
+            payload_json: json!({
+                "reason": report.reason,
+            })
+            .to_string(),
+        },
         ProjectionRecord::ToolCall(tool_call) => ProjectionRecordRow {
             kind: "tool_call",
             record_id: tool_call.tool_call_id.to_string(),
@@ -3351,6 +3457,64 @@ fn projection_record_from_row(
                         "output_limit_bytes",
                     )?,
                     dogfood_blocker: h,
+                    updated_sequence: 0,
+                },
+            ))
+        }
+        "adapter_smoke_report" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::AdapterSmokeReport(
+                AdapterSmokeReportProjection {
+                    smoke_report_id: record_id,
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "adapter_smoke_report",
+                        a,
+                        "project_id",
+                    )?),
+                    adapter_kind: required_field(
+                        &projection_kind,
+                        "adapter_smoke_report",
+                        b,
+                        "adapter_kind",
+                    )?,
+                    smoke_status: required_field(
+                        &projection_kind,
+                        "adapter_smoke_report",
+                        c,
+                        "smoke_status",
+                    )?,
+                    credential_scan_status: required_field(
+                        &projection_kind,
+                        "adapter_smoke_report",
+                        d,
+                        "credential_scan_status",
+                    )?,
+                    marker_found: required_field(
+                        &projection_kind,
+                        "adapter_smoke_report",
+                        e,
+                        "marker_found",
+                    )?
+                    .parse::<bool>()
+                    .map_err(|error| {
+                        ProjectionDecodeError(format!(
+                            "invalid bool for adapter_smoke_report marker_found: {error}"
+                        ))
+                    })?,
+                    artifact_root: f,
+                    reason: required_payload_string(
+                        &projection_kind,
+                        "adapter_smoke_report",
+                        &payload,
+                        "reason",
+                    )?,
+                    dogfood_readiness_effect: required_field(
+                        &projection_kind,
+                        "adapter_smoke_report",
+                        g,
+                        "dogfood_readiness_effect",
+                    )?,
                     updated_sequence: 0,
                 },
             ))
@@ -4971,6 +5135,59 @@ mod tests {
         assert_eq!(
             readiness[0].dogfood_blocker.as_deref(),
             Some("real_subscription_smoke_not_recorded")
+        );
+    }
+
+    #[test]
+    fn adapter_smoke_report_is_persisted_and_rebuilt() {
+        let store = temp_store("adapter-smoke-report-rebuild");
+        let project_id = ProjectId::new("project-capo");
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-adapter-smoke-report".to_string(),
+                    kind: EventKind::AdapterSmokeRecorded,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some("adapter-smoke-codex-skipped".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::AdapterSmokeReport(
+                    AdapterSmokeReportProjection {
+                        smoke_report_id: "adapter-smoke-codex-skipped".to_string(),
+                        project_id: project_id.clone(),
+                        adapter_kind: "codex_exec".to_string(),
+                        smoke_status: "skipped".to_string(),
+                        credential_scan_status: "not_run".to_string(),
+                        marker_found: false,
+                        artifact_root: None,
+                        reason: "waiting for opt-in".to_string(),
+                        dogfood_readiness_effect: "real_subscription_smoke_not_recorded"
+                            .to_string(),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append adapter smoke report");
+
+        store.rebuild_projections().expect("rebuild projections");
+        let reports = store
+            .adapter_smoke_reports(&project_id)
+            .expect("adapter smoke reports");
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].adapter_kind, "codex_exec");
+        assert_eq!(reports[0].credential_scan_status, "not_run");
+        assert_eq!(
+            reports[0].dogfood_readiness_effect,
+            "real_subscription_smoke_not_recorded"
         );
     }
 

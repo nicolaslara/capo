@@ -15,11 +15,12 @@ use capo_core::{
 use capo_eval::TaskOutcomeReport;
 use capo_query::{ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 use capo_state::{
-    AdapterReadinessProjection, ArtifactRecord, CapabilityGrantProjection, EventKind, EventRecord,
-    EvidenceProjection, MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
-    NewEvent, PermissionApprovalProjection, ProjectionRecord, RedactionState,
-    ReviewFindingProjection, RunProjection, SessionProjection, SqliteStateStore,
-    ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
+    AdapterReadinessProjection, AdapterSmokeReportProjection, ArtifactRecord,
+    CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection, MemoryPacketProjection,
+    MemoryRecordProjection, MemorySourceProjection, NewEvent, PermissionApprovalProjection,
+    ProjectionRecord, RedactionState, ReviewFindingProjection, RunProjection, SessionProjection,
+    SqliteStateStore, ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection,
+    WorkpadTaskProjection,
 };
 use capo_voice::{
     MemoryIngestionPolicy, TranscriptRetentionPolicy, VOICE_TRANSCRIPT_RETENTION_DEFAULT,
@@ -42,6 +43,7 @@ Usage:
   capo agent spawn --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent list [--state PATH]
   capo adapter readiness [--record] [--state PATH]
+  capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
   capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR] [--state PATH]
   capo task send --agent NAME --goal GOAL [--scenario NAME] [--state PATH]
   capo session status --agent NAME [--state PATH]
@@ -103,6 +105,11 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "adapter" && command == "readiness" => {
             adapter_readiness(&parsed, rest)
+        }
+        [area, command, action, rest @ ..]
+            if area == "adapter" && command == "smoke-report" && action == "record" =>
+        {
+            record_adapter_smoke_report(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "task" && command == "send" => {
             send_task(&parsed, rest)
@@ -488,6 +495,85 @@ fn adapter_readiness_projection(
     }
 }
 
+fn record_adapter_smoke_report(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let adapter = adapter_label(&required_arg(args, "--adapter")?).to_string();
+    if !matches!(adapter.as_str(), "codex_exec" | "claude_code") {
+        return Err("adapter smoke reports currently support codex or claude".to_string());
+    }
+    let smoke_status = required_arg(args, "--status")?;
+    if !matches!(smoke_status.as_str(), "skipped" | "passed" | "failed") {
+        return Err("--status must be skipped, passed, or failed".to_string());
+    }
+    let credential_scan_status = required_arg(args, "--credential-scan")?;
+    if !matches!(
+        credential_scan_status.as_str(),
+        "clean" | "blocked" | "not_run"
+    ) {
+        return Err("--credential-scan must be clean, blocked, or not_run".to_string());
+    }
+    let reason = required_arg(args, "--reason")?;
+    let marker_found = has_flag(args, "--marker-found");
+    let artifact_root = optional_arg(args, "--artifact-root");
+    if smoke_status == "passed" && (credential_scan_status != "clean" || !marker_found) {
+        return Err(
+            "passed smoke reports require --credential-scan clean and --marker-found".to_string(),
+        );
+    }
+    let smoke_report_id = format!(
+        "adapter-smoke-{}-{}",
+        adapter,
+        stable_cli_hash(&format!(
+            "{adapter}:{smoke_status}:{credential_scan_status}:{marker_found}:{reason}"
+        ))
+    );
+    let dogfood_readiness_effect =
+        if smoke_status == "passed" && credential_scan_status == "clean" && marker_found {
+            "real_agent_connector_proven"
+        } else {
+            "real_subscription_smoke_not_recorded"
+        };
+    let report = AdapterSmokeReportProjection {
+        smoke_report_id: smoke_report_id.clone(),
+        project_id: project_id(),
+        adapter_kind: adapter.clone(),
+        smoke_status: smoke_status.clone(),
+        credential_scan_status: credential_scan_status.clone(),
+        marker_found,
+        artifact_root: artifact_root.clone(),
+        reason: reason.clone(),
+        dogfood_readiness_effect: dogfood_readiness_effect.to_string(),
+        updated_sequence: 0,
+    };
+    let event = NewEvent {
+        event_id: format!("event-adapter-smoke-{}", stable_cli_hash(&smoke_report_id)),
+        kind: EventKind::AdapterSmokeRecorded,
+        actor: "local-cli".to_string(),
+        project_id: Some(project_id()),
+        task_id: None,
+        agent_id: None,
+        session_id: None,
+        run_id: None,
+        turn_id: None,
+        item_id: Some(smoke_report_id.clone()),
+        payload_json: format!(
+            "{{\"adapter\":\"{}\",\"smoke_status\":\"{}\",\"credential_scan_status\":\"{}\",\"dogfood_readiness_effect\":\"{}\"}}",
+            escape_json(&adapter),
+            escape_json(&smoke_status),
+            escape_json(&credential_scan_status),
+            escape_json(dogfood_readiness_effect)
+        ),
+        idempotency_key: Some(format!("adapter-smoke-report:{smoke_report_id}")),
+        redaction_state: RedactionState::Safe,
+    };
+    let sequence = state(parsed)?
+        .append_event(event, &[ProjectionRecord::AdapterSmokeReport(report)])
+        .map_err(debug_error)?;
+    Ok(format!(
+        "adapter_smoke_report_recorded=true\nsmoke_report_id={smoke_report_id}\nadapter={adapter}\nsmoke_status={smoke_status}\ncredential_scan_status={credential_scan_status}\nmarker_found={marker_found}\ndogfood_readiness_effect={dogfood_readiness_effect}\nartifact_root={}\nsequence={sequence}\n",
+        artifact_root.as_deref().unwrap_or("none")
+    ))
+}
+
 fn dashboard(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let query = dashboard_query(args)?;
     let command = envelope(
@@ -652,6 +738,23 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
             readiness.redaction_rule_count,
             readiness.output_limit_bytes,
             readiness.dogfood_blocker.as_deref().unwrap_or("none")
+        ));
+    }
+    output.push_str(&format!(
+        "adapter_smoke_reports={}\n",
+        dashboard.adapter_smoke_reports.len()
+    ));
+    for report in &dashboard.adapter_smoke_reports {
+        output.push_str(&format!(
+            "adapter_smoke_report={} adapter={} smoke_status={} credential_scan_status={} marker_found={} dogfood_readiness_effect={} artifact_root={} reason={}\n",
+            report.smoke_report_id,
+            report.adapter_kind,
+            report.smoke_status,
+            report.credential_scan_status,
+            report.marker_found,
+            report.dogfood_readiness_effect,
+            report.artifact_root.as_deref().unwrap_or("none"),
+            report.reason
         ));
     }
 
@@ -2900,6 +3003,57 @@ mod tests {
         assert!(dashboard.contains("adapter_readiness=2"));
         assert!(dashboard.contains("adapter_readiness_row=codex_exec"));
         assert!(dashboard.contains("dogfood_blocker=real_subscription_smoke_not_recorded"));
+    }
+
+    #[test]
+    fn adapter_smoke_report_records_skipped_and_blocks_invalid_pass() {
+        let state_root = temp_root("adapter-smoke-report-state");
+        let skipped = run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "record".to_string(),
+            "--adapter".to_string(),
+            "codex".to_string(),
+            "--status".to_string(),
+            "skipped".to_string(),
+            "--credential-scan".to_string(),
+            "not_run".to_string(),
+            "--reason".to_string(),
+            "waiting for explicit opt-in".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record skipped smoke");
+        assert!(skipped.contains("adapter_smoke_report_recorded=true"));
+        assert!(skipped.contains("dogfood_readiness_effect=real_subscription_smoke_not_recorded"));
+
+        let invalid_pass = run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "record".to_string(),
+            "--adapter".to_string(),
+            "codex".to_string(),
+            "--status".to_string(),
+            "passed".to_string(),
+            "--credential-scan".to_string(),
+            "not_run".to_string(),
+            "--reason".to_string(),
+            "bad pass".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("passed report requires clean scan and marker");
+        assert!(invalid_pass.contains("passed smoke reports require"));
+
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard");
+        assert!(dashboard.contains("adapter_smoke_reports=1"));
+        assert!(dashboard.contains("adapter_smoke_report=adapter-smoke-codex_exec"));
+        assert!(dashboard.contains("credential_scan_status=not_run"));
     }
 
     #[test]

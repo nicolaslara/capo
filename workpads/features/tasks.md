@@ -58,6 +58,7 @@ Progress:
 - AC3 deterministic normalized adapter replay through controller/state is completed for Codex and Claude fixtures, but the real-agent controller path remains pending until at least one real local adapter stream is run.
 - AC4 connector readiness surface is completed. `capo adapter readiness` reports configured Codex/Claude opt-in gates and smoke-plan safety metadata without launching provider CLIs or inspecting credentials.
 - AC5 durable connector readiness state is completed. `capo adapter readiness --record` persists readiness rows and the dashboard renders the remaining dogfood blocker.
+- AC6 real smoke evidence contract is completed. `capo adapter smoke-report record` can persist skipped/failed/passed smoke reports and refuses passed reports without a clean credential scan plus expected marker.
 
 Evidence:
 
@@ -75,6 +76,8 @@ Evidence:
 - `cargo test -p capo-cli adapter_fixture -- --nocapture`
 - `cargo test -p capo-cli adapter_readiness -- --nocapture`
 - `cargo test -p capo-state adapter_readiness -- --nocapture`
+- `cargo test -p capo-state adapter_smoke -- --nocapture`
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`
 - Focused F1 connector safety review: no blocking findings; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge

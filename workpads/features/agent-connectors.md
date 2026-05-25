@@ -145,3 +145,26 @@ Evidence:
 Decision:
 
 - Recorded readiness keeps `dogfood_blocker=real_subscription_smoke_not_recorded`. Only a future explicit real-smoke evidence path should clear it.
+
+### AC6 - Real Smoke Evidence Contract
+
+Status: completed
+
+Acceptance:
+
+- Add a durable record shape for future real subscription-backed smoke outcomes.
+- Allow skipped/failed/passed smoke reports, but only allow a passed report when the expected marker is present and credential scan is clean.
+- Show smoke reports in the shared dashboard/read-model path.
+- Do not run provider CLIs as part of the report command.
+
+Evidence:
+
+- `AdapterSmokeReportProjection`, `EventKind::AdapterSmokeRecorded`, SQLite migration, rebuild codec, and read query in `../../crates/capo-state/src/lib.rs`.
+- `capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH]`.
+- `capo dashboard` renders smoke report status, credential scan status, marker status, dogfood effect, artifact root, and reason.
+- `cargo test -p capo-state adapter_smoke -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`: passed.
+
+Decision:
+
+- AC6 is an evidence contract, not a real smoke. A skipped report preserves `dogfood_readiness_effect=real_subscription_smoke_not_recorded`.

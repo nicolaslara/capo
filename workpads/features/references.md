@@ -233,6 +233,16 @@ Observed 2026-05-25.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC5.
 
+## F1/AC6 Real Smoke Evidence Contract
+
+Observed 2026-05-25.
+
+- Adapter smoke report projection, event kind, migration, rebuild codec, read query, and state regression test: `../../crates/capo-state/src/lib.rs`
+- `capo adapter smoke-report record`, dashboard rendering, and CLI regression test: `../../crates/capo-cli/src/main.rs`
+- Shared dashboard smoke-report query field: `../../crates/capo-query/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC6.
+
 ## F7/RR1 Loopback Remote Runtime Contract
 
 Observed 2026-05-25.
