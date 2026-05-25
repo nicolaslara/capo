@@ -159,3 +159,14 @@ Observed 2026-05-25.
 - CLI review recording command, guarded review artifacts, tool/workpad link validation, review outcome derivation, and e2e regression coverage: `../../crates/capo-cli/src/main.rs`
 - Memory/evaluation source workpad: `memory-eval.md`
 - No new third-party dependencies were added for ME3.
+
+## F6/V1 Voice Controller Integration
+
+Observed 2026-05-25.
+
+- Dummy transcript planning contract: `../../crates/capo-voice/src/lib.rs`
+- CLI voice submit route, controller dispatch, shared query rendering, and regression tests: `../../crates/capo-cli/src/main.rs`
+- Shared voice/dashboard read contract: `../../crates/capo-query/src/lib.rs`
+- Controller redirect/stop command handlers used by voice plans: `../../crates/capo-controller/src/lib.rs`
+- Voice source workpad: `voice.md`
+- No new third-party dependencies were added for V1; `capo-cli` now depends on the existing workspace crate `capo-voice`.

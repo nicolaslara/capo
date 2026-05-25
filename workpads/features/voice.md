@@ -18,13 +18,22 @@ Turn the P14 dummy transcript contract into a conversational Capo control loop t
 
 ### V1 - Controller Integration
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Route `VoiceCommandPlan` commands through controller command handlers.
 - Render spoken-response data from the shared query surface.
 - Unknown transcripts do not mutate state.
+
+Evidence:
+
+- `capo voice submit --transcript TEXT [--voice-session SESSION_ID] [--actor ACTOR] [--confirm]` in `../../crates/capo-cli/src/main.rs`.
+- Voice status/dashboard plans render from `capo-query::project_dashboard`.
+- Voice redirect plans execute through `FakeBoundaryController::redirect_command`.
+- Unknown and unconfirmed privileged plans return without appending state events.
+- `cargo test -p capo-voice`: passed.
+- `cargo test -p capo-cli voice -- --nocapture`: passed.
 
 ### V2 - Voice Permission Confirmation
 

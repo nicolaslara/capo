@@ -414,3 +414,26 @@ Follow-up:
 
 - Controller integration should persist wrapper artifacts and lifecycle events through the existing state projections instead of leaving PT3 as a crate-level execution boundary.
 - PT3 does not make provider-native tools governed; native Codex/Claude tool observations remain observed-only unless routed through these wrappers or reported with structured lifecycle evidence.
+
+## F6/V1 - Voice Controller Integration
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo voice submit --transcript TEXT` as the first dummy-transcript integration surface. It is intentionally text-only; real audio capture, ASR, streaming, and mobile voice remain deferred.
+- Keep `capo-voice` responsible for lowering transcripts into `VoiceCommandPlan`; the CLI only submits the resulting command envelope or renders the read contract.
+- Route non-mutating voice status/dashboard plans through `capo-query::project_dashboard` so voice, CLI, dashboard, web, and mobile continue sharing the same read-model contract.
+- Route steering plans through `FakeBoundaryController::redirect_command` instead of writing state directly.
+- Preserve raw transcript non-retention by not storing the transcript in events, artifacts, or output. The durable command text for steering is the normalized target goal, not the raw transcript.
+- Unknown transcripts and stop/interrupt plans without `--confirm` return a response without appending state events.
+
+Verification:
+
+- `cargo test -p capo-voice`: passed.
+- `cargo test -p capo-cli voice -- --nocapture`: passed.
+
+Follow-up:
+
+- V2 should add first-class voice-origin approval/audit records for visible confirmations instead of treating `--confirm` as a bare CLI flag.
+- V3 should prove retained summaries pass review/redaction before memory ingestion and that raw transcripts remain absent from state and evidence artifacts.

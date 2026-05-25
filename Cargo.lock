@@ -37,6 +37,7 @@ dependencies = [
  "capo-runtime",
  "capo-state",
  "capo-tools",
+ "capo-voice",
  "capo-workpads",
  "serde_json",
 ]

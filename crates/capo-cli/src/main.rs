@@ -16,6 +16,10 @@ use capo_state::{
     RedactionState, ReviewFindingProjection, RunProjection, SessionProjection, SqliteStateStore,
     ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
+use capo_voice::{
+    MemoryIngestionPolicy, VOICE_TRANSCRIPT_RETENTION_DEFAULT, VoiceCommandPlan, VoiceIntentKind,
+    VoiceReadScope, VoiceTranscriptInput, plan_dummy_transcript,
+};
 use capo_workpads::{WorkpadIndex, index_project_workpads};
 
 const DEFAULT_STATE_ROOT: &str = ".capo-dev";
@@ -37,6 +41,7 @@ Usage:
   capo session redirect --agent NAME --goal GOAL [--state PATH]
   capo session interrupt --agent NAME --reason REASON [--state PATH]
   capo session stop --agent NAME --reason REASON [--state PATH]
+  capo voice submit --transcript TEXT [--voice-session SESSION_ID] [--actor ACTOR] [--confirm] [--state PATH]
   capo recover [--state PATH]
   capo permission request --approval APPROVAL_ID --scope-json JSON --reason REASON [--profile PROFILE] [--session SESSION_ID] [--tool-call TOOL_CALL_ID] [--subject-json JSON] [--requested-by ACTOR] [--state PATH]
   capo permission list [--state PATH]
@@ -100,6 +105,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "session" && command == "stop" => {
             interrupt_session(&parsed, rest, "stop")
+        }
+        [area, command, rest @ ..] if area == "voice" && command == "submit" => {
+            submit_voice(&parsed, rest)
         }
         [command] if command == "recover" => recover(&parsed),
         [area, command, rest @ ..] if area == "permission" && command == "request" => {
@@ -479,6 +487,201 @@ fn interrupt_session(parsed: &ParsedArgs, args: &[String], action: &str) -> Resu
             .unwrap_or_else(|| "none".to_string()),
         command.command_id
     ))
+}
+
+fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let transcript = required_arg(args, "--transcript")?;
+    let voice_session_id =
+        optional_arg(args, "--voice-session").unwrap_or_else(|| "voice-session-cli".to_string());
+    let actor_id = optional_arg(args, "--actor").unwrap_or_else(|| "local-user".to_string());
+    let confirmed = has_flag(args, "--confirm");
+    let plan = plan_dummy_transcript(VoiceTranscriptInput {
+        voice_session_id,
+        actor_id,
+        project_id: project_id(),
+        transcript_text: transcript,
+        asr_confidence: None,
+        retention_policy: VOICE_TRANSCRIPT_RETENTION_DEFAULT,
+    });
+
+    if plan.intent_kind == VoiceIntentKind::Unknown {
+        return Ok(render_voice_header(&plan, None, false, false));
+    }
+    if plan.requires_visible_confirmation && !confirmed {
+        return Ok(render_voice_header(
+            &plan,
+            plan.command.as_ref(),
+            true,
+            false,
+        ));
+    }
+
+    let mut output = render_voice_header(&plan, plan.command.as_ref(), false, false);
+    match plan.intent_kind {
+        VoiceIntentKind::DashboardSummary | VoiceIntentKind::AgentStatus => {
+            let dashboard = voice_dashboard(parsed, &plan)?;
+            output.push_str(&render_voice_read_contract(&plan, &dashboard));
+        }
+        VoiceIntentKind::RedirectSession => {
+            let command = plan
+                .command
+                .as_ref()
+                .ok_or_else(|| "voice redirect plan missing command".to_string())?;
+            controller(parsed)?
+                .redirect_command(command)
+                .map_err(debug_error)?;
+            output = render_voice_header(&plan, Some(command), false, true);
+            let dashboard = voice_dashboard(parsed, &plan)?;
+            output.push_str(&render_voice_read_contract(&plan, &dashboard));
+        }
+        VoiceIntentKind::StopSession => {
+            let command = plan
+                .command
+                .as_ref()
+                .ok_or_else(|| "voice stop plan missing command".to_string())?;
+            controller(parsed)?
+                .stop_command(command)
+                .map_err(debug_error)?;
+            output = render_voice_header(&plan, Some(command), true, true);
+            let dashboard = voice_dashboard(parsed, &plan)?;
+            output.push_str(&render_voice_read_contract(&plan, &dashboard));
+        }
+        VoiceIntentKind::Unknown => {}
+    }
+    Ok(output)
+}
+
+fn voice_dashboard(
+    parsed: &ParsedArgs,
+    plan: &VoiceCommandPlan,
+) -> Result<ProjectDashboard, String> {
+    let command = plan
+        .command
+        .as_ref()
+        .ok_or_else(|| "voice plan missing query command".to_string())?;
+    project_dashboard(
+        &state(parsed)?,
+        ProjectDashboardQuery::new(command.project_id.clone()),
+    )
+    .map_err(debug_error)
+}
+
+fn render_voice_header(
+    plan: &VoiceCommandPlan,
+    command: Option<&CommandEnvelope>,
+    confirmation_required: bool,
+    mutation_applied: bool,
+) -> String {
+    format!(
+        "voice_plan={}\norigin=voice\ncommand_id={}\nconfirmation_required={}\nmutation_applied={}\nraw_transcript_retained={}\nredaction_required={}\nmemory_ingestion={}\nassistant_reply_hint={}\n",
+        voice_intent_label(plan.intent_kind),
+        command
+            .map(|command| command.command_id.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        confirmation_required,
+        mutation_applied,
+        plan.transcript_policy.retain_raw_transcript,
+        plan.transcript_policy.redaction_required,
+        memory_ingestion_label(plan.transcript_policy.memory_ingestion),
+        plan.assistant_reply_hint
+    )
+}
+
+fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashboard) -> String {
+    let mut output = format!(
+        "read_scope={}\nrequired_fields={}\n",
+        voice_scope_label(&plan.read_contract.query_scope),
+        plan.read_contract.required_fields.join(",")
+    );
+    match &plan.read_contract.query_scope {
+        VoiceReadScope::ProjectDashboard => {
+            output.push_str(&format!(
+                "spoken_agents={}\nspoken_active_sessions={}\n",
+                dashboard.agents.len(),
+                dashboard.active_session_count()
+            ));
+            for row in &dashboard.agents {
+                append_voice_agent_row(&mut output, row);
+            }
+        }
+        VoiceReadScope::Agent { agent_name } | VoiceReadScope::SessionForAgent { agent_name } => {
+            if let Some(row) = dashboard
+                .agents
+                .iter()
+                .find(|row| row.agent.name == *agent_name)
+            {
+                append_voice_agent_row(&mut output, row);
+            } else {
+                output.push_str(&format!("spoken_agent_missing={agent_name}\n"));
+            }
+        }
+        VoiceReadScope::None => {}
+    }
+    output
+}
+
+fn append_voice_agent_row(output: &mut String, row: &capo_query::AgentDashboardRow) {
+    output.push_str(&format!(
+        "spoken_agent={} agent_status={}\n",
+        row.agent.name, row.agent.status
+    ));
+    if let Some(session_row) = &row.session {
+        output.push_str(&format!(
+            "spoken_session={} session_status={} run_status={} current_goal={} latest_summary={} blocker={} confidence={} evidence_refs={} recent_events={}\n",
+            session_row.session.session_id,
+            session_row.session.status,
+            session_row
+                .run
+                .as_ref()
+                .map(|run| run.status.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            session_row.session.current_goal,
+            session_row
+                .session
+                .latest_summary
+                .as_deref()
+                .unwrap_or("none"),
+            session_row.session.latest_blocker.as_deref().unwrap_or("none"),
+            session_row
+                .session
+                .latest_confidence
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            session_row
+                .evidence
+                .iter()
+                .map(|item| item.evidence_id.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            session_row.recent_events.len()
+        ));
+    }
+}
+
+fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
+    match intent {
+        VoiceIntentKind::AgentStatus => "agent_status",
+        VoiceIntentKind::DashboardSummary => "dashboard_summary",
+        VoiceIntentKind::RedirectSession => "redirect_session",
+        VoiceIntentKind::StopSession => "stop_session",
+        VoiceIntentKind::Unknown => "unknown",
+    }
+}
+
+fn voice_scope_label(scope: &VoiceReadScope) -> &'static str {
+    match scope {
+        VoiceReadScope::ProjectDashboard => "project_dashboard",
+        VoiceReadScope::Agent { .. } => "agent",
+        VoiceReadScope::SessionForAgent { .. } => "session_for_agent",
+        VoiceReadScope::None => "none",
+    }
+}
+
+fn memory_ingestion_label(policy: MemoryIngestionPolicy) -> &'static str {
+    match policy {
+        MemoryIngestionPolicy::None => "none",
+        MemoryIngestionPolicy::ReviewedRedactedSummaryOnly => "reviewed_redacted_summary_only",
+    }
 }
 
 fn recover(parsed: &ParsedArgs) -> Result<String, String> {
@@ -2903,6 +3106,128 @@ mod tests {
     }
 
     #[test]
+    fn voice_status_reads_shared_query_without_mutating_or_retaining_transcript() {
+        let state_root = temp_root("cli-voice-status");
+        seed_running_agent(&state_root, "fake-codex", "Inspect the project");
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        let before_sequence = state.last_sequence().expect("before sequence");
+
+        let output = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What is fake-codex doing?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice status");
+
+        assert!(output.contains("voice_plan=agent_status"));
+        assert!(output.contains("origin=voice"));
+        assert!(output.contains("mutation_applied=false"));
+        assert!(output.contains("raw_transcript_retained=false"));
+        assert!(output.contains("memory_ingestion=none"));
+        assert!(output.contains("read_scope=agent"));
+        assert!(output.contains("spoken_agent=fake-codex agent_status=running"));
+        assert!(output.contains("current_goal=Inspect the project"));
+        assert!(!output.contains("What is fake-codex doing?"));
+        assert_eq!(
+            state.last_sequence().expect("after sequence"),
+            before_sequence
+        );
+    }
+
+    #[test]
+    fn voice_redirect_routes_through_controller_and_preserves_transient_transcript() {
+        let state_root = temp_root("cli-voice-redirect");
+        seed_running_agent(&state_root, "fake-reviewer", "Review the status summary");
+
+        let output = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "Steer fake-reviewer to focus only on dogfood blockers.".to_string(),
+            "--voice-session".to_string(),
+            "voice-session-test".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice redirect");
+
+        assert!(output.contains("voice_plan=redirect_session"));
+        assert!(output.contains("command_id=cmd-voice-redirect-voice-session-test"));
+        assert!(output.contains("mutation_applied=true"));
+        assert!(output.contains("read_scope=session_for_agent"));
+        assert!(output.contains("spoken_agent=fake-reviewer agent_status=running"));
+        assert!(output.contains("current_goal=focus only on dogfood blockers"));
+        assert!(!output.contains("Steer fake-reviewer"));
+
+        let status = run_cli(vec![
+            "session".to_string(),
+            "status".to_string(),
+            "--agent".to_string(),
+            "fake-reviewer".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("status after voice redirect");
+        assert!(status.contains("current_goal=focus only on dogfood blockers"));
+        assert!(status.contains("kind=session.redirected"));
+    }
+
+    #[test]
+    fn voice_unknown_and_unconfirmed_stop_do_not_mutate_state() {
+        let state_root = temp_root("cli-voice-no-mutation");
+        seed_running_agent(&state_root, "fake-codex", "Inspect the project");
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        let before_unknown = state.last_sequence().expect("before unknown");
+
+        let unknown = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "Maybe later, never mind".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice unknown");
+        assert!(unknown.contains("voice_plan=unknown"));
+        assert!(unknown.contains("command_id=none"));
+        assert!(unknown.contains("mutation_applied=false"));
+        assert_eq!(
+            state.last_sequence().expect("after unknown"),
+            before_unknown
+        );
+
+        let before_stop = state.last_sequence().expect("before stop");
+        let stop = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "Stop fake-codex because smoke is done".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice stop needs confirmation");
+        assert!(stop.contains("voice_plan=stop_session"));
+        assert!(stop.contains("confirmation_required=true"));
+        assert!(stop.contains("mutation_applied=false"));
+        assert_eq!(state.last_sequence().expect("after stop"), before_stop);
+
+        let status = run_cli(vec![
+            "session".to_string(),
+            "status".to_string(),
+            "--agent".to_string(),
+            "fake-codex".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("status after unconfirmed stop");
+        assert!(status.contains("status=active"));
+        assert!(status.contains("run_status=running"));
+    }
+
+    #[test]
     fn evidence_export_handles_completed_runs_and_refuses_foreign_files() {
         let state_root = temp_root("cli-completed-state");
         let evidence_dir = temp_root("cli-completed-evidence");
@@ -3303,6 +3628,33 @@ mod tests {
                 assert_no_sensitive_markers(&contents);
             }
         }
+    }
+
+    fn seed_running_agent(state_root: &Path, agent: &str, goal: &str) {
+        run_cli(vec![
+            "agent".to_string(),
+            "register".to_string(),
+            "--name".to_string(),
+            agent.to_string(),
+            "--adapter".to_string(),
+            "fake".to_string(),
+            "--runtime".to_string(),
+            "fake".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("register agent");
+        run_cli(vec![
+            "task".to_string(),
+            "send".to_string(),
+            "--agent".to_string(),
+            agent.to_string(),
+            "--goal".to_string(),
+            goal.to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("send task");
     }
 
     fn temp_root(name: &str) -> PathBuf {
