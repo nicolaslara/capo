@@ -156,6 +156,28 @@ Follow-up:
 
 - After real connector proof, `start-next` can grow an adapter/runtime selector instead of assuming the registered fake agent path.
 
+## F2/DB6 - Dogfood Readiness Surface
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `ProjectDogfoodReadiness` to `capo-query` so CLI, dashboard, voice, web, and mobile can share one readiness contract.
+- Add `capo dogfood readiness` as the operator command for deciding whether Capo can move its own workpads into Capo-managed dogfood.
+- Keep the readiness summary read-only and evidence-derived. It does not inspect provider credentials, launch provider CLIs, rematerialize prompts, open tunnels, or edit markdown.
+- Report three independent readiness dimensions: real-agent connector proof, indexed workpad bridge state, and recorded dispatch-chain state.
+- Keep readiness blocked when any dimension is missing, with explicit blockers and next actions.
+
+Verification:
+
+- `cargo test -p capo-query dogfood_readiness -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Follow-up:
+
+- Once a real opt-in Codex run is recorded, use `capo dogfood readiness` as the final checkpoint before moving the Capo project execution loop into Capo.
+
 ## F1/AC1-AC2 - Local Connector Preflight
 
 Status: in progress on 2026-05-25.

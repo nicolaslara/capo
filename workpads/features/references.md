@@ -78,6 +78,16 @@ Observed 2026-05-25.
 - Dogfood bridge source workpad: `dogfood-bridge.md`
 - No new third-party dependencies were added for DB5.
 
+## F2/DB6 Dogfood Readiness Surface
+
+Observed 2026-05-26.
+
+- Shared readiness query contract: `../../crates/capo-query/src/lib.rs`
+- CLI `dogfood readiness` rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Dogfood bridge source workpad: `dogfood-bridge.md`
+- Agent connector facts consumed by the readiness query: `agent-connectors.md`
+- No new third-party dependencies were added for DB6.
+
 ## F1/AC1-AC2 Local Connector Preflight
 
 Observed 2026-05-25.

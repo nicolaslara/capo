@@ -142,6 +142,7 @@ Progress:
 - DB3 reviewed artifacts are completed.
 - DB4 next workpad selection is completed with a read-only `capo workpad next` command.
 - DB5 start-next dispatch is completed with explicit import plus fake-controller dispatch while preserving markdown.
+- DB6 dogfood readiness surface is completed with a shared query/CLI summary of connector, workpad, and dispatch-chain prerequisites.
 
 Evidence:
 
@@ -163,6 +164,8 @@ Evidence:
 - Focused DB3 review subagent: proposal overwrite/idempotency blocker found and fixed
 - `capo workpad next [--path PATH]`
 - `capo workpad start-next --agent NAME [--path PATH]`
+- `capo dogfood readiness [--state PATH]`
+- `cargo test -p capo-query dogfood_readiness -- --nocapture`
 - `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`
 
 ## F3 - Query Surface And Dashboard Upgrade

@@ -158,3 +158,27 @@ Decision:
 - `start-next` remains an explicit operator command. It does not change markdown status or automatically choose a real provider connector.
 - The command imports only `observed_only` workpad refs selected by DB4, then sends the selected goal through the existing controller/runtime/adapter/tool instrumentation path.
 - Existing `task send` behavior remains compatible; explicit task IDs are only used when provided in the command envelope.
+
+### DB6 - Dogfood Readiness Surface
+
+Status: completed
+
+Acceptance:
+
+- Add a read-only operator command that summarizes whether Capo is ready to move its own workpads into Capo-managed dogfood.
+- Reuse shared query/read-model state instead of live runtime, provider, or filesystem inspection.
+- Report real-agent connector readiness, workpad bridge readiness, dispatch-chain readiness, counts, blockers, and next actions.
+- Keep the command honest when provider opt-in evidence is missing.
+
+Evidence:
+
+- `ProjectDogfoodReadiness` and `project_dogfood_readiness(...)` in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo dogfood readiness [--state PATH]` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query dogfood_readiness -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Treat dogfood readiness as a shared query contract, not a CLI-only checklist.
+- Require three independent signals before the summary reports ready: real-agent connector evidence, indexed workpad state, and a recorded dispatch chain.
+- The command does not run provider CLIs, inspect credentials, materialize prompts, create tunnels, or edit markdown.

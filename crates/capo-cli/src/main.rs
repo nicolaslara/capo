@@ -15,7 +15,10 @@ use capo_core::{
     RunId, SessionId, TaskId, ToolCallId,
 };
 use capo_eval::TaskOutcomeReport;
-use capo_query::{AdapterDogfoodGate, ProjectDashboard, ProjectDashboardQuery, project_dashboard};
+use capo_query::{
+    AdapterDogfoodGate, ProjectDashboard, ProjectDashboardQuery, ProjectDogfoodReadiness,
+    project_dashboard, project_dogfood_readiness,
+};
 use capo_runtime::{
     ChannelKind, ConnectivityEndpointConfig, ConnectivityTunnel, EndpointOwner, ExposureScope,
     LocalProcessRunner,
@@ -65,6 +68,7 @@ Usage:
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
   capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR] [--state PATH]
   capo adapter replay-dispatch --dispatch-plan DISPATCH_PLAN_ID --fixture PATH [--out DIR] [--state PATH]
+  capo dogfood readiness [--state PATH]
   capo task send --agent NAME --goal GOAL [--scenario NAME] [--state PATH]
   capo session status --agent NAME [--state PATH]
   capo session redirect --agent NAME --goal GOAL [--state PATH]
@@ -132,6 +136,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "adapter" && command == "replay-dispatch" => {
             replay_adapter_dispatch_fixture(&parsed, rest)
+        }
+        [area, command] if area == "dogfood" && command == "readiness" => {
+            dogfood_readiness(&parsed)
         }
         [area, command, rest @ ..] if area == "adapter" && command == "readiness" => {
             adapter_readiness(&parsed, rest)
@@ -1229,6 +1236,15 @@ fn adapter_dogfood_gate(parsed: &ParsedArgs) -> Result<String, String> {
     let dashboard =
         project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
     Ok(render_adapter_dogfood_gate(&dashboard.adapter_dogfood_gate))
+}
+
+fn dogfood_readiness(parsed: &ParsedArgs) -> Result<String, String> {
+    let state = state(parsed)?;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    Ok(render_dogfood_readiness(&project_dogfood_readiness(
+        &dashboard,
+    )))
 }
 
 fn adapter_dispatch_gate(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
@@ -2494,6 +2510,26 @@ fn render_adapter_dogfood_gate(gate: &AdapterDogfoodGate) -> String {
         comma_or_none(&gate.proven_adapters),
         comma_or_none(&gate.blocked_adapters),
         comma_or_none(&gate.reasons)
+    )
+}
+
+fn render_dogfood_readiness(readiness: &ProjectDogfoodReadiness) -> String {
+    format!(
+        "dogfood_readiness=true\nready={}\nstatus={}\nreal_agent_connector_ready={}\nworkpad_bridge_ready={}\ndispatch_chain_ready={}\nworkpad_tasks={}\nworkpad_tasks_observed_only={}\nworkpad_tasks_imported={}\ndispatch_plans={}\nready_dispatch_gates={}\ndispatch_replays={}\ndispatch_executions={}\nblockers={}\nnext_actions={}\n",
+        readiness.ready,
+        readiness.status,
+        readiness.real_agent_connector_ready,
+        readiness.workpad_bridge_ready,
+        readiness.dispatch_chain_ready,
+        readiness.workpad_task_count,
+        readiness.observed_workpad_task_count,
+        readiness.imported_workpad_task_count,
+        readiness.dispatch_plan_count,
+        readiness.ready_dispatch_gate_count,
+        readiness.dispatch_replay_count,
+        readiness.dispatch_execution_count,
+        readiness.blockers.join(","),
+        readiness.next_actions.join(",")
     )
 }
 
@@ -6039,6 +6075,7 @@ mod tests {
         assert!(HELP.contains("adapter run-local"));
         assert!(HELP.contains("adapter replay-dispatch"));
         assert!(HELP.contains("adapter dogfood-gate"));
+        assert!(HELP.contains("dogfood readiness"));
         assert!(HELP.contains("connectivity expose-stub"));
         assert!(HELP.contains("connectivity request-approval"));
         assert!(HELP.contains("connectivity activate-exposure"));
@@ -6663,6 +6700,23 @@ mod tests {
                 .iter()
                 .any(|evidence| evidence.kind == "adapter_dispatch_evidence")
         );
+        let readiness = run_cli(vec![
+            "dogfood".to_string(),
+            "readiness".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dogfood readiness");
+        assert!(readiness.contains("dogfood_readiness=true"));
+        assert!(readiness.contains("ready=false"));
+        assert!(readiness.contains("real_agent_connector_ready=true"));
+        assert!(readiness.contains("dispatch_chain_ready=true"));
+        assert!(readiness.contains("workpad_bridge_ready=false"));
+        assert!(readiness.contains("dispatch_plans=1"));
+        assert!(readiness.contains("dispatch_replays=1"));
+        assert!(readiness.contains("dispatch_executions=1"));
+        assert!(readiness.contains("blockers=workpad_index_missing"));
+        assert!(readiness.contains("next_actions=run_workpad_index"));
         assert_text_absent_in_tree(&state_root, "Do not render this dispatch prompt");
         assert_text_absent_in_tree(&state_root, "Codex fixture response.");
         assert_text_absent_in_tree(&state_root, "cargo test");

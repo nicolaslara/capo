@@ -70,6 +70,24 @@ pub struct AdapterDogfoodGate {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectDogfoodReadiness {
+    pub ready: bool,
+    pub status: String,
+    pub real_agent_connector_ready: bool,
+    pub workpad_bridge_ready: bool,
+    pub dispatch_chain_ready: bool,
+    pub workpad_task_count: usize,
+    pub observed_workpad_task_count: usize,
+    pub imported_workpad_task_count: usize,
+    pub dispatch_plan_count: usize,
+    pub ready_dispatch_gate_count: usize,
+    pub dispatch_replay_count: usize,
+    pub dispatch_execution_count: usize,
+    pub blockers: Vec<String>,
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectDashboardQuery {
     pub project_id: ProjectId,
     pub session_id: Option<SessionId>,
@@ -230,6 +248,69 @@ pub fn adapter_dogfood_gate(smoke_reports: &[AdapterSmokeReportProjection]) -> A
         proven_adapters,
         blocked_adapters,
         reasons,
+    }
+}
+
+pub fn project_dogfood_readiness(dashboard: &ProjectDashboard) -> ProjectDogfoodReadiness {
+    let real_agent_connector_ready = dashboard.adapter_dogfood_gate.ready;
+    let workpad_task_count = dashboard.workpad_tasks.len();
+    let observed_workpad_task_count = dashboard
+        .workpad_tasks
+        .iter()
+        .filter(|task| task.capo_execution_status == "observed_only")
+        .count();
+    let imported_workpad_task_count = dashboard
+        .workpad_tasks
+        .iter()
+        .filter(|task| task.capo_execution_status == "imported")
+        .count();
+    let workpad_bridge_ready = workpad_task_count > 0;
+    let dispatch_plan_count = dashboard.adapter_dispatch_plans.len();
+    let ready_dispatch_gate_count = dashboard
+        .adapter_dispatch_gates
+        .iter()
+        .filter(|gate| gate.provider_cli_execution_allowed && gate.status == "ready_for_execution")
+        .count();
+    let dispatch_replay_count = dashboard.adapter_dispatch_replays.len();
+    let dispatch_execution_count = dashboard.adapter_dispatch_executions.len();
+    let dispatch_chain_ready = dispatch_plan_count > 0
+        && (ready_dispatch_gate_count > 0
+            || dispatch_replay_count > 0
+            || dispatch_execution_count > 0);
+    let mut blockers = Vec::new();
+    let mut next_actions = Vec::new();
+    if !real_agent_connector_ready {
+        blockers.push("real_agent_connector_not_proven".to_string());
+        next_actions.push("record_clean_codex_smoke_evidence".to_string());
+    }
+    if !workpad_bridge_ready {
+        blockers.push("workpad_index_missing".to_string());
+        next_actions.push("run_workpad_index".to_string());
+    }
+    if !dispatch_chain_ready {
+        blockers.push("dispatch_chain_missing".to_string());
+        next_actions.push("record_or_replay_workpad_dispatch_plan".to_string());
+    }
+    let ready = blockers.is_empty();
+    ProjectDogfoodReadiness {
+        ready,
+        status: if ready {
+            "ready_for_first_dogfood".to_string()
+        } else {
+            "blocked_pending_dogfood_prerequisites".to_string()
+        },
+        real_agent_connector_ready,
+        workpad_bridge_ready,
+        dispatch_chain_ready,
+        workpad_task_count,
+        observed_workpad_task_count,
+        imported_workpad_task_count,
+        dispatch_plan_count,
+        ready_dispatch_gate_count,
+        dispatch_replay_count,
+        dispatch_execution_count,
+        blockers,
+        next_actions,
     }
 }
 
@@ -471,6 +552,64 @@ mod tests {
             ready.adapter_dogfood_gate.proven_adapters,
             vec!["codex_exec"]
         );
+    }
+
+    #[test]
+    fn project_dogfood_readiness_reports_blockers_and_ready_counts() {
+        let root = temp_root("query-dogfood-readiness");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        append_agent(&state, &project_id, "agent-idle", None);
+
+        let blocked_dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id.clone()))
+                .expect("blocked dashboard");
+        let blocked = project_dogfood_readiness(&blocked_dashboard);
+        assert!(!blocked.ready);
+        assert_eq!(blocked.status, "blocked_pending_dogfood_prerequisites");
+        assert_eq!(
+            blocked.blockers,
+            vec![
+                "real_agent_connector_not_proven",
+                "workpad_index_missing",
+                "dispatch_chain_missing"
+            ]
+        );
+
+        append_adapter_smoke_report(
+            &state,
+            &project_id,
+            "adapter-smoke-codex-clean",
+            "codex_exec",
+            "passed",
+            "clean",
+            true,
+        );
+        append_workpad_task(
+            &state,
+            &project_id,
+            "workpads:features:tasks.md#f1",
+            "workpads/features/tasks.md",
+            "in_progress",
+            "observed_only",
+        );
+        append_adapter_dispatch_plan(&state, &project_id);
+        append_adapter_dispatch_replay(&state, &project_id);
+
+        let ready_dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+        let ready = project_dogfood_readiness(&ready_dashboard);
+        assert!(ready.ready);
+        assert_eq!(ready.status, "ready_for_first_dogfood");
+        assert!(ready.real_agent_connector_ready);
+        assert!(ready.workpad_bridge_ready);
+        assert!(ready.dispatch_chain_ready);
+        assert_eq!(ready.workpad_task_count, 1);
+        assert_eq!(ready.observed_workpad_task_count, 1);
+        assert_eq!(ready.dispatch_plan_count, 1);
+        assert_eq!(ready.dispatch_replay_count, 1);
+        assert!(ready.blockers.is_empty());
+        assert!(ready.next_actions.is_empty());
     }
 
     #[test]
