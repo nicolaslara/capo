@@ -84,6 +84,34 @@ Follow-up:
 - P2 should replace preview-only state with append-only event/store abstractions and projection records.
 - P3 should turn the fake boundary wiring into a real fake e2e loop through the controller/state store.
 
+## P2 - SQLite Event Store And Projections
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `rusqlite 0.39.0` with the `bundled` feature to `capo-state` for deterministic local prototype tests. `cargo info rusqlite` reported license MIT.
+- Use append-only `events` plus a replayable `projection_records` table. This lets P2 rebuild read models deterministically without pretending final event JSON parsing exists yet.
+- Keep artifacts as explicit rows with redaction state, URI, hash, size, and owner refs. P2 records artifact metadata but does not write artifact file contents yet. Normal artifact persistence is fail-closed to `safe` or `redacted`; `unknown` and `contains_sensitive` rows are rejected until a quarantine path exists.
+- Implement projection tables for projects, tasks, agents, sessions, runs, capability grants, tool calls, memory packet refs, and evidence.
+- Implement restart recovery shape with `recovery_attempts`, `begin_recovery`, and `complete_recovery` without mutating existing events.
+- Define the projection watermark as the latest event sequence considered by rebuild, including events with no projection records.
+- Store `idempotency_key` on events for later replay/dedupe work, but P2 does not enforce idempotent append yet.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+- State tests cover event/projection persistence, artifact/tool/grant/memory/evidence persistence and projection rebuild, projection watermark recovery after events with no projection records, fail-closed malformed projection decode, safe/redacted artifact persistence policy, and recovery attempt bookkeeping.
+
+Follow-up:
+
+- P3 should drive these state APIs through the fake controller/adapter/runtime/tool/memory loop.
+- P4 should expose read models through CLI commands instead of tests only.
+- P10 should either enforce event idempotency with a partial unique index or route ACP replay dedupe through explicit lookup behavior before broad restart/replay claims.
+- Future hardening should replace generic projection rows with typed event payload parsing once command semantics stabilize.
+
 ## Prototype Gate
 
 Status: not passed.

@@ -53,3 +53,12 @@ Observed 2026-05-25.
 - Fake memory boundary: `../../crates/capo-memory/src/lib.rs`
 - Fake evaluation boundary: `../../crates/capo-eval/src/lib.rs`
 - Cross-boundary wiring test: `../../crates/capo-cli/src/main.rs`
+
+## P2 SQLite Event Store And Projections
+
+Observed 2026-05-25.
+
+- State implementation: `../../crates/capo-state/src/lib.rs`
+- State manifest: `../../crates/capo-state/Cargo.toml`
+- `rusqlite` crate: version `0.39.0`, license MIT, repository `https://github.com/rusqlite/rusqlite`, observed via `cargo info rusqlite`
+- Added features: `bundled`

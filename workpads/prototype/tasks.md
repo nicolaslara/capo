@@ -60,13 +60,22 @@ Evidence:
 
 ## P2 - SQLite Event Store And Projections
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Persist controller-owned events, agents, sessions, tasks, runs, summaries, capability grants, tool calls, memory packet refs, and evidence refs.
 - Store large payloads as artifacts referenced by SQLite rows.
 - Define and test projection rebuild and restart recovery shape.
+
+Evidence:
+
+- `crates/capo-state/src/lib.rs`
+- `crates/capo-state/Cargo.toml`
+- `Cargo.lock`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
 
 ## P3 - Fake Boundary E2E
 
@@ -149,6 +158,7 @@ Acceptance:
 
 - Restart Capo against an existing SQLite store.
 - Rebuild projections without duplicate read-model rows.
+- Define and enforce event idempotency behavior for replay, either with a partial unique index on `idempotency_key` or explicit duplicate lookup semantics.
 - Recover, orphan, or exit-mark active-looking runs with durable events.
 - Include ACP fixture replay/dedupe tests before claiming broad ACP compatibility.
 
