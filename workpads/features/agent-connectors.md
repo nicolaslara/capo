@@ -410,3 +410,25 @@ Decision:
 - Treat dispatch replay as a separate audit/result fact from dispatch plans and gate checks. Plans record intent, gates record execution permission, and replays record deterministic adapter-event ingestion results.
 - Store fixture hash, fixture path, event counts, session/run refs, and `raw_content_policy=content_hashed_not_rendered`; keep raw provider text and raw dispatch prompts out of read models and dashboard output.
 - Replays remain non-provider execution evidence: `provider_cli_executed=false`, no vendor CLI launch, and no planned runtime workspace/artifact root creation.
+
+### AC17 - Dispatch Chain Status
+
+Status: completed
+
+Acceptance:
+
+- Add a read-only operator command that summarizes a recorded dispatch plan, latest recorded gate, latest dispatch replay, and next action.
+- Reuse shared query/dashboard read models rather than adding a second persistence path.
+- Keep output prompt-redacted and fixture-content-redacted.
+- Do not execute provider CLIs, create runtime artifact directories, or mutate dispatch state.
+
+Evidence:
+
+- CLI `capo adapter dispatch-status --dispatch-plan DISPATCH_PLAN_ID` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Use `dispatch-status` as the operator introspection surface for the plan -> gate -> replay chain. It reports plan metadata, dogfood gate status, latest gate status/reasons, latest replay counts/raw-content policy, and the next safe action.
+- Keep the command read-only over `ProjectDashboard` so CLI, future dashboard, voice, and mobile surfaces can share the same state contract.
+- The command deliberately does not render raw dispatch prompts or raw fixture/provider text, and it preserves `provider_cli_executed=false` until a future explicit provider-running command exists.

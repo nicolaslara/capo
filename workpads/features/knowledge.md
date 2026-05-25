@@ -397,6 +397,25 @@ Follow-up:
 
 - A future real-provider execution result should use a sibling projection with runtime process refs and adapter stream cursor refs rather than overloading fixture replay rows.
 
+## F1/AC17 - Dispatch Chain Status
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo adapter dispatch-status --dispatch-plan DISPATCH_PLAN_ID` as a read-only operator summary for the recorded dispatch chain.
+- Reuse `ProjectDashboard` read models for dispatch plans, gate audits, replays, and dogfood readiness. The command does not add a new table or persistence path.
+- Render the latest gate and latest replay for the selected plan, including gate reasons, replay counts, raw-content policy, and a conservative next action.
+- Keep raw dispatch prompt text and raw provider/fixture output out of the command. The command reports only IDs, counts, policies, statuses, and already-redacted metadata.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Follow-up:
+
+- Future voice/web/mobile surfaces should use the same query/read-model facts for dispatch-chain summaries rather than reconstructing chain state from events.
+
 ## F3/DS1 - Query Surface Extraction
 
 Status: completed on 2026-05-25.

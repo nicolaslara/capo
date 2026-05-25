@@ -46,6 +46,7 @@ Usage:
   capo adapter readiness [--record] [--state PATH]
   capo adapter plan-launch --adapter codex|claude --agent NAME --goal GOAL [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
   capo adapter dispatch-gate --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
+  capo adapter dispatch-status --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
   capo adapter dogfood-gate [--state PATH]
   capo adapter smoke-report scan --artifact-root PATH [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
@@ -123,6 +124,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "adapter" && command == "dispatch-gate" => {
             adapter_dispatch_gate(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "adapter" && command == "dispatch-status" => {
+            adapter_dispatch_status(&parsed, rest)
         }
         [area, command] if area == "adapter" && command == "dogfood-gate" => {
             adapter_dogfood_gate(&parsed)
@@ -1108,6 +1112,40 @@ fn adapter_dispatch_gate(parsed: &ParsedArgs, args: &[String]) -> Result<String,
     ))
 }
 
+fn adapter_dispatch_status(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let dispatch_plan_id = required_arg(args, "--dispatch-plan")?;
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan"))
+    {
+        return Err(format!("unknown adapter dispatch-status option: {unknown}"));
+    }
+    let state = state(parsed)?;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    let plan = dashboard
+        .adapter_dispatch_plans
+        .iter()
+        .find(|plan| plan.dispatch_plan_id == dispatch_plan_id)
+        .ok_or_else(|| format!("unknown adapter dispatch plan: {dispatch_plan_id}"))?;
+    let latest_gate = dashboard
+        .adapter_dispatch_gates
+        .iter()
+        .rev()
+        .find(|gate| gate.dispatch_plan_id == plan.dispatch_plan_id);
+    let latest_replay = dashboard
+        .adapter_dispatch_replays
+        .iter()
+        .rev()
+        .find(|replay| replay.dispatch_plan_id == plan.dispatch_plan_id);
+    Ok(render_adapter_dispatch_status(
+        plan,
+        latest_gate,
+        latest_replay,
+        &dashboard.adapter_dogfood_gate,
+    ))
+}
+
 fn adapter_dispatch_gate_projection(
     plan: &AdapterDispatchPlanProjection,
     dogfood_gate: &AdapterDogfoodGate,
@@ -1188,6 +1226,72 @@ fn render_adapter_dispatch_gate(
         recorded_sequence
             .map(|sequence| sequence.to_string())
             .unwrap_or_else(|| "none".to_string())
+    )
+}
+
+fn render_adapter_dispatch_status(
+    plan: &AdapterDispatchPlanProjection,
+    latest_gate: Option<&AdapterDispatchGateProjection>,
+    latest_replay: Option<&AdapterDispatchReplayProjection>,
+    dogfood_gate: &AdapterDogfoodGate,
+) -> String {
+    let gate_id = latest_gate
+        .map(|gate| gate.dispatch_gate_id.as_str())
+        .unwrap_or("none");
+    let gate_status = latest_gate
+        .map(|gate| gate.status.as_str())
+        .unwrap_or("missing");
+    let gate_allowed = latest_gate
+        .map(|gate| gate.provider_cli_execution_allowed.to_string())
+        .unwrap_or_else(|| "false".to_string());
+    let gate_reasons = latest_gate
+        .map(|gate| gate.reason_codes.as_str())
+        .unwrap_or("recorded_dispatch_gate_missing");
+    let replay_id = latest_replay
+        .map(|replay| replay.dispatch_replay_id.as_str())
+        .unwrap_or("none");
+    let replay_count = latest_replay
+        .map(|replay| replay.appended_event_count.to_string())
+        .unwrap_or_else(|| "0".to_string());
+    let replay_raw_policy = latest_replay
+        .map(|replay| replay.raw_content_policy.as_str())
+        .unwrap_or("none");
+    let next_action = if latest_replay.is_some() {
+        "inspect_replay_or_prepare_real_execution"
+    } else if latest_gate
+        .map(|gate| gate.provider_cli_execution_allowed && gate.status == "ready_for_execution")
+        .unwrap_or(false)
+    {
+        "replay_dispatch_fixture_or_run_provider_execution_after_explicit_opt_in"
+    } else if dogfood_gate.ready {
+        "record_ready_dispatch_gate"
+    } else {
+        "record_clean_real_smoke_evidence"
+    };
+
+    format!(
+        "adapter_dispatch_status=true\ndispatch_plan={}\nadapter={}\nagent={}\nsession_id={}\nrun_id={}\nplan_status={}\nprovider_kind={}\ncredential_scope={}\nruntime_program={}\nruntime_arg_count={}\nruntime_prompt_policy={}\nprovider_cli_executed={}\ndogfood_gate={}\nlatest_dispatch_gate={}\nlatest_gate_status={}\nlatest_gate_provider_cli_execution_allowed={}\nlatest_gate_reasons={}\nlatest_dispatch_replay={}\nlatest_replay_appended_events={}\nlatest_replay_raw_content_policy={}\nnext_action={}\n",
+        plan.dispatch_plan_id,
+        plan.adapter_kind,
+        plan.agent_name,
+        plan.session_id,
+        plan.run_id,
+        plan.status,
+        plan.provider_kind,
+        plan.credential_scope,
+        plan.runtime_program,
+        plan.runtime_arg_count,
+        plan.runtime_prompt_policy,
+        plan.provider_cli_executed,
+        dogfood_gate.status,
+        gate_id,
+        gate_status,
+        gate_allowed,
+        gate_reasons,
+        replay_id,
+        replay_count,
+        replay_raw_policy,
+        next_action
     )
 }
 
@@ -3971,6 +4075,7 @@ mod tests {
         assert!(HELP.contains("adapter readiness"));
         assert!(HELP.contains("adapter plan-launch"));
         assert!(HELP.contains("adapter dispatch-gate"));
+        assert!(HELP.contains("adapter dispatch-status"));
         assert!(HELP.contains("adapter replay-dispatch"));
         assert!(HELP.contains("adapter dogfood-gate"));
         assert!(HELP.contains("workpad index"));
@@ -4158,6 +4263,21 @@ mod tests {
         assert!(!blocked.contains("Do not render this dispatch prompt"));
         assert!(!workspace.exists());
         assert!(!artifacts.exists());
+        let blocked_status = run_cli(vec![
+            "adapter".to_string(),
+            "dispatch-status".to_string(),
+            "--dispatch-plan".to_string(),
+            dispatch_plan_id.clone(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("blocked dispatch status");
+        assert!(blocked_status.contains("adapter_dispatch_status=true"));
+        assert!(blocked_status.contains("latest_dispatch_gate=none"));
+        assert!(blocked_status.contains("latest_gate_status=missing"));
+        assert!(blocked_status.contains("latest_dispatch_replay=none"));
+        assert!(blocked_status.contains("next_action=record_clean_real_smoke_evidence"));
+        assert!(!blocked_status.contains("Do not render this dispatch prompt"));
         let fixture = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../capo-adapters/fixtures/codex-exec.jsonl"
@@ -4232,6 +4352,22 @@ mod tests {
         assert!(dashboard.contains("adapter_dispatch_gates=1"));
         assert!(dashboard.contains("gate_status=ready_for_execution"));
         assert!(!dashboard.contains("Do not render this dispatch prompt"));
+        let ready_status = run_cli(vec![
+            "adapter".to_string(),
+            "dispatch-status".to_string(),
+            "--dispatch-plan".to_string(),
+            gates[0].dispatch_plan_id.clone(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("ready dispatch status");
+        assert!(ready_status.contains("latest_gate_status=ready_for_execution"));
+        assert!(ready_status.contains("latest_gate_provider_cli_execution_allowed=true"));
+        assert!(ready_status.contains("latest_dispatch_replay=none"));
+        assert!(ready_status.contains(
+            "next_action=replay_dispatch_fixture_or_run_provider_execution_after_explicit_opt_in"
+        ));
+        assert!(!ready_status.contains("Do not render this dispatch prompt"));
         let evidence_dir = temp_root("adapter-dispatch-gate-replay-evidence");
         let replay = run_cli(vec![
             "adapter".to_string(),
@@ -4278,6 +4414,24 @@ mod tests {
         assert!(replay_dashboard.contains("raw_content_policy=content_hashed_not_rendered"));
         assert!(!replay_dashboard.contains("Codex fixture response."));
         assert!(!replay_dashboard.contains("cargo test"));
+        let replay_status = run_cli(vec![
+            "adapter".to_string(),
+            "dispatch-status".to_string(),
+            "--dispatch-plan".to_string(),
+            replays[0].dispatch_plan_id.clone(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("replay dispatch status");
+        assert!(replay_status.contains("latest_gate_status=ready_for_execution"));
+        assert!(
+            replay_status.contains("latest_replay_raw_content_policy=content_hashed_not_rendered")
+        );
+        assert!(replay_status.contains("latest_replay_appended_events="));
+        assert!(replay_status.contains("next_action=inspect_replay_or_prepare_real_execution"));
+        assert!(!replay_status.contains("Do not render this dispatch prompt"));
+        assert!(!replay_status.contains("Codex fixture response."));
+        assert!(!replay_status.contains("cargo test"));
         assert_text_absent_in_tree(&state_root, "Do not render this dispatch prompt");
         assert_text_absent_in_tree(&state_root, "Codex fixture response.");
         assert_text_absent_in_tree(&state_root, "cargo test");
