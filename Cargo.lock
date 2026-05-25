@@ -35,6 +35,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "capo-controller"
+version = "0.1.0"
+dependencies = [
+ "capo-adapters",
+ "capo-core",
+ "capo-memory",
+ "capo-runtime",
+ "capo-state",
+ "capo-tools",
+]
+
+[[package]]
 name = "capo-core"
 version = "0.1.0"
 

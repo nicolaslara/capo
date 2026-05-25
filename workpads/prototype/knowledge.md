@@ -112,6 +112,35 @@ Follow-up:
 - P10 should either enforce event idempotency with a partial unique index or route ACP replay dedupe through explicit lookup behavior before broad restart/replay claims.
 - Future hardening should replace generic projection rows with typed event payload parsing once command semantics stabilize.
 
+## P3 - Fake Boundary E2E
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo-controller` as the orchestration crate. `capo-core` remains shared domain vocabulary; concrete boundary calls stay in their owning crates.
+- Implement `FakeBoundaryController` as a real fake-only loop over `FakeAdapter`, `FakeRuntimeRunner`, fake provider metadata, `AllowTrustedLocalProfilePolicy`, fake Capo tools, fake memory packets, and SQLite state.
+- Keep trusted-local permissions explicit and non-fake. The policy allows broadly for the prototype but still emits a durable capability grant projection.
+- Persist separate events for session start, capability grant, tool request, tool completion, memory packet build, evidence record, and interrupt so recent-event inspection proves boundary flow instead of hiding work under one event.
+- Reuse the fake runtime process ref and adapter session ref returned by `send_task` when interrupting. P3 does not yet persist those refs in dedicated read-model columns; P10/P5 will harden runtime recovery.
+- Controller observations are read from SQLite projections and `recent_events_for_session`, not from live fake objects.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+- `fake_boundaries_drive_controller_state_and_interrupt_from_read_models` covers send/observe/interrupt, read-model status/summary/confidence, separate permission/tool/memory/evidence event kinds, and reopening SQLite state after the fake run.
+
+Review:
+
+- A focused review found misleading interrupt behavior, over-combined events, wrong registration event naming, and dropped session title. All were fixed before completion.
+
+Follow-up:
+
+- P4 should wire this controller loop into CLI commands instead of test-only APIs.
+- P5/P10 should persist adapter session refs and runtime process refs as first-class read models before local process recovery claims.
+
 ## Prototype Gate
 
 Status: not passed.

@@ -1,0 +1,15 @@
+[package]
+name = "capo-controller"
+description = "Controller orchestration scaffold for Capo."
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+capo-adapters.workspace = true
+capo-core.workspace = true
+capo-memory.workspace = true
+capo-runtime.workspace = true
+capo-state.workspace = true
+capo-tools.workspace = true

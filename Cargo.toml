@@ -2,6 +2,7 @@
 members = [
     "crates/capo-adapters",
     "crates/capo-cli",
+    "crates/capo-controller",
     "crates/capo-core",
     "crates/capo-eval",
     "crates/capo-memory",
@@ -19,6 +20,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 capo-adapters = { path = "crates/capo-adapters" }
+capo-controller = { path = "crates/capo-controller" }
 capo-core = { path = "crates/capo-core" }
 capo-eval = { path = "crates/capo-eval" }
 capo-memory = { path = "crates/capo-memory" }

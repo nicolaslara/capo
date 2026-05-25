@@ -24,6 +24,7 @@ pub enum StateError {
     Io(std::io::Error),
     Sql(rusqlite::Error),
     MissingRecoveryAttempt(String),
+    MissingReadModel { kind: &'static str, id: String },
     UnsafeArtifactRedactionState(RedactionState),
 }
 
@@ -347,6 +348,88 @@ impl SqliteStateStore {
             .optional()?;
         Ok(task)
     }
+
+    pub fn agent(&self, agent_id: &AgentId) -> StateResult<Option<AgentProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let agent = connection
+            .query_row(
+                "SELECT agent_id, project_id, name, status, current_session_id, updated_sequence
+                 FROM agents
+                 WHERE agent_id = ?1",
+                params![agent_id.as_str()],
+                |row| {
+                    Ok(AgentProjection {
+                        agent_id: AgentId::new(row.get::<_, String>(0)?),
+                        project_id: ProjectId::new(row.get::<_, String>(1)?),
+                        name: row.get(2)?,
+                        status: row.get(3)?,
+                        current_session_id: optional_id(row.get::<_, Option<String>>(4)?),
+                        updated_sequence: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(agent)
+    }
+
+    pub fn run(&self, run_id: &RunId) -> StateResult<Option<RunProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let run = connection
+            .query_row(
+                "SELECT run_id, session_id, status, recovery_of_run_id, updated_sequence
+                 FROM runs
+                 WHERE run_id = ?1",
+                params![run_id.as_str()],
+                |row| {
+                    Ok(RunProjection {
+                        run_id: RunId::new(row.get::<_, String>(0)?),
+                        session_id: SessionId::new(row.get::<_, String>(1)?),
+                        status: row.get(2)?,
+                        recovery_of_run_id: optional_id(row.get::<_, Option<String>>(3)?),
+                        updated_sequence: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(run)
+    }
+
+    pub fn recent_events_for_session(
+        &self,
+        session_id: &SessionId,
+        limit: usize,
+    ) -> StateResult<Vec<EventRecord>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT sequence, event_id, kind, actor, project_id, task_id, agent_id, session_id,
+                    run_id, turn_id, item_id, payload_json, idempotency_key, redaction_state
+             FROM events
+             WHERE session_id = ?1
+             ORDER BY sequence DESC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![session_id.as_str(), limit as i64], |row| {
+            Ok(EventRecord {
+                sequence: row.get(0)?,
+                event_id: row.get(1)?,
+                kind: row.get(2)?,
+                actor: row.get(3)?,
+                project_id: optional_id(row.get::<_, Option<String>>(4)?),
+                task_id: optional_id(row.get::<_, Option<String>>(5)?),
+                agent_id: optional_id(row.get::<_, Option<String>>(6)?),
+                session_id: optional_id(row.get::<_, Option<String>>(7)?),
+                run_id: optional_id(row.get::<_, Option<String>>(8)?),
+                turn_id: row.get(9)?,
+                item_id: row.get(10)?,
+                payload_json: row.get(11)?,
+                idempotency_key: row.get(12)?,
+                redaction_state: row.get(13)?,
+            })
+        })?;
+        let mut events = rows.collect::<Result<Vec<_>, _>>()?;
+        events.reverse();
+        Ok(events)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -359,10 +442,12 @@ pub enum EventKind {
     RunStarted,
     CapabilityGrantCreated,
     ToolCallRequested,
+    ToolCallCompleted,
     MemoryPacketBuilt,
     EvidenceRecorded,
     RecoveryStarted,
     RecoveryCompleted,
+    SessionInterrupted,
 }
 
 impl EventKind {
@@ -376,10 +461,12 @@ impl EventKind {
             Self::RunStarted => "run.started",
             Self::CapabilityGrantCreated => "capability.grant_created",
             Self::ToolCallRequested => "tool.call_requested",
+            Self::ToolCallCompleted => "tool.call_completed",
             Self::MemoryPacketBuilt => "memory.packet_built",
             Self::EvidenceRecorded => "evidence.recorded",
             Self::RecoveryStarted => "recovery.started",
             Self::RecoveryCompleted => "recovery.completed",
+            Self::SessionInterrupted => "session.interrupted",
         }
     }
 }
@@ -558,6 +645,24 @@ pub struct EvidenceProjection {
     pub artifact_id: Option<String>,
     pub confidence: i64,
     pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventRecord {
+    pub sequence: i64,
+    pub event_id: String,
+    pub kind: String,
+    pub actor: String,
+    pub project_id: Option<ProjectId>,
+    pub task_id: Option<TaskId>,
+    pub agent_id: Option<AgentId>,
+    pub session_id: Option<SessionId>,
+    pub run_id: Option<RunId>,
+    pub turn_id: Option<String>,
+    pub item_id: Option<String>,
+    pub payload_json: String,
+    pub idempotency_key: Option<String>,
+    pub redaction_state: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

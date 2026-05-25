@@ -79,13 +79,26 @@ Evidence:
 
 ## P3 - Fake Boundary E2E
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Drive `FakeAdapter`, `FakeRuntimeRunner`, fake provider, trusted-local permission policy, fake memory packet, and fake tools through the real controller.
 - Create task/session, send work, track status/latest summary/recent events, and interrupt/stop the fake run.
 - Verify all observations come from read models, not live fake state.
+
+Evidence:
+
+- `crates/capo-controller/src/lib.rs`
+- `crates/capo-controller/Cargo.toml`
+- `crates/capo-adapters/src/lib.rs`
+- `crates/capo-runtime/src/lib.rs`
+- `crates/capo-tools/src/lib.rs`
+- `crates/capo-memory/src/lib.rs`
+- `crates/capo-state/src/lib.rs`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
 
 ## P4 - First CLI Control Surface
 

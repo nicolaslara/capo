@@ -33,7 +33,8 @@ Start with one Cargo workspace. Keep modules separate even if implementations ar
 ```text
 crates/
   capo-cli/          # command-line control surface
-  capo-core/         # domain types, controller, command envelopes
+  capo-core/         # domain types and command envelopes
+  capo-controller/   # orchestration policy and cross-boundary controller loop
   capo-state/        # event store, SQLite projections, artifacts
   capo-adapters/     # fake, Codex, Claude Code, ACP mapping
   capo-runtime/      # fake and local process runners

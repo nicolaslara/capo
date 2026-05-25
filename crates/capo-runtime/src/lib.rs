@@ -3,7 +3,7 @@
 //! The fake variants let controller tests prove runtime/tunnel separation before
 //! local process execution or remote connectivity exists.
 
-use capo_core::{BoundaryBinding, BoundaryKind};
+use capo_core::{BoundaryBinding, BoundaryKind, RunId};
 
 /// First runtime variants from the prototype plan.
 pub const PLANNED_RUNTIMES: &[&str] = &["fake", "local-process"];
@@ -23,6 +23,24 @@ impl RuntimeRunner {
             Self::Fake(runner) => runner.binding(),
         }
     }
+
+    pub fn start(&self, request: FakeRuntimeStartRequest) -> FakeRuntimeProcess {
+        match self {
+            Self::Fake(runner) => runner.start(request),
+        }
+    }
+
+    pub fn interrupt(&self, process: &FakeRuntimeProcess, reason: &str) -> FakeRuntimeProcess {
+        match self {
+            Self::Fake(runner) => runner.interrupt(process, reason),
+        }
+    }
+
+    pub fn attach_process(&self, run_id: RunId, runtime_process_ref: String) -> FakeRuntimeProcess {
+        match self {
+            Self::Fake(runner) => runner.attach_process(run_id, runtime_process_ref),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,6 +50,43 @@ impl FakeRuntimeRunner {
     pub fn binding(&self) -> BoundaryBinding {
         BoundaryBinding::fake(BoundaryKind::RuntimeRunner, "fake-runtime")
     }
+
+    pub fn start(&self, request: FakeRuntimeStartRequest) -> FakeRuntimeProcess {
+        FakeRuntimeProcess {
+            run_id: request.run_id,
+            runtime_process_ref: format!("fake-runtime-process-{}", request.agent_name),
+            status: "running".to_string(),
+        }
+    }
+
+    pub fn interrupt(&self, process: &FakeRuntimeProcess, _reason: &str) -> FakeRuntimeProcess {
+        FakeRuntimeProcess {
+            run_id: process.run_id.clone(),
+            runtime_process_ref: process.runtime_process_ref.clone(),
+            status: "stopping".to_string(),
+        }
+    }
+
+    pub fn attach_process(&self, run_id: RunId, runtime_process_ref: String) -> FakeRuntimeProcess {
+        FakeRuntimeProcess {
+            run_id,
+            runtime_process_ref,
+            status: "running".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FakeRuntimeStartRequest {
+    pub run_id: RunId,
+    pub agent_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FakeRuntimeProcess {
+    pub run_id: RunId,
+    pub runtime_process_ref: String,
+    pub status: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

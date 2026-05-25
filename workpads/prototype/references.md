@@ -62,3 +62,15 @@ Observed 2026-05-25.
 - State manifest: `../../crates/capo-state/Cargo.toml`
 - `rusqlite` crate: version `0.39.0`, license MIT, repository `https://github.com/rusqlite/rusqlite`, observed via `cargo info rusqlite`
 - Added features: `bundled`
+
+## P3 Fake Boundary E2E
+
+Observed 2026-05-25.
+
+- Controller orchestration crate: `../../crates/capo-controller/src/lib.rs`
+- Controller manifest: `../../crates/capo-controller/Cargo.toml`
+- Fake adapter/provider boundary methods: `../../crates/capo-adapters/src/lib.rs`
+- Fake runtime attach/interrupt methods: `../../crates/capo-runtime/src/lib.rs`
+- Trusted-local permission and fake tool methods: `../../crates/capo-tools/src/lib.rs`
+- Fake memory packet builder: `../../crates/capo-memory/src/lib.rs`
+- SQLite read-model queries and event kinds used by controller: `../../crates/capo-state/src/lib.rs`
