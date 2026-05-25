@@ -1078,3 +1078,23 @@ Follow-up:
 
 - Concrete tunnel adapters should replace stub health with real endpoint health before active exposure is interpreted as reachable in production.
 - A later revocation command should pair with this activation surface so operators can revoke exposure without hand-writing projection rows in tests.
+
+## F7/RR7 - Connectivity Exposure Revocation Surface
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo connectivity revoke-exposure` as the operator command for disabling a recorded connectivity exposure.
+- Revocation writes `ConnectivityExposureRevoked` and updates the exposure read model to `status=revoked`, `health_status=disabled`, `reachable=false`, and a `revoked_at` timestamp.
+- Preserve the linked `capability_grant_id` as audit history. The command does not delete or rewrite grants.
+- Keep this as a state/audit transition only. Concrete tunnel shutdown remains future adapter work because the current endpoint is still a stub.
+
+Verification:
+
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Follow-up:
+
+- When concrete tunnels exist, revocation should call the connectivity adapter shutdown path and record adapter-specific cleanup evidence before projecting disabled health.

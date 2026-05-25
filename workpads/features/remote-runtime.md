@@ -133,3 +133,26 @@ Decision:
 
 - Reuse the existing `permission request` / `permission decide` event and grant machinery instead of adding a connectivity-specific policy store.
 - Treat `activate-exposure` as an audited state transition from blocked to active. It does not prove real network reachability beyond the stub health metadata recorded by the endpoint adapter.
+
+### RR7 - Connectivity Exposure Revocation Surface
+
+Status: completed
+
+Acceptance:
+
+- Add an operator command that revokes an active or pending connectivity exposure row.
+- Preserve the linked grant for audit while marking the exposure disabled and unreachable.
+- Keep revocation as state/audit metadata only: do not manage real tunnels, runtime processes, provider CLIs, or credentials.
+- Show revoked status, disabled health, reachability, and revocation time through the existing dashboard path.
+
+Evidence:
+
+- CLI `capo connectivity revoke-exposure --exposure EXPOSURE_ID [--reason REASON]` in `../../crates/capo-cli/src/main.rs`.
+- Revocation records `EventKind::ConnectivityExposureRevoked` and projects `status=revoked`, `health_status=disabled`, `reachable=false`, and `revoked_at`.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Decision:
+
+- Keep capability grants append-only for now. Revocation changes exposure availability, not historical grant evidence.
+- Use the existing dashboard row as the operator visibility surface for revoked exposure state.

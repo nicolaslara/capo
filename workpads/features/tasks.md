@@ -310,6 +310,7 @@ Progress:
 - RR4 dashboard exposure visibility is completed through the shared query surface and CLI dashboard rendering.
 - RR5 connectivity exposure operator surface is completed with a provider-free `connectivity expose-stub` command that records blocked private/public exposure intent without opening tunnels or running agents.
 - RR6 connectivity exposure approval bridge is completed with commands to queue a permission approval from a blocked exposure and activate it only after a matching durable allow grant exists.
+- RR7 connectivity exposure revocation surface is completed with a command that records revoked exposure state, disabled health, and unreachable status without managing real tunnels or runtime processes.
 - F7 remains `in_progress` until the real local-agent connector dependency is satisfied; remote execution semantics are still contract-level and loopback/stubbed.
 
 Evidence:

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use capo_adapters::{
     AcpAdapter, AdapterFixtureParse, ClaudeCodeAdapter, CodexExecAdapter, LocalAdapterSmokeError,
@@ -72,6 +73,7 @@ Usage:
   capo connectivity expose-stub --endpoint ENDPOINT_ID --owner-kind runtime_target|capo_server --owner-id OWNER_ID --channel control|stdio|logs|dashboard|artifact --exposure loopback|private|public [--address REF] [--record] [--state PATH]
   capo connectivity request-approval --exposure EXPOSURE_ID [--approval APPROVAL_ID] [--state PATH]
   capo connectivity activate-exposure --exposure EXPOSURE_ID [--state PATH]
+  capo connectivity revoke-exposure --exposure EXPOSURE_ID [--reason REASON] [--state PATH]
   capo workpad index --root PATH [--state PATH]
   capo workpad next [--path PATH] [--state PATH]
   capo workpad plan-next --agent NAME --adapter codex|claude [--path PATH] [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
@@ -193,6 +195,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "connectivity" && command == "activate-exposure" => {
             activate_connectivity_exposure(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "connectivity" && command == "revoke-exposure" => {
+            revoke_connectivity_exposure(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "workpad" && command == "index" => {
             index_workpads(&parsed, rest)
@@ -3421,6 +3426,67 @@ fn activate_connectivity_exposure(parsed: &ParsedArgs, args: &[String]) -> Resul
     ))
 }
 
+fn revoke_connectivity_exposure(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let exposure_id = required_arg(args, "--exposure")?;
+    let reason = optional_arg(args, "--reason").unwrap_or_else(|| "operator_revoked".to_string());
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--exposure" | "--reason"))
+    {
+        return Err(format!(
+            "unknown connectivity revoke-exposure option: {unknown}"
+        ));
+    }
+    let state = state(parsed)?;
+    let exposure = connectivity_exposure(&state, &exposure_id)?;
+    if exposure.status == "revoked" {
+        return Ok(render_connectivity_exposure_revocation(
+            &exposure, &reason, None,
+        ));
+    }
+    let revoked_at = unix_timestamp_label()?;
+    let revoked = ConnectivityExposureProjection {
+        status: "revoked".to_string(),
+        health_status: "disabled".to_string(),
+        reachable: false,
+        revoked_at: Some(revoked_at.clone()),
+        updated_sequence: 0,
+        ..exposure.clone()
+    };
+    let mut event = NewEvent::new(
+        format!(
+            "event-connectivity-exposure-revoked-{}",
+            stable_cli_hash(&revoked.exposure_id)
+        ),
+        EventKind::ConnectivityExposureRevoked,
+        "capo-cli",
+    );
+    event.project_id = Some(revoked.project_id.clone());
+    event.item_id = Some(revoked.exposure_id.clone());
+    event.payload_json = format!(
+        "{{\"exposure_id\":\"{}\",\"status\":\"revoked\",\"reason\":\"{}\",\"revoked_at\":\"{}\"}}",
+        escape_json(&revoked.exposure_id),
+        escape_json(&reason),
+        escape_json(&revoked_at)
+    );
+    event.idempotency_key = Some(format!(
+        "connectivity-exposure-revoke:{}:{}",
+        revoked.project_id, revoked.exposure_id
+    ));
+    event.redaction_state = RedactionState::Safe;
+    let sequence = state
+        .append_event(
+            event,
+            &[ProjectionRecord::ConnectivityExposure(revoked.clone())],
+        )
+        .map_err(debug_error)?;
+    Ok(render_connectivity_exposure_revocation(
+        &revoked,
+        &reason,
+        Some(sequence),
+    ))
+}
+
 fn render_connectivity_exposure_activation(
     exposure: &ConnectivityExposureProjection,
     grant_id: &str,
@@ -3439,6 +3505,32 @@ fn render_connectivity_exposure_activation(
         grant_id,
         exposure.health_status,
         exposure.reachable,
+        sequence
+            .map(|sequence| sequence.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    )
+}
+
+fn render_connectivity_exposure_revocation(
+    exposure: &ConnectivityExposureProjection,
+    reason: &str,
+    sequence: Option<i64>,
+) -> String {
+    format!(
+        "connectivity_exposure_revoked=true\nexposure={}\nendpoint={}\nowner={}:{}\nchannel={}\nexposure_scope={}\npermission_scope={}\nstatus={}\ngrant={}\nhealth={}\nreachable={}\nrevoked_at={}\nreason={}\nrecorded_sequence={}\n",
+        exposure.exposure_id,
+        exposure.connectivity_endpoint_id,
+        exposure.owner_kind,
+        exposure.owner_id,
+        exposure.channel_kind,
+        exposure.exposure,
+        exposure.permission_scope,
+        exposure.status,
+        exposure.capability_grant_id.as_deref().unwrap_or("none"),
+        exposure.health_status,
+        exposure.reachable,
+        exposure.revoked_at.as_deref().unwrap_or("none"),
+        reason,
         sequence
             .map(|sequence| sequence.to_string())
             .unwrap_or_else(|| "none".to_string())
@@ -3520,6 +3612,14 @@ fn subject_contains(subject_json: &str, expected: &serde_json::Value) -> bool {
     expected
         .iter()
         .all(|(key, value)| subject.get(key) == Some(value))
+}
+
+fn unix_timestamp_label() -> Result<String, String> {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system time before unix epoch: {error}"))?
+        .as_secs();
+    Ok(format!("unix:{seconds}"))
 }
 
 fn parse_channel_kind(value: &str) -> Result<ChannelKind, String> {
@@ -5134,6 +5234,7 @@ mod tests {
         assert!(HELP.contains("connectivity expose-stub"));
         assert!(HELP.contains("connectivity request-approval"));
         assert!(HELP.contains("connectivity activate-exposure"));
+        assert!(HELP.contains("connectivity revoke-exposure"));
         assert!(HELP.contains("workpad index"));
         assert!(HELP.contains("workpad next"));
         assert!(HELP.contains("workpad plan-next"));
@@ -7197,6 +7298,35 @@ mod tests {
         assert!(dashboard.contains("connectivity_exposures=1"));
         assert!(dashboard.contains("exposure_status=active"));
         assert!(dashboard.contains("grant=grant-approval-"));
+
+        let revoked = run_cli(vec![
+            "connectivity".to_string(),
+            "revoke-exposure".to_string(),
+            "--exposure".to_string(),
+            output_value(&activated, "exposure"),
+            "--reason".to_string(),
+            "operator closed private control surface".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("revoke exposure");
+        assert!(revoked.contains("connectivity_exposure_revoked=true"));
+        assert!(revoked.contains("status=revoked"));
+        assert!(revoked.contains("health=disabled"));
+        assert!(revoked.contains("reachable=false"));
+        assert!(revoked.contains("revoked_at=unix:"));
+
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard after revoke");
+        assert!(dashboard.contains("connectivity_exposures=1"));
+        assert!(dashboard.contains("exposure_status=revoked"));
+        assert!(dashboard.contains("health=disabled"));
+        assert!(dashboard.contains("reachable=false"));
+        assert!(dashboard.contains("revoked_at=unix:"));
     }
 
     #[test]

@@ -476,3 +476,12 @@ Observed 2026-05-26.
 - Shared dashboard exposure rendering used to verify active state: `../../crates/capo-cli/src/main.rs`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR6.
+
+## F7/RR7 Connectivity Exposure Revocation Surface
+
+Observed 2026-05-26.
+
+- CLI `connectivity revoke-exposure` command and active -> revoked dashboard regression path: `../../crates/capo-cli/src/main.rs`
+- Connectivity exposure revocation event kind and projection fields reused from state layer: `../../crates/capo-state/src/lib.rs`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR7.
