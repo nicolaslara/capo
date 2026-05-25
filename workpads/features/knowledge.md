@@ -54,3 +54,35 @@ Follow-up:
 
 - DB2 should map selected `workpad_tasks` into Capo task records while preserving markdown status as observed source truth.
 - DB3 should add reviewed update/evidence proposal artifacts before Capo can apply any changes to source workpads.
+
+## F2/DB2 - Capo Task Import
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo workpad import --workpad-task WORKPAD_TASK_ID` to convert a selected observed workpad task into a normal Capo task read model.
+- Default imported task IDs are deterministic from the workpad task ID, with an optional `--task TASK_ID` override for operators.
+- Preserve the data boundary:
+  - `observed_status` remains the markdown status observed from the source file.
+  - `workpad_tasks.capo_execution_status=imported` means Capo has imported that source task.
+  - `tasks.capo_execution_status=ready` means the Capo task record is ready for later orchestration.
+- Store source path, heading anchor, source hash, observed status, and workpad task ID in the import event payload and task summary until DB3 adds Capo-owned reviewed artifacts.
+- Use project-scoped idempotency keys for imports based on task ID, workpad task ID, and source hash so repeated imports of the same observed source do not duplicate events.
+- Preserve imported workpad execution status across no-change re-indexes. Re-index still removes stale workpad task refs when the markdown source task disappears, and later restores them if the source content recurs.
+- Do not use project-scoped idempotency keys for workpad index events. The projection reset must reapply every observation so A-B-A source changes cannot leave current read models stale.
+- Refuse `--task` imports that would overwrite an existing unrelated, active, or session-linked Capo task read model.
+- Use `--expected-hash` for optimistic source drift checks. Imports with a stale expected hash fail before writing Capo task state.
+
+Verification:
+
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources`: passed.
+
+Review:
+
+- Focused review found two blockers in the first draft: source-fingerprint recurrence could leave stale read models, and imports could clobber existing Capo task state. Both were fixed with regression coverage.
+
+Follow-up:
+
+- DB3 should replace ad hoc source metadata in task summaries with Capo-owned proposal/evidence artifacts.
+- Dashboard/query work should expose imported workpad task refs without forcing consumers to parse task summaries.

@@ -65,7 +65,8 @@ Acceptance:
 
 Progress:
 
-- DB1 workpad index is completed. DB2 task import and DB3 reviewed artifacts remain pending.
+- DB1 workpad index is completed.
+- DB2 task import is completed. DB3 reviewed artifacts remain pending.
 
 Evidence:
 
@@ -78,6 +79,9 @@ Evidence:
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`
 - Focused review subagent: blockers found and fixed
+- `capo workpad import --workpad-task WORKPAD_TASK_ID [--expected-hash HASH] [--task TASK_ID]`
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources`
+- Focused DB2 review subagent: source-fingerprint recurrence and task overwrite blockers found and fixed
 
 ## F3 - Query Surface And Dashboard Upgrade
 

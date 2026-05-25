@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -5,7 +6,7 @@ use std::path::{Path, PathBuf};
 use capo_controller::FakeBoundaryController;
 use capo_core::{
     AgentId, CommandEnvelope, CommandId, CommandIntent, CommandTarget, InputOrigin, ProjectId,
-    SessionId,
+    SessionId, TaskId,
 };
 use capo_state::{
     EventKind, EventRecord, EvidenceProjection, MemoryPacketProjection, NewEvent, ProjectionRecord,
@@ -35,6 +36,7 @@ Usage:
   capo session stop --agent NAME --reason REASON [--state PATH]
   capo recover [--state PATH]
   capo workpad index --root PATH [--state PATH]
+  capo workpad import --workpad-task WORKPAD_TASK_ID [--expected-hash HASH] [--task TASK_ID] [--state PATH]
   capo evidence export --session SESSION_ID --out DIR [--state PATH]
 
 Prototype notes:
@@ -92,6 +94,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         [command] if command == "recover" => recover(&parsed),
         [area, command, rest @ ..] if area == "workpad" && command == "index" => {
             index_workpads(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "workpad" && command == "import" => {
+            import_workpad_task(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "evidence" && command == "export" => {
             export_evidence(&parsed, rest)
@@ -422,14 +427,26 @@ fn index_workpads(parsed: &ParsedArgs, args: &[String]) -> Result<String, String
         CommandIntent::IndexWorkpads,
         Some(root.display().to_string()),
     );
-    let projections = workpad_index_projections(&index);
+    let state = state(parsed)?;
+    let existing_statuses = state
+        .workpad_tasks(&project_id())
+        .map_err(debug_error)?
+        .into_iter()
+        .map(|task| (task.workpad_task_id, task.capo_execution_status))
+        .collect::<HashMap<_, _>>();
+    let projections = workpad_index_projections(&index, &existing_statuses);
     let index_fingerprint = index
         .files
         .iter()
         .map(|file| file.content_hash.as_str())
         .collect::<Vec<_>>()
         .join(":");
-    let event_suffix = stable_cli_hash(&format!("{}:{index_fingerprint}", root.display()));
+    let next_sequence_hint = state.last_sequence().map_err(debug_error)? + 1;
+    let event_suffix = stable_cli_hash(&format!(
+        "{}:{}:{index_fingerprint}",
+        root.display(),
+        next_sequence_hint
+    ));
     let mut event = NewEvent::new(
         format!("event-workpad-index-{}-{event_suffix}", index.observed_unix),
         EventKind::WorkpadIndexed,
@@ -443,13 +460,9 @@ fn index_workpads(parsed: &ParsedArgs, args: &[String]) -> Result<String, String
         index.tasks.len(),
         index.observed_unix
     );
-    event.idempotency_key = Some(format!(
-        "workpad-index:{}:{}",
-        root.display(),
-        index_fingerprint
-    ));
+    event.idempotency_key = None;
     event.redaction_state = RedactionState::Safe;
-    let sequence = state(parsed)?
+    let sequence = state
         .append_event(event, &projections)
         .map_err(debug_error)?;
     Ok(format!(
@@ -457,6 +470,134 @@ fn index_workpads(parsed: &ParsedArgs, args: &[String]) -> Result<String, String
         root.display(),
         index.files.len(),
         index.tasks.len(),
+        command.command_id
+    ))
+}
+
+fn import_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let workpad_task_id = required_arg(args, "--workpad-task")?;
+    let state = state(parsed)?;
+    let project_id = project_id();
+    let workpad_task = state
+        .workpad_task(&project_id, &workpad_task_id)
+        .map_err(debug_error)?
+        .ok_or_else(|| format!("missing workpad task read model: {workpad_task_id}"))?;
+    let workpad_file = state
+        .workpad_file(&project_id, &workpad_task.path)
+        .map_err(debug_error)?
+        .ok_or_else(|| format!("missing workpad file read model: {}", workpad_task.path))?;
+
+    if let Some(expected_hash) = optional_arg(args, "--expected-hash")
+        && expected_hash != workpad_file.content_hash
+    {
+        return Err(format!(
+            "source drift detected for {}: expected_hash={} current_hash={}",
+            workpad_task.path, expected_hash, workpad_file.content_hash
+        ));
+    }
+
+    let task_id = TaskId::new(optional_arg(args, "--task").unwrap_or_else(|| {
+        format!(
+            "task-workpad-{}",
+            sanitize_id_component(&workpad_task.workpad_task_id)
+        )
+    }));
+    if let Some(existing_task) = state.task(&task_id).map_err(debug_error)? {
+        let same_source = existing_task
+            .latest_summary
+            .as_deref()
+            .is_some_and(|summary| {
+                summary.contains(&format!("workpad_task_id={}", workpad_task.workpad_task_id))
+            });
+        if !same_source
+            || existing_task.capo_execution_status != "ready"
+            || existing_task.active_session_id.is_some()
+        {
+            return Err(format!(
+                "refusing to overwrite existing Capo task read model: {task_id}"
+            ));
+        }
+    }
+    let mut command = envelope(
+        "workpad-import",
+        CommandTarget::Task(task_id.clone()),
+        CommandIntent::ImportWorkpadTask,
+        Some(workpad_task.title.clone()),
+    );
+    command.structured_args.push((
+        "workpad_task_id".to_string(),
+        workpad_task.workpad_task_id.clone(),
+    ));
+    command
+        .structured_args
+        .push(("source_hash".to_string(), workpad_file.content_hash.clone()));
+    let source_ref = format!("{}#{}", workpad_task.path, workpad_task.source_anchor);
+    let latest_summary = format!(
+        "source={} hash={} observed_status={} workpad_task_id={}",
+        source_ref,
+        workpad_file.content_hash,
+        workpad_task.observed_status,
+        workpad_task.workpad_task_id
+    );
+    let imported_workpad_task = WorkpadTaskProjection {
+        capo_execution_status: "imported".to_string(),
+        ..workpad_task.clone()
+    };
+    let task_projection = ProjectionRecord::Task(capo_state::TaskProjection {
+        task_id: task_id.clone(),
+        project_id: project_id.clone(),
+        title: workpad_task.title.clone(),
+        capo_execution_status: "ready".to_string(),
+        active_session_id: None,
+        latest_summary: Some(latest_summary),
+        evidence_id: None,
+        updated_sequence: 0,
+    });
+    let mut event = NewEvent::new(
+        format!(
+            "event-workpad-import-{}",
+            stable_cli_hash(&format!(
+                "{}:{}:{}",
+                task_id, workpad_task.workpad_task_id, workpad_file.content_hash
+            ))
+        ),
+        EventKind::WorkpadTaskImported,
+        "capo-cli",
+    );
+    event.project_id = Some(project_id.clone());
+    event.task_id = Some(task_id.clone());
+    event.payload_json = format!(
+        "{{\"task_id\":\"{}\",\"workpad_task_id\":\"{}\",\"path\":\"{}\",\"source_anchor\":\"{}\",\"content_hash\":\"{}\",\"observed_status\":\"{}\"}}",
+        escape_json(task_id.as_str()),
+        escape_json(&workpad_task.workpad_task_id),
+        escape_json(&workpad_task.path),
+        escape_json(&workpad_task.source_anchor),
+        escape_json(&workpad_file.content_hash),
+        escape_json(&workpad_task.observed_status)
+    );
+    event.idempotency_key = Some(format!(
+        "workpad-import:{}:{}:{}",
+        task_id, workpad_task.workpad_task_id, workpad_file.content_hash
+    ));
+    event.redaction_state = RedactionState::Safe;
+    let sequence = state
+        .append_event(
+            event,
+            &[
+                task_projection,
+                ProjectionRecord::WorkpadTask(imported_workpad_task),
+            ],
+        )
+        .map_err(debug_error)?;
+
+    Ok(format!(
+        "workpad_task_imported=true\nworkpad_task_id={}\ntask_id={}\nsource={}#{}\nsource_hash={}\nobserved_status={}\ncapo_execution_status=ready\nsequence={sequence}\ncommand_id={}\n",
+        workpad_task.workpad_task_id,
+        task_id,
+        workpad_task.path,
+        workpad_task.source_anchor,
+        workpad_file.content_hash,
+        workpad_task.observed_status,
         command.command_id
     ))
 }
@@ -511,7 +652,10 @@ fn export_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, Strin
     ))
 }
 
-fn workpad_index_projections(index: &WorkpadIndex) -> Vec<ProjectionRecord> {
+fn workpad_index_projections(
+    index: &WorkpadIndex,
+    existing_statuses: &HashMap<String, String>,
+) -> Vec<ProjectionRecord> {
     let project_id = project_id();
     let mut projections = vec![ProjectionRecord::WorkpadIndexReset(
         WorkpadIndexResetProjection {
@@ -539,12 +683,35 @@ fn workpad_index_projections(index: &WorkpadIndex) -> Vec<ProjectionRecord> {
             source_anchor: task.source_anchor.clone(),
             title: task.title.clone(),
             observed_status: task.observed_status.clone(),
-            capo_execution_status: task.capo_execution_status.clone(),
+            capo_execution_status: existing_statuses
+                .get(&task.workpad_task_id)
+                .cloned()
+                .unwrap_or_else(|| task.capo_execution_status.clone()),
             observed_unix: index.observed_unix,
             updated_sequence: 0,
         }));
     }
     projections
+}
+
+fn sanitize_id_component(value: &str) -> String {
+    let mut sanitized = String::new();
+    let mut previous_dash = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            sanitized.push(ch.to_ascii_lowercase());
+            previous_dash = false;
+        } else if !previous_dash {
+            sanitized.push('-');
+            previous_dash = true;
+        }
+    }
+    let trimmed = sanitized.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "workpad-task".to_string()
+    } else {
+        trimmed
+    }
 }
 
 fn escape_json(value: &str) -> String {
@@ -845,6 +1012,150 @@ mod tests {
                 .expect("read after"),
             before
         );
+        let source_hash = files
+            .iter()
+            .find(|file| file.path == "workpads/features/tasks.md")
+            .expect("feature tasks file")
+            .content_hash
+            .clone();
+
+        let import_output = run_cli(vec![
+            "workpad".to_string(),
+            "import".to_string(),
+            "--workpad-task".to_string(),
+            "workpads:features:tasks.md#f2".to_string(),
+            "--expected-hash".to_string(),
+            source_hash.clone(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("import workpad task");
+        assert!(import_output.contains("workpad_task_imported=true"));
+        assert!(import_output.contains("task_id=task-workpad-workpads-features-tasks-md-f2"));
+        assert!(import_output.contains(&format!("source_hash={source_hash}")));
+        let imported_task = state
+            .task(&TaskId::new("task-workpad-workpads-features-tasks-md-f2"))
+            .expect("imported task query")
+            .expect("imported task");
+        assert_eq!(imported_task.capo_execution_status, "ready");
+        assert!(
+            imported_task
+                .latest_summary
+                .as_deref()
+                .is_some_and(|summary| summary
+                    .contains("workpads/features/tasks.md#F2 - Workpad Dogfood Bridge")
+                    && summary.contains(&format!("hash={source_hash}"))
+                    && summary.contains("observed_status=in_progress"))
+        );
+        let imported_workpad_task = state
+            .workpad_task(&project_id(), "workpads:features:tasks.md#f2")
+            .expect("workpad task query")
+            .expect("workpad task");
+        assert_eq!(imported_workpad_task.observed_status, "in_progress");
+        assert_eq!(imported_workpad_task.capo_execution_status, "imported");
+
+        let conflicting_task_id = TaskId::new("task-existing-active");
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-existing-active-task".to_string(),
+                    kind: EventKind::TaskDiscovered,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id()),
+                    task_id: Some(conflicting_task_id.clone()),
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: None,
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::Task(capo_state::TaskProjection {
+                    task_id: conflicting_task_id.clone(),
+                    project_id: project_id(),
+                    title: "Existing active task".to_string(),
+                    capo_execution_status: "active".to_string(),
+                    active_session_id: None,
+                    latest_summary: Some("unrelated task".to_string()),
+                    evidence_id: None,
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("existing active task");
+        let collision_error = run_cli(vec![
+            "workpad".to_string(),
+            "import".to_string(),
+            "--workpad-task".to_string(),
+            "workpads:features:tasks.md#f2".to_string(),
+            "--task".to_string(),
+            conflicting_task_id.to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("import should not overwrite existing Capo task");
+        assert!(collision_error.contains("refusing to overwrite existing Capo task"));
+
+        let event_count = state.event_count().expect("event count before re-import");
+        run_cli(vec![
+            "workpad".to_string(),
+            "import".to_string(),
+            "--workpad-task".to_string(),
+            "workpads:features:tasks.md#f2".to_string(),
+            "--expected-hash".to_string(),
+            source_hash.clone(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("idempotent import");
+        assert_eq!(
+            state.event_count().expect("event count unchanged"),
+            event_count
+        );
+
+        run_cli(vec![
+            "workpad".to_string(),
+            "index".to_string(),
+            "--root".to_string(),
+            project_root.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("re-index workpads without source change");
+        let imported_workpad_task = state
+            .workpad_task(&project_id(), "workpads:features:tasks.md#f2")
+            .expect("workpad task after re-index")
+            .expect("workpad task after re-index");
+        assert_eq!(imported_workpad_task.observed_status, "in_progress");
+        assert_eq!(imported_workpad_task.capo_execution_status, "imported");
+
+        fs::write(
+            project_root.join("workpads/features/tasks.md"),
+            "# Feature Tasks\n\n## Objective\n\nSplit work updated.\n\n## F1 - Real Local Agent Connector Proof\n\nStatus: pending\n\n## F2 - Workpad Dogfood Bridge\n\nStatus: in_progress\n",
+        )
+        .expect("drift feature tasks");
+        run_cli(vec![
+            "workpad".to_string(),
+            "index".to_string(),
+            "--root".to_string(),
+            project_root.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("re-index drifted workpads");
+        let drift_error = run_cli(vec![
+            "workpad".to_string(),
+            "import".to_string(),
+            "--workpad-task".to_string(),
+            "workpads:features:tasks.md#f2".to_string(),
+            "--expected-hash".to_string(),
+            source_hash,
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("old hash should detect source drift");
+        assert!(drift_error.contains("source drift detected"));
 
         fs::write(
             project_root.join("workpads/features/tasks.md"),
@@ -868,6 +1179,27 @@ mod tests {
             !tasks
                 .iter()
                 .any(|task| task.workpad_task_id == "workpads:features:tasks.md#f2")
+        );
+
+        fs::write(project_root.join("workpads/features/tasks.md"), before)
+            .expect("restore original feature tasks");
+        run_cli(vec![
+            "workpad".to_string(),
+            "index".to_string(),
+            "--root".to_string(),
+            project_root.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("re-index restored workpads");
+        let tasks = state
+            .workpad_tasks(&project_id())
+            .expect("tasks after source recurrence");
+        assert!(
+            tasks
+                .iter()
+                .any(|task| task.workpad_task_id == "workpads:features:tasks.md#f2"),
+            "restored source task should reappear after A-B-A fingerprint recurrence"
         );
     }
 

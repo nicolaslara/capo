@@ -683,6 +683,34 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn workpad_file(
+        &self,
+        project_id: &ProjectId,
+        path: &str,
+    ) -> StateResult<Option<WorkpadFileProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let file = connection
+            .query_row(
+                "SELECT path, project_id, content_hash, headings, objective, observed_unix, updated_sequence
+                 FROM workpad_files
+                 WHERE project_id = ?1 AND path = ?2",
+                params![project_id.as_str(), path],
+                |row| {
+                    Ok(WorkpadFileProjection {
+                        path: row.get(0)?,
+                        project_id: ProjectId::new(row.get::<_, String>(1)?),
+                        content_hash: row.get(2)?,
+                        headings: row.get(3)?,
+                        objective: row.get(4)?,
+                        observed_unix: row.get(5)?,
+                        updated_sequence: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(file)
+    }
+
     pub fn workpad_tasks(&self, project_id: &ProjectId) -> StateResult<Vec<WorkpadTaskProjection>> {
         let connection = Connection::open(&self.db_path)?;
         let mut statement = connection.prepare(
@@ -707,6 +735,37 @@ impl SqliteStateStore {
         })?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StateError::from)
+    }
+
+    pub fn workpad_task(
+        &self,
+        project_id: &ProjectId,
+        workpad_task_id: &str,
+    ) -> StateResult<Option<WorkpadTaskProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let task = connection
+            .query_row(
+                "SELECT workpad_task_id, project_id, path, source_anchor, title, observed_status,
+                        capo_execution_status, observed_unix, updated_sequence
+                 FROM workpad_tasks
+                 WHERE project_id = ?1 AND workpad_task_id = ?2",
+                params![project_id.as_str(), workpad_task_id],
+                |row| {
+                    Ok(WorkpadTaskProjection {
+                        workpad_task_id: row.get(0)?,
+                        project_id: ProjectId::new(row.get::<_, String>(1)?),
+                        path: row.get(2)?,
+                        source_anchor: row.get(3)?,
+                        title: row.get(4)?,
+                        observed_status: row.get(5)?,
+                        capo_execution_status: row.get(6)?,
+                        observed_unix: row.get(7)?,
+                        updated_sequence: row.get(8)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(task)
     }
 
     pub fn recent_events_for_session(
@@ -770,6 +829,7 @@ pub enum EventKind {
     MemoryPacketBuilt,
     EvidenceRecorded,
     WorkpadIndexed,
+    WorkpadTaskImported,
     RecoveryStarted,
     RecoveryCompleted,
     SessionInterrupted,
@@ -800,6 +860,7 @@ impl EventKind {
             Self::MemoryPacketBuilt => "memory.packet_built",
             Self::EvidenceRecorded => "evidence.recorded",
             Self::WorkpadIndexed => "workpad.indexed",
+            Self::WorkpadTaskImported => "workpad.task_imported",
             Self::RecoveryStarted => "recovery.started",
             Self::RecoveryCompleted => "recovery.completed",
             Self::SessionInterrupted => "session.interrupted",

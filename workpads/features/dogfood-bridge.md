@@ -53,13 +53,33 @@ Review:
 
 ### DB2 - Capo Task Import
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Convert selected workpad tasks into Capo task records with source anchors.
 - Preserve distinction between observed markdown status and Capo execution status.
 - Re-indexing is idempotent and detects source drift.
+
+Evidence:
+
+- `crates/capo-core/src/lib.rs`
+- `crates/capo-state/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources`
+
+Decision:
+
+- Add `capo workpad import --workpad-task WORKPAD_TASK_ID [--expected-hash HASH] [--task TASK_ID]` as the first bridge from observed markdown work into executable Capo task records.
+- Keep `observed_status` on `workpad_tasks` as the markdown source observation and set the imported Capo task read model to `capo_execution_status=ready`.
+- Mark the imported source workpad task with `capo_execution_status=imported` so operators can distinguish observed-only work from work that Capo is now tracking.
+- Store source path, source anchor, content hash, observed status, and workpad task ID in the imported task summary and event payload until DB3 adds richer Capo-owned artifacts.
+- Preserve imported workpad execution status across re-indexes for tasks still present in markdown, while allowing reset/re-index to remove stale source refs.
+- Use optional `--expected-hash` as the drift guard. Imports fail with `source drift detected` when the caller imported against an old observed file hash.
+
+Review:
+
+- Focused review found two blockers in the first draft: repeated source fingerprints could no-op projection reset/reapply, and `--task` could overwrite an existing Capo task read model. Both were fixed before completion.
 
 ### DB3 - Reviewed Workpad Artifacts
 

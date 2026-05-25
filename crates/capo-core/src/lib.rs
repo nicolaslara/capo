@@ -93,6 +93,7 @@ pub enum CommandIntent {
     Recover,
     ExportEvidence,
     IndexWorkpads,
+    ImportWorkpadTask,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

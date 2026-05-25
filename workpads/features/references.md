@@ -39,3 +39,13 @@ Observed 2026-05-25.
 - CLI index command and tests: `../../crates/capo-cli/src/main.rs`
 - Dogfood bridge source workpad: `dogfood-bridge.md`
 - No new third-party dependencies were added for DB1.
+
+## F2/DB2 Capo Task Import
+
+Observed 2026-05-25.
+
+- Command intent for workpad import: `../../crates/capo-core/src/lib.rs`
+- SQLite workpad lookup helpers and import event kind: `../../crates/capo-state/src/lib.rs`
+- CLI import command, source-hash drift check, idempotency key, and regression test: `../../crates/capo-cli/src/main.rs`
+- Dogfood bridge source workpad: `dogfood-bridge.md`
+- No new third-party dependencies were added for DB2.
