@@ -8,7 +8,7 @@ Prototype work starts after the architecture gate unless explicitly authorized a
 
 ## P0 - Workspace Scaffold And Toolchain
 
-Status: pending
+Status: completed
 
 Acceptance:
 
@@ -16,6 +16,22 @@ Acceptance:
 - Initial Cargo workspace and package layout created.
 - Format/lint/test commands recorded.
 - `capo --help` skeleton runs without requiring provider credentials.
+
+Evidence:
+
+- `Cargo.toml`
+- `crates/capo-cli`
+- `crates/capo-core`
+- `crates/capo-state`
+- `crates/capo-adapters`
+- `crates/capo-runtime`
+- `crates/capo-tools`
+- `crates/capo-memory`
+- `crates/capo-eval`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+- `cargo run -p capo-cli -- --help`
 
 ## P1 - Core Domain And Boundary Skeleton
 

@@ -1,0 +1,9 @@
+[package]
+name = "capo-core"
+description = "Core domain vocabulary and controller scaffolding for Capo."
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]

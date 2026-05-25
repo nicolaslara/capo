@@ -24,3 +24,19 @@ Observed 2026-05-25.
 - Protocol and provider plan: `../architecture/protocol-provider.md`
 - Tool exposure model: `../architecture/tool-exposure.md`
 - Memory architecture: `../architecture/memory-architecture.md`
+
+## P0 Workspace Scaffold
+
+Observed 2026-05-25.
+
+- Local toolchain: `rustc 1.94.1 (e408947bf 2026-03-25)`
+- Local Cargo: `cargo 1.94.1 (29ea6fb6a 2026-03-24)`
+- Workspace manifest: `../../Cargo.toml`
+- CLI crate: `../../crates/capo-cli`
+- Core crate: `../../crates/capo-core`
+- State crate: `../../crates/capo-state`
+- Adapter crate: `../../crates/capo-adapters`
+- Runtime crate: `../../crates/capo-runtime`
+- Tool crate: `../../crates/capo-tools`
+- Memory crate: `../../crates/capo-memory`
+- Evaluation crate: `../../crates/capo-eval`

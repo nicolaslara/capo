@@ -1,0 +1,10 @@
+[package]
+name = "capo-tools"
+description = "Tool exposure and instrumentation scaffolding for Capo."
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+capo-core.workspace = true
