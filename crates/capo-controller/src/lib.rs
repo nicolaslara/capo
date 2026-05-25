@@ -119,12 +119,16 @@ impl FakeBoundaryController {
         let recovery_attempt_id = format!("recovery-{}", command.command_id);
         let started = self.state.begin_recovery(&recovery_attempt_id)?;
         self.state.rebuild_projections()?;
+        let recovered_runs = self
+            .state
+            .mark_active_runs_exited_unknown(&self.project_id, &recovery_attempt_id)?;
         let completed = self.state.complete_recovery(&recovery_attempt_id)?;
         Ok(RecoveryReport {
             recovery_attempt_id,
             started_sequence: started.started_sequence,
             completed_sequence: completed.completed_sequence.unwrap_or_default(),
             watermark: self.state.watermark("default")?,
+            recovered_run_count: recovered_runs.len(),
         })
     }
 
@@ -942,6 +946,7 @@ pub struct RecoveryReport {
     pub started_sequence: i64,
     pub completed_sequence: i64,
     pub watermark: Option<i64>,
+    pub recovered_run_count: usize,
 }
 
 fn event(event_id: &str, kind: EventKind, project_id: &ProjectId) -> NewEvent {
@@ -1146,6 +1151,94 @@ mod tests {
                 .status,
             "canceled"
         );
+    }
+
+    #[test]
+    fn acp_fixture_replay_dedupes_stable_tool_updates_in_state() {
+        let store = SqliteStateStore::open(temp_root()).expect("open state");
+        let project_id = ProjectId::new("project-capo");
+        let session_id = SessionId::new("session-acp");
+        let fixture = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../capo-adapters/fixtures/acp-replay.jsonl"
+        ))
+        .expect("read ACP fixture");
+        let parsed = capo_adapters::AcpAdapter::parse_replay_jsonl(&fixture).expect("parse ACP");
+        let tool_events = parsed
+            .events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| {
+                event.timeline_key.as_deref() == Some("acp:acp-session-1:tool:tool-1")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(tool_events.len(), 4);
+        for pass in 0..2 {
+            for (index, adapter_event) in &tool_events {
+                let Some(idempotency_key) = adapter_event.idempotency_key.clone() else {
+                    continue;
+                };
+                let (kind, status) = match adapter_event.kind.as_str() {
+                    "adapter.tool_call_requested" => (EventKind::ToolCallRequested, "requested"),
+                    "adapter.tool_call_started" => (EventKind::ToolInvocationStarted, "started"),
+                    "adapter.tool_call_completed" => (EventKind::ToolCallCompleted, "completed"),
+                    other => panic!("unexpected ACP tool event kind: {other}"),
+                };
+                let tool_name = adapter_event
+                    .tool_name
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                store
+                    .append_event(
+                        NewEvent {
+                            event_id: format!("event-acp-replay-{pass}-{index}"),
+                            kind,
+                            actor: "acp-replay".to_string(),
+                            project_id: Some(project_id.clone()),
+                            task_id: None,
+                            agent_id: None,
+                            session_id: Some(session_id.clone()),
+                            run_id: None,
+                            turn_id: Some("turn-acp".to_string()),
+                            item_id: adapter_event.external_item_ref.clone(),
+                            payload_json: format!(
+                                "{{\"adapter_kind\":\"acp\",\"provider_event_kind\":\"{}\",\"status\":\"{}\"}}",
+                                escape_json(&adapter_event.provider_event_kind),
+                                status
+                            ),
+                            idempotency_key: Some(idempotency_key),
+                            redaction_state: RedactionState::Safe,
+                        },
+                        &[ProjectionRecord::ToolCall(capo_state::ToolCallProjection {
+                            tool_call_id: ToolCallId::new("tool-acp-tool-1"),
+                            session_id: session_id.clone(),
+                            turn_id: Some("turn-acp".to_string()),
+                            tool_name,
+                            tool_origin: "adapter_native".to_string(),
+                            status: status.to_string(),
+                            input_artifact_id: None,
+                            output_artifact_id: adapter_event
+                                .content
+                                .as_ref()
+                                .map(|_| "artifact-acp-tool-1-output".to_string()),
+                            updated_sequence: 0,
+                        })],
+                    )
+                    .expect("append normalized ACP event");
+            }
+        }
+
+        assert_eq!(store.event_count().unwrap(), 3);
+        store.rebuild_projections().expect("rebuild projections");
+        assert_eq!(store.event_count().unwrap(), 3);
+        let tool_calls = store
+            .tool_calls_for_session(&session_id)
+            .expect("tool call read model");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].status, "completed");
+        assert_eq!(tool_calls[0].tool_origin, "adapter_native");
     }
 
     fn temp_root() -> std::path::PathBuf {

@@ -281,7 +281,7 @@ fn recover(parsed: &ParsedArgs) -> Result<String, String> {
         .recover_command(&command)
         .map_err(debug_error)?;
     Ok(format!(
-        "recovered=true\nrecovery_attempt_id={}\nstarted_sequence={}\ncompleted_sequence={}\nwatermark={}\ncommand_id={}\n",
+        "recovered=true\nrecovery_attempt_id={}\nstarted_sequence={}\ncompleted_sequence={}\nwatermark={}\nrecovered_run_count={}\ncommand_id={}\n",
         report.recovery_attempt_id,
         report.started_sequence,
         report.completed_sequence,
@@ -289,6 +289,7 @@ fn recover(parsed: &ParsedArgs) -> Result<String, String> {
             .watermark
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string()),
+        report.recovered_run_count,
         command.command_id
     ))
 }

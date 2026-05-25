@@ -139,3 +139,15 @@ Observed 2026-05-25.
 - Memory architecture source: `../architecture/memory-architecture.md`
 - Tool/audit provenance source: `../architecture/tool-exposure.md`
 - No new third-party dependencies were added for P9.
+
+## P10 Restart Recovery And Replay
+
+Observed 2026-05-25.
+
+- SQLite idempotency, projection rebuild, active-run recovery, and tool-call read-model query: `../../crates/capo-state/src/lib.rs`
+- Controller restart recovery command and ACP replay/dedupe state test: `../../crates/capo-controller/src/lib.rs`
+- CLI recover output including recovered run count: `../../crates/capo-cli/src/main.rs`
+- ACP replay fixture used by the controller test: `../../crates/capo-adapters/fixtures/acp-replay.jsonl`
+- ACP replay/dedupe architecture source: `../architecture/acp-replay-dedupe.md`
+- State model restart recovery source: `../architecture/state-model.md`
+- No new third-party dependencies were added for P10.

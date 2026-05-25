@@ -234,7 +234,7 @@ Evidence:
 
 ## P10 - Restart Recovery And Replay
 
-Status: pending
+Status: completed
 
 Acceptance:
 
@@ -243,6 +243,15 @@ Acceptance:
 - Define and enforce event idempotency behavior for replay, either with a partial unique index on `idempotency_key` or explicit duplicate lookup semantics.
 - Recover, orphan, or exit-mark active-looking runs with durable events.
 - Include ACP fixture replay/dedupe tests before claiming broad ACP compatibility.
+
+Evidence:
+
+- `crates/capo-state/src/lib.rs`
+- `crates/capo-controller/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
 
 ## P11 - Workpad Evidence Export
 

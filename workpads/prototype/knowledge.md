@@ -308,6 +308,33 @@ Follow-up:
 - P10 should make memory packet attachment replay/idempotency robust across restart.
 - Future memory work should add typed memory record/source/read models rather than relying only on packet projection plus artifact metadata.
 
+## P10 - Restart Recovery And Replay
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Enforce durable replay idempotency in SQLite with project-scoped `(project_id, idempotency_key)` duplicate lookup plus a partial unique index for non-null project/idempotency pairs.
+- Duplicate appends return the original event sequence and do not write projection records again. This keeps `session/load` or adapter replay from producing duplicate read-model rows when stable normalized idempotency keys are present.
+- Keep idempotency project-scoped. Null-project events are not deduped by the partial index and should be used only for unscoped internal records.
+- Add `tool_calls_for_session` so replay and later dashboard surfaces can inspect adapter-native tool-call read models.
+- Restart recovery now rebuilds projections first, then marks active-looking runs for the current project as `exited_unknown` with durable `run.exited` events.
+- Active-looking run recovery is scoped through the run's session project rather than all runs in the SQLite store.
+- ACP compatibility remains fixture-level only. The P10 test proves stable ACP tool updates are durable and deduped through state, not that Capo is a full ACP server/client yet.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+- State tests cover project-scoped idempotency lookup, projection non-duplication, active-looking run exit-marking, and idempotent repeated recovery.
+- Controller tests replay the ACP fixture's stable `toolCallId` updates through SQLite twice, including a duplicate completed update, then rebuild projections and verify there are three durable events and one completed tool-call read model.
+
+Follow-up:
+
+- P11 can export evidence after interrupted or recovered runs now that exit-marked active runs survive restart as durable state.
+- Future ACP work should add raw update batch storage and explicit adapter replay start/completed events if Capo needs full `session/load` transcript replay rather than only normalized read-model dedupe.
+
 ## Prototype Gate
 
 Status: not passed.

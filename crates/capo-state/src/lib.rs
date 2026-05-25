@@ -107,6 +107,22 @@ impl SqliteStateStore {
     ) -> StateResult<i64> {
         let mut connection = Connection::open(&self.db_path)?;
         let transaction = connection.transaction()?;
+        if let (Some(project_id), Some(idempotency_key)) =
+            (&event.project_id, &event.idempotency_key)
+            && let Some(existing) = transaction
+                .query_row(
+                    "SELECT sequence
+                     FROM events
+                     WHERE project_id = ?1 AND idempotency_key = ?2
+                     LIMIT 1",
+                    params![project_id.as_str(), idempotency_key],
+                    |row| row.get(0),
+                )
+                .optional()?
+        {
+            transaction.commit()?;
+            return Ok(existing);
+        }
         transaction.execute(
             "INSERT INTO events (
                 event_id, kind, actor, project_id, task_id, agent_id, session_id,
@@ -137,6 +153,49 @@ impl SqliteStateStore {
         update_watermark(&transaction, "default", sequence)?;
         transaction.commit()?;
         Ok(sequence)
+    }
+
+    pub fn mark_active_runs_exited_unknown(
+        &self,
+        project_id: &ProjectId,
+        recovery_attempt_id: &str,
+    ) -> StateResult<Vec<RunProjection>> {
+        let active_runs = self.active_looking_runs_for_project(project_id)?;
+        let mut recovered = Vec::new();
+        for run in active_runs {
+            let recovered_run = RunProjection {
+                status: "exited_unknown".to_string(),
+                ..run.clone()
+            };
+            let event_id = format!("event-{recovery_attempt_id}-exited-{}", run.run_id);
+            self.append_event(
+                NewEvent {
+                    event_id: event_id.clone(),
+                    kind: EventKind::RunExited,
+                    actor: "capo-recovery".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: Some(run.session_id.clone()),
+                    run_id: Some(run.run_id.clone()),
+                    turn_id: None,
+                    item_id: None,
+                    payload_json: format!(
+                        "{{\"recovery_attempt_id\":\"{}\",\"previous_status\":\"{}\",\"status\":\"exited_unknown\"}}",
+                        escape_json(recovery_attempt_id),
+                        escape_json(&run.status)
+                    ),
+                    idempotency_key: Some(format!(
+                        "recovery:{recovery_attempt_id}:run:{}:exited_unknown",
+                        run.run_id
+                    )),
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::Run(recovered_run.clone())],
+            )?;
+            recovered.push(recovered_run);
+        }
+        Ok(recovered)
     }
 
     pub fn record_artifact(&self, artifact: ArtifactRecord) -> StateResult<()> {
@@ -465,6 +524,54 @@ impl SqliteStateStore {
         Ok(run)
     }
 
+    pub fn active_looking_runs(&self) -> StateResult<Vec<RunProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT run_id, session_id, status, recovery_of_run_id, updated_sequence
+             FROM runs
+             WHERE status IN ('starting', 'running', 'stopping', 'active')
+             ORDER BY updated_sequence ASC, run_id ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(RunProjection {
+                run_id: RunId::new(row.get::<_, String>(0)?),
+                session_id: SessionId::new(row.get::<_, String>(1)?),
+                status: row.get(2)?,
+                recovery_of_run_id: optional_id(row.get::<_, Option<String>>(3)?),
+                updated_sequence: row.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    pub fn active_looking_runs_for_project(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<RunProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT runs.run_id, runs.session_id, runs.status, runs.recovery_of_run_id,
+                    runs.updated_sequence
+             FROM runs
+             JOIN sessions ON sessions.session_id = runs.session_id
+             WHERE sessions.project_id = ?1
+                AND runs.status IN ('starting', 'running', 'stopping', 'active')
+             ORDER BY runs.updated_sequence ASC, runs.run_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(RunProjection {
+                run_id: RunId::new(row.get::<_, String>(0)?),
+                session_id: SessionId::new(row.get::<_, String>(1)?),
+                status: row.get(2)?,
+                recovery_of_run_id: optional_id(row.get::<_, Option<String>>(3)?),
+                updated_sequence: row.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn evidence_for_session(
         &self,
         session_id: &SessionId,
@@ -524,6 +631,35 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn tool_calls_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> StateResult<Vec<ToolCallProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT tool_call_id, session_id, turn_id, tool_name, tool_origin, status,
+                    input_artifact_id, output_artifact_id, updated_sequence
+             FROM tool_calls
+             WHERE session_id = ?1
+             ORDER BY updated_sequence ASC, tool_call_id ASC",
+        )?;
+        let rows = statement.query_map(params![session_id.as_str()], |row| {
+            Ok(ToolCallProjection {
+                tool_call_id: ToolCallId::new(row.get::<_, String>(0)?),
+                session_id: SessionId::new(row.get::<_, String>(1)?),
+                turn_id: row.get(2)?,
+                tool_name: row.get(3)?,
+                tool_origin: row.get(4)?,
+                status: row.get(5)?,
+                input_artifact_id: row.get(6)?,
+                output_artifact_id: row.get(7)?,
+                updated_sequence: row.get(8)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn recent_events_for_session(
         &self,
         session_id: &SessionId,
@@ -570,6 +706,7 @@ pub enum EventKind {
     SessionStarted,
     SessionSummaryUpdated,
     RunStarted,
+    RunExited,
     PermissionRequested,
     PermissionDecided,
     CapabilityGrantCreated,
@@ -597,6 +734,7 @@ impl EventKind {
             Self::SessionStarted => "session.started",
             Self::SessionSummaryUpdated => "session.summary_updated",
             Self::RunStarted => "run.started",
+            Self::RunExited => "run.exited",
             Self::PermissionRequested => "permission.requested",
             Self::PermissionDecided => "permission.decided",
             Self::CapabilityGrantCreated => "capability.grant_created",
@@ -858,6 +996,9 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             idempotency_key TEXT,
             redaction_state TEXT NOT NULL
         );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_events_project_idempotency
+        ON events(project_id, idempotency_key)
+        WHERE project_id IS NOT NULL AND idempotency_key IS NOT NULL;
         CREATE TABLE IF NOT EXISTS projection_records (
             sequence INTEGER NOT NULL,
             projection_kind TEXT NOT NULL,
@@ -1593,6 +1734,10 @@ where
     value.map(T::from_string_id)
 }
 
+fn escape_json(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 trait FromStringId {
     fn from_string_id(value: String) -> Self;
 }
@@ -1718,6 +1863,152 @@ mod tests {
         assert_eq!(session.latest_confidence, Some(70));
         let task = store.task(&task_id).unwrap().expect("task");
         assert_eq!(task.latest_summary.as_deref(), Some("state scaffold"));
+    }
+
+    #[test]
+    fn append_event_is_idempotent_for_project_scoped_keys() {
+        let store = temp_store("idempotency");
+        let project_id = ProjectId::new("project-capo");
+        let task_id = TaskId::new("task-idempotent");
+
+        let first = store
+            .append_event(
+                NewEvent {
+                    event_id: "event-idempotent-1".to_string(),
+                    kind: EventKind::TaskDiscovered,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: Some(task_id.clone()),
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: None,
+                    payload_json: "{}".to_string(),
+                    idempotency_key: Some("task:discover:one".to_string()),
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::Task(TaskProjection {
+                    task_id: task_id.clone(),
+                    project_id: project_id.clone(),
+                    title: "first".to_string(),
+                    capo_execution_status: "pending".to_string(),
+                    active_session_id: None,
+                    latest_summary: Some("first".to_string()),
+                    evidence_id: None,
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append first");
+
+        let second = store
+            .append_event(
+                NewEvent {
+                    event_id: "event-idempotent-2".to_string(),
+                    kind: EventKind::TaskDiscovered,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: Some(task_id.clone()),
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: None,
+                    payload_json: "{}".to_string(),
+                    idempotency_key: Some("task:discover:one".to_string()),
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::Task(TaskProjection {
+                    task_id: task_id.clone(),
+                    project_id,
+                    title: "second".to_string(),
+                    capo_execution_status: "active".to_string(),
+                    active_session_id: None,
+                    latest_summary: Some("second".to_string()),
+                    evidence_id: None,
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append duplicate");
+
+        assert_eq!(first, second);
+        assert_eq!(store.event_count().unwrap(), 1);
+        assert_eq!(
+            store
+                .task(&task_id)
+                .unwrap()
+                .expect("task")
+                .latest_summary
+                .as_deref(),
+            Some("first")
+        );
+    }
+
+    #[test]
+    fn recovery_marks_active_looking_runs_exited_unknown_once() {
+        let store = temp_store("active-run-recovery");
+        let project_id = ProjectId::new("project-capo");
+        let session_id = SessionId::new("session-running");
+        let run_id = RunId::new("run-running");
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-run-started".to_string(),
+                    kind: EventKind::RunStarted,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: Some(session_id.clone()),
+                    run_id: Some(run_id.clone()),
+                    turn_id: None,
+                    item_id: None,
+                    payload_json: "{}".to_string(),
+                    idempotency_key: Some("run:start".to_string()),
+                    redaction_state: RedactionState::Safe,
+                },
+                &[
+                    ProjectionRecord::Session(SessionProjection {
+                        session_id: session_id.clone(),
+                        project_id: project_id.clone(),
+                        task_id: None,
+                        agent_id: AgentId::new("agent-running"),
+                        title: "Running session".to_string(),
+                        status: "active".to_string(),
+                        current_goal: "recover active run".to_string(),
+                        latest_summary: None,
+                        latest_confidence: None,
+                        latest_blocker: None,
+                        updated_sequence: 0,
+                    }),
+                    ProjectionRecord::Run(RunProjection {
+                        run_id: run_id.clone(),
+                        session_id: session_id.clone(),
+                        status: "running".to_string(),
+                        recovery_of_run_id: None,
+                        updated_sequence: 0,
+                    }),
+                ],
+            )
+            .expect("start run");
+
+        assert_eq!(store.active_looking_runs().unwrap().len(), 1);
+        let recovered = store
+            .mark_active_runs_exited_unknown(&project_id, "recovery-1")
+            .expect("recover active runs");
+        let recovered_again = store
+            .mark_active_runs_exited_unknown(&project_id, "recovery-1")
+            .expect("recover active runs idempotently");
+
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered_again.len(), 0);
+        assert_eq!(
+            store.run(&run_id).unwrap().expect("run").status,
+            "exited_unknown"
+        );
+        assert_eq!(store.active_looking_runs().unwrap().len(), 0);
+        assert_eq!(store.event_count().unwrap(), 2);
     }
 
     #[test]
