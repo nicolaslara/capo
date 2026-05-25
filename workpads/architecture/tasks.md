@@ -8,12 +8,17 @@ Architecture turns research into contracts and a prototype plan.
 
 ## A0 - Research Ingestion
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Research gate findings summarized in `knowledge.md`.
 - Architecture risks and open questions listed.
+
+Evidence:
+
+- `workpads/architecture/knowledge.md` A0 section
+- `workpads/architecture/references.md` Research Gate Inputs section
 
 ## A1 - Boundary Contracts
 

@@ -40,6 +40,53 @@ Key research decisions to carry forward:
 - Capo should not expose itself as an ACP agent right now. Capo should be the user's entrypoint and remain primarily a controller/client for the prototype.
 - Voice should be a conversational interface to Capo for asking what agents have done, checking status/blockers, discussing next steps, and steering agents. It is not just speech-to-text input.
 
+## A0 - Research Ingestion
+
+Status: completed on 2026-05-25.
+
+Architecture inputs ingested:
+
+- Research gate summary: `workpads/research/knowledge.md`
+- ACP protocol mapping: `workpads/research/findings/R1-acp.md`
+- Prior-art product comparison: `workpads/research/findings/R2-prior-art.md`
+- Prior-art source-code architecture: `workpads/research/findings/R2-code-architecture.md`
+- Subscription connector security boundary: `workpads/research/findings/R3-subscriptions.md`
+- Stack/runtime/tunnel recommendation: `workpads/research/findings/R4-R6-stack-runtime.md`
+- Memory recommendation: `workpads/research/findings/R5-memory.md`
+- Input and conversational voice recommendation: `workpads/research/findings/R7-input-surfaces.md`
+
+Architecture direction:
+
+- Use controller-owned event/state IDs and store external adapter IDs separately.
+- Persist raw adapter events separately from normalized Capo events.
+- Project CLI/dashboard/voice state from Capo read models, not live agent process memory.
+- Implement Claude Code and Codex adapters first, with ACP as an adapter boundary rather than the Capo domain model.
+- Use Rust for controller, state, runtime supervision, command handling, and audit.
+- Use SQLite for operational truth and markdown workpads for human-auditable project state.
+- Use local process runtime first; remote, Tailscale, SSH, container, and stronger sandboxing are later adapters.
+- Start permissions as all-allowed for trusted local dogfooding while still routing all decisions through a modular policy boundary.
+- Make Capo-exposed tools instrumented wrappers so tool calls become durable, auditable events.
+- Treat conversational voice as a Capo-facing control surface over the same read models and command envelopes as CLI/dashboard.
+
+Architecture risks:
+
+- **Event identity and replay:** ACP `session/load`, Codex JSONL streams, Claude Code output, and Capo restart recovery can duplicate partial updates unless A2/A2a defines stable idempotency rules.
+- **Adapter drift:** Codex/Claude CLI output schemas and subscription semantics can change. Adapter contracts need raw event capture, version metadata, and golden transcript tests.
+- **Permission over-simplification:** All-allowed v0 can hide missing policy boundaries. Every allow decision still needs a durable decision source, scope, and audit event.
+- **Tool observability gaps:** If Capo only wraps top-level CLI processes, provider-native tools may remain opaque. A5a must define what can be instrumented in v0 and where visibility is deferred.
+- **Runtime safety claims:** Local process execution is controllable but not a sandbox. Documentation and UI must not imply stronger isolation than exists.
+- **State/source split:** Markdown workpads and SQLite event state can diverge unless architecture defines which store is authoritative for each class of fact.
+- **Voice privacy:** Conversational voice can expose sensitive status, code, and credentials through transcripts. Retention/redaction rules must be explicit before implementation.
+- **UI ownership:** Dashboard or voice surfaces must not become the owner of orchestration state; they submit commands and render read models only.
+- **Naming drift:** Terms like session, run, turn, task, event, checkpoint, agent, adapter, runtime, and tool must be defined before implementation to keep modules readable.
+
+Resolved open questions:
+
+- First concrete agent connectors: Claude Code and Codex.
+- Capo modes: rejected as a Capo product model; modes belong to adapters/subagents if present.
+- Capo as ACP agent/editor backend: deferred; Capo remains the entrypoint.
+- Voice role: first-class conversational interface to Capo, not generic dictation.
+
 ## Architecture Gate
 
 Status: not passed.
@@ -59,3 +106,5 @@ Required evidence:
 - Should the core process be a long-running server from day one, or a CLI that later grows a daemon?
 - Should the first UI be TUI, web dashboard, or both?
 - How should partial streaming updates be persisted and replayed without duplicate UI state across ACP `session/load` and Capo restart recovery?
+- What is the exact vocabulary for `project`, `agent`, `adapter`, `runtime`, `session`, `run`, `turn`, `task`, `event`, `item`, `tool_call`, `artifact`, and `checkpoint`?
+- Which data belongs only in SQLite, which belongs in markdown workpads, and which is mirrored between them?
