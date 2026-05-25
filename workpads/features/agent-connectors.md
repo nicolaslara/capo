@@ -20,7 +20,7 @@ Prove that Capo can safely dispatch work to real local subscription-backed codin
 
 ### AC1 - Codex Opt-In Smoke
 
-Status: pending
+Status: waiting_on_opt_in
 
 Acceptance:
 
@@ -29,15 +29,51 @@ Acceptance:
 - Scan stdout/stderr artifacts and state/evidence trees for credential/session markers.
 - Record whether the local Codex connector is safe enough for first dogfood.
 
+Evidence:
+
+- `codex --version`: `codex-cli 0.133.0`
+- `codex exec --help` observed 2026-05-25 and supports the planned `--json`, `--sandbox read-only`, `--ephemeral`, `--ignore-user-config`, `--ignore-rules`, and `--cd` arguments.
+- `cargo test -p capo-adapters local_smoke_plan`: passed.
+- `cargo test -p capo-adapters local_adapter_smoke_runner`: passed.
+- `cargo test -p capo-adapters artifact_scanner_allows_redacted_markers_and_rejects_raw_secrets`: passed.
+- `cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture`: passed without `CAPO_RUN_CODEX_LOCAL_SMOKE=1`, proving the ignored real smoke remains opt-in gated.
+
+Skipped verification:
+
+- The real Codex subscription-backed smoke was not run because the task requires explicit user opt-in before setting `CAPO_RUN_CODEX_LOCAL_SMOKE=1`.
+
+Decision:
+
+- The Codex connector is not yet safe enough for first dogfood because the actual subscription-backed process has not run. The harness shape remains appropriate: local process runtime, isolated temporary workspace, read-only sandbox, ephemeral mode, ignored user config/rules, bounded/redacted artifacts, and marker scanning.
+
+Review:
+
+- Focused review found no blockers. It confirmed the real Codex smoke remains opt-in gated and the workpad does not claim real-agent readiness.
+
 ### AC2 - Claude Code Restricted Args Verification
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Verify installed Claude Code CLI restricted permission/tool arguments before running a subscription-backed smoke.
 - Keep empty MCP config and disallowed tools unless the user explicitly scopes more access.
 - Record unsupported or drifting CLI args as a compatibility issue, not a product failure.
+
+Evidence:
+
+- `claude --version`: `2.1.150 (Claude Code)`.
+- `claude --help` observed 2026-05-25 and supports `-p`, `--output-format stream-json`, `--permission-mode plan`, `--tools`, `--disallowedTools`, `--mcp-config`, `--strict-mcp-config`, `--no-session-persistence`, and `--disable-slash-commands`.
+- `crates/capo-adapters/src/lib.rs` now includes `--no-session-persistence`, `--disable-slash-commands`, and `--tools ""` in the Claude smoke plan, in addition to `--permission-mode plan`, `--disallowedTools *`, empty MCP config, and strict MCP config.
+- `cargo test -p capo-adapters local_smoke_plan`: passed.
+
+Decision:
+
+- Claude Code restricted-argument compatibility is ready for a future opt-in smoke. The smoke itself remains gated behind `CAPO_RUN_CLAUDE_LOCAL_SMOKE=1` and should not run until explicitly authorized.
+
+Review:
+
+- Focused review found no blockers. It confirmed the documented Claude flags match the installed help surface, including `--tools ""`, `--no-session-persistence`, and `--disable-slash-commands`.
 
 ### AC3 - Real-Agent Controller Path
 

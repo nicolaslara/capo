@@ -116,3 +116,37 @@ Follow-up:
 
 - Future source writeback should validate source hash at apply time, generate a patch/diff artifact first, and keep a rollback artifact before modifying markdown.
 - Dashboard/query work should expose proposal artifact/evidence refs directly instead of making users parse CLI output.
+
+## F1/AC1-AC2 - Local Connector Preflight
+
+Status: in progress on 2026-05-25.
+
+Decisions:
+
+- Do not run the real Codex subscription-backed smoke without explicit user opt-in. The ignored test was executed without `CAPO_RUN_CODEX_LOCAL_SMOKE=1` and stayed inside the opt-in gate.
+- Installed Codex is `codex-cli 0.133.0`; `codex exec --help` currently supports the planned safe smoke flags: JSONL output, read-only sandbox, ephemeral mode, ignored user config/rules, and isolated `--cd`.
+- Installed Claude Code is `2.1.150`; its help currently supports the restricted noninteractive stream path.
+- Tighten the Claude smoke plan with `--no-session-persistence`, `--disable-slash-commands`, and `--tools ""` in addition to plan permission mode, disallowed tools, empty MCP config, and strict MCP config.
+- Treat Codex as still unproven for dogfood until the real opt-in smoke runs and artifact/state scans pass.
+- Treat Claude restricted args as verified enough for a future opt-in smoke, but do not run Claude without explicit authorization.
+
+Verification:
+
+- `cargo test -p capo-adapters local_smoke_plan`: passed.
+- `cargo test -p capo-adapters local_adapter_smoke_runner`: passed.
+- `cargo test -p capo-adapters artifact_scanner_allows_redacted_markers_and_rejects_raw_secrets`: passed.
+- `cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture` without opt-in: passed by skipping the provider process.
+
+Review:
+
+- Focused connector safety review found no blocking issues. It confirmed Codex opt-in gating is preserved, Claude restricted flags match current help, and F1 remains honestly in progress because real subscription-backed smoke has not run.
+
+Skipped verification:
+
+- Real Codex local smoke with `CAPO_RUN_CODEX_LOCAL_SMOKE=1` was not run because explicit opt-in is required.
+- Real Claude local smoke with `CAPO_RUN_CLAUDE_LOCAL_SMOKE=1` was not run because this pass only verified restricted arguments.
+
+Follow-up:
+
+- After explicit user opt-in, run `CAPO_RUN_CODEX_LOCAL_SMOKE=1 cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture`, inspect artifacts/state for credential markers, and decide whether Codex is safe enough for first dogfood.
+- If Codex passes, AC3 should route a real adapter event stream through controller/state/evidence instead of stopping at adapter-level smoke.

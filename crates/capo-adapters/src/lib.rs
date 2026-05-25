@@ -361,6 +361,10 @@ impl ClaudeCodeAdapter {
                 "--verbose".to_string(),
                 "--permission-mode".to_string(),
                 "plan".to_string(),
+                "--no-session-persistence".to_string(),
+                "--disable-slash-commands".to_string(),
+                "--tools".to_string(),
+                "".to_string(),
                 "--disallowedTools".to_string(),
                 "*".to_string(),
                 "--mcp-config".to_string(),
@@ -1137,6 +1141,17 @@ mod tests {
                 .windows(2)
                 .any(|args| args == ["--permission-mode", "plan"])
         );
+        assert!(
+            plan.argv
+                .iter()
+                .any(|arg| arg == "--no-session-persistence")
+        );
+        assert!(
+            plan.argv
+                .iter()
+                .any(|arg| arg == "--disable-slash-commands")
+        );
+        assert!(plan.argv.windows(2).any(|args| args == ["--tools", ""]));
         assert!(
             plan.argv
                 .windows(2)

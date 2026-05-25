@@ -59,3 +59,15 @@ Observed 2026-05-25.
 - CLI proposal generation, guarded apply command, overwrite guards, and regression test: `../../crates/capo-cli/src/main.rs`
 - Dogfood bridge source workpad: `dogfood-bridge.md`
 - No new third-party dependencies were added for DB3.
+
+## F1/AC1-AC2 Local Connector Preflight
+
+Observed 2026-05-25.
+
+- Codex CLI path/version: `/Users/nicolas/.nvm/versions/node/v24.10.0/bin/codex`, `codex-cli 0.133.0`.
+- Codex help checked with `codex exec --help`; planned safe-smoke flags are present: `--json`, `--sandbox read-only`, `--ephemeral`, `--ignore-user-config`, `--ignore-rules`, and `--cd`.
+- Claude Code path/version: `/Applications/cmux.app/Contents/Resources/bin/claude`, `2.1.150 (Claude Code)`.
+- Claude help checked with `claude --help`; restricted smoke flags are present: `-p`, `--output-format stream-json`, `--permission-mode plan`, `--tools`, `--disallowedTools`, `--mcp-config`, `--strict-mcp-config`, `--no-session-persistence`, and `--disable-slash-commands`.
+- Local adapter smoke plan and safety scanner implementation: `../../crates/capo-adapters/src/lib.rs`.
+- Agent connectors source workpad: `agent-connectors.md`.
+- No new third-party dependencies were added for AC1/AC2 preflight.

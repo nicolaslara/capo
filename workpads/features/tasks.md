@@ -41,7 +41,7 @@ Evidence:
 
 ## F1 - Real Local Agent Connector Proof
 
-Status: pending
+Status: in_progress
 
 Source workpad: `agent-connectors.md`
 
@@ -50,6 +50,25 @@ Acceptance:
 - Run the opt-in Codex local smoke through the existing restrictive harness or record why it cannot safely run.
 - Verify no credential/session material is read, persisted, or exported.
 - Decide whether Claude Code smoke is ready or needs a separate restricted-CLI compatibility slice.
+
+Progress:
+
+- AC1 Codex smoke is waiting on explicit user opt-in. The local Codex CLI exists and the non-secret harness/preflight tests pass, but the real subscription-backed process has not been run.
+- AC2 Claude Code restricted-args verification is completed for installed `claude 2.1.150`.
+- AC3 real-agent controller path remains pending until at least one real local adapter stream is run.
+
+Evidence:
+
+- `crates/capo-adapters/src/lib.rs`
+- `codex --version`: `codex-cli 0.133.0`
+- `codex exec --help`
+- `claude --version`: `2.1.150 (Claude Code)`
+- `claude --help`
+- `cargo test -p capo-adapters local_smoke_plan`
+- `cargo test -p capo-adapters local_adapter_smoke_runner`
+- `cargo test -p capo-adapters artifact_scanner_allows_redacted_markers_and_rejects_raw_secrets`
+- `cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture` without `CAPO_RUN_CODEX_LOCAL_SMOKE=1`
+- Focused F1 connector safety review: no blocking findings; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge
 
