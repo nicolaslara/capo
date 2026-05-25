@@ -177,7 +177,7 @@ Evidence:
 
 ## F5 - Memory And Evaluation Reports
 
-Status: pending
+Status: in_progress
 
 Source workpad: `memory-eval.md`
 
