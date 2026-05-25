@@ -68,6 +68,7 @@ Progress:
 - AC13 dispatch execution gate is completed. `capo adapter dispatch-gate` checks recorded dispatch plans against the shared real-agent dogfood gate and fails closed before any provider CLI execution.
 - AC14 dispatch gate audit trail is completed. `capo adapter dispatch-gate --record` persists prompt-redacted gate decisions and dashboard/query surfaces render them without claiming provider execution.
 - AC15 dispatch fixture replay is completed. `capo adapter replay-dispatch` links recorded dispatch plans and ready gates to deterministic fixture replay without launching provider CLIs or retaining raw prompt/provider text.
+- AC16 dispatch replay read model is completed. Dispatch fixture replay outcomes are persisted, rebuilt, and surfaced through dashboard/query with fixture hashes, counts, session/run refs, and `provider_cli_executed=false`.
 
 Evidence:
 
@@ -98,6 +99,7 @@ Evidence:
 - `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`
 - `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`
 - `cargo test -p capo-state adapter_dispatch_gate -- --nocapture`
+- `cargo test -p capo-state adapter_dispatch_replay -- --nocapture`
 - Focused F1 connector safety review: no blocking findings; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge

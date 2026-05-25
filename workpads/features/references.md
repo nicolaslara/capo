@@ -160,6 +160,16 @@ Observed 2026-05-25.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC15.
 
+## F1/AC16 Dispatch Replay Read Model
+
+Observed 2026-05-25.
+
+- Dispatch-replay projection, event kind, SQLite table, rebuild codec, and read query: `../../crates/capo-state/src/lib.rs`
+- Shared dashboard query field for recorded dispatch replays: `../../crates/capo-query/src/lib.rs`
+- CLI `adapter replay-dispatch` replay recording and dashboard rendering: `../../crates/capo-cli/src/main.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC16.
+
 ## F3/DS1 Query Surface Extraction
 
 Observed 2026-05-25.

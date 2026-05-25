@@ -373,6 +373,30 @@ Follow-up:
 
 - The future real-provider execution command can reuse the same dispatch-plan and ready-gate lookup, but must append runtime start/process lifecycle records instead of fixture replay events.
 
+## F1/AC16 - Dispatch Replay Read Model
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `AdapterDispatchReplayProjection` as a durable read model for deterministic dispatch fixture replay results.
+- Keep the lifecycle facts separate:
+  - dispatch plans record intended runtime metadata;
+  - dispatch gates record whether execution would be allowed;
+  - dispatch replays record fixture-ingestion outcomes and counts.
+- Persist fixture path and fixture hash plus event counts, session/run refs, and `raw_content_policy=content_hashed_not_rendered`. Do not persist raw fixture message/tool text or raw dispatch prompt text.
+- Expose replay rows through `ProjectDashboard.adapter_dispatch_replays` and CLI dashboard rendering so future operator surfaces can inspect fixture replay history without parsing session events.
+
+Verification:
+
+- `cargo test -p capo-state adapter_dispatch_replay -- --nocapture`: passed.
+- `cargo test -p capo-query adapter_dispatch -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Follow-up:
+
+- A future real-provider execution result should use a sibling projection with runtime process refs and adapter stream cursor refs rather than overloading fixture replay rows.
+
 ## F3/DS1 - Query Surface Extraction
 
 Status: completed on 2026-05-25.

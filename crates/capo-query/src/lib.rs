@@ -6,10 +6,11 @@
 
 use capo_core::{ProjectId, SessionId};
 use capo_state::{
-    AdapterDispatchGateProjection, AdapterDispatchPlanProjection, AdapterReadinessProjection,
-    AdapterSmokeReportProjection, AgentProjection, ConnectivityExposureProjection, EventRecord,
-    EvidenceProjection, MemoryPacketProjection, RunProjection, SessionProjection, SqliteStateStore,
-    StateResult, ToolCallProjection, WorkpadTaskProjection,
+    AdapterDispatchGateProjection, AdapterDispatchPlanProjection, AdapterDispatchReplayProjection,
+    AdapterReadinessProjection, AdapterSmokeReportProjection, AgentProjection,
+    ConnectivityExposureProjection, EventRecord, EvidenceProjection, MemoryPacketProjection,
+    RunProjection, SessionProjection, SqliteStateStore, StateResult, ToolCallProjection,
+    WorkpadTaskProjection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +22,7 @@ pub struct ProjectDashboard {
     pub adapter_smoke_reports: Vec<AdapterSmokeReportProjection>,
     pub adapter_dispatch_plans: Vec<AdapterDispatchPlanProjection>,
     pub adapter_dispatch_gates: Vec<AdapterDispatchGateProjection>,
+    pub adapter_dispatch_replays: Vec<AdapterDispatchReplayProjection>,
     pub adapter_dogfood_gate: AdapterDogfoodGate,
     pub workpad_tasks: Vec<WorkpadTaskProjection>,
 }
@@ -134,6 +136,7 @@ pub fn project_dashboard(
     let adapter_smoke_reports = state.adapter_smoke_reports(&query.project_id)?;
     let adapter_dispatch_plans = state.adapter_dispatch_plans(&query.project_id)?;
     let adapter_dispatch_gates = state.adapter_dispatch_gates(&query.project_id)?;
+    let adapter_dispatch_replays = state.adapter_dispatch_replays(&query.project_id)?;
     let adapter_dogfood_gate = adapter_dogfood_gate(&adapter_smoke_reports);
     let workpad_tasks = state
         .workpad_tasks(&query.project_id)?
@@ -163,6 +166,7 @@ pub fn project_dashboard(
         adapter_smoke_reports,
         adapter_dispatch_plans,
         adapter_dispatch_gates,
+        adapter_dispatch_replays,
         adapter_dogfood_gate,
         workpad_tasks,
     })
@@ -459,6 +463,7 @@ mod tests {
         append_agent(&state, &project_id, "agent-idle", None);
         append_adapter_dispatch_plan(&state, &project_id);
         append_adapter_dispatch_gate(&state, &project_id);
+        append_adapter_dispatch_replay(&state, &project_id);
 
         let dashboard =
             project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
@@ -478,6 +483,14 @@ mod tests {
         assert_eq!(gate.status, "blocked");
         assert!(!gate.provider_cli_execution_allowed);
         assert!(!gate.provider_cli_executed);
+        assert_eq!(dashboard.adapter_dispatch_replays.len(), 1);
+        let replay = &dashboard.adapter_dispatch_replays[0];
+        assert_eq!(replay.dispatch_plan_id, "adapter-dispatch-plan-codex");
+        assert_eq!(replay.dispatch_gate_id, "adapter-dispatch-gate-codex");
+        assert_eq!(replay.adapter_kind, "codex_exec");
+        assert_eq!(replay.input_event_count, 4);
+        assert!(!replay.provider_cli_executed);
+        assert_eq!(replay.raw_content_policy, "content_hashed_not_rendered");
     }
 
     #[test]
@@ -979,6 +992,49 @@ mod tests {
                 )],
             )
             .expect("append adapter dispatch gate");
+    }
+
+    fn append_adapter_dispatch_replay(state: &SqliteStateStore, project_id: &ProjectId) {
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-adapter-dispatch-replay-codex".to_string(),
+                    kind: EventKind::AdapterDispatchReplayed,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: Some(AgentId::new("agent-codex")),
+                    session_id: Some(SessionId::new("session-codex")),
+                    run_id: Some(RunId::new("run-codex")),
+                    turn_id: None,
+                    item_id: Some("adapter-dispatch-replay-codex".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::AdapterDispatchReplay(
+                    AdapterDispatchReplayProjection {
+                        dispatch_replay_id: "adapter-dispatch-replay-codex".to_string(),
+                        project_id: project_id.clone(),
+                        dispatch_plan_id: "adapter-dispatch-plan-codex".to_string(),
+                        dispatch_gate_id: "adapter-dispatch-gate-codex".to_string(),
+                        adapter_kind: "codex_exec".to_string(),
+                        session_id: SessionId::new("session-codex"),
+                        run_id: RunId::new("run-codex"),
+                        fixture_path: "fixtures/codex-exec.jsonl".to_string(),
+                        fixture_hash: "fixture-hash".to_string(),
+                        input_event_count: 4,
+                        appended_event_count: 4,
+                        tool_event_count: 2,
+                        summary_event_count: 1,
+                        completed_turn_count: 1,
+                        provider_cli_executed: false,
+                        raw_content_policy: "content_hashed_not_rendered".to_string(),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append adapter dispatch replay");
     }
 
     fn append_workpad_task(

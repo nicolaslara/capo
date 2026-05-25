@@ -15,12 +15,13 @@ use capo_core::{
 use capo_eval::TaskOutcomeReport;
 use capo_query::{AdapterDogfoodGate, ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 use capo_state::{
-    AdapterDispatchGateProjection, AdapterDispatchPlanProjection, AdapterReadinessProjection,
-    AdapterSmokeReportProjection, ArtifactRecord, CapabilityGrantProjection, EventKind,
-    EventRecord, EvidenceProjection, MemoryPacketProjection, MemoryRecordProjection,
-    MemorySourceProjection, NewEvent, PermissionApprovalProjection, ProjectionRecord,
-    RedactionState, ReviewFindingProjection, RunProjection, SessionProjection, SqliteStateStore,
-    ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
+    AdapterDispatchGateProjection, AdapterDispatchPlanProjection, AdapterDispatchReplayProjection,
+    AdapterReadinessProjection, AdapterSmokeReportProjection, ArtifactRecord,
+    CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection, MemoryPacketProjection,
+    MemoryRecordProjection, MemorySourceProjection, NewEvent, PermissionApprovalProjection,
+    ProjectionRecord, RedactionState, ReviewFindingProjection, RunProjection, SessionProjection,
+    SqliteStateStore, ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection,
+    WorkpadTaskProjection,
 };
 use capo_voice::{
     MemoryIngestionPolicy, TranscriptRetentionPolicy, VOICE_TRANSCRIPT_RETENTION_DEFAULT,
@@ -411,20 +412,82 @@ fn replay_adapter_dispatch_fixture(parsed: &ParsedArgs, args: &[String]) -> Resu
     let report = controller
         .apply_normalized_adapter_events(&refs, &adapter_events)
         .map_err(debug_error)?;
+    let replay = AdapterDispatchReplayProjection {
+        dispatch_replay_id: format!(
+            "adapter-dispatch-replay-{}",
+            stable_cli_hash(&format!(
+                "{}:{}:{}",
+                plan.dispatch_plan_id,
+                ready_gate.dispatch_gate_id,
+                stable_cli_hash(&fixture)
+            ))
+        ),
+        project_id: project_id(),
+        dispatch_plan_id: plan.dispatch_plan_id.clone(),
+        dispatch_gate_id: ready_gate.dispatch_gate_id.clone(),
+        adapter_kind: plan.adapter_kind.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        fixture_path: fixture_path.display().to_string(),
+        fixture_hash: stable_cli_hash(&fixture),
+        input_event_count: report.input_event_count as i64,
+        appended_event_count: report.appended_event_count as i64,
+        tool_event_count: report.tool_event_count as i64,
+        summary_event_count: report.summary_event_count as i64,
+        completed_turn_count: report.completed_turn_count as i64,
+        provider_cli_executed: false,
+        raw_content_policy: "content_hashed_not_rendered".to_string(),
+        updated_sequence: 0,
+    };
+    let replay_sequence = state
+        .append_event(
+            NewEvent {
+                event_id: format!(
+                    "event-adapter-dispatch-replay-{}",
+                    stable_cli_hash(&replay.dispatch_replay_id)
+                ),
+                kind: EventKind::AdapterDispatchReplayed,
+                actor: "local-cli".to_string(),
+                project_id: Some(replay.project_id.clone()),
+                task_id: Some(refs.task_id.clone()),
+                agent_id: Some(refs.agent_id.clone()),
+                session_id: Some(refs.session_id.clone()),
+                run_id: Some(refs.run_id.clone()),
+                turn_id: None,
+                item_id: Some(replay.dispatch_replay_id.clone()),
+                payload_json: format!(
+                    "{{\"dispatch_plan_id\":\"{}\",\"dispatch_gate_id\":\"{}\",\"fixture_hash\":\"{}\",\"provider_cli_executed\":false,\"raw_content_policy\":\"content_hashed_not_rendered\"}}",
+                    escape_json(&replay.dispatch_plan_id),
+                    escape_json(&replay.dispatch_gate_id),
+                    replay.fixture_hash
+                ),
+                idempotency_key: Some(format!(
+                    "adapter-dispatch-replay:{}:{}:{}",
+                    replay.project_id, replay.dispatch_plan_id, replay.fixture_hash
+                )),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::AdapterDispatchReplay(replay.clone())],
+        )
+        .map_err(debug_error)?;
     let mut output = format!(
-        "adapter_dispatch_replayed=true\ndispatch_plan={}\ndispatch_gate={}\nadapter={}\nfixture={}\nagent={}\nsession_id={}\nrun_id={}\nprovider_cli_executed=false\ninput_events={}\nappended_events={}\ntool_events={}\nsummary_events={}\ncompleted_turns={}\n",
+        "adapter_dispatch_replayed=true\ndispatch_replay={}\ndispatch_plan={}\ndispatch_gate={}\nadapter={}\nfixture={}\nfixture_hash={}\nagent={}\nsession_id={}\nrun_id={}\nprovider_cli_executed=false\nraw_content_policy={}\ninput_events={}\nappended_events={}\ntool_events={}\nsummary_events={}\ncompleted_turns={}\nrecorded_sequence={}\n",
+        replay.dispatch_replay_id,
         plan.dispatch_plan_id,
         ready_gate.dispatch_gate_id,
         plan.adapter_kind,
         fixture_path.display(),
+        replay.fixture_hash,
         plan.agent_name,
         refs.session_id,
         refs.run_id,
+        replay.raw_content_policy,
         report.input_event_count,
         report.appended_event_count,
         report.tool_event_count,
         report.summary_event_count,
-        report.completed_turn_count
+        report.completed_turn_count,
+        replay_sequence
     );
     if let Some(out) = optional_arg(args, "--out") {
         output.push_str(&export_evidence(
@@ -1372,6 +1435,29 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
             gate.provider_cli_executed,
             gate.runtime_prompt_policy,
             gate.reason_codes
+        ));
+    }
+    output.push_str(&format!(
+        "adapter_dispatch_replays={}\n",
+        dashboard.adapter_dispatch_replays.len()
+    ));
+    for replay in &dashboard.adapter_dispatch_replays {
+        output.push_str(&format!(
+            "adapter_dispatch_replay={} dispatch_plan={} dispatch_gate={} adapter={} session={} run={} fixture_hash={} input_events={} appended_events={} tool_events={} summary_events={} completed_turns={} provider_cli_executed={} raw_content_policy={}\n",
+            replay.dispatch_replay_id,
+            replay.dispatch_plan_id,
+            replay.dispatch_gate_id,
+            replay.adapter_kind,
+            replay.session_id,
+            replay.run_id,
+            replay.fixture_hash,
+            replay.input_event_count,
+            replay.appended_event_count,
+            replay.tool_event_count,
+            replay.summary_event_count,
+            replay.completed_turn_count,
+            replay.provider_cli_executed,
+            replay.raw_content_policy
         ));
     }
     output.push_str(&render_adapter_dogfood_gate(
@@ -4162,6 +4248,7 @@ mod tests {
         .expect("replay dispatch fixture");
         assert!(replay.contains("adapter_dispatch_replayed=true"));
         assert!(replay.contains("adapter=codex_exec"));
+        assert!(replay.contains("raw_content_policy=content_hashed_not_rendered"));
         assert!(replay.contains("provider_cli_executed=false"));
         assert!(replay.contains("tool_events=2"));
         assert!(replay.contains("summary_events=1"));
@@ -4170,6 +4257,27 @@ mod tests {
         assert!(!replay.contains("Do not render this dispatch prompt"));
         assert!(!replay.contains("Codex fixture response."));
         assert!(!replay.contains("cargo test"));
+        let replays = SqliteStateStore::open(&state_root)
+            .expect("state")
+            .adapter_dispatch_replays(&project_id())
+            .expect("dispatch replays");
+        assert_eq!(replays.len(), 1);
+        assert_eq!(replays[0].dispatch_plan_id, gates[0].dispatch_plan_id);
+        assert_eq!(replays[0].dispatch_gate_id, gates[0].dispatch_gate_id);
+        assert_eq!(replays[0].adapter_kind, "codex_exec");
+        assert_eq!(replays[0].tool_event_count, 2);
+        assert!(!replays[0].provider_cli_executed);
+        assert_eq!(replays[0].raw_content_policy, "content_hashed_not_rendered");
+        let replay_dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard after replay");
+        assert!(replay_dashboard.contains("adapter_dispatch_replays=1"));
+        assert!(replay_dashboard.contains("raw_content_policy=content_hashed_not_rendered"));
+        assert!(!replay_dashboard.contains("Codex fixture response."));
+        assert!(!replay_dashboard.contains("cargo test"));
         assert_text_absent_in_tree(&state_root, "Do not render this dispatch prompt");
         assert_text_absent_in_tree(&state_root, "Codex fixture response.");
         assert_text_absent_in_tree(&state_root, "cargo test");

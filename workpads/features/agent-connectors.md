@@ -384,3 +384,29 @@ Decision:
 - Add fixture-only dispatch replay as a deterministic pre-real-execution scaffold. It proves the shape from planned dispatch -> gate -> adapter events -> controller/state/evidence while preserving the opt-in boundary for real provider CLIs.
 - Require a recorded ready dispatch gate before replay so this path cannot bypass the same readiness contract that future provider execution will use.
 - Replay uses fixture parsing and fake controller session plumbing only. It records `provider_cli_executed=false` and does not create the planned runtime workspace or artifact root.
+
+### AC16 - Dispatch Replay Read Model
+
+Status: completed
+
+Acceptance:
+
+- Persist dispatch fixture replay outcomes as Capo-owned read models.
+- Rebuild replay rows from projection records after restart.
+- Expose replay rows through the shared dashboard/query surface.
+- Track counts, fixture hash, session/run refs, and raw-content policy without storing raw prompt or raw provider fixture text.
+
+Evidence:
+
+- `AdapterDispatchReplayProjection`, `EventKind::AdapterDispatchReplayed`, SQLite table, rebuild codec, and read query in `../../crates/capo-state/src/lib.rs`.
+- `ProjectDashboard.adapter_dispatch_replays` in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo adapter replay-dispatch ...` records replay rows and dashboard rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-state adapter_dispatch_replay -- --nocapture`: passed.
+- `cargo test -p capo-query adapter_dispatch -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Treat dispatch replay as a separate audit/result fact from dispatch plans and gate checks. Plans record intent, gates record execution permission, and replays record deterministic adapter-event ingestion results.
+- Store fixture hash, fixture path, event counts, session/run refs, and `raw_content_policy=content_hashed_not_rendered`; keep raw provider text and raw dispatch prompts out of read models and dashboard output.
+- Replays remain non-provider execution evidence: `provider_cli_executed=false`, no vendor CLI launch, and no planned runtime workspace/artifact root creation.

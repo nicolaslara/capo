@@ -931,6 +931,46 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn adapter_dispatch_replays(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<AdapterDispatchReplayProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT dispatch_replay_id, project_id, dispatch_plan_id, dispatch_gate_id,
+                    adapter_kind, session_id, run_id, fixture_path, fixture_hash,
+                    input_event_count, appended_event_count, tool_event_count,
+                    summary_event_count, completed_turn_count, provider_cli_executed,
+                    raw_content_policy, updated_sequence
+             FROM adapter_dispatch_replays
+             WHERE project_id = ?1
+             ORDER BY updated_sequence ASC, dispatch_replay_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(AdapterDispatchReplayProjection {
+                dispatch_replay_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                dispatch_plan_id: row.get(2)?,
+                dispatch_gate_id: row.get(3)?,
+                adapter_kind: row.get(4)?,
+                session_id: SessionId::new(row.get::<_, String>(5)?),
+                run_id: RunId::new(row.get::<_, String>(6)?),
+                fixture_path: row.get(7)?,
+                fixture_hash: row.get(8)?,
+                input_event_count: row.get(9)?,
+                appended_event_count: row.get(10)?,
+                tool_event_count: row.get(11)?,
+                summary_event_count: row.get(12)?,
+                completed_turn_count: row.get(13)?,
+                provider_cli_executed: row.get::<_, i64>(14)? != 0,
+                raw_content_policy: row.get(15)?,
+                updated_sequence: row.get(16)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn evidence_for_session(
         &self,
         session_id: &SessionId,
@@ -1409,6 +1449,7 @@ pub enum EventKind {
     AdapterSmokeRecorded,
     AdapterDispatchPlanned,
     AdapterDispatchGateChecked,
+    AdapterDispatchReplayed,
     ToolCallRequested,
     ToolInvocationStarted,
     ToolOutputArtifactRecorded,
@@ -1454,6 +1495,7 @@ impl EventKind {
             Self::AdapterSmokeRecorded => "adapter.smoke_recorded",
             Self::AdapterDispatchPlanned => "adapter.dispatch_planned",
             Self::AdapterDispatchGateChecked => "adapter.dispatch_gate_checked",
+            Self::AdapterDispatchReplayed => "adapter.dispatch_replayed",
             Self::ToolCallRequested => "tool.call_requested",
             Self::ToolInvocationStarted => "tool.invocation_started",
             Self::ToolOutputArtifactRecorded => "tool.output_artifact_recorded",
@@ -1551,6 +1593,7 @@ pub enum ProjectionRecord {
     AdapterSmokeReport(AdapterSmokeReportProjection),
     AdapterDispatchPlan(AdapterDispatchPlanProjection),
     AdapterDispatchGate(AdapterDispatchGateProjection),
+    AdapterDispatchReplay(AdapterDispatchReplayProjection),
     ToolCall(ToolCallProjection),
     MemoryPacketRef(MemoryPacketProjection),
     MemoryRecord(Box<MemoryRecordProjection>),
@@ -1734,6 +1777,27 @@ pub struct AdapterDispatchGateProjection {
     pub reason_codes: String,
     pub provider_cli_executed: bool,
     pub runtime_prompt_policy: String,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterDispatchReplayProjection {
+    pub dispatch_replay_id: String,
+    pub project_id: ProjectId,
+    pub dispatch_plan_id: String,
+    pub dispatch_gate_id: String,
+    pub adapter_kind: String,
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    pub fixture_path: String,
+    pub fixture_hash: String,
+    pub input_event_count: i64,
+    pub appended_event_count: i64,
+    pub tool_event_count: i64,
+    pub summary_event_count: i64,
+    pub completed_turn_count: i64,
+    pub provider_cli_executed: bool,
+    pub raw_content_policy: String,
     pub updated_sequence: i64,
 }
 
@@ -2151,6 +2215,25 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             runtime_prompt_policy TEXT NOT NULL,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS adapter_dispatch_replays (
+            dispatch_replay_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            dispatch_plan_id TEXT NOT NULL,
+            dispatch_gate_id TEXT NOT NULL,
+            adapter_kind TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            fixture_path TEXT NOT NULL,
+            fixture_hash TEXT NOT NULL,
+            input_event_count INTEGER NOT NULL,
+            appended_event_count INTEGER NOT NULL,
+            tool_event_count INTEGER NOT NULL,
+            summary_event_count INTEGER NOT NULL,
+            completed_turn_count INTEGER NOT NULL,
+            provider_cli_executed INTEGER NOT NULL,
+            raw_content_policy TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS tool_calls (
             tool_call_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
@@ -2344,6 +2427,7 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "adapter_smoke_reports",
         "adapter_dispatch_plans",
         "adapter_dispatch_gates",
+        "adapter_dispatch_replays",
         "tool_calls",
         "memory_packet_refs",
         "memory_records",
@@ -2778,6 +2862,51 @@ fn apply_projection_record(
                 gate.reason_codes,
                 if gate.provider_cli_executed { 1 } else { 0 },
                 gate.runtime_prompt_policy,
+                sequence,
+            ],
+        )?,
+        ProjectionRecord::AdapterDispatchReplay(replay) => transaction.execute(
+            "INSERT INTO adapter_dispatch_replays(
+                dispatch_replay_id, project_id, dispatch_plan_id, dispatch_gate_id,
+                adapter_kind, session_id, run_id, fixture_path, fixture_hash,
+                input_event_count, appended_event_count, tool_event_count,
+                summary_event_count, completed_turn_count, provider_cli_executed,
+                raw_content_policy, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+             ON CONFLICT(dispatch_replay_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                dispatch_plan_id = excluded.dispatch_plan_id,
+                dispatch_gate_id = excluded.dispatch_gate_id,
+                adapter_kind = excluded.adapter_kind,
+                session_id = excluded.session_id,
+                run_id = excluded.run_id,
+                fixture_path = excluded.fixture_path,
+                fixture_hash = excluded.fixture_hash,
+                input_event_count = excluded.input_event_count,
+                appended_event_count = excluded.appended_event_count,
+                tool_event_count = excluded.tool_event_count,
+                summary_event_count = excluded.summary_event_count,
+                completed_turn_count = excluded.completed_turn_count,
+                provider_cli_executed = excluded.provider_cli_executed,
+                raw_content_policy = excluded.raw_content_policy,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                replay.dispatch_replay_id,
+                replay.project_id.as_str(),
+                replay.dispatch_plan_id,
+                replay.dispatch_gate_id,
+                replay.adapter_kind,
+                replay.session_id.as_str(),
+                replay.run_id.as_str(),
+                replay.fixture_path,
+                replay.fixture_hash,
+                replay.input_event_count,
+                replay.appended_event_count,
+                replay.tool_event_count,
+                replay.summary_event_count,
+                replay.completed_turn_count,
+                if replay.provider_cli_executed { 1 } else { 0 },
+                replay.raw_content_policy,
                 sequence,
             ],
         )?,
@@ -3305,6 +3434,28 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
             h: Some(gate.runtime_prompt_policy.clone()),
             payload_json: json!({
                 "reason_codes": gate.reason_codes,
+            })
+            .to_string(),
+        },
+        ProjectionRecord::AdapterDispatchReplay(replay) => ProjectionRecordRow {
+            kind: "adapter_dispatch_replay",
+            record_id: replay.dispatch_replay_id.clone(),
+            a: Some(replay.project_id.to_string()),
+            b: Some(replay.dispatch_plan_id.clone()),
+            c: Some(replay.dispatch_gate_id.clone()),
+            d: Some(replay.adapter_kind.clone()),
+            e: Some(replay.session_id.to_string()),
+            f: Some(replay.run_id.to_string()),
+            g: Some(replay.provider_cli_executed.to_string()),
+            h: Some(replay.raw_content_policy.clone()),
+            payload_json: json!({
+                "fixture_path": replay.fixture_path,
+                "fixture_hash": replay.fixture_hash,
+                "input_event_count": replay.input_event_count,
+                "appended_event_count": replay.appended_event_count,
+                "tool_event_count": replay.tool_event_count,
+                "summary_event_count": replay.summary_event_count,
+                "completed_turn_count": replay.completed_turn_count,
             })
             .to_string(),
         },
@@ -4008,6 +4159,111 @@ fn projection_record_from_row(
                         "adapter_dispatch_gate",
                         h,
                         "runtime_prompt_policy",
+                    )?,
+                    updated_sequence: 0,
+                },
+            ))
+        }
+        "adapter_dispatch_replay" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::AdapterDispatchReplay(
+                AdapterDispatchReplayProjection {
+                    dispatch_replay_id: record_id,
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "adapter_dispatch_replay",
+                        a,
+                        "project_id",
+                    )?),
+                    dispatch_plan_id: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_replay",
+                        b,
+                        "dispatch_plan_id",
+                    )?,
+                    dispatch_gate_id: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_replay",
+                        c,
+                        "dispatch_gate_id",
+                    )?,
+                    adapter_kind: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_replay",
+                        d,
+                        "adapter_kind",
+                    )?,
+                    session_id: SessionId::new(required_field(
+                        &projection_kind,
+                        "adapter_dispatch_replay",
+                        e,
+                        "session_id",
+                    )?),
+                    run_id: RunId::new(required_field(
+                        &projection_kind,
+                        "adapter_dispatch_replay",
+                        f,
+                        "run_id",
+                    )?),
+                    fixture_path: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_replay",
+                        &payload,
+                        "fixture_path",
+                    )?,
+                    fixture_hash: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_replay",
+                        &payload,
+                        "fixture_hash",
+                    )?,
+                    input_event_count: required_payload_i64(
+                        &projection_kind,
+                        "adapter_dispatch_replay",
+                        &payload,
+                        "input_event_count",
+                    )?,
+                    appended_event_count: required_payload_i64(
+                        &projection_kind,
+                        "adapter_dispatch_replay",
+                        &payload,
+                        "appended_event_count",
+                    )?,
+                    tool_event_count: required_payload_i64(
+                        &projection_kind,
+                        "adapter_dispatch_replay",
+                        &payload,
+                        "tool_event_count",
+                    )?,
+                    summary_event_count: required_payload_i64(
+                        &projection_kind,
+                        "adapter_dispatch_replay",
+                        &payload,
+                        "summary_event_count",
+                    )?,
+                    completed_turn_count: required_payload_i64(
+                        &projection_kind,
+                        "adapter_dispatch_replay",
+                        &payload,
+                        "completed_turn_count",
+                    )?,
+                    provider_cli_executed: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_replay",
+                        g,
+                        "provider_cli_executed",
+                    )?
+                    .parse::<bool>()
+                    .map_err(|error| {
+                        ProjectionDecodeError(format!(
+                            "invalid bool for adapter_dispatch_replay provider_cli_executed: {error}"
+                        ))
+                    })?,
+                    raw_content_policy: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_replay",
+                        h,
+                        "raw_content_policy",
                     )?,
                     updated_sequence: 0,
                 },
@@ -5803,6 +6059,68 @@ mod tests {
         assert!(!gates[0].provider_cli_execution_allowed);
         assert!(!gates[0].provider_cli_executed);
         assert_eq!(gates[0].runtime_prompt_policy, "not_rendered");
+    }
+
+    #[test]
+    fn adapter_dispatch_replay_is_persisted_and_rebuilt() {
+        let store = temp_store("adapter-dispatch-replay-rebuild");
+        let project_id = ProjectId::new("project-capo");
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-adapter-dispatch-replay".to_string(),
+                    kind: EventKind::AdapterDispatchReplayed,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: Some(TaskId::new("task-codex")),
+                    agent_id: Some(AgentId::new("agent-codex")),
+                    session_id: Some(SessionId::new("session-codex")),
+                    run_id: Some(RunId::new("run-codex")),
+                    turn_id: None,
+                    item_id: Some("adapter-dispatch-replay-codex".to_string()),
+                    payload_json:
+                        "{\"provider_cli_executed\":false,\"raw_content_policy\":\"content_hashed_not_rendered\"}"
+                            .to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::AdapterDispatchReplay(
+                    AdapterDispatchReplayProjection {
+                        dispatch_replay_id: "adapter-dispatch-replay-codex".to_string(),
+                        project_id: project_id.clone(),
+                        dispatch_plan_id: "adapter-dispatch-plan-codex".to_string(),
+                        dispatch_gate_id: "adapter-dispatch-gate-codex".to_string(),
+                        adapter_kind: "codex_exec".to_string(),
+                        session_id: SessionId::new("session-codex"),
+                        run_id: RunId::new("run-codex"),
+                        fixture_path: "fixtures/codex-exec.jsonl".to_string(),
+                        fixture_hash: "fixture-hash".to_string(),
+                        input_event_count: 4,
+                        appended_event_count: 4,
+                        tool_event_count: 2,
+                        summary_event_count: 1,
+                        completed_turn_count: 1,
+                        provider_cli_executed: false,
+                        raw_content_policy: "content_hashed_not_rendered".to_string(),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append adapter dispatch replay");
+
+        store.rebuild_projections().expect("rebuild projections");
+        let replays = store
+            .adapter_dispatch_replays(&project_id)
+            .expect("adapter dispatch replays");
+        assert_eq!(replays.len(), 1);
+        assert_eq!(replays[0].dispatch_plan_id, "adapter-dispatch-plan-codex");
+        assert_eq!(replays[0].dispatch_gate_id, "adapter-dispatch-gate-codex");
+        assert_eq!(replays[0].adapter_kind, "codex_exec");
+        assert_eq!(replays[0].fixture_hash, "fixture-hash");
+        assert_eq!(replays[0].tool_event_count, 2);
+        assert!(!replays[0].provider_cli_executed);
+        assert_eq!(replays[0].raw_content_policy, "content_hashed_not_rendered");
     }
 
     #[test]
