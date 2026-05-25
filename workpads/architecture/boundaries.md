@@ -4,229 +4,769 @@
 
 Define Capo's system vocabulary and adapter boundaries so implementation can stay modular as runtimes, tunnels, providers, input surfaces, state stores, and memory systems change.
 
-This file defines the target architecture vocabulary. It is intentionally implementation-neutral until the architecture gate passes.
+This file is the architecture contract surface for A1. It is concrete enough to scaffold code, but still allows implementation details to evolve during prototype work.
+
+## Design Rules
+
+- Capo is the controller. It is not a modeful coding agent.
+- User-facing modes are not a Capo product concept. Adapter/subagent modes may be recorded as metadata.
+- Every external system is behind an adapter boundary.
+- Capo-owned IDs are authoritative. External IDs are adapter references.
+- Capo's event log is authoritative. Raw external streams are inputs.
+- UI, voice, and mobile surfaces submit commands and render read models; they do not own orchestration state.
+- Tools exposed through Capo should be instrumented wrappers when feasible.
+- The local prototype may allow all actions, but permission decisions still flow through a policy boundary and produce audit events.
+- Prefer static dispatch for the initial Rust scaffold where the variant set is known: `enum AgentAdapter`, `enum RuntimeRunner`, `enum ConnectivityTunnel`, `enum ProviderConnector`, `enum PermissionPolicy`, `enum ToolExposure`, `enum StateStore`, `enum MemoryBackend`, and `enum EvaluationLayer`. Use trait objects only when plugin loading or third-party extension genuinely needs dynamic dispatch.
+
+## Naming Vocabulary
+
+| Term | Meaning |
+| --- | --- |
+| `Project` | A repo/workspace Capo manages, including workpads and settings. |
+| `Task` | A user-visible unit of work, usually backed by a workpad item. |
+| `Agent` | A configured worker identity Capo can start, address, and inspect. |
+| `Adapter` | Boundary that normalizes a concrete agent/protocol/provider surface into Capo events and commands. |
+| `Runtime` | Environment/process runner that executes an adapter or agent process. |
+| `Session` | A durable Capo conversation/execution context with one agent. |
+| `Run` | One execution attempt within a session, including process/runtime lifecycle. |
+| `Turn` | One user/controller prompt or steering command and the resulting agent activity. |
+| `Item` | A streamable unit inside a turn: message, plan, tool call, command output, summary, diff, etc. |
+| `ToolCall` | An invocation of a Capo-exposed, adapter-native, or runtime tool. |
+| `Artifact` | A file/log/report/diff/transcript generated or referenced by a run. |
+| `Checkpoint` | A restart/recovery point: event sequence, adapter checkpoint, git/worktree point, or read-model snapshot. |
+| `CapabilityProfile` | The set of allowed scopes for a session/run: filesystem, shell, git, network, tools, secrets, voice, browser. |
+| `CommandEnvelope` | Normalized command submitted by CLI/dashboard/mobile/voice/API into the controller. |
 
 ## Boundary Map
 
 ```text
-Human input surfaces
-  -> Capo controller
-  -> Agent protocol adapter
-  -> Agent runtime
-  -> Model/provider/subscription connector
-
-Capo controller
-  -> State store
-  -> Memory layer
-  -> Evaluation/review layer
-  -> Connectivity/tunnel manager
+InputSurface
+  -> CapoController
+    -> StateStore
+    -> AgentAdapter
+      -> RuntimeRunner
+      -> ProviderConnector
+      -> ToolExposure
+    -> PermissionPolicy
+    -> MemoryLayer
+    -> EvaluationLayer
+    -> ConnectivityTunnel
 ```
 
-## Core Principle
+## Cross-Cutting Event Contract
 
-Each boundary should be replaceable without forcing unrelated parts to change. A Tailscale tunnel should not know how memories are stored. A Claude subscription connector should not own task state. A mobile input surface should not know where an agent executes.
+All boundaries communicate durable facts through Capo events.
 
-## Boundaries
+Minimum event envelope:
 
-### Input Surface
+```text
+CapoEvent {
+  event_id,
+  sequence,
+  occurred_at,
+  actor,
+  project_id,
+  task_id?,
+  agent_id?,
+  session_id?,
+  run_id?,
+  turn_id?,
+  item_id?,
+  kind,
+  payload,
+  idempotency_key?,
+  external_ref?,
+  redaction_state,
+}
+```
+
+Rules:
+
+- `event_id` and `sequence` are Capo-owned.
+- `external_ref` stores adapter IDs such as ACP session IDs, Codex item IDs, Claude message IDs, process IDs, and provider request IDs.
+- `idempotency_key` is required for replay-prone inputs when the adapter can derive one.
+- Raw adapter events may be persisted as artifacts or side records, but normalized Capo events drive read models.
+- Read models are rebuildable from events plus referenced artifacts.
+
+## Input Surface
 
 Captures user intent and renders Capo state.
 
 Examples: CLI, TUI, web dashboard, mobile app, voice conversation with Capo.
 
-Initial contract ideas:
+### Contract
 
-- Submit command/message
-- Subscribe to session/task updates
-- Query agent/task status and summaries
-- Approve or deny capability requests
-- Interrupt/pause/resume an agent
+Inputs submit:
 
-Voice-specific note:
+```text
+CommandEnvelope {
+  command_id,
+  origin,
+  actor_id,
+  project_id,
+  target,
+  intent,
+  text?,
+  structured_args,
+  attachments,
+  risk,
+  idempotency_key,
+}
+```
 
-- Voice talks to Capo, not directly to every subagent. Capo answers from controller read models and translates steering decisions into explicit command envelopes.
+Inputs subscribe to:
 
-### Capo Controller
+- `ProjectReadModel`
+- `AgentReadModel`
+- `SessionReadModel`
+- `TaskReadModel`
+- `PermissionQueue`
+- `EventStream`
+
+### Responsibilities
+
+- Submit commands and steering messages.
+- Query agent/task/session status and summaries.
+- Render pending permissions and confirmations.
+- Interrupt, pause, resume, or stop through controller commands.
+- For voice: maintain conversational context and lower decisions into command envelopes.
+
+### Non-Responsibilities
+
+- Owning session truth.
+- Holding runtime process handles.
+- Mutating state without the controller.
+- Bypassing policy for convenience.
+
+### Failure Modes
+
+- Duplicate command submission after reconnect.
+- Stale UI approving an old permission request.
+- Voice ambiguity selecting the wrong agent/task.
+- Remote/mobile session loss during a privileged confirmation.
+
+### Test Strategy
+
+- Command envelope idempotency tests.
+- Read-model subscription replay tests.
+- Stale permission approval rejection tests.
+- Voice parser fixture tests for status, summary, and steering intents.
+
+## Capo Controller
 
 Owns orchestration policy and authoritative state transitions.
 
-Responsibilities:
+### Contract
 
-- Task/session creation
-- Agent lifecycle orchestration
-- Capability assignment
-- Event ingestion
-- Persistence coordination
-- Review/evaluation hooks
-- Recovery after restart
+Primary operations:
 
-### Agent Protocol Adapter
+```text
+handle_command(CommandEnvelope) -> CommandResult
+start_session(ProjectId, AgentId, CapabilityProfileId) -> SessionId
+send_turn(SessionId, PromptContent) -> TurnId
+interrupt(SessionId | RunId | TurnId) -> InterruptResult
+apply_adapter_event(AdapterEvent) -> Vec<CapoEvent>
+decide_permission(PermissionRequest) -> PermissionDecision
+```
 
-Normalizes communication with agents.
+### Responsibilities
 
-Examples: ACP adapter, Claude Code adapter, Codex adapter, CLI adapter, browser/subscription adapter, custom JSON-RPC adapter.
+- Resolve targets: project, task, agent, session, run, turn.
+- Validate command intent, actor, state, and policy.
+- Create sessions, runs, turns, permission requests, and checkpoints.
+- Dispatch to adapter/runtime/tool/memory/evaluation boundaries.
+- Append events and update read models through the state store.
+- Recover from restart by reconciling persisted state with runtime status.
 
-Responsibilities:
+### Non-Responsibilities
 
-- Session start/stop
-- Message exchange
-- Tool/capability negotiation
-- Progress/event stream normalization
-- Error mapping
-- Stream/replay deduplication between external protocol events and Capo's event log
+- Provider-specific auth flows.
+- Terminal/PTY implementation details.
+- Tunnel connection mechanics.
+- Long-term memory ranking internals.
+- UI rendering.
 
-Initial target adapters:
+### Failure Modes
 
-- Claude Code
-- Codex
-- ACP-compatible agents where they help Capo interoperate without replacing Capo's controller model
+- Partial side effect before event append.
+- Conflicting commands against the same session.
+- Adapter event arrives after session cancellation.
+- Restart during pending permission or running process.
+- Ambiguous target selection from voice or dashboard.
 
-Deferred:
+### Test Strategy
 
-- Capo exposing itself as an ACP agent/editor backend. Capo should remain the user entrypoint for the prototype.
+- Controller command state-machine tests.
+- Crash/restart recovery tests with fake runtime/adapter.
+- Concurrent command ordering tests.
+- Adapter event normalization golden tests.
 
-### Agent Runtime
+## Agent Adapter
 
-Executes the agent process or environment.
+Normalizes concrete agents/protocols into Capo commands and events.
 
-Examples: local process, tmux/session runner, cloud VM, container, remote dev box.
+Initial variants:
 
-Responsibilities:
+```text
+AgentAdapter =
+  CodexExecAdapter
+  | ClaudeCodeAdapter
+  | AcpAdapter
+  | FakeAdapter
+```
 
-- Start/stop process
-- Attach logs/events
-- Provide workspace
-- Enforce environment/capability constraints where possible
-- Report health
+### Contract
 
-### Connectivity/Tunnel
+```text
+initialize(AdapterConfig) -> AdapterInfo
+start_session(AdapterSessionConfig) -> ExternalSessionRef
+send_turn(ExternalSessionRef, AdapterPrompt) -> AdapterTurnRef
+deliver_tool_result(ExternalSessionRef, AdapterToolResult) -> DeliveryResult
+cancel(ExternalSessionRef, AdapterTurnRef?) -> CancelResult
+stream_events(ExternalSessionRef) -> AdapterEventStream
+shutdown(ExternalSessionRef) -> ShutdownResult
+```
 
-Connects Capo to remote runtimes.
+### Responsibilities
 
-Examples: Tailscale, SSH, reverse tunnel, local-only loopback.
+- Launch or attach to the underlying agent surface through a runtime.
+- Translate Capo prompts/commands into adapter-specific messages.
+- Normalize adapter output into `AdapterEvent`.
+- Surface adapter-requested tool calls as events and accept Capo tool results back when the underlying adapter supports it.
+- Preserve external IDs and raw event metadata for replay/dedupe.
+- Surface adapter capabilities, version, auth mode, and known limitations.
 
-Responsibilities:
+### Non-Responsibilities
 
-- Reachability
-- Authentication/authorization
-- Network policy
-- Connectivity health
+- Owning Capo session IDs.
+- Deciding durable permission policy.
+- Managing tunnels directly.
+- Writing read models.
+- Treating provider-specific state as Capo truth.
 
-Non-responsibilities:
+### Failure Modes
 
-- Agent task state
-- Provider authentication
-- Memory semantics
+- CLI output schema changes.
+- Adapter emits events without stable IDs.
+- Adapter requests a tool call but cannot accept structured tool results.
+- Authentication expires mid-run.
+- Agent process exits while Capo thinks it is active.
+- ACP `session/load` replay duplicates previously seen updates.
 
-### Model/Provider Connector
+### Test Strategy
 
-Supplies model intelligence or connects to a subscription-backed product.
+- Golden transcript tests for Codex JSONL, Claude output, and ACP JSON-RPC.
+- Adapter version/capability snapshot tests.
+- Replay/dedupe fixture tests with repeated raw events.
+- Fake adapter e2e tests for controller/runtime integration.
 
-Examples: API provider, Claude Code, ChatGPT, local vLLM server, Ollama.
+## Runtime Runner
 
-Responsibilities:
+Executes local or remote agent processes.
 
-- Provider-specific auth/session management
-- Provider capability metadata
-- Cost/rate-limit metadata where available
-- Provider error mapping
+Initial variants:
 
-### Capability Layer
+```text
+RuntimeRunner =
+  LocalProcessRunner
+  | FakeRuntimeRunner
+  | ContainerRunner
+  | RemoteProcessRunner
+```
 
-Defines and enforces what an agent may do.
+Only `LocalProcessRunner` and `FakeRuntimeRunner` are prototype requirements.
 
-Examples: shell, git, filesystem, browser, network, MCP tools, voice transcript access.
+### Contract
 
-Initial fields:
+```text
+start_process(RuntimeRequest) -> RuntimeProcessRef
+write_stdin(RuntimeProcessRef, Bytes) -> WriteResult
+interrupt(RuntimeProcessRef) -> InterruptResult
+terminate(RuntimeProcessRef) -> TerminateResult
+kill(RuntimeProcessRef) -> KillResult
+stream_output(RuntimeProcessRef) -> RuntimeOutputStream
+health(RuntimeProcessRef) -> RuntimeHealth
+```
 
-- Capability ID
-- Scope
-- Grant source
-- Expiry/revocation
-- Audit events
+### Responsibilities
 
-Initial policy:
+- Start commands with cwd, workspace roots, environment allowlist, and redaction policy.
+- Track process group/session and child process cleanup.
+- Capture stdout/stderr/PTY output with bounded retention.
+- Report exit status, health, and liveness.
+- Implement kill escalation.
 
-- The local prototype may start with an all-allowed policy for trusted local dogfooding.
-- Even with all allowed, permission decisions must flow through a modular policy boundary so the decision source can later be static policy, user approval, or a fast security-review agent.
-- ACP permission outcomes such as `allow_once`, `allow_always`, `reject_once`, and `reject_always` should map into Capo policy decisions, but the first policy can choose `allow_once`/allow for all low-risk local operations.
+### Non-Responsibilities
 
-### Tool Exposure Layer
+- Claiming sandboxing it does not enforce.
+- Provider authentication.
+- Capo task/session policy.
+- Parsing adapter protocol semantics.
 
-Defines tools Capo exposes to agents and how Capo instruments tool use.
+### Failure Modes
 
-Examples: workpad lookup, task status, memory search, evidence recording, capability request, controlled shell/git/filesystem wrappers.
+- Child process escapes process group.
+- Output contains secrets before redaction.
+- Process survives Capo restart.
+- PTY behavior differs from stdio behavior.
+- Workspace path policy is bypassed by shell commands.
 
-Responsibilities:
+### Test Strategy
 
-- Expose a small initial tool set to agents.
-- Wrap existing agent/runtime tools where possible instead of bypassing them.
-- Track tool calls, inputs, outputs, errors, latency, and redaction state.
-- Emit Capo events for every tool call and result.
-- Feed future evaluation, memory, and permission policy.
+- Fake process runner tests.
+- Spawn/interrupt/terminate/kill smoke tests.
+- Output cap and redaction tests.
+- Restart reconciliation tests for orphaned processes.
 
-Non-responsibilities:
+## Connectivity / Tunnel
 
-- Reimplement every provider-native tool immediately.
-- Hide vendor/provider tool behavior from the audit trail.
+Connects Capo to remote runtimes and clients.
 
-### State Store
+Initial variants:
+
+```text
+ConnectivityTunnel =
+  LocalLoopback
+  | SshTunnel
+  | TailscaleTunnel
+  | ReverseTunnel
+```
+
+Prototype requirement: `LocalLoopback`.
+
+### Contract
+
+```text
+resolve_endpoint(RuntimeTarget) -> Endpoint
+check_reachability(Endpoint) -> ConnectivityHealth
+open_channel(Endpoint, ChannelKind) -> ChannelRef
+close_channel(ChannelRef) -> CloseResult
+```
+
+### Responsibilities
+
+- Reachability and routing.
+- Authentication metadata and policy hooks.
+- Health/status of private connectivity.
+- Clear separation between reachability and runtime execution.
+
+### Non-Responsibilities
+
+- Agent task state.
+- Provider auth/session management.
+- Memory, evaluation, or tool semantics.
+
+### Failure Modes
+
+- Lost tunnel during active run.
+- Stale remote endpoint identity.
+- Public exposure by mistake.
+- Remote runtime unreachable during recovery.
+
+### Test Strategy
+
+- Local loopback health tests.
+- Fake tunnel lost/recovered tests.
+- Endpoint identity validation fixtures.
+- Public exposure policy checks before enabling reverse/funnel modes.
+
+## Provider Connector
+
+Represents model/provider/subscription metadata behind adapters.
+
+Initial variants:
+
+```text
+ProviderConnector =
+  CodexSubscription
+  | ClaudeSubscription
+  | OpenAiApi
+  | AnthropicApi
+  | LocalModelEndpoint
+  | UnknownProvider
+  | FakeProviderConnector
+```
+
+### Contract
+
+```text
+describe_provider() -> ProviderInfo
+auth_status() -> AuthStatus
+usage_snapshot(SessionId?) -> UsageSnapshot?
+redaction_rules() -> RedactionPolicy
+revocation_instructions() -> RevocationPlan
+```
+
+### Responsibilities
+
+- Report non-secret provider/auth metadata.
+- Describe rate limits, cost fields, and capability hints when available.
+- Provide revocation instructions.
+- Keep credentials in vendor/OS/secret-manager storage.
+
+### Non-Responsibilities
+
+- Reading OAuth tokens or browser cookies.
+- Owning Capo sessions.
+- Dispatching agent turns directly in v0.
+
+### Failure Modes
+
+- Subscription entitlement changes.
+- CLI chooses API key instead of subscription auth due to environment.
+- Provider usage/cost unavailable.
+- Token/session expires mid-run.
+
+### Test Strategy
+
+- Environment scrubbing tests.
+- Auth metadata redaction tests.
+- Provider capability snapshot tests.
+- Revocation instruction rendering tests.
+
+## Permission Policy
+
+Defines what an agent may do and how decisions are made.
+
+Initial variants:
+
+```text
+PermissionPolicy =
+  AllowAllLocalPolicy
+  | StaticPolicy
+  | UserApprovalPolicy
+  | SecurityAgentPolicy
+  | FakePermissionPolicy
+```
+
+Prototype starts with `AllowAllLocalPolicy`, but every decision still emits events.
+
+### Contract
+
+```text
+evaluate(PermissionRequest, CapabilityProfile, Context) -> PermissionDecision
+grant(CapabilityGrantRequest) -> CapabilityGrant
+revoke(CapabilityGrantId, Reason) -> RevocationResult
+explain(PermissionDecisionId) -> DecisionExplanation
+```
+
+### Responsibilities
+
+- Represent scopes for filesystem, shell, git, network, tools, secrets, browser, and voice transcript access.
+- Map adapter-native requests such as ACP `allow_once` / `allow_always` / `reject_once` / `reject_always`.
+- Persist request, decision, source, scope, expiry, and revocation.
+- Support future static/user/security-agent decision sources.
+
+### Non-Responsibilities
+
+- Implementing OS sandbox mechanics directly.
+- Hiding policy decisions inside prompts.
+- Treating "all allowed" as "no audit needed."
+
+### Failure Modes
+
+- Permission decision lost on restart.
+- Over-broad grant has no expiry or scope.
+- Adapter-native approval bypasses Capo policy.
+- Security-agent policy is unavailable or slow.
+
+### Test Strategy
+
+- All-allowed policy still emits decision events.
+- Scope/expiry/revocation unit tests.
+- ACP permission option mapping tests.
+- Restart persistence tests for pending approvals.
+
+Naming note:
+
+- `CapabilityProfile` names the scopes granted to a session/run.
+- `PermissionPolicy` names the decision boundary that evaluates requests against a capability profile.
+- Avoid naming code as if capability profile data and permission decisions are one boundary.
+
+## Tool Exposure
+
+Defines tools Capo exposes and instruments.
+
+Initial tool set:
+
+- `capo.task_status`
+- `capo.agent_status`
+- `capo.session_summary`
+- `capo.workpad_read`
+- `capo.evidence_record`
+- `capo.capability_request`
+
+Wrapper tools later:
+
+- shell command wrapper
+- git status/diff wrapper
+- file read/write wrapper
+- memory search wrapper
+- test/smoke runner wrapper
+
+### Contract
+
+```text
+list_tools(Context) -> Vec<ToolInfo>
+invoke_tool(ToolCallRequest) -> ToolCallResult
+wrap_external_tool(AdapterToolCall) -> InstrumentedToolCall
+```
+
+### Responsibilities
+
+- Provide schema, description, scope, and risk metadata.
+- Emit events for requested/started/output/completed/failed tool calls.
+- Redact inputs/outputs according to policy.
+- Correlate provider-native or adapter-native tools with Capo-visible tool calls when possible.
+
+### Non-Responsibilities
+
+- Reimplementing every native tool in Claude/Codex.
+- Silently bypassing provider-native tool safety.
+- Treating uninstrumentable native tools as fully observed.
+
+### Failure Modes
+
+- Provider-native tool call is visible only as text/log output.
+- Tool output contains secrets.
+- Tool call finishes after session cancellation.
+- Duplicate tool events during adapter replay.
+
+### Test Strategy
+
+- Fake tool invocation tests.
+- Redaction tests.
+- Event correlation tests.
+- Tool replay/dedupe tests.
+
+### Adapter Tool-Call Loop
+
+The prototype e2e flow should be explicit:
+
+1. `AgentAdapter` emits an `AdapterEvent::ToolCallRequested` with external IDs and raw metadata.
+2. `CapoController` maps it to `tool.call_requested` and asks `PermissionPolicy` for a decision.
+3. `PermissionPolicy` emits request/decision/grant events, even under `AllowAllLocalPolicy`.
+4. `ToolExposure` invokes or wraps the requested tool and emits started/output/completed/failed events.
+5. `CapoController` persists the result and calls `AgentAdapter.deliver_tool_result(...)` when the adapter can accept structured results.
+6. If the adapter cannot accept structured results, Capo records the result as observed-only and exposes that limitation in the session read model.
+
+## State Store
 
 Persists operational truth.
 
-Initial candidates:
+Prototype store:
 
-- SQLite event log and read models
-- Markdown workpad pointers for human-readable plans
+- SQLite event log
+- SQLite read models
+- file artifact store for logs/raw transcripts
+- markdown workpads referenced by path
 
-State categories:
+Initial variants:
 
-- Agents
-- Sessions
-- Tasks/goals
-- Messages/events
-- Capability grants
-- Artifacts
-- Reviews/evaluations
-- Memory references
+```text
+StateStore =
+  SqliteStateStore
+  | InMemoryStateStore
+  | FakeStateStore
+```
 
-### Memory Layer
+### Contract
+
+```text
+append_event(CapoEvent) -> Sequence
+append_events(Vec<CapoEvent>) -> SequenceRange
+load_events(EventQuery) -> Vec<CapoEvent>
+update_read_models(SequenceRange) -> ProjectionResult
+read_model(Query) -> ReadModelResult
+record_artifact(ArtifactRecord) -> ArtifactId
+checkpoint(CheckpointRecord) -> CheckpointId
+```
+
+### Responsibilities
+
+- Transactional event append.
+- Rebuildable read models.
+- Idempotency enforcement.
+- Artifact pointers and content hashes.
+- Migration and schema versioning.
+- Backup/export path.
+
+### Non-Responsibilities
+
+- Deciding policy.
+- Ranking memory.
+- Owning markdown as hidden state.
+
+### Failure Modes
+
+- Event append succeeds but projection fails.
+- Duplicate idempotency key.
+- Markdown and SQLite facts diverge.
+- Artifact path points to missing file.
+- Migration breaks old state.
+
+### Test Strategy
+
+- Migration tests.
+- Event append/projection transaction tests.
+- Idempotency tests.
+- Rebuild read models from events.
+- Export/import smoke tests.
+
+## Memory Layer
 
 Stores distilled reusable context, separate from operational state.
 
-Initial candidates:
+Initial variants:
 
-- Markdown files
-- SQLite index pointing to markdown
-- Later: graph/vector/external memory systems
+```text
+MemoryBackend =
+  MarkdownMemory
+  | SQLiteFtsMemory
+  | ExternalMemoryAdapter
+```
 
-### Evaluation Layer
+Prototype starts with markdown pointers plus optional SQLite FTS later.
+
+### Contract
+
+```text
+ingest(MemorySourceRef) -> MemoryRecordId
+search(MemoryQuery) -> Vec<MemoryHit>
+build_packet(TaskContext, MemoryBudget) -> MemoryPacket
+explain(MemoryHitId) -> MemoryExplanation
+invalidate(MemoryRecordId, Reason) -> InvalidationResult
+```
+
+### Responsibilities
+
+- Keep derived memory rebuildable from events/files.
+- Preserve provenance, confidence, scope, and invalidation metadata.
+- Build task-specific memory packets.
+- Prevent raw voice transcripts or secrets from entering long-term memory by default.
+
+### Non-Responsibilities
+
+- Operational event recovery.
+- Replacing workpads as human-readable source.
+- Sending project memory to external SaaS without explicit connector policy.
+
+### Failure Modes
+
+- Memory poisoning from unreviewed summaries.
+- Stale facts retrieved as current.
+- Prompt bloat.
+- External memory leaks project data.
+
+### Test Strategy
+
+- Provenance-required tests.
+- Invalidated fact exclusion tests.
+- Memory packet budget tests.
+- Redaction/no-raw-voice-transcript tests.
+
+## Evaluation Layer
 
 Assesses agent outcomes.
 
-Inputs:
+Initial variants:
 
-- Task acceptance criteria
-- Tests and smoke evidence
-- Review findings
-- Human feedback
-- Time/cost/retry data
+```text
+EvaluationLayer =
+  LocalEvaluationLayer
+  | FakeEvaluationLayer
+```
 
-Outputs:
+### Contract
 
-- Completion quality
-- Failure taxonomy
-- Agent/provider performance notes
-- Recommendations for future routing
+```text
+record_evidence(EvidenceRecord) -> EvidenceId
+request_review(ReviewRequest) -> ReviewId
+record_review(ReviewResult) -> ReviewId
+score_run(RunId, Criteria) -> EvaluationResult
+summarize_performance(ProjectId | AgentId | TaskId) -> PerformanceSummary
+```
 
-## Architecture Gate Criteria
+### Responsibilities
 
-To pass architecture:
+- Store tests, smoke evidence, manual review, confidence, blockers, and outcomes.
+- Compare acceptance criteria to evidence.
+- Feed performance summaries and routing recommendations.
+- Keep evaluation separate from agent execution.
 
-- Boundary contracts are concrete enough for prototype tasks.
-- State model supports restart recovery.
-- Capability model covers at least shell/filesystem/git/network grants.
-- Runtime model covers at least local process execution.
-- Protocol model explains ACP fit or deferral.
-- Security model covers subscription sessions, tunnels, logs, and secrets.
-- Prototype plan identifies the thinnest e2e product path.
+### Non-Responsibilities
+
+- Deciding implementation strategy.
+- Mutating work without controller command.
+- Acting as long-term memory without provenance.
+
+### Failure Modes
+
+- Evidence record references missing artifact.
+- Review result attached to wrong task/session.
+- Automated score overstates completion.
+- Agent performance summary ignores failed hidden work.
+
+### Test Strategy
+
+- Evidence/artifact linkage tests.
+- Review attachment tests.
+- Completion audit fixtures.
+- Performance summary aggregation tests.
+
+## Static Dispatch Guidance
+
+Use static dispatch for known in-tree boundaries in the first scaffold:
+
+```text
+enum AgentAdapter { Codex(CodexExecAdapter), Claude(ClaudeCodeAdapter), Acp(AcpAdapter), Fake(FakeAdapter) }
+enum RuntimeRunner { Local(LocalProcessRunner), Fake(FakeRuntimeRunner) }
+enum ConnectivityTunnel { Local(LocalLoopback), Fake(FakeTunnel) }
+enum ProviderConnector { Codex(CodexSubscription), Claude(ClaudeSubscription), OpenAi(OpenAiApi), Anthropic(AnthropicApi), LocalModel(LocalModelEndpoint), Unknown(UnknownProvider), Fake(FakeProviderConnector) }
+enum PermissionPolicy { AllowAll(AllowAllLocalPolicy), Static(StaticPolicy), UserApproval(UserApprovalPolicy), SecurityAgent(SecurityAgentPolicy), Fake(FakePermissionPolicy) }
+enum ToolExposure { Local(LocalToolExposure), Fake(FakeToolExposure) }
+enum StateStore { Sqlite(SqliteStateStore), InMemory(InMemoryStateStore), Fake(FakeStateStore) }
+enum MemoryBackend { Markdown(MarkdownMemory), SqliteFts(SqliteFtsMemory) }
+enum EvaluationLayer { Local(LocalEvaluationLayer), Fake(FakeEvaluationLayer) }
+```
+
+Why:
+
+- Keeps control flow explicit and readable.
+- Makes match arms reveal missing boundary handling.
+- Avoids early plugin/dynamic-dispatch complexity.
+- Works well while Capo's first adapters are known: Claude Code, Codex, ACP, fake test adapters.
+
+Controller composition should start as an owned dependency bundle:
+
+```text
+CapoController {
+  state: StateStore,
+  adapters: AgentAdapterRegistry,
+  runtimes: RuntimeRunnerRegistry,
+  tunnel: ConnectivityTunnel,
+  providers: ProviderConnectorRegistry,
+  policy: PermissionPolicy,
+  tools: ToolExposure,
+  memory: MemoryBackend,
+  evaluation: EvaluationLayer,
+}
+```
+
+Registries can be simple static maps keyed by configured IDs in the prototype. They do not need plugin loading.
+
+Use trait objects later when:
+
+- Third-party plugin loading is real.
+- Adapter set is not known at compile time.
+- Dynamic composition materially simplifies a subsystem.
+
+## A1 Gate Evidence
+
+A1 is complete when:
+
+- Every boundary has a contract.
+- Every boundary lists responsibilities and non-responsibilities.
+- Every boundary lists failure modes.
+- Every boundary lists test strategy.
+- Static-dispatch guidance is recorded for the implementation scaffold.

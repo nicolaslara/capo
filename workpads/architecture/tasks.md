@@ -22,12 +22,17 @@ Evidence:
 
 ## A1 - Boundary Contracts
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - `boundaries.md` updated with concrete interfaces for input, controller, protocol adapter, runtime, tunnel, provider, capability, state, memory, and evaluation.
 - Each interface has responsibilities, non-responsibilities, failure modes, and test strategy.
+
+Evidence:
+
+- `workpads/architecture/boundaries.md`
+- `workpads/architecture/knowledge.md` A1 section
 
 ## A2 - State Model And Event Log
 

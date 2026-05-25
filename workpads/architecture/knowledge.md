@@ -87,6 +87,34 @@ Resolved open questions:
 - Capo as ACP agent/editor backend: deferred; Capo remains the entrypoint.
 - Voice role: first-class conversational interface to Capo, not generic dictation.
 
+## A1 - Boundary Contracts
+
+Status: completed on 2026-05-25.
+
+Decision:
+
+- Use `workpads/architecture/boundaries.md` as the implementation-facing contract map.
+- Keep all core boundaries explicit: input surface, controller, agent adapter, runtime runner, connectivity/tunnel, provider connector, permission policy, tool exposure, state store, memory layer, and evaluation layer.
+- Start with static dispatch for known in-tree variants. This keeps the initial Rust scaffold readable and makes missing variant handling visible at compile time.
+- Defer dynamic dispatch/plugin loading until third-party extension or runtime-loaded adapters are real requirements.
+
+Naming decisions:
+
+- `AgentAdapter`, not `AgentProtocolAdapter`, for the broad boundary that covers Codex, Claude Code, ACP, and fake test adapters.
+- `RuntimeRunner` for process/container/remote execution.
+- `ProviderConnector` for non-secret provider/auth/usage metadata behind adapters.
+- `CapabilityProfile` plus `PermissionPolicy` for scopes and decision source.
+- `ToolExposure` for Capo-exposed tools and instrumentation wrappers.
+- `CommandEnvelope` for normalized commands from CLI/dashboard/mobile/voice/API.
+
+Implementation implications:
+
+- A first code scaffold should include fake adapter/runtime/tool/policy variants for e2e tests before real Claude/Codex integration.
+- Controller tests should use static fake variants to prove dispatch, event append, read model projection, and restart recovery.
+- Adapter outputs are inputs, not persistence truth; the state store owns normalized events and read models.
+- UI and voice must depend on read models and command envelopes, not live process state.
+- Review pass added fake/static variants for each scaffold boundary, an explicit adapter tool-call loop, and a runtime/tunnel separation where Tailscale and SSH stay in connectivity instead of runtime execution.
+
 ## Architecture Gate
 
 Status: not passed.
