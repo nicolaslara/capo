@@ -68,3 +68,20 @@ Evidence:
 - Exposure read models include endpoint ID, owner, channel, exposure scope, permission scope, status, linked capability grant, health status, reachability, and revocation timestamp.
 - Regression test proves remote-control exposure starts as `blocked_pending_permission`, becomes `active` only after a durable `capability.grant_created` event/projection, then rebuilds as `revoked` with disabled health.
 - `cargo test -p capo-state connectivity_exposure -- --nocapture`: passed.
+
+### RR4 - Dashboard Exposure Visibility
+
+Status: completed
+
+Acceptance:
+
+- Expose connectivity exposure rows through the shared dashboard/query surface.
+- Render exposure status, health, permission scope, and grant/revocation state in the CLI dashboard.
+- Keep dashboard rendering read-only; approval decisions remain in the permission queue.
+
+Evidence:
+
+- `ProjectDashboard.connectivity_exposures` in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo dashboard` renders exposure ID, endpoint, owner, channel, exposure scope, status, health, reachability, permission scope, grant ID, and revocation timestamp from the shared query contract.
+- `cargo test -p capo-query connectivity -- --nocapture`: passed.
+- `cargo test -p capo-cli dashboard_renders_connectivity -- --nocapture`: passed.

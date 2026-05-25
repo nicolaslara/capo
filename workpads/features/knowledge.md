@@ -585,3 +585,22 @@ Follow-up:
 
 - A future CLI/API surface should render connectivity exposure rows and drive approval decisions using the existing permission approval queue.
 - Concrete SSH/Tailscale adapters must attach real identity/auth refs and health checks to this projection before any dogfood remote-control path.
+
+## F7/RR4 - Dashboard Exposure Visibility
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add connectivity exposures to `ProjectDashboard` so CLI, voice, web, mobile, and future TUI surfaces can share the same read contract for remote/public-access state.
+- Render exposure rows in the CLI dashboard with endpoint, owner, channel, exposure scope, status, health, reachability, permission scope, grant, and revocation timestamp.
+- Keep the dashboard read-only. It shows blocked/active/revoked exposure state but does not decide permissions or mutate tunnel state; approval decisions stay in the existing permission queue.
+
+Verification:
+
+- `cargo test -p capo-query connectivity -- --nocapture`: passed.
+- `cargo test -p capo-cli dashboard_renders_connectivity -- --nocapture`: passed.
+
+Follow-up:
+
+- A future approval UI/API should use these rows plus `permission_approvals` to let operators grant or revoke exposure without parsing raw event logs.

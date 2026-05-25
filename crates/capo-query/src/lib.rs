@@ -6,14 +6,16 @@
 
 use capo_core::{ProjectId, SessionId};
 use capo_state::{
-    AgentProjection, EventRecord, EvidenceProjection, MemoryPacketProjection, RunProjection,
-    SessionProjection, SqliteStateStore, StateResult, ToolCallProjection,
+    AgentProjection, ConnectivityExposureProjection, EventRecord, EvidenceProjection,
+    MemoryPacketProjection, RunProjection, SessionProjection, SqliteStateStore, StateResult,
+    ToolCallProjection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectDashboard {
     pub project_id: ProjectId,
     pub agents: Vec<AgentDashboardRow>,
+    pub connectivity_exposures: Vec<ConnectivityExposureProjection>,
 }
 
 impl ProjectDashboard {
@@ -96,9 +98,11 @@ pub fn project_dashboard(
         }
         rows.push(AgentDashboardRow { agent, session });
     }
+    let connectivity_exposures = state.connectivity_exposures(&query.project_id)?;
     Ok(ProjectDashboard {
         project_id: query.project_id,
         agents: rows,
+        connectivity_exposures,
     })
 }
 
@@ -145,9 +149,9 @@ mod tests {
     use super::*;
     use capo_core::{AgentId, EvidenceId, MemoryPacketId, RunId, TaskId, ToolCallId};
     use capo_state::{
-        AgentProjection, EventKind, EvidenceProjection, MemoryPacketProjection, NewEvent,
-        ProjectionRecord, RedactionState, RunProjection, SessionProjection, TaskProjection,
-        ToolCallProjection,
+        AgentProjection, ConnectivityExposureProjection, EventKind, EvidenceProjection,
+        MemoryPacketProjection, NewEvent, ProjectionRecord, RedactionState, RunProjection,
+        SessionProjection, TaskProjection, ToolCallProjection,
     };
 
     #[test]
@@ -278,6 +282,26 @@ mod tests {
             MemoryPacketId::new("packet-demo")
         );
         assert_eq!(session.recent_events[0].kind, "session.started");
+    }
+
+    #[test]
+    fn project_dashboard_includes_connectivity_exposures() {
+        let root = temp_root("query-dashboard-connectivity");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        append_agent(&state, &project_id, "agent-idle", None);
+        append_connectivity_exposure(&state, &project_id);
+
+        let dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+
+        assert_eq!(dashboard.connectivity_exposures.len(), 1);
+        let exposure = &dashboard.connectivity_exposures[0];
+        assert_eq!(exposure.exposure_id, "exposure-private-control");
+        assert_eq!(exposure.status, "blocked_pending_permission");
+        assert_eq!(exposure.permission_scope, "network:connect:private_tunnel");
+        assert_eq!(exposure.health_status, "unknown");
+        assert!(!exposure.reachable);
     }
 
     #[test]
@@ -523,6 +547,46 @@ mod tests {
                 &[],
             )
             .expect("append session event");
+    }
+
+    fn append_connectivity_exposure(state: &SqliteStateStore, project_id: &ProjectId) {
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-connectivity-exposure".to_string(),
+                    kind: EventKind::ConnectivityExposureRequested,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some("exposure-private-control".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::ConnectivityExposure(
+                    ConnectivityExposureProjection {
+                        exposure_id: "exposure-private-control".to_string(),
+                        project_id: project_id.clone(),
+                        connectivity_endpoint_id: "endpoint-private-1".to_string(),
+                        owner_kind: "runtime_target".to_string(),
+                        owner_id: "remote-target-1".to_string(),
+                        channel_kind: "control".to_string(),
+                        exposure: "private".to_string(),
+                        permission_scope: "network:connect:private_tunnel".to_string(),
+                        status: "blocked_pending_permission".to_string(),
+                        capability_grant_id: None,
+                        health_status: "unknown".to_string(),
+                        reachable: false,
+                        revoked_at: None,
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append connectivity exposure");
     }
 
     fn temp_root(name: &str) -> std::path::PathBuf {

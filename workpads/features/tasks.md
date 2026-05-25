@@ -256,12 +256,17 @@ Progress:
 - RR1 loopback remote runtime contract is completed without Tailscale or cloud credentials.
 - RR2 tunnel adapter stub is completed with endpoint resolution, health, exposure scope, and permission requirement records kept separate from runtime process refs.
 - RR3 explicit exposure policy read model is completed with blocked/active/revoked exposure states, linked durable grants, and health visibility.
+- RR4 dashboard exposure visibility is completed through the shared query surface and CLI dashboard rendering.
 - F7 remains `in_progress` until the real local-agent connector dependency is satisfied; remote execution semantics are still contract-level and loopback/stubbed.
 
 Evidence:
 
 - `crates/capo-runtime/src/lib.rs`
 - `crates/capo-state/src/lib.rs`
+- `crates/capo-query/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
 - `cargo test -p capo-runtime remote_runtime -- --nocapture`
 - `cargo test -p capo-runtime tunnel -- --nocapture`
 - `cargo test -p capo-state connectivity_exposure -- --nocapture`
+- `cargo test -p capo-query connectivity -- --nocapture`
+- `cargo test -p capo-cli dashboard_renders_connectivity -- --nocapture`

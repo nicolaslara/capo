@@ -477,6 +477,28 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
     }
 
     output.push_str(&format!(
+        "connectivity_exposures={}\n",
+        dashboard.connectivity_exposures.len()
+    ));
+    for exposure in &dashboard.connectivity_exposures {
+        output.push_str(&format!(
+            "connectivity_exposure={} endpoint={} owner={}:{} channel={} exposure={} exposure_status={} health={} reachable={} permission_scope={} grant={} revoked_at={}\n",
+            exposure.exposure_id,
+            exposure.connectivity_endpoint_id,
+            exposure.owner_kind,
+            exposure.owner_id,
+            exposure.channel_kind,
+            exposure.exposure,
+            exposure.status,
+            exposure.health_status,
+            exposure.reachable,
+            exposure.permission_scope,
+            exposure.capability_grant_id.as_deref().unwrap_or("none"),
+            exposure.revoked_at.as_deref().unwrap_or("none")
+        ));
+    }
+
+    output.push_str(&format!(
         "active_sessions={}\n",
         dashboard.active_session_count()
     ));
@@ -2658,6 +2680,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use capo_state::ConnectivityExposureProjection;
 
     #[test]
     fn help_mentions_command_envelopes_and_no_credentials() {
@@ -3583,6 +3606,62 @@ mod tests {
         ])
         .unwrap_err();
         assert!(unknown.contains("unknown dashboard filter: --agent"));
+    }
+
+    #[test]
+    fn dashboard_renders_connectivity_exposure_state() {
+        let state_root = temp_root("cli-dashboard-connectivity");
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-cli-connectivity-exposure".to_string(),
+                    kind: EventKind::ConnectivityExposureRequested,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some("exposure-private-control".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::ConnectivityExposure(
+                    ConnectivityExposureProjection {
+                        exposure_id: "exposure-private-control".to_string(),
+                        project_id: project_id(),
+                        connectivity_endpoint_id: "endpoint-private-1".to_string(),
+                        owner_kind: "runtime_target".to_string(),
+                        owner_id: "remote-target-1".to_string(),
+                        channel_kind: "control".to_string(),
+                        exposure: "private".to_string(),
+                        permission_scope: "network:connect:private_tunnel".to_string(),
+                        status: "blocked_pending_permission".to_string(),
+                        capability_grant_id: None,
+                        health_status: "unknown".to_string(),
+                        reachable: false,
+                        revoked_at: None,
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append exposure");
+
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard");
+
+        assert!(dashboard.contains("connectivity_exposures=1"));
+        assert!(dashboard.contains("connectivity_exposure=exposure-private-control"));
+        assert!(dashboard.contains("exposure_status=blocked_pending_permission"));
+        assert!(dashboard.contains("permission_scope=network:connect:private_tunnel"));
+        assert!(dashboard.contains("grant=none"));
     }
 
     #[test]

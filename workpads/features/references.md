@@ -242,3 +242,13 @@ Observed 2026-05-25.
 - Durable grant/revocation architecture: `../architecture/capability-permissions.md`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR3.
+
+## F7/RR4 Dashboard Exposure Visibility
+
+Observed 2026-05-25.
+
+- Shared dashboard query exposure rows and regression test: `../../crates/capo-query/src/lib.rs`
+- CLI dashboard exposure rendering and regression test: `../../crates/capo-cli/src/main.rs`
+- Connectivity exposure projection source: `../../crates/capo-state/src/lib.rs`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR4.
