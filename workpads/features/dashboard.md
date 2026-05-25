@@ -106,3 +106,27 @@ Decision:
 
 - Put workpad queue visibility in the shared query contract rather than a CLI-only read. Voice, web, mobile, and future TUI views should consume the same `ProjectDashboard` workpad task rows.
 - Render both observed markdown status and Capo execution status so operators can distinguish source truth from Capo-tracked execution.
+
+### DS4 - Workpad Queue Filters
+
+Status: completed
+
+Acceptance:
+
+- Add explicit dashboard filters for workpad task path and workpad task status.
+- Keep workpad queue filters independent from the existing agent/session/run `--status` filter.
+- Reject malformed workpad filter flags fail-closed.
+- Preserve shared query ownership of the filter behavior.
+
+Evidence:
+
+- `ProjectDashboardQuery::with_workpad_path` and `with_workpad_status` in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo dashboard --workpad-path PATH --workpad-status STATUS` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query workpad -- --nocapture`: passed.
+- `cargo test -p capo-cli dashboard_rejects_malformed_filters -- --nocapture`: passed.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+
+Decision:
+
+- Use explicit workpad filter names instead of overloading `--status`. This keeps operator intent clear when filtering agent/session state versus markdown workpad queue state.
+- `--workpad-status` matches either observed markdown status or Capo execution status, because dashboard rows intentionally show both state dimensions.

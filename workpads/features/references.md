@@ -120,6 +120,16 @@ Observed 2026-05-25.
 - Dogfood bridge source workpad: `dogfood-bridge.md`
 - No new third-party dependencies were added for DS3.
 
+## F3/DS4 Workpad Queue Filters
+
+Observed 2026-05-25.
+
+- Shared workpad filter query fields and regression tests: `../../crates/capo-query/src/lib.rs`
+- CLI dashboard `--workpad-path` / `--workpad-status` filters and regression tests: `../../crates/capo-cli/src/main.rs`
+- Dashboard source workpad: `dashboard.md`
+- Dogfood bridge source workpad: `dogfood-bridge.md`
+- No new third-party dependencies were added for DS4.
+
 ## F4/PT1 Static Policy Variant
 
 Observed 2026-05-25.

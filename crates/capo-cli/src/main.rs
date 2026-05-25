@@ -38,7 +38,7 @@ Usage:
   capo --help
   capo version
   capo init [--state PATH]
-  capo dashboard [--project PROJECT_ID] [--session SESSION_ID] [--status STATUS] [--state PATH]
+  capo dashboard [--project PROJECT_ID] [--session SESSION_ID] [--status STATUS] [--workpad-path PATH] [--workpad-status STATUS] [--state PATH]
   capo agent register --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent spawn --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent list [--state PATH]
@@ -728,6 +728,8 @@ fn dashboard_query(args: &[String]) -> Result<ProjectDashboardQuery, String> {
     let mut project_id = project_id();
     let mut session_id = None;
     let mut status = None;
+    let mut workpad_path = None;
+    let mut workpad_status = None;
     let mut index = 0;
     while index < args.len() {
         let key = args[index].as_str();
@@ -739,6 +741,8 @@ fn dashboard_query(args: &[String]) -> Result<ProjectDashboardQuery, String> {
             "--project" => project_id = ProjectId::new(value),
             "--session" => session_id = Some(SessionId::new(value)),
             "--status" => status = Some(value.clone()),
+            "--workpad-path" => workpad_path = Some(value.clone()),
+            "--workpad-status" => workpad_status = Some(value.clone()),
             other => return Err(format!("unknown dashboard filter: {other}")),
         }
         index += 2;
@@ -749,6 +753,12 @@ fn dashboard_query(args: &[String]) -> Result<ProjectDashboardQuery, String> {
     }
     if let Some(status) = status {
         query = query.with_status(status);
+    }
+    if let Some(workpad_path) = workpad_path {
+        query = query.with_workpad_path(workpad_path);
+    }
+    if let Some(workpad_status) = workpad_status {
+        query = query.with_workpad_status(workpad_status);
     }
     Ok(query)
 }
@@ -3656,6 +3666,19 @@ mod tests {
         assert!(dashboard_after_index.contains("workpad_tasks=3"));
         assert!(dashboard_after_index.contains("workpad_task=workpads:features:tasks.md#f2"));
         assert!(dashboard_after_index.contains("capo_execution_status=observed_only"));
+        let dashboard_by_workpad = run_cli(vec![
+            "dashboard".to_string(),
+            "--workpad-path".to_string(),
+            "workpads/features/tasks.md".to_string(),
+            "--workpad-status".to_string(),
+            "in_progress".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard filtered by workpad task");
+        assert!(dashboard_by_workpad.contains("workpad_tasks=1"));
+        assert!(dashboard_by_workpad.contains("workpad_task=workpads:features:tasks.md#f2"));
+        assert!(!dashboard_by_workpad.contains("workpad_task=TASKS.md#f2"));
         let source_hash = files
             .iter()
             .find(|file| file.path == "workpads/features/tasks.md")
@@ -4580,6 +4603,24 @@ mod tests {
         ])
         .unwrap_err();
         assert!(unknown.contains("unknown dashboard filter: --agent"));
+
+        let missing_workpad_path = run_cli(vec![
+            "dashboard".to_string(),
+            "--workpad-path".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap_err();
+        assert!(missing_workpad_path.contains("--workpad-path requires a value"));
+
+        let missing_workpad_status = run_cli(vec![
+            "dashboard".to_string(),
+            "--workpad-status".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap_err();
+        assert!(missing_workpad_status.contains("--workpad-status requires a value"));
     }
 
     #[test]

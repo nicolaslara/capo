@@ -312,6 +312,23 @@ Follow-up:
 
 - Future TUI/web/mobile dashboards should consume `ProjectDashboard.workpad_tasks` instead of querying state directly.
 
+## F3/DS4 - Workpad Queue Filters
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add explicit `--workpad-path` and `--workpad-status` dashboard filters backed by `ProjectDashboardQuery`, not CLI-only filtering.
+- Keep `--status` scoped to agent/session/run rows. Workpad filters use separate names so operators do not accidentally hide or widen the wrong state surface.
+- Let `--workpad-status` match either observed markdown status or Capo execution status because dashboard rows expose both as separate fields.
+- Fail closed on missing workpad filter values, matching the existing dashboard filter parser behavior.
+
+Verification:
+
+- `cargo test -p capo-query workpad -- --nocapture`: passed.
+- `cargo test -p capo-cli dashboard_rejects_malformed_filters -- --nocapture`: passed.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+
 ## F5/ME1 - Memory Record Read Models
 
 Status: completed on 2026-05-25.

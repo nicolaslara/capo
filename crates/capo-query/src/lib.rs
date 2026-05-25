@@ -63,6 +63,8 @@ pub struct ProjectDashboardQuery {
     pub project_id: ProjectId,
     pub session_id: Option<SessionId>,
     pub status: Option<String>,
+    pub workpad_path: Option<String>,
+    pub workpad_status: Option<String>,
     pub recent_event_limit: usize,
 }
 
@@ -72,6 +74,8 @@ impl ProjectDashboardQuery {
             project_id,
             session_id: None,
             status: None,
+            workpad_path: None,
+            workpad_status: None,
             recent_event_limit: 5,
         }
     }
@@ -83,6 +87,16 @@ impl ProjectDashboardQuery {
 
     pub fn with_status(mut self, status: impl Into<String>) -> Self {
         self.status = Some(status.into());
+        self
+    }
+
+    pub fn with_workpad_path(mut self, path: impl Into<String>) -> Self {
+        self.workpad_path = Some(path.into());
+        self
+    }
+
+    pub fn with_workpad_status(mut self, status: impl Into<String>) -> Self {
+        self.workpad_status = Some(status.into());
         self
     }
 }
@@ -117,7 +131,26 @@ pub fn project_dashboard(
     let adapter_readiness = state.adapter_readiness(&query.project_id)?;
     let adapter_smoke_reports = state.adapter_smoke_reports(&query.project_id)?;
     let adapter_dogfood_gate = adapter_dogfood_gate(&adapter_smoke_reports);
-    let workpad_tasks = state.workpad_tasks(&query.project_id)?;
+    let workpad_tasks = state
+        .workpad_tasks(&query.project_id)?
+        .into_iter()
+        .filter(|task| {
+            query
+                .workpad_path
+                .as_ref()
+                .map(|path| &task.path == path)
+                .unwrap_or(true)
+        })
+        .filter(|task| {
+            query
+                .workpad_status
+                .as_ref()
+                .map(|status| {
+                    &task.observed_status == status || &task.capo_execution_status == status
+                })
+                .unwrap_or(true)
+        })
+        .collect();
     Ok(ProjectDashboard {
         project_id: query.project_id,
         agents: rows,
@@ -418,7 +451,14 @@ mod tests {
         let state = SqliteStateStore::open(&root).expect("state");
         let project_id = ProjectId::new("project-capo");
         append_agent(&state, &project_id, "agent-idle", None);
-        append_workpad_task(&state, &project_id, "workpads:features:tasks.md#f2");
+        append_workpad_task(
+            &state,
+            &project_id,
+            "workpads:features:tasks.md#f2",
+            "workpads/features/tasks.md",
+            "in_progress",
+            "observed_only",
+        );
 
         let dashboard =
             project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
@@ -432,6 +472,56 @@ mod tests {
         assert_eq!(
             dashboard.workpad_tasks[0].capo_execution_status,
             "observed_only"
+        );
+    }
+
+    #[test]
+    fn project_dashboard_filters_workpad_tasks_without_filtering_agents() {
+        let root = temp_root("query-dashboard-workpad-filter");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        append_agent(&state, &project_id, "agent-active", Some("session-active"));
+        append_minimal_session(&state, &project_id, "agent-active", "session-active");
+        append_workpad_task(
+            &state,
+            &project_id,
+            "workpads:features:tasks.md#f2",
+            "workpads/features/tasks.md",
+            "in_progress",
+            "observed_only",
+        );
+        append_workpad_task(
+            &state,
+            &project_id,
+            "workpads:features:dashboard.md#ds3",
+            "workpads/features/dashboard.md",
+            "completed",
+            "imported",
+        );
+
+        let dashboard = project_dashboard(
+            &state,
+            ProjectDashboardQuery::new(project_id.clone())
+                .with_workpad_path("workpads/features/tasks.md"),
+        )
+        .expect("dashboard by workpad path");
+        assert_eq!(dashboard.agents.len(), 1);
+        assert_eq!(dashboard.workpad_tasks.len(), 1);
+        assert_eq!(
+            dashboard.workpad_tasks[0].workpad_task_id,
+            "workpads:features:tasks.md#f2"
+        );
+
+        let imported_dashboard = project_dashboard(
+            &state,
+            ProjectDashboardQuery::new(project_id).with_workpad_status("imported"),
+        )
+        .expect("dashboard by workpad status");
+        assert_eq!(imported_dashboard.agents.len(), 1);
+        assert_eq!(imported_dashboard.workpad_tasks.len(), 1);
+        assert_eq!(
+            imported_dashboard.workpad_tasks[0].workpad_task_id,
+            "workpads:features:dashboard.md#ds3"
         );
     }
 
@@ -775,6 +865,9 @@ mod tests {
         state: &SqliteStateStore,
         project_id: &ProjectId,
         workpad_task_id: &str,
+        path: &str,
+        observed_status: &str,
+        capo_execution_status: &str,
     ) {
         state
             .append_event(
@@ -796,11 +889,11 @@ mod tests {
                 &[ProjectionRecord::WorkpadTask(WorkpadTaskProjection {
                     workpad_task_id: workpad_task_id.to_string(),
                     project_id: project_id.clone(),
-                    path: "workpads/features/tasks.md".to_string(),
+                    path: path.to_string(),
                     source_anchor: "F2 - Workpad Dogfood Bridge".to_string(),
                     title: "Workpad Dogfood Bridge".to_string(),
-                    observed_status: "in_progress".to_string(),
-                    capo_execution_status: "observed_only".to_string(),
+                    observed_status: observed_status.to_string(),
+                    capo_execution_status: capo_execution_status.to_string(),
                     observed_unix: 123,
                     updated_sequence: 0,
                 })],
