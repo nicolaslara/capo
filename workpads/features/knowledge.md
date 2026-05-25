@@ -277,6 +277,38 @@ Follow-up:
 - ME3 should replace evidence-kind review derivation with first-class review finding records linked to tasks, sessions, tools, and follow-up workpad items.
 - Later UI/query work should expose task outcome reports without requiring users to inspect CLI markdown artifacts manually.
 
+## F5/ME3 - Review Feedback Loop
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `review_findings` as the first durable review feedback read model. Findings link project, task, session, optional run, optional tool call, optional follow-up workpad task, reviewer, kind, severity, status, summary, evidence artifact, and follow-up text.
+- Add `capo review record --session SESSION_ID --reviewer NAME --kind blocker|finding|no_blockers --summary TEXT --out DIR` as the CLI capture path for human/subagent review outcomes.
+- Review findings write guarded `<!-- capo:review-finding -->` markdown artifacts and `review.finding_recorded` events, plus evidence projections using review evidence kinds.
+- Task outcome report review derivation now prefers first-class `review_findings` over legacy review evidence kinds.
+- Validate tool-call links against the target session before persistence.
+- Validate follow-up workpad task links against the session project before persistence.
+- Include follow-up workpad task ID in review finding identity so changing only the follow-up link produces a distinct review finding instead of a stale overwrite/idempotency collision.
+
+Verification:
+
+- `cargo test -p capo-state review_findings`: passed.
+- `cargo test -p capo-cli cli_drives_fake_controller_and_exports_evidence`: passed.
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Review:
+
+- Focused ME3 review found blockers in follow-up identity and unchecked tool/workpad links. Both were fixed.
+- Focused ME3 re-review found no blockers in identity/idempotency, link validation, or review artifact overwrite safety.
+
+Follow-up:
+
+- Future dashboard/query work should expose review findings directly so operators do not need to inspect markdown artifacts for blockers.
+- Future workpad writeback should use review findings as the durable source when creating follow-up items or marking findings resolved.
+
 ## F4/PT1 - Static Policy Variant
 
 Status: completed on 2026-05-25.

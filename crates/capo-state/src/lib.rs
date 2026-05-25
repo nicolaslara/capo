@@ -996,6 +996,42 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn review_findings_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> StateResult<Vec<ReviewFindingProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT review_finding_id, project_id, task_id, session_id, run_id, tool_call_id,
+                    workpad_task_id, reviewer, finding_kind, severity, summary, status,
+                    evidence_artifact_id, follow_up, updated_sequence
+             FROM review_findings
+             WHERE session_id = ?1
+             ORDER BY updated_sequence ASC, review_finding_id ASC",
+        )?;
+        let rows = statement.query_map(params![session_id.as_str()], |row| {
+            Ok(ReviewFindingProjection {
+                review_finding_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                task_id: TaskId::new(row.get::<_, String>(2)?),
+                session_id: SessionId::new(row.get::<_, String>(3)?),
+                run_id: optional_id(row.get::<_, Option<String>>(4)?),
+                tool_call_id: optional_id(row.get::<_, Option<String>>(5)?),
+                workpad_task_id: row.get(6)?,
+                reviewer: row.get(7)?,
+                finding_kind: row.get(8)?,
+                severity: row.get(9)?,
+                summary: row.get(10)?,
+                status: row.get(11)?,
+                evidence_artifact_id: row.get(12)?,
+                follow_up: row.get(13)?,
+                updated_sequence: row.get(14)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn tool_calls_for_session(
         &self,
         session_id: &SessionId,
@@ -1196,6 +1232,7 @@ pub enum EventKind {
     MemoryRecordIngested,
     MemoryRecordInvalidated,
     TaskOutcomeReportGenerated,
+    ReviewFindingRecorded,
     EvidenceRecorded,
     WorkpadIndexed,
     WorkpadTaskImported,
@@ -1232,6 +1269,7 @@ impl EventKind {
             Self::MemoryRecordIngested => "memory.record_ingested",
             Self::MemoryRecordInvalidated => "memory.record_invalidated",
             Self::TaskOutcomeReportGenerated => "task.outcome_report_generated",
+            Self::ReviewFindingRecorded => "review.finding_recorded",
             Self::EvidenceRecorded => "evidence.recorded",
             Self::WorkpadIndexed => "workpad.indexed",
             Self::WorkpadTaskImported => "workpad.task_imported",
@@ -1318,6 +1356,7 @@ pub enum ProjectionRecord {
     MemoryRecord(Box<MemoryRecordProjection>),
     MemorySource(MemorySourceProjection),
     TaskOutcomeReport(TaskOutcomeReportProjection),
+    ReviewFinding(ReviewFindingProjection),
     Evidence(EvidenceProjection),
     WorkpadIndexReset(WorkpadIndexResetProjection),
     WorkpadFile(WorkpadFileProjection),
@@ -1522,6 +1561,25 @@ pub struct TaskOutcomeReportProjection {
     pub blocker: Option<String>,
     pub review_outcome: String,
     pub report_artifact_id: Option<String>,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewFindingProjection {
+    pub review_finding_id: String,
+    pub project_id: ProjectId,
+    pub task_id: TaskId,
+    pub session_id: SessionId,
+    pub run_id: Option<RunId>,
+    pub tool_call_id: Option<ToolCallId>,
+    pub workpad_task_id: Option<String>,
+    pub reviewer: String,
+    pub finding_kind: String,
+    pub severity: String,
+    pub summary: String,
+    pub status: String,
+    pub evidence_artifact_id: Option<String>,
+    pub follow_up: Option<String>,
     pub updated_sequence: i64,
 }
 
@@ -1815,6 +1873,23 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             report_artifact_id TEXT,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS review_findings (
+            review_finding_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            run_id TEXT,
+            tool_call_id TEXT,
+            workpad_task_id TEXT,
+            reviewer TEXT NOT NULL,
+            finding_kind TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            status TEXT NOT NULL,
+            evidence_artifact_id TEXT,
+            follow_up TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS workpad_files (
             path TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -1899,6 +1974,7 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "memory_sources",
         "evidence",
         "task_outcome_reports",
+        "review_findings",
         "workpad_files",
         "workpad_tasks",
         "projection_watermarks",
@@ -2361,6 +2437,45 @@ fn apply_projection_record(
                 sequence,
             ],
         )?,
+        ProjectionRecord::ReviewFinding(finding) => transaction.execute(
+            "INSERT INTO review_findings(
+                review_finding_id, project_id, task_id, session_id, run_id, tool_call_id,
+                workpad_task_id, reviewer, finding_kind, severity, summary, status,
+                evidence_artifact_id, follow_up, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ON CONFLICT(review_finding_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                task_id = excluded.task_id,
+                session_id = excluded.session_id,
+                run_id = excluded.run_id,
+                tool_call_id = excluded.tool_call_id,
+                workpad_task_id = excluded.workpad_task_id,
+                reviewer = excluded.reviewer,
+                finding_kind = excluded.finding_kind,
+                severity = excluded.severity,
+                summary = excluded.summary,
+                status = excluded.status,
+                evidence_artifact_id = excluded.evidence_artifact_id,
+                follow_up = excluded.follow_up,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                finding.review_finding_id,
+                finding.project_id.as_str(),
+                finding.task_id.as_str(),
+                finding.session_id.as_str(),
+                finding.run_id.as_ref().map(RunId::as_str),
+                finding.tool_call_id.as_ref().map(ToolCallId::as_str),
+                finding.workpad_task_id,
+                finding.reviewer,
+                finding.finding_kind,
+                finding.severity,
+                finding.summary,
+                finding.status,
+                finding.evidence_artifact_id,
+                finding.follow_up,
+                sequence,
+            ],
+        )?,
         ProjectionRecord::WorkpadIndexReset(reset) => {
             transaction.execute(
                 "DELETE FROM workpad_files WHERE project_id = ?1",
@@ -2639,6 +2754,26 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
                 "blocker": report.blocker,
                 "review_outcome": report.review_outcome,
                 "report_artifact_id": report.report_artifact_id,
+            })
+            .to_string(),
+        },
+        ProjectionRecord::ReviewFinding(finding) => ProjectionRecordRow {
+            kind: "review_finding",
+            record_id: finding.review_finding_id.clone(),
+            a: Some(finding.project_id.to_string()),
+            b: Some(finding.task_id.to_string()),
+            c: Some(finding.session_id.to_string()),
+            d: finding.run_id.as_ref().map(ToString::to_string),
+            e: finding.tool_call_id.as_ref().map(ToString::to_string),
+            f: finding.workpad_task_id.clone(),
+            g: Some(finding.finding_kind.clone()),
+            h: Some(finding.status.clone()),
+            payload_json: json!({
+                "reviewer": finding.reviewer,
+                "severity": finding.severity,
+                "summary": finding.summary,
+                "evidence_artifact_id": finding.evidence_artifact_id,
+                "follow_up": finding.follow_up,
             })
             .to_string(),
         },
@@ -3090,6 +3225,61 @@ fn projection_record_from_row(
                     updated_sequence: 0,
                 },
             ))
+        }
+        "review_finding" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::ReviewFinding(ReviewFindingProjection {
+                review_finding_id: record_id,
+                project_id: ProjectId::new(required_field(
+                    &projection_kind,
+                    "review_finding",
+                    a,
+                    "project_id",
+                )?),
+                task_id: TaskId::new(required_field(
+                    &projection_kind,
+                    "review_finding",
+                    b,
+                    "task_id",
+                )?),
+                session_id: SessionId::new(required_field(
+                    &projection_kind,
+                    "review_finding",
+                    c,
+                    "session_id",
+                )?),
+                run_id: optional_id(d),
+                tool_call_id: optional_id(e),
+                workpad_task_id: f,
+                finding_kind: required_field(
+                    &projection_kind,
+                    "review_finding",
+                    g,
+                    "finding_kind",
+                )?,
+                status: required_field(&projection_kind, "review_finding", h, "status")?,
+                reviewer: required_payload_string(
+                    &projection_kind,
+                    "review_finding",
+                    &payload,
+                    "reviewer",
+                )?,
+                severity: required_payload_string(
+                    &projection_kind,
+                    "review_finding",
+                    &payload,
+                    "severity",
+                )?,
+                summary: required_payload_string(
+                    &projection_kind,
+                    "review_finding",
+                    &payload,
+                    "summary",
+                )?,
+                evidence_artifact_id: payload_optional_string(&payload, "evidence_artifact_id"),
+                follow_up: payload_optional_string(&payload, "follow_up"),
+                updated_sequence: 0,
+            }))
         }
         "workpad_index_reset" => Ok(ProjectionRecord::WorkpadIndexReset(
             WorkpadIndexResetProjection {
@@ -3982,6 +4172,71 @@ mod tests {
         assert_eq!(
             reports[0].report_artifact_id.as_deref(),
             Some("artifact-task-outcome")
+        );
+    }
+
+    #[test]
+    fn review_findings_are_persisted_and_rebuilt() {
+        let store = temp_store("review-finding-rebuild");
+        let project_id = ProjectId::new("project-capo");
+        let task_id = TaskId::new("task-me3");
+        let session_id = SessionId::new("session-me3");
+        let run_id = RunId::new("run-me3");
+        let tool_call_id = ToolCallId::new("tool-me3");
+        let finding_id = "review-finding-me3";
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-review-finding".to_string(),
+                    kind: EventKind::ReviewFindingRecorded,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: Some(task_id.clone()),
+                    agent_id: None,
+                    session_id: Some(session_id.clone()),
+                    run_id: Some(run_id.clone()),
+                    turn_id: None,
+                    item_id: Some(finding_id.to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::ReviewFinding(ReviewFindingProjection {
+                    review_finding_id: finding_id.to_string(),
+                    project_id: project_id.clone(),
+                    task_id: task_id.clone(),
+                    session_id: session_id.clone(),
+                    run_id: Some(run_id.clone()),
+                    tool_call_id: Some(tool_call_id.clone()),
+                    workpad_task_id: Some("ME3".to_string()),
+                    reviewer: "focused-review".to_string(),
+                    finding_kind: "blocker".to_string(),
+                    severity: "high".to_string(),
+                    summary: "Link findings to follow-up workpad tasks.".to_string(),
+                    status: "open".to_string(),
+                    evidence_artifact_id: Some("artifact-review".to_string()),
+                    follow_up: Some("ME3".to_string()),
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append review finding");
+
+        store.rebuild_projections().expect("rebuild projections");
+        let findings = store
+            .review_findings_for_session(&session_id)
+            .expect("review findings");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].project_id, project_id);
+        assert_eq!(findings[0].task_id, task_id);
+        assert_eq!(findings[0].run_id.as_ref(), Some(&run_id));
+        assert_eq!(findings[0].tool_call_id.as_ref(), Some(&tool_call_id));
+        assert_eq!(findings[0].workpad_task_id.as_deref(), Some("ME3"));
+        assert_eq!(findings[0].finding_kind, "blocker");
+        assert_eq!(findings[0].status, "open");
+        assert_eq!(
+            findings[0].evidence_artifact_id.as_deref(),
+            Some("artifact-review")
         );
     }
 

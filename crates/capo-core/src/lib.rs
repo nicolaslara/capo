@@ -99,6 +99,7 @@ pub enum CommandIntent {
     ApplyWorkpadProposal,
     QueuePermissionApproval,
     DecidePermissionApproval,
+    RecordReviewFinding,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

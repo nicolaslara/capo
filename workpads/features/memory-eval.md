@@ -61,9 +61,21 @@ Evidence:
 
 ### ME3 - Review Feedback Loop
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Capture human/subagent review findings as durable evidence.
 - Link findings to sessions, tasks, tools, and follow-up workpad items.
+
+Evidence:
+
+- `crates/capo-state/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
+- `crates/capo-core/src/lib.rs`
+- `cargo test -p capo-state review_findings`
+- `cargo test -p capo-cli cli_drives_fake_controller_and_exports_evidence`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+- Focused ME3 review found follow-up identity and unchecked link blockers; fixes added follow-up-aware finding identity plus tool/workpad link validation. Final focused re-review found no blockers.

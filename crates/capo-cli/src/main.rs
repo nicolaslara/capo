@@ -13,8 +13,8 @@ use capo_query::{ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 use capo_state::{
     ArtifactRecord, CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection,
     MemoryPacketProjection, NewEvent, PermissionApprovalProjection, ProjectionRecord,
-    RedactionState, RunProjection, SessionProjection, SqliteStateStore, ToolCallProjection,
-    WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
+    RedactionState, ReviewFindingProjection, RunProjection, SessionProjection, SqliteStateStore,
+    ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
 use capo_workpads::{WorkpadIndex, index_project_workpads};
 
@@ -47,6 +47,7 @@ Usage:
   capo workpad apply --proposal PATH [--confirm] [--state PATH]
   capo evidence export --session SESSION_ID --out DIR [--state PATH]
   capo eval task-outcome --session SESSION_ID --out DIR [--state PATH]
+  capo review record --session SESSION_ID --reviewer NAME --kind blocker|finding|no_blockers --summary TEXT --out DIR [--severity LEVEL] [--tool-call TOOL_CALL_ID] [--follow-up-workpad-task WORKPAD_TASK_ID] [--state PATH]
 
 Prototype notes:
   The P4 CLI uses command envelopes, the fake controller, and SQLite read models.
@@ -127,6 +128,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "eval" && command == "task-outcome" => {
             export_task_outcome_report(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "review" && command == "record" => {
+            record_review_finding(&parsed, rest)
         }
         [unknown, ..] => Err(format!("unknown command: {unknown}\nrun `capo --help`")),
     }
@@ -1209,6 +1213,169 @@ fn export_task_outcome_report(parsed: &ParsedArgs, args: &[String]) -> Result<St
     ))
 }
 
+fn record_review_finding(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let session_id = SessionId::new(required_arg(args, "--session")?);
+    let reviewer = required_arg(args, "--reviewer")?;
+    let finding_kind = required_arg(args, "--kind")?;
+    if !matches!(finding_kind.as_str(), "blocker" | "finding" | "no_blockers") {
+        return Err("--kind must be blocker, finding, or no_blockers".to_string());
+    }
+    let summary = required_arg(args, "--summary")?;
+    let out = PathBuf::from(required_arg(args, "--out")?);
+    let severity =
+        optional_arg(args, "--severity").unwrap_or_else(|| default_review_severity(&finding_kind));
+    let tool_call_id = optional_arg(args, "--tool-call").map(ToolCallId::new);
+    let follow_up_workpad_task_id = optional_arg(args, "--follow-up-workpad-task");
+    let state = state(parsed)?;
+    let session = state
+        .session(&session_id)
+        .map_err(debug_error)?
+        .ok_or_else(|| format!("missing session read model: {session_id}"))?;
+    let task_id = session
+        .task_id
+        .clone()
+        .ok_or_else(|| format!("session is not linked to a task: {session_id}"))?;
+    let run = state.run_for_session(&session_id).map_err(debug_error)?;
+    let run_id = run.as_ref().map(|run| run.run_id.clone());
+    if let Some(tool_call_id) = &tool_call_id {
+        let session_tool_calls = state
+            .tool_calls_for_session(&session_id)
+            .map_err(debug_error)?;
+        if !session_tool_calls
+            .iter()
+            .any(|tool_call| &tool_call.tool_call_id == tool_call_id)
+        {
+            return Err(format!(
+                "tool call is not linked to session: {}",
+                tool_call_id
+            ));
+        }
+    }
+    if let Some(workpad_task_id) = &follow_up_workpad_task_id
+        && state
+            .workpad_task(&session.project_id, workpad_task_id)
+            .map_err(debug_error)?
+            .is_none()
+    {
+        return Err(format!("missing follow-up workpad task: {workpad_task_id}"));
+    }
+    let command = envelope(
+        "review-record",
+        CommandTarget::Session(session_id.clone()),
+        CommandIntent::RecordReviewFinding,
+        Some(summary.clone()),
+    );
+    let finding_seed = format!(
+        "{}:{}:{}:{}:{}:{}:{}",
+        session_id,
+        reviewer,
+        finding_kind,
+        severity,
+        summary,
+        tool_call_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "none".to_string()),
+        follow_up_workpad_task_id.as_deref().unwrap_or("none")
+    );
+    let review_finding_id = format!("review-finding-{}", stable_cli_hash(&finding_seed));
+    let artifact_id = format!("artifact-{review_finding_id}");
+    fs::create_dir_all(&out).map_err(|error| error.to_string())?;
+    let path = out.join(format!("{artifact_id}.md"));
+    let markdown = render_review_finding_artifact(
+        &session,
+        run.as_ref(),
+        &review_finding_id,
+        &artifact_id,
+        &reviewer,
+        &finding_kind,
+        &severity,
+        &summary,
+        tool_call_id.as_ref(),
+        follow_up_workpad_task_id.as_deref(),
+    );
+    write_review_finding_file(&path, &markdown)?;
+    let content_hash = stable_cli_hash(&markdown);
+    state
+        .record_artifact(ArtifactRecord {
+            artifact_id: artifact_id.clone(),
+            project_id: Some(session.project_id.clone()),
+            session_id: Some(session_id.clone()),
+            run_id: run_id.clone(),
+            kind: "review".to_string(),
+            uri: path.display().to_string(),
+            content_hash: content_hash.clone(),
+            size_bytes: markdown.len() as i64,
+            redaction_state: RedactionState::Safe,
+        })
+        .map_err(debug_error)?;
+
+    let evidence_kind = review_evidence_kind(&finding_kind);
+    let evidence_id = format!("evidence-{review_finding_id}");
+    let sequence = state
+        .append_event(
+            NewEvent {
+                event_id: format!("event-{}", review_finding_id),
+                kind: EventKind::ReviewFindingRecorded,
+                actor: "cli".to_string(),
+                project_id: Some(session.project_id.clone()),
+                task_id: Some(task_id.clone()),
+                agent_id: Some(session.agent_id.clone()),
+                session_id: Some(session_id.clone()),
+                run_id: run_id.clone(),
+                turn_id: None,
+                item_id: Some(review_finding_id.clone()),
+                payload_json: format!(
+                    "{{\"review_finding_id\":\"{}\",\"artifact_id\":\"{}\",\"content_hash\":\"{}\",\"finding_kind\":\"{}\",\"severity\":\"{}\"}}",
+                    escape_json(&review_finding_id),
+                    escape_json(&artifact_id),
+                    escape_json(&content_hash),
+                    escape_json(&finding_kind),
+                    escape_json(&severity)
+                ),
+                idempotency_key: Some(format!("review-finding:{review_finding_id}")),
+                redaction_state: RedactionState::Safe,
+            },
+            &[
+                ProjectionRecord::ReviewFinding(ReviewFindingProjection {
+                    review_finding_id: review_finding_id.clone(),
+                    project_id: session.project_id.clone(),
+                    task_id: task_id.clone(),
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    tool_call_id: tool_call_id.clone(),
+                    workpad_task_id: follow_up_workpad_task_id.clone(),
+                    reviewer: reviewer.clone(),
+                    finding_kind: finding_kind.clone(),
+                    severity: severity.clone(),
+                    summary: summary.clone(),
+                    status: review_finding_status(&finding_kind).to_string(),
+                    evidence_artifact_id: Some(artifact_id.clone()),
+                    follow_up: follow_up_workpad_task_id.clone(),
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Evidence(EvidenceProjection {
+                    evidence_id: capo_core::EvidenceId::new(evidence_id.clone()),
+                    project_id: session.project_id,
+                    task_id: Some(task_id),
+                    session_id: Some(session_id.clone()),
+                    run_id,
+                    kind: evidence_kind.to_string(),
+                    artifact_id: Some(artifact_id.clone()),
+                    confidence: review_confidence(&finding_kind),
+                    updated_sequence: 0,
+                }),
+            ],
+        )
+        .map_err(debug_error)?;
+
+    Ok(format!(
+        "review_finding_recorded=true\nreview_finding_id={review_finding_id}\nevidence_id={evidence_id}\nartifact_id={artifact_id}\npath={}\nsequence={sequence}\ncommand_id={}\n",
+        path.display(),
+        command.command_id
+    ))
+}
+
 fn workpad_index_projections(
     index: &WorkpadIndex,
     existing_statuses: &HashMap<String, String>,
@@ -1334,6 +1501,23 @@ fn derive_review_outcome(
     state: &SqliteStateStore,
     session_id: &SessionId,
 ) -> Result<String, String> {
+    let findings = state
+        .review_findings_for_session(session_id)
+        .map_err(debug_error)?;
+    if let Some(finding) = findings.iter().max_by_key(|finding| {
+        (
+            finding.updated_sequence,
+            review_finding_precedence(&finding.finding_kind),
+        )
+    }) {
+        return Ok(match finding.finding_kind.as_str() {
+            "blocker" | "finding" => "reviewed_with_findings",
+            "no_blockers" => "reviewed_no_blockers",
+            _ => "not_reviewed",
+        }
+        .to_string());
+    }
+
     let evidence = state
         .evidence_for_session(session_id)
         .map_err(debug_error)?;
@@ -1355,6 +1539,49 @@ fn derive_review_outcome(
         _ => "not_reviewed",
     }
     .to_string())
+}
+
+fn review_finding_precedence(finding_kind: &str) -> i64 {
+    match finding_kind {
+        "blocker" => 3,
+        "finding" => 2,
+        "no_blockers" => 1,
+        _ => 0,
+    }
+}
+
+fn review_evidence_kind(finding_kind: &str) -> &'static str {
+    match finding_kind {
+        "blocker" => "review_blockers",
+        "finding" => "review_findings",
+        "no_blockers" => "review_no_blockers",
+        _ => "review_findings",
+    }
+}
+
+fn review_finding_status(finding_kind: &str) -> &'static str {
+    match finding_kind {
+        "no_blockers" => "closed",
+        _ => "open",
+    }
+}
+
+fn review_confidence(finding_kind: &str) -> i64 {
+    match finding_kind {
+        "no_blockers" => 90,
+        "blocker" => 80,
+        _ => 70,
+    }
+}
+
+fn default_review_severity(finding_kind: &str) -> String {
+    match finding_kind {
+        "blocker" => "high",
+        "finding" => "medium",
+        "no_blockers" => "none",
+        _ => "medium",
+    }
+    .to_string()
 }
 
 fn render_evidence(
@@ -1449,6 +1676,45 @@ fn render_evidence(
     markdown
 }
 
+#[allow(clippy::too_many_arguments)]
+fn render_review_finding_artifact(
+    session: &SessionProjection,
+    run: Option<&RunProjection>,
+    review_finding_id: &str,
+    artifact_id: &str,
+    reviewer: &str,
+    finding_kind: &str,
+    severity: &str,
+    summary: &str,
+    tool_call_id: Option<&ToolCallId>,
+    follow_up_workpad_task_id: Option<&str>,
+) -> String {
+    format!(
+        "<!-- capo:review-finding -->\n# Capo Review Finding - {}\n\n## Review\n\n- Review finding: `{}`\n- Reviewer: `{}`\n- Kind: `{}`\n- Severity: `{}`\n- Status: `{}`\n- Artifact: `{}`\n\n## Links\n\n- Project: `{}`\n- Task: `{}`\n- Session: `{}`\n- Run: `{}`\n- Tool call: `{}`\n- Follow-up workpad task: `{}`\n\n## Summary\n\n{}\n",
+        session.title,
+        review_finding_id,
+        reviewer,
+        finding_kind,
+        severity,
+        review_finding_status(finding_kind),
+        artifact_id,
+        session.project_id,
+        session
+            .task_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "none".to_string()),
+        session.session_id,
+        run.map(|run| run.run_id.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        tool_call_id
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "none".to_string()),
+        follow_up_workpad_task_id.unwrap_or("none"),
+        summary
+    )
+}
+
 fn render_workpad_proposal(
     task_id: &TaskId,
     workpad_task: &WorkpadTaskProjection,
@@ -1496,6 +1762,24 @@ fn write_task_outcome_report_file(path: &Path, markdown: &str) -> Result<(), Str
         if existing != markdown {
             return Err(format!(
                 "refusing to overwrite changed Capo task outcome report file: {}",
+                path.display()
+            ));
+        }
+    }
+    fs::write(path, markdown).map_err(|error| error.to_string())
+}
+
+fn write_review_finding_file(path: &Path, markdown: &str) -> Result<(), String> {
+    if let Ok(existing) = fs::read_to_string(path) {
+        if !existing.starts_with("<!-- capo:review-finding -->") {
+            return Err(format!(
+                "refusing to overwrite non-Capo review finding file: {}",
+                path.display()
+            ));
+        }
+        if existing != markdown {
+            return Err(format!(
+                "refusing to overwrite changed Capo review finding file: {}",
                 path.display()
             ));
         }
@@ -2407,28 +2691,24 @@ mod tests {
         assert!(!exported.contains("OPENAI_API_KEY"));
         assert!(!exported.contains("ANTHROPIC_API_KEY"));
         let state = SqliteStateStore::open(&state_root).expect("open state");
-        state
-            .append_event(
-                NewEvent::new(
-                    "event-review-no-blockers",
-                    EventKind::EvidenceRecorded,
-                    "test",
-                ),
-                &[ProjectionRecord::Evidence(EvidenceProjection {
-                    evidence_id: capo_core::EvidenceId::new("evidence-review-no-blockers"),
-                    project_id: project_id(),
-                    task_id: Some(TaskId::new(
-                        "task-inspect-the-project-and-write-a-short-status-summary",
-                    )),
-                    session_id: Some(SessionId::new("session-fake-codex")),
-                    run_id: Some(capo_core::RunId::new("run-fake-codex")),
-                    kind: "review_no_blockers".to_string(),
-                    artifact_id: Some("artifact-review-no-blockers".to_string()),
-                    confidence: 90,
-                    updated_sequence: 0,
-                })],
-            )
-            .expect("append review evidence");
+        let review_recorded = run_cli(vec![
+            "review".to_string(),
+            "record".to_string(),
+            "--session".to_string(),
+            "session-fake-codex".to_string(),
+            "--reviewer".to_string(),
+            "focused-review".to_string(),
+            "--kind".to_string(),
+            "no_blockers".to_string(),
+            "--summary".to_string(),
+            "No blockers in exported fake controller evidence.".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record no-blockers review");
+        assert!(review_recorded.contains("review_finding_recorded=true"));
 
         let outcome = run_cli(vec![
             "eval".to_string(),
@@ -2492,25 +2772,49 @@ mod tests {
                 .len(),
             1
         );
-
         state
             .append_event(
-                NewEvent::new("event-review-blockers", EventKind::EvidenceRecorded, "test"),
-                &[ProjectionRecord::Evidence(EvidenceProjection {
-                    evidence_id: capo_core::EvidenceId::new("evidence-review-blockers"),
+                NewEvent::new(
+                    "event-workpad-me3-follow-up",
+                    EventKind::WorkpadIndexed,
+                    "test",
+                ),
+                &[ProjectionRecord::WorkpadTask(WorkpadTaskProjection {
+                    workpad_task_id: "ME3".to_string(),
                     project_id: project_id(),
-                    task_id: Some(TaskId::new(
-                        "task-inspect-the-project-and-write-a-short-status-summary",
-                    )),
-                    session_id: Some(SessionId::new("session-fake-codex")),
-                    run_id: Some(capo_core::RunId::new("run-fake-codex")),
-                    kind: "review_blockers".to_string(),
-                    artifact_id: Some("artifact-review-blockers".to_string()),
-                    confidence: 60,
+                    path: "workpads/features/memory-eval.md".to_string(),
+                    source_anchor: "ME3 - Review Feedback Loop".to_string(),
+                    title: "Review Feedback Loop".to_string(),
+                    observed_status: "pending".to_string(),
+                    capo_execution_status: "observed_only".to_string(),
+                    observed_unix: 1,
                     updated_sequence: 0,
                 })],
             )
-            .expect("append blocker review evidence");
+            .expect("append ME3 follow-up workpad task");
+
+        let blocker_review = run_cli(vec![
+            "review".to_string(),
+            "record".to_string(),
+            "--session".to_string(),
+            "session-fake-codex".to_string(),
+            "--reviewer".to_string(),
+            "focused-review".to_string(),
+            "--kind".to_string(),
+            "blocker".to_string(),
+            "--summary".to_string(),
+            "Tool output needs follow-up workpad handling.".to_string(),
+            "--tool-call".to_string(),
+            "tool-fake-codex".to_string(),
+            "--follow-up-workpad-task".to_string(),
+            "ME3".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record blocker review");
+        assert!(blocker_review.contains("review_finding_recorded=true"));
         let blocker_outcome = run_cli(vec![
             "eval".to_string(),
             "task-outcome".to_string(),
@@ -2533,6 +2837,36 @@ mod tests {
                 .iter()
                 .any(|report| report.review_outcome == "reviewed_with_findings")
         );
+        let findings = state
+            .review_findings_for_session(&SessionId::new("session-fake-codex"))
+            .expect("review findings");
+        assert_eq!(findings.len(), 2);
+        let blocker = findings
+            .iter()
+            .find(|finding| finding.finding_kind == "blocker")
+            .expect("blocker finding");
+        assert_eq!(
+            blocker
+                .tool_call_id
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("tool-fake-codex")
+        );
+        assert_eq!(blocker.workpad_task_id.as_deref(), Some("ME3"));
+        let review_artifact = fs::read_to_string(
+            evidence_dir
+                .join(
+                    blocker
+                        .evidence_artifact_id
+                        .as_ref()
+                        .expect("review artifact"),
+                )
+                .with_extension("md"),
+        )
+        .expect("read review artifact");
+        assert!(review_artifact.starts_with("<!-- capo:review-finding -->"));
+        assert!(review_artifact.contains("Follow-up workpad task: `ME3`"));
     }
 
     #[test]

@@ -149,3 +149,13 @@ Observed 2026-05-25.
 - Eval crate dependency on state read models: `../../crates/capo-eval/Cargo.toml`, `../../Cargo.lock`
 - Memory/evaluation source workpad: `memory-eval.md`
 - No new third-party dependencies were added for ME2.
+
+## F5/ME3 Review Feedback Loop
+
+Observed 2026-05-25.
+
+- Review finding command intent: `../../crates/capo-core/src/lib.rs`
+- Review finding projection, event kind, rebuild encode/decode, read query, and rebuild test: `../../crates/capo-state/src/lib.rs`
+- CLI review recording command, guarded review artifacts, tool/workpad link validation, review outcome derivation, and e2e regression coverage: `../../crates/capo-cli/src/main.rs`
+- Memory/evaluation source workpad: `memory-eval.md`
+- No new third-party dependencies were added for ME3.
