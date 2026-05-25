@@ -88,6 +88,7 @@ Acceptance:
 Progress:
 
 - Deterministic replay support is completed for normalized Codex and Claude fixture streams. This does not claim real-agent readiness, but it proves parsed provider events can flow through controller-owned state/read models without launching subscription-backed CLIs.
+- CLI fixture replay is completed for deterministic local evidence export. This gives operators a non-subscription-backed e2e command for replaying normalized provider fixtures through Capo state/read models and markdown evidence.
 
 Evidence:
 
@@ -95,6 +96,8 @@ Evidence:
 - `cargo test -p capo-controller replay -- --nocapture`: passed.
 - Codex replay regression covers `fixtures/codex-exec.jsonl`, updates `session.summary_updated`, `tool_calls`, and `evidence`, and asserts event payloads do not persist raw provider message/tool text.
 - Claude replay regression covers `fixtures/claude-code-stream.jsonl`, preserves tool name across tool-result updates, updates evidence, and asserts event payloads do not persist raw provider message/tool text.
+- `capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR]` routes fixture replay through the controller and optional evidence export.
+- `cargo test -p capo-cli adapter_fixture -- --nocapture`: passed.
 
 Skipped verification:
 

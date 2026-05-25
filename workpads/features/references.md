@@ -203,3 +203,13 @@ Observed 2026-05-25.
 - State projections used by replay: `../../crates/capo-state/src/lib.rs`
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC3a.
+
+## F1/AC3b Adapter Fixture Replay CLI
+
+Observed 2026-05-25.
+
+- CLI adapter fixture replay command and evidence export regression: `../../crates/capo-cli/src/main.rs`
+- Controller replay seam reused by CLI: `../../crates/capo-controller/src/lib.rs`
+- Normalized adapter fixtures: `../../crates/capo-adapters/fixtures/codex-exec.jsonl`, `../../crates/capo-adapters/fixtures/claude-code-stream.jsonl`, `../../crates/capo-adapters/fixtures/acp-replay.jsonl`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC3b.

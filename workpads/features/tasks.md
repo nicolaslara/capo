@@ -69,6 +69,7 @@ Evidence:
 - `cargo test -p capo-adapters artifact_scanner_allows_redacted_markers_and_rejects_raw_secrets`
 - `cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture` without `CAPO_RUN_CODEX_LOCAL_SMOKE=1`
 - `cargo test -p capo-controller replay -- --nocapture`
+- `cargo test -p capo-cli adapter_fixture -- --nocapture`
 - Focused F1 connector safety review: no blocking findings; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge

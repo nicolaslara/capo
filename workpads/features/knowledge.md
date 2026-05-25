@@ -502,3 +502,22 @@ Verification:
 Follow-up:
 
 - After explicit user opt-in, run a real subscription-backed adapter smoke and pass the resulting normalized stream through the same controller replay seam, then export evidence and scan it for credential/session markers.
+
+## F1/AC3b - Adapter Fixture Replay CLI
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR]` as a deterministic operator surface for the adapter replay seam.
+- The command registers the target agent if needed, starts a normal Capo session through the fake controller/runtime scaffold, replays normalized adapter fixture events through controller-owned state, and optionally exports markdown evidence.
+- Evidence export remains Capo-owned markdown. Tests assert raw provider message/tool text from the fixture is absent from CLI output, state files, and exported evidence.
+- This is not a substitute for real subscription-backed smoke. It is the regression harness that the real smoke should converge on after opt-in.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_fixture -- --nocapture`: passed.
+
+Follow-up:
+
+- Real opt-in Codex/Claude smoke should feed captured normalized streams into this same replay/evidence path and then run credential/session marker scans.

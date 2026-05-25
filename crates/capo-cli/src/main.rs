@@ -3,6 +3,9 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use capo_adapters::{
+    AcpAdapter, AdapterFixtureParse, ClaudeCodeAdapter, CodexExecAdapter, NormalizedAdapterEvent,
+};
 use capo_controller::FakeBoundaryController;
 use capo_core::{
     AgentId, CommandEnvelope, CommandId, CommandIntent, CommandTarget, InputOrigin, ProjectId,
@@ -37,6 +40,7 @@ Usage:
   capo agent register --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent spawn --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent list [--state PATH]
+  capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR] [--state PATH]
   capo task send --agent NAME --goal GOAL [--scenario NAME] [--state PATH]
   capo session status --agent NAME [--state PATH]
   capo session redirect --agent NAME --goal GOAL [--state PATH]
@@ -92,6 +96,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             register_agent(&parsed, rest)
         }
         [area, command] if area == "agent" && command == "list" => list_agents(&parsed),
+        [area, command, rest @ ..] if area == "adapter" && command == "replay-fixture" => {
+            replay_adapter_fixture(&parsed, rest)
+        }
         [area, command, rest @ ..] if area == "task" && command == "send" => {
             send_task(&parsed, rest)
         }
@@ -253,6 +260,95 @@ fn list_agents(parsed: &ParsedArgs) -> Result<String, String> {
         ));
     }
     Ok(output)
+}
+
+fn replay_adapter_fixture(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let adapter = required_arg(args, "--adapter")?;
+    let fixture_path = PathBuf::from(required_arg(args, "--fixture")?);
+    let agent = required_arg(args, "--agent")?;
+    let goal = required_arg(args, "--goal")?;
+    let fixture = fs::read_to_string(&fixture_path).map_err(|error| error.to_string())?;
+    let adapter_events = parse_adapter_fixture(&adapter, &fixture)?;
+    let controller = controller(parsed)?;
+    let registration = if state(parsed)?
+        .agent_by_name(&agent)
+        .map_err(debug_error)?
+        .is_some()
+    {
+        controller
+            .registration_for_agent_name(&agent)
+            .map_err(debug_error)?
+    } else {
+        controller.register_agent(&agent).map_err(debug_error)?
+    };
+    let refs = controller
+        .send_task(&registration, &goal)
+        .map_err(debug_error)?;
+    let report = controller
+        .apply_normalized_adapter_events(&refs, &adapter_events)
+        .map_err(debug_error)?;
+    let mut output = format!(
+        "adapter_replayed=true\nadapter={}\nfixture={}\nagent={}\nsession_id={}\nrun_id={}\ninput_events={}\nappended_events={}\ntool_events={}\nsummary_events={}\ncompleted_turns={}\n",
+        adapter_label(&adapter),
+        fixture_path.display(),
+        agent,
+        refs.session_id,
+        refs.run_id,
+        report.input_event_count,
+        report.appended_event_count,
+        report.tool_event_count,
+        report.summary_event_count,
+        report.completed_turn_count
+    );
+    if let Some(out) = optional_arg(args, "--out") {
+        output.push_str(&export_evidence(
+            parsed,
+            &[
+                "--session".to_string(),
+                refs.session_id.to_string(),
+                "--out".to_string(),
+                out,
+            ],
+        )?);
+    }
+    Ok(output)
+}
+
+fn parse_adapter_fixture(
+    adapter: &str,
+    fixture: &str,
+) -> Result<Vec<NormalizedAdapterEvent>, String> {
+    let parsed: AdapterFixtureParse = match adapter {
+        "codex" | "codex-exec" | "codex_exec" => {
+            CodexExecAdapter::parse_jsonl(fixture).map_err(adapter_parse_error)?
+        }
+        "claude" | "claude-code" | "claude_code" => {
+            ClaudeCodeAdapter::parse_stream_json(fixture).map_err(adapter_parse_error)?
+        }
+        "acp" => AcpAdapter::parse_replay_jsonl(fixture).map_err(adapter_parse_error)?,
+        other => {
+            return Err(format!(
+                "unsupported adapter fixture kind: {other}; expected codex, claude, or acp"
+            ));
+        }
+    };
+    Ok(parsed.deduped_by_idempotency())
+}
+
+fn adapter_parse_error(error: capo_adapters::AdapterParseError) -> String {
+    format!(
+        "adapter fixture parse failed at line {}: {}",
+        error.line, error.message
+    )
+}
+
+fn adapter_label(adapter: &str) -> &'static str {
+    match adapter {
+        "codex" | "codex-exec" | "codex_exec" => "codex_exec",
+        "claude" | "claude-code" | "claude_code" => "claude_code",
+        "acp" => "acp",
+        _ => "unknown",
+    }
 }
 
 fn dashboard(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
@@ -3487,6 +3583,56 @@ mod tests {
         ])
         .unwrap_err();
         assert!(unknown.contains("unknown dashboard filter: --agent"));
+    }
+
+    #[test]
+    fn adapter_fixture_replay_cli_exports_evidence_without_raw_provider_text() {
+        let state_root = temp_root("cli-adapter-replay-state");
+        let evidence_dir = temp_root("cli-adapter-replay-evidence");
+        let fixture = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../capo-adapters/fixtures/codex-exec.jsonl"
+        ));
+
+        let output = run_cli(vec![
+            "adapter".to_string(),
+            "replay-fixture".to_string(),
+            "--adapter".to_string(),
+            "codex".to_string(),
+            "--fixture".to_string(),
+            fixture.display().to_string(),
+            "--agent".to_string(),
+            "replay-codex".to_string(),
+            "--goal".to_string(),
+            "Replay Codex fixture through Capo".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("adapter replay fixture");
+
+        assert!(output.contains("adapter_replayed=true"));
+        assert!(output.contains("adapter=codex_exec"));
+        assert!(output.contains("session_id=session-replay-codex"));
+        assert!(output.contains("tool_events=2"));
+        assert!(output.contains("summary_events=1"));
+        assert!(output.contains("completed_turns=1"));
+        assert!(output.contains("evidence_exported=true"));
+        assert!(!output.contains("Codex fixture response."));
+        assert!(!output.contains("cargo test"));
+
+        let evidence_path = evidence_dir.join("session-replay-codex.md");
+        let evidence = fs::read_to_string(&evidence_path).expect("read replay evidence");
+        assert!(evidence.contains("adapter_replay:codex_exec"));
+        assert!(evidence.contains("adapter_native:codex_exec"));
+        assert!(evidence.contains("content_hash="));
+        assert!(!evidence.contains("Codex fixture response."));
+        assert!(!evidence.contains("cargo test"));
+        assert_text_absent_in_tree(&state_root, "Codex fixture response.");
+        assert_text_absent_in_tree(&state_root, "cargo test");
+        assert_text_absent_in_tree(&evidence_dir, "Codex fixture response.");
+        assert_text_absent_in_tree(&evidence_dir, "cargo test");
     }
 
     #[test]
