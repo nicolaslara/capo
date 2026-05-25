@@ -35,6 +35,7 @@ This is the A2 architecture artifact. It refines the `StateStore` boundary from 
 | Adapter replay batches | SQLite plus raw-update artifacts | Used to reconcile ACP `session/load` and restart recovery without duplicate UI state. |
 | Adapter replay candidates | SQLite staging table | Non-projecting records used during replay reconciliation before accepted Capo events are appended. |
 | Capability profiles, grants, and permission decisions | SQLite events and read models | Detailed scope and policy model lives in `capability-permissions.md`. |
+| Tool definitions, invocations, and observations | SQLite events and read models | Detailed wrapper/instrumentation model lives in `tool-exposure.md`. |
 | Human decisions and review/evidence | SQLite events plus artifacts | Links back to workpad evidence where applicable. |
 | Derived memory | Memory layer | Must reference event/file provenance. |
 | Recovery attempts | SQLite events plus recovery metadata | Used only to make restart reconciliation idempotent. |
@@ -355,6 +356,72 @@ Fields:
 - `external_tool_ref?`
 
 Prototype status values: `requested`, `approved`, `started`, `output`, `completed`, `failed`, `denied`, `canceled`, `observed_only`.
+
+### ToolDefinition
+
+Registered callable surface exposed through Capo, runtime wrappers, adapter observers, provider observers, MCP bridge, or fake tests.
+
+Fields:
+
+- `tool_definition_id`
+- `tool_id`
+- `display_name`
+- `origin`: `capo`, `runtime`, `adapter_native`, `provider_native`, `mcp`
+- `handler_kind`
+- `schema`
+- `required_scopes`
+- `risk`
+- `redaction_policy`
+- `exposure`
+- `instrumentation_level`: `full`, `structured_observed`, `text_observed`, `none`
+- `status`
+- `created_at`
+- `updated_at`
+
+### ToolInvocation
+
+Execution attempt for a visible tool call.
+
+Fields:
+
+- `tool_invocation_id`
+- `tool_call_id`
+- `tool_definition_id?`
+- `session_id?`
+- `run_id?`
+- `turn_id?`
+- `adapter_config_id?`
+- `provider_connector_id?`
+- `runtime_process_ref_id?`
+- `external_tool_ref?`
+- `actor_id`
+- `subject`
+- `permission_decision_id?`
+- `capability_grant_use_id?`
+- `correlation_id`
+- `instrumentation_level`
+- `input_artifact_id?`
+- `output_artifact_id?`
+- `status`
+- `started_at?`
+- `completed_at?`
+
+### ToolObservation
+
+Structured or partial observation of a tool event from an adapter, provider, runtime, MCP bridge, or manual review.
+
+Fields:
+
+- `tool_observation_id`
+- `tool_call_id?`
+- `tool_invocation_id?`
+- `source`: `adapter_event`, `runtime_output`, `provider_usage`, `mcp_message`, `manual`
+- `external_tool_ref?`
+- `observed_status?`
+- `confidence`
+- `raw_event_id?`
+- `artifact_id?`
+- `observed_at`
 
 ### PermissionDecision
 
@@ -681,9 +748,15 @@ Uniqueness rules:
 | `capability.grant_used` | Grant use result and action refs | `capability_grant_uses` |
 | `capability.grant_expired` | Grant ID and expiry reason | `capability_grants` |
 | `capability.grant_revoked` | Grant ID, actor, reason | `capability_grants` |
+| `tool.definition_registered` | Tool schema, scopes, risk, exposure, instrumentation level | `tool_definitions` |
+| `tool.definition_updated` | Tool schema/status/exposure change | `tool_definitions` |
 | `tool.call_requested` | Tool name, origin, input artifact/ref | `tool_calls`, `items` |
-| `tool.call_started` | Execution metadata | `tool_calls` |
+| `tool.invocation_started` | Tool handler/invocation metadata | `tool_invocations`, `tool_calls` |
+| `tool.call_started` | Timeline status that invocation is running | `tool_calls` |
+| `tool.output_artifact_recorded` | Tool output artifact metadata | `tool_invocations`, `artifacts` |
 | `tool.output_observed` | Output artifact/ref | `tool_calls`, `items` |
+| `tool.observation_recorded` | Structured or partial external tool observation | `tool_observations`, `tool_calls` |
+| `tool.instrumentation_downgraded` | Tool visibility downgraded to partial or observed-only | `tool_observations`, `tool_calls` |
 | `tool.call_completed` | Result metadata, output artifact/ref | `tool_calls`, `items` |
 | `tool.call_failed` | Error and retryability | `tool_calls`, `items` |
 | `tool.call_canceled` | Actor/source and cancellation reason | `tool_calls`, `items` |
@@ -760,6 +833,16 @@ Includes:
 - Staleness/restart markers.
 - Decision history.
 
+### ToolCatalogReadModel
+
+Includes:
+
+- Registered tools and schemas.
+- Required scopes, risk, exposure, status, and instrumentation level.
+- Handler kind and native-tool limitation notes.
+
+Tool catalog rows are display and routing projections over `tool_definitions`, not independent authority.
+
 ### EventStream
 
 Includes:
@@ -812,6 +895,9 @@ runs(run_id, session_id, runtime_process_ref_json, adapter_instance_ref_json, st
 turns(turn_id, session_id, run_id, origin_command_id, role, status, created_at, completed_at)
 items(item_id, turn_id, kind, status, stream_state, ordinal, summary, artifact_id, external_item_ref_json, content_hash, chunk_count, message_boundary_confidence, adapter_timeline_key_id, import_confidence, updated_at)
 tool_calls(tool_call_id, session_id, turn_id, item_id, tool_name, tool_origin, permission_decision_id, status, started_at, completed_at, latency_ms, input_artifact_id, output_artifact_id, external_tool_ref_json)
+tool_definitions(tool_definition_id, tool_id, display_name, origin, handler_kind, schema_json, required_scopes_json, risk, redaction_policy_json, exposure, instrumentation_level, status, created_at, updated_at)
+tool_invocations(tool_invocation_id, tool_call_id, tool_definition_id, session_id, run_id, turn_id, adapter_config_id, provider_connector_id, runtime_process_ref_id, external_tool_ref_json, actor_id, subject_json, permission_decision_id, capability_grant_use_id, correlation_id, instrumentation_level, input_artifact_id, output_artifact_id, status, started_at, completed_at)
+tool_observations(tool_observation_id, tool_call_id, tool_invocation_id, source, external_tool_ref_json, observed_status, confidence, raw_event_id, artifact_id, observed_at)
 permission_decisions(permission_decision_id, request_id, session_id, run_id, tool_call_id, capability_profile_id, decision, persistence, source, scope_json, expires_at, revoked_at, created_at)
 permission_requests(permission_request_id, session_id, run_id, tool_call_id, capability_profile_id, scope_json, risk, source, adapter_options_json, status, created_at, decided_at)
 capability_profiles(capability_profile_id, project_id, name, description, default_scopes_json, risk_level, decision_mode, created_at, updated_at, disabled_at)
@@ -841,6 +927,12 @@ Minimum indexes:
 - `items(turn_id, ordinal)`
 - `items(adapter_timeline_key_id)`
 - `tool_calls(session_id, status)`
+- `tool_definitions(tool_id)` unique
+- `tool_definitions(origin, status)`
+- `tool_invocations(tool_call_id)`
+- `tool_invocations(session_id, status)`
+- `tool_observations(tool_call_id, observed_at)`
+- `tool_observations(external_tool_ref_json)` where stable external refs exist
 - `adapter_configs(project_id, adapter_kind, status)`
 - `adapter_session_refs(session_id, adapter_config_id)`
 - `provider_connectors(project_id, provider_kind, status)`
@@ -886,6 +978,7 @@ Minimum indexes:
 - Runtime process start is request/event driven: `runtime.start_requested` is persisted before launch, then `runtime.process_started` or `runtime.process_start_failed` closes the attempt.
 - Adapter/provider read models are projections over adapter/provider events and store non-secret metadata only.
 - Provider connector use is gated before runtime launch; denied use emits `provider.connector_use_denied`.
+- Tool catalog, invocation, and observation read models are projections over tool events. Observed-only native tools must remain labeled as partial visibility in session/agent/evaluation views.
 
 ## Workpad Status Boundary
 

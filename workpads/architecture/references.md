@@ -51,6 +51,15 @@ Observed 2026-05-25. Local clones are gitignored under `workpads/references/repo
   - `claude --version`: `2.1.150 (Claude Code)`
   - `claude -p --help`: supports `--output-format text|json|stream-json`, `--input-format text|stream-json`, `--permission-mode`, `--allowedTools`, `--disallowedTools`, `--tools`, `--mcp-config`, `--session-id`, `--resume`, `--continue`, `--no-session-persistence`, `--bare`, `--max-budget-usd`, and partial-message flags
 
+## Tool Exposure
+
+- Tool exposure architecture artifact: `tool-exposure.md` (created 2026-05-25)
+- ACP tool call docs, observed 2026-05-25: `workpads/references/repos/agent-client-protocol/docs/protocol/tool-calls.mdx`
+- ACP filesystem client capability docs, observed 2026-05-25: `workpads/references/repos/agent-client-protocol/docs/protocol/file-system.mdx`
+- ACP terminal client capability docs, observed 2026-05-25: `workpads/references/repos/agent-client-protocol/docs/protocol/terminals.mdx`
+- ACP client capability schema, observed 2026-05-25: `workpads/references/repos/agent-client-protocol/schema/schema.json`
+- ACP MCP server setup docs, observed 2026-05-25: `workpads/references/repos/agent-client-protocol/docs/protocol/session-setup.mdx`
+
 ## Runtime And Connectivity
 
 - Runtime/tunnel architecture artifact: `runtime-tunnel.md` (created 2026-05-25)

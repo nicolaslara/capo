@@ -28,6 +28,7 @@ Load these conditionally:
 - `workpads/architecture/capability-permissions.md` when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A3 is complete
 - `workpads/architecture/runtime-tunnel.md` when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A4 is complete
 - `workpads/architecture/protocol-provider.md` when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A5 is complete
+- `workpads/architecture/tool-exposure.md` when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A5a is complete
 - `workpads/prototype/spec.md` when active workpad is `prototype` or `dogfood`
 - `workpads/research/knowledge.md` when active workpad is `architecture`
 - `workpads/architecture/knowledge.md` when active workpad is `prototype`

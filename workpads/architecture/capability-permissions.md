@@ -268,12 +268,25 @@ Scopes:
 - `tool:invoke:provider_native`
 - `mcp:connect:server`
 - `mcp:invoke:tool`
+- `state:read:project`
+- `state:read:task`
+- `state:read:agent`
+- `state:read:session`
+- `state:read:runtime`
+- `state:read:provider`
+- `state:read:tool`
+- `state:read:evidence`
+- `state:read:capability`
+- `state:read:permission_queue`
+- `state:write:evidence`
+- `state:write:capability_request`
 
 Prototype behavior:
 
 - Capo-exposed tools should route through `ToolExposure` and `PermissionPolicy`.
 - Provider-native/adapter-native tools may be observed-only; mark instrumentation confidence explicitly.
-- Enforceable `resource_ref` is Capo tool ID, MCP server ID/tool ID, or adapter/provider native tool reference.
+- State-read and state-write scopes are distinct from tool invocation scopes. Calling `capo.session_summary` requires both the tool invocation scope and the relevant state read scopes.
+- Enforceable `resource_ref` is Capo tool ID, MCP server ID/tool ID, adapter/provider native tool reference, or a typed Capo state owner such as project/task/agent/session/run/permission queue.
 
 ### Secrets And Subscription Material
 

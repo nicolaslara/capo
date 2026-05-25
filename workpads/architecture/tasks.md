@@ -129,7 +129,7 @@ Evidence:
 
 ## A5a - Capo Tool Exposure And Instrumentation
 
-Status: pending
+Status: completed
 
 Acceptance:
 
@@ -137,6 +137,13 @@ Acceptance:
 - Define how Capo wraps existing agent tools so tool calls can be tracked, instrumented, audited, and eventually governed.
 - Define how exposed tools relate to ACP client capabilities, MCP servers, local runtime tools, and provider-native tools.
 - Record what is in prototype scope and what is deferred.
+
+Evidence:
+
+- `workpads/architecture/tool-exposure.md`
+- `workpads/architecture/state-model.md` tool definition/invocation/observation additions
+- `workpads/architecture/knowledge.md` A5a section
+- `workpads/architecture/references.md` Tool Exposure section
 
 ## A6 - Memory Architecture
 

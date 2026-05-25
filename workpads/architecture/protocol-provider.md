@@ -296,8 +296,11 @@ Capo calls agent:
 Capo implements client handlers:
 
 - `session/request_permission`
-- client filesystem/terminal methods only when explicitly enabled by Capo capability policy
-- MCP/client tool surfaces only when A5a defines and enables them
+- `fs/read_text_file` and `fs/write_text_file` only when `tool-exposure.md` wrappers and capability policy enable them
+- `terminal/*` only through `RuntimeRunner`-backed wrappers when capability policy enables them
+- MCP/client tool surfaces only when `tool-exposure.md` defines and enables them
+
+Prototype default: advertise no ACP `fs` or `terminal` client capability until the corresponding Capo wrapper tools have `ToolDefinition` rows, permission scopes, and passing wrapper tests.
 
 Mapping:
 
@@ -306,6 +309,7 @@ Mapping:
 - ACP `ToolCallUpdate.toolCallId` is a stable timeline key.
 - ACP permission options map through `capability-permissions.md`.
 - ACP client capabilities such as filesystem, terminal, and MCP server config are exposed only when Capo capability policy permits them.
+- ACP tool calls and client capability requests map through `tool-exposure.md`; raw ACP tool updates are observations until Capo executes the backing wrapper.
 
 Deferred:
 

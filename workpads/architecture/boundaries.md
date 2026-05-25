@@ -504,7 +504,21 @@ Naming note:
 
 Defines tools Capo exposes and instruments.
 
-Initial tool set:
+Detailed tool registry, wrapper, ACP client capability, MCP, native-tool observation, and instrumentation design lives in `tool-exposure.md`.
+
+Initial variants:
+
+```text
+ToolExposure =
+  CapoToolRegistry
+  | RuntimeToolWrappers
+  | AdapterNativeToolObserver
+  | ProviderNativeToolObserver
+  | McpToolBridge
+  | FakeToolExposure
+```
+
+Initial Capo tool set:
 
 - `capo.task_status`
 - `capo.agent_status`
@@ -525,8 +539,11 @@ Wrapper tools later:
 
 ```text
 list_tools(Context) -> Vec<ToolInfo>
+describe_tool(ToolId) -> ToolInfo
+authorize_tool_call(ToolCallRequest, CapabilityProfile, PolicyContext) -> PermissionDecision
 invoke_tool(ToolCallRequest) -> ToolCallResult
-wrap_external_tool(AdapterToolCall) -> InstrumentedToolCall
+observe_external_tool(AdapterToolObservation) -> ToolObservationResult
+deliver_tool_result(AdapterSessionRef, ToolCallResult) -> DeliveryResult
 ```
 
 ### Responsibilities
@@ -743,7 +760,7 @@ enum RuntimeRunner { LocalProcess(LocalProcessRunner), RemoteProcess(RemoteProce
 enum ConnectivityTunnel { LocalLoopback(LocalLoopbackTunnel), Ssh(SshTunnel), Tailscale(TailscaleTunnel), Reverse(ReverseTunnel), Fake(FakeTunnel) }
 enum ProviderConnector { CodexSubscription(CodexSubscriptionConnector), ClaudeSubscription(ClaudeSubscriptionConnector), OpenAiApi(OpenAiApiConnector), AnthropicApi(AnthropicApiConnector), LocalModel(LocalModelConnector), Unknown(UnknownProviderConnector), Fake(FakeProviderConnector) }
 enum PermissionPolicy { AllowTrustedLocalProfile(AllowTrustedLocalProfilePolicy), Static(StaticPolicy), UserApproval(UserApprovalPolicy), SecurityAgent(SecurityAgentPolicy), Fake(FakePermissionPolicy) }
-enum ToolExposure { Local(LocalToolExposure), Fake(FakeToolExposure) }
+enum ToolExposure { Capo(CapoToolRegistry), Runtime(RuntimeToolWrappers), AdapterNative(AdapterNativeToolObserver), ProviderNative(ProviderNativeToolObserver), Mcp(McpToolBridge), Fake(FakeToolExposure) }
 enum StateStore { Sqlite(SqliteStateStore), InMemory(InMemoryStateStore), Fake(FakeStateStore) }
 enum MemoryBackend { Markdown(MarkdownMemory), SqliteFts(SqliteFtsMemory) }
 enum EvaluationLayer { Local(LocalEvaluationLayer), Fake(FakeEvaluationLayer) }

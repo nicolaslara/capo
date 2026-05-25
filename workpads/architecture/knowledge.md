@@ -271,6 +271,42 @@ Review findings accepted:
 - Split ACP client calls from ACP client handlers.
 - Marked local absolute CLI paths as diagnostic observations only.
 
+## A5a - Capo Tool Exposure And Instrumentation
+
+Status: completed on 2026-05-25.
+
+Decision:
+
+- Use `workpads/architecture/tool-exposure.md` as the implementation-facing tool registry and instrumentation model.
+- Treat Capo tools as controller capabilities rather than agent identities.
+- Start with six Capo-owned tools: `capo.task_status`, `capo.agent_status`, `capo.session_summary`, `capo.workpad_read`, `capo.evidence_record`, and `capo.capability_request`.
+- Use static dispatch for tool exposure variants: Capo registry, runtime wrappers, adapter-native observer, provider-native observer, MCP bridge, and fake tests.
+- Build fake and Capo-owned tools before shell/file/git wrappers so the controller, permission, state, artifact, read-model, and adapter result-delivery path can be tested without relying on Codex/Claude native tool visibility.
+
+Tool boundary:
+
+- Fully governed tools are tools Capo executes through a registered handler or wrapper.
+- Adapter-native and provider-native tools are `observed_only` unless Capo receives structured lifecycle evidence or executes the backing action itself.
+- ACP `session/update` tool calls are observations; ACP `fs/*` and `terminal/*` requests are executable only when Capo advertises the matching client capability and routes through wrappers.
+- ACP terminal requests route through `RuntimeRunner`, not direct shell execution.
+- ACP filesystem requests route through canonicalized workspace file wrappers, not raw filesystem access.
+- MCP is deferred as a publication/bridge surface over `ToolExposure`, not a second internal tool registry.
+
+State implications:
+
+- Added `ToolDefinition`, `ToolInvocation`, and `ToolObservation` records to separate tool catalog, execution projection, and partial native-tool observations.
+- Added tool definition, invocation, observation, output artifact, authorization, and instrumentation downgrade events.
+- Added `ToolCatalogReadModel` and read-model requirements for instrumentation confidence in agent/session/evaluation views.
+- Added explicit state read/write scopes so status and summary tools cannot use broad tool-invoke grants as implicit access to all Capo state.
+- Added actor, subject, permission decision, grant-use, and correlation fields to tool invocation records.
+- Clarified that `tool.call_requested` owns timeline creation, permission events own authorization, and `tool.invocation_started` owns execution projection creation.
+- Set the v0 ACP default to advertise no `fs` or `terminal` client capability until backing wrapper tools and tests exist.
+
+Residual risks:
+
+- Exact Codex and Claude native-tool visibility remains medium confidence until fixture captures show which structured fields are exposed.
+- Shell/file/git wrappers are intentionally deferred; prototype tests must not claim runtime enforcement until wrappers exist.
+
 ## Architecture Gate
 
 Status: not passed.
