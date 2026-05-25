@@ -24,6 +24,8 @@ This is the A2 architecture artifact. It refines the `StateStore` boundary from 
 | Project registration | SQLite | Points at repo/workpad paths. |
 | Workpad task text/status | Markdown files | Capo stores path, heading anchor, and observed workpad status snapshots. |
 | Agent configuration | SQLite | Includes adapter/runtime/provider/capability profile IDs. |
+| Runtime targets and process refs | SQLite events and read models | Detailed runtime/tunnel model lives in `runtime-tunnel.md`. |
+| Connectivity endpoints | SQLite events and read models | Stores endpoint/tunnel metadata and redacted auth references, not raw secrets. |
 | Session/run/turn lifecycle | SQLite events | Read models are projections. |
 | Streaming messages/items/tool calls | SQLite events | Raw chunks may also be artifact records. |
 | Runtime stdout/stderr/PTY logs | File artifacts plus event pointers | Avoid unbounded blobs in event rows. |
@@ -128,6 +130,85 @@ Fields:
 - `recovery_of_run_id?`
 
 Prototype status values: `starting`, `running`, `stopping`, `exited`, `failed`, `orphaned`, `recovered`.
+
+Restart recovery can recover the same run in place when the original process is still alive and attachable. `recovery_of_run_id` is for a new run that relaunches/retries after restart, provider switch, or explicit recovery attempt.
+
+### RuntimeTarget
+
+Configured execution placement for an agent process.
+
+Fields:
+
+- `runtime_target_id`
+- `project_id?`
+- `name`
+- `runner_kind`: `local_process`, `remote_process`, `container`
+- `workspace_root`
+- `artifact_root`
+- `default_cwd`
+- `env_policy_json`
+- `capability_profile_id`
+- `connectivity_endpoint_id?`
+- `status`
+- `created_at`
+- `updated_at`
+
+`env_policy_json` stores environment inheritance, allowlist, redaction, and secret-handle references. It must not store raw secret values.
+
+### RuntimeProcessRef
+
+Opaque process reference returned by a runtime runner.
+
+Fields:
+
+- `runtime_process_ref_id`
+- `runtime_target_id`
+- `run_id`
+- `external_pid?`
+- `process_group_ref?`
+- `remote_process_ref?`
+- `started_at`
+- `last_heartbeat_at?`
+- `status`
+- `redaction_state`
+
+### ConnectivityEndpoint
+
+Configured way to reach a runtime or Capo surface.
+
+Fields:
+
+- `connectivity_endpoint_id`
+- `project_id?`
+- `name`
+- `tunnel_kind`: `local_loopback`, `ssh`, `tailscale`, `reverse`
+- `address_ref`
+- `identity_ref?`
+- `auth_ref?`
+- `exposure`: `loopback`, `private`, `public`
+- `allowed_channels`
+- `status`
+- `created_at`
+- `updated_at`
+
+### ResolvedEndpoint
+
+Resolved endpoint/channel for one runtime, Capo server, input surface, or artifact operation.
+
+Fields:
+
+- `resolved_endpoint_id`
+- `connectivity_endpoint_id`
+- `owner_kind`: `runtime_target`, `capo_server`, `input_surface`, `artifact_store`
+- `owner_id`
+- `channel_kind`: `control`, `stdio`, `logs`, `dashboard`, `artifact`
+- `resolved_uri`
+- `identity_fingerprint?`
+- `expires_at?`
+- `redaction_state`
+- `created_at`
+
+`owner_kind` / `owner_id` is the typed endpoint owner. Runtime targets, Capo server/API surfaces, input surfaces, and artifact stores can all own resolved endpoints.
 
 ### Turn
 
@@ -425,6 +506,15 @@ Uniqueness rules:
 | --- | --- | --- |
 | `agent.registered` | Adapter/runtime/provider/capability IDs | `agents` |
 | `agent.status_changed` | Old/new status, health note | `agents` |
+| `runtime.target_registered` | Runtime target config and runner kind | `runtime_targets` |
+| `runtime.target_updated` | Runtime target change and reason | `runtime_targets` |
+| `connectivity.endpoint_registered` | Endpoint/tunnel config and exposure | `connectivity_endpoints` |
+| `connectivity.endpoint_updated` | Endpoint config/status change | `connectivity_endpoints` |
+| `connectivity.health_changed` | Reachability status and safe diagnostic refs | `connectivity_endpoints` |
+| `connectivity.endpoint_resolved` | Resolved endpoint/channel with owner and redaction state | `resolved_endpoints` |
+| `connectivity.channel_opened` | Opened channel metadata and endpoint ref | `resolved_endpoints` |
+| `connectivity.channel_closed` | Closed channel metadata and reason | `resolved_endpoints` |
+| `connectivity.exposure_changed` | Exposure scope transition and actor | `connectivity_endpoints` |
 | `session.started` | Agent, task, title, external session ref | `sessions` |
 | `session.status_changed` | Old/new status, reason | `sessions` |
 | `session.summary_updated` | Summary artifact or short text | `sessions` |
@@ -436,17 +526,30 @@ Uniqueness rules:
 | Event kind | Payload summary | Projects to |
 | --- | --- | --- |
 | `run.started` | Runtime target, command metadata, process ref | `runs`, `sessions` |
+| `runtime.start_requested` | Runtime request metadata, idempotency key, pending status | `runs` |
+| `runtime.prepared` | Runtime target prepared for a run | `runtime_targets`, `runs` |
+| `runtime.process_started` | Runtime process ref, command metadata, redaction state | `runtime_process_refs`, `runs` |
+| `runtime.process_start_failed` | Launch failure, cleanup result, retryability | `runs` |
+| `runtime.output_delta` | Output stream/channel, byte range, artifact ref | `runtime_process_refs`, `runs`, `items` |
+| `runtime.output_artifact_recorded` | Runtime output artifact metadata | `artifacts`, `runs` |
+| `runtime.stdin_written` | Stdin write metadata and byte count | `runtime_process_refs`, `runs` |
 | `run.output_observed` | Stream/channel, artifact ref, byte range | `runs`, `items` |
 | `run.health_changed` | Health/status details | `runs`, `agents` |
 | `run.interrupt_requested` | Actor, target, reason | `runs`, `sessions` |
 | `run.interrupt_sent` | Runtime process ref, result metadata | `runs` |
+| `runtime.interrupt_sent` | Low-level runtime interrupt result | `runtime_process_refs`, `runs` |
 | `run.interrupt_failed` | Error, retryability | `runs`, `sessions` |
 | `run.stop_requested` | Actor, target, reason, force flag | `runs`, `sessions` |
 | `run.terminate_sent` | Runtime process ref, escalation level | `runs` |
+| `runtime.terminate_sent` | Low-level runtime terminate result | `runtime_process_refs`, `runs` |
+| `runtime.kill_sent` | Low-level runtime kill result | `runtime_process_refs`, `runs` |
 | `run.terminate_failed` | Error, retryability | `runs`, `sessions` |
 | `run.exited` | Exit status, signal, reason | `runs`, `sessions` |
+| `runtime.process_exited` | Low-level process exit status and output close state | `runtime_process_refs`, `runs` |
+| `runtime.health_changed` | Runtime liveness/heartbeat status | `runtime_process_refs`, `runs` |
+| `runtime.cleanup_completed` | Runtime cleanup result | `runtime_process_refs`, `runs` |
 | `run.orphaned` | Restart detected process without owner | `runs` |
-| `run.recovered` | New run mapped to previous state | `runs`, `sessions` |
+| `run.recovered` | Existing run reattached after restart, or recovery metadata for a relaunched run | `runs`, `sessions` |
 
 ### Adapter Replay And Attach
 
@@ -609,6 +712,10 @@ projections(name, last_sequence, updated_at, status, error)
 projects(project_id, name, workspace_root, workpad_root, status, updated_at)
 tasks(task_id, project_id, source_kind, source_ref_json, title, capo_execution_status, workpad_status_observed, active_session_id, updated_at)
 agents(agent_id, project_id, name, adapter_id, runtime_target_id, provider_id, capability_profile_id, status, metadata_json, updated_at)
+runtime_targets(runtime_target_id, project_id, name, runner_kind, workspace_root, artifact_root, default_cwd, env_policy_json, capability_profile_id, connectivity_endpoint_id, status, created_at, updated_at)
+runtime_process_refs(runtime_process_ref_id, runtime_target_id, run_id, external_pid, process_group_ref_json, remote_process_ref_json, started_at, last_heartbeat_at, status, redaction_state)
+connectivity_endpoints(connectivity_endpoint_id, project_id, name, tunnel_kind, address_ref_json, identity_ref_json, auth_ref, exposure, allowed_channels_json, status, created_at, updated_at)
+resolved_endpoints(resolved_endpoint_id, connectivity_endpoint_id, owner_kind, owner_id, channel_kind, resolved_uri, identity_fingerprint, expires_at, redaction_state, created_at)
 sessions(session_id, project_id, task_id, agent_id, title, status, external_session_ref_json, latest_summary, last_sequence, updated_at)
 runs(run_id, session_id, runtime_process_ref_json, adapter_instance_ref_json, status, started_at, ended_at, exit_status_json, recovery_of_run_id, updated_at)
 turns(turn_id, session_id, run_id, origin_command_id, role, status, created_at, completed_at)
@@ -643,6 +750,11 @@ Minimum indexes:
 - `items(turn_id, ordinal)`
 - `items(adapter_timeline_key_id)`
 - `tool_calls(session_id, status)`
+- `runtime_targets(project_id, status)`
+- `runtime_process_refs(run_id)`
+- `runtime_process_refs(runtime_target_id, status)`
+- `connectivity_endpoints(project_id, tunnel_kind, status)`
+- `resolved_endpoints(owner_kind, owner_id, channel_kind)`
 - `permission_requests(status, created_at)`
 - `permission_decisions(session_id, revoked_at)`
 - `capability_profiles(project_id, name)`
@@ -675,6 +787,8 @@ Minimum indexes:
 - UI state dedupe keys are Capo `sequence` and `event_id`, not adapter IDs.
 - `PermissionQueue` is a read model over `permission_requests` joined to decisions and affected sessions/tools.
 - Capability profile/grant read models are projections over capability and permission events.
+- Runtime and connectivity read models are projections over runtime/connectivity events; they do not poll live processes directly.
+- Runtime process start is request/event driven: `runtime.start_requested` is persisted before launch, then `runtime.process_started` or `runtime.process_start_failed` closes the attempt.
 
 ## Workpad Status Boundary
 
@@ -698,7 +812,7 @@ Startup recovery follows this order:
 6. Ask `RuntimeRunner.health(...)` for known runtime process refs.
 7. Ask each relevant `AgentAdapter` for attach/load capability and external session health when supported.
 8. For every live-looking run:
-   - If the process is alive and adapter can attach, emit `run.recovered` and keep the session active.
+   - If the process is alive and adapter can attach, emit `run.recovered` for the existing run and keep the session active.
    - If the process is alive but adapter cannot attach, emit `run.orphaned` and mark the session `recovering` or `failed` depending on policy.
    - If the process is gone and no terminal event exists, emit `run.exited` with unknown exit detail and mark the session `failed` or `waiting_for_input`.
    - If the session was waiting for permission, keep the permission queue pending but mark stale decisions as stale in the read model.
@@ -733,6 +847,7 @@ ACP-specific rules:
 - ACP plans are replacement projections.
 - ACP message chunks in stable v1 lack stable message IDs, so Capo finalizes content hashes and records boundary confidence.
 - See `acp-replay-dedupe.md` for the complete A2a design.
+- See `runtime-tunnel.md` for the complete A4 runtime and connectivity design.
 
 ## Prototype E2E State Flow
 

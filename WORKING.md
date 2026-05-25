@@ -34,16 +34,17 @@ Use this loop for `/next`, `$next`, and similar task execution. The concrete com
 5. After A2 is complete, also load `workpads/architecture/state-model.md` for architecture, prototype, features, or dogfood work.
 6. After A2a is complete, also load `workpads/architecture/acp-replay-dedupe.md` for ACP/protocol, state, prototype, features, or dogfood work.
 7. After A3 is complete, also load `workpads/architecture/capability-permissions.md` for permission, runtime, tool, protocol, prototype, features, or dogfood work.
-8. For prototype or dogfood work, also load `workpads/prototype/spec.md`.
-9. Select a task by dependencies, risk, and testability.
-10. Mark the task `in_progress` before doing work.
-11. Complete acceptance criteria with the smallest correct change.
-12. Verify per the task's evidence standard.
-13. Record findings, decisions, and open questions in the workpad or project docs.
-14. Assess confidence and use review subagents per thresholds below.
-15. Incorporate review feedback, record rejections, or ask the user when product-sensitive.
-16. Mark `completed` only when acceptance criteria and review requirements are satisfied.
-17. Before another `/next` pass: explicit commit decision - commit, or record why not.
+8. After A4 is complete, also load `workpads/architecture/runtime-tunnel.md` for runtime, tunnel, protocol, provider, prototype, features, or dogfood work.
+9. For prototype or dogfood work, also load `workpads/prototype/spec.md`.
+10. Select a task by dependencies, risk, and testability.
+11. Mark the task `in_progress` before doing work.
+12. Complete acceptance criteria with the smallest correct change.
+13. Verify per the task's evidence standard.
+14. Record findings, decisions, and open questions in the workpad or project docs.
+15. Assess confidence and use review subagents per thresholds below.
+16. Incorporate review feedback, record rejections, or ask the user when product-sensitive.
+17. Mark `completed` only when acceptance criteria and review requirements are satisfied.
+18. Before another `/next` pass: explicit commit decision - commit, or record why not.
 
 ## Verification
 
@@ -117,13 +118,14 @@ Prefer clear names. Comment non-obvious invariants: permission boundaries, recov
 | `workpads/architecture/state-model.md` | State entities, event log, read models, and restart recovery |
 | `workpads/architecture/acp-replay-dedupe.md` | ACP replay and dedupe rules |
 | `workpads/architecture/capability-permissions.md` | Capability and permission model |
+| `workpads/architecture/runtime-tunnel.md` | Runtime and connectivity model |
 
 ## Phase Focus
 
 | Phase | Workpad | `/next` reads |
 | --- | --- | --- |
 | Complete | `research` | `research/tasks.md`, `knowledge.md`, `references.md` |
-| Now | `architecture` | `architecture/tasks.md`, `knowledge.md`, `references.md`, `boundaries.md`, `state-model.md`, `acp-replay-dedupe.md`, `capability-permissions.md` |
+| Now | `architecture` | `architecture/tasks.md`, `knowledge.md`, `references.md`, `boundaries.md`, `state-model.md`, `acp-replay-dedupe.md`, `capability-permissions.md`, `runtime-tunnel.md` |
 | Next | `prototype` | `prototype/spec.md`, `tasks.md`, `knowledge.md`, `references.md`, architecture artifacts |
 | Later | `features` | Feature-specific tasks after prototype |
 | Later | `dogfood` | Migration of Capo project execution into Capo |

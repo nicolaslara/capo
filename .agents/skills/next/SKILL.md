@@ -26,6 +26,7 @@ Load these conditionally:
 - `workpads/architecture/state-model.md` when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A2 is complete
 - `workpads/architecture/acp-replay-dedupe.md` when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A2a is complete
 - `workpads/architecture/capability-permissions.md` when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A3 is complete
+- `workpads/architecture/runtime-tunnel.md` when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A4 is complete
 - `workpads/prototype/spec.md` when active workpad is `prototype` or `dogfood`
 - `workpads/research/knowledge.md` when active workpad is `architecture`
 - `workpads/architecture/knowledge.md` when active workpad is `prototype`

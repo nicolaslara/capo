@@ -42,12 +42,19 @@ Observed 2026-05-25. Local clones are gitignored under `workpads/references/repo
 
 ## Runtime And Connectivity
 
-To research:
-
-- Tailscale ACLs and auth keys
-- SSH tunnel patterns
-- Local process supervisors
-- tmux/session management
+- Runtime/tunnel architecture artifact: `runtime-tunnel.md` (created 2026-05-25)
+- Runtime and tunnel research finding: `../research/findings/R4-R6-stack-runtime.md`
+- Prior-art runtime source-code architecture finding: `../research/findings/R2-code-architecture.md`
+- Local prior-art source references observed 2026-05-25:
+  - OpenAI Codex process/runtime handling: `workpads/references/repos/openai-codex/codex-rs/core/src/exec.rs`
+  - OpenHands process/Docker/remote sandbox service notes: `../research/findings/R2-code-architecture.md`
+  - OpenCode shell/tool prior-art notes: `../research/findings/R2-code-architecture.md`
+- Connectivity references already checked in R4/R6:
+  - Tailscale SSH docs: https://tailscale.com/kb/1193/tailscale-ssh
+  - Tailscale policy syntax: https://tailscale.com/kb/1337/policy-syntax
+  - Tailscale Funnel/Serve docs: https://tailscale.com/docs/reference/tailscale-cli/funnel and https://tailscale.com/docs/features/tailscale-funnel
+  - OpenSSH: https://www.openssh.org/
+  - cloudflared tunnel setup: https://developers.cloudflare.com/tunnel/setup/
 
 ## State And Memory
 

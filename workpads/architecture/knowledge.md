@@ -194,6 +194,43 @@ ACP mapping:
 - ACP `reject_always` maps to a scoped durable deny rule/grant record.
 - ACP `session/cancel` while a permission request is pending maps to Capo decision `cancel` and ACP outcome `cancelled`.
 
+## A4 - Runtime And Tunnel Plan
+
+Status: completed on 2026-05-25.
+
+Decision:
+
+- Use `workpads/architecture/runtime-tunnel.md` as the implementation-facing runtime and connectivity model.
+- Keep runtime execution and tunnel/connectivity as separate boundaries.
+- `RuntimeRunner` owns local/remote/container process lifecycle: prepare, start, stdin, output, interrupt, terminate, kill, health, cleanup.
+- `ConnectivityTunnel` owns endpoint resolution, channel reachability, identity/exposure metadata, and tunnel health. It does not own process handles or session truth.
+- Prototype runtime is `LocalProcessRunner` plus `FakeRuntimeRunner`; prototype connectivity is `LocalLoopbackTunnel` plus `FakeTunnel`.
+- Remote process, SSH, Tailscale, reverse tunnel, container, devcontainer, and Linux sandbox profiles are modeled but deferred.
+
+Safety and recovery:
+
+- Local process execution is a controllable trusted runtime, not a sandbox.
+- Subscription-backed CLIs run as privileged local processes with environment allowlists and redacted output artifacts; Capo does not read provider session credentials.
+- Runtime starts are event-sequenced with `runtime.start_requested` before launch, then `runtime.process_started` or `runtime.process_start_failed`; if append fails after spawn, recovery treats the live process as orphaned and cleans it up with evidence.
+- Restart recovery probes stored runtime process refs and maps them to `run.recovered`, `run.orphaned`, or `run.exited`. Simple attach recovery marks the same run recovered; `recovery_of_run_id` is for new relaunch/retry runs.
+- Public exposure through reverse tunnels or Tailscale Funnel is out of prototype scope and must require explicit permission plus audit events later.
+
+Implementation implications:
+
+- First Rust scaffold should include fake/local runtime and fake/local-loopback tunnel variants.
+- Runtime/connectivity tables and events are added to `state-model.md` so dashboard/voice can inspect execution placement without live process ownership.
+- Connectivity resolution uses owner-typed `ResolvedEndpoint` records so dashboard/API/input-surface endpoints do not pretend to belong to a runtime target.
+- PTY is deferred until Claude Code/Codex adapter tests prove it is required; pipe stdio is the first implementation path.
+
+Review findings accepted:
+
+- Added explicit runtime start request/start failed event ordering to avoid ambiguous spawned-but-not-persisted processes.
+- Replaced runtime-only endpoint records with owner-typed resolved endpoints.
+- Aligned `boundaries.md` with the A4 contract and fake tunnel variant.
+- Clarified same-run restart recovery versus new retry/relaunch runs.
+- Replaced undefined environment profiles with `env_policy_json` for the prototype.
+- Changed runtime launch vocabulary from command/args to program/argv plus launch mode.
+
 ## Architecture Gate
 
 Status: not passed.

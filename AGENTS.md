@@ -18,6 +18,7 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 | `workpads/architecture/state-model.md` | State entities, event log, read models, and restart recovery |
 | `workpads/architecture/acp-replay-dedupe.md` | ACP streaming replay, `session/load`, and dedupe design |
 | `workpads/architecture/capability-permissions.md` | Capability profiles, scopes, grants, permissions, and ACP option mapping |
+| `workpads/architecture/runtime-tunnel.md` | Runtime runners, process lifecycle, tunnels, connectivity, and exposure policy |
 | `.cursor/commands/next.md` / `.opencode/commands/next.md` | `/next` task-execution command |
 | `.agents/skills/next/SKILL.md` | Codex `$next` task-execution skill |
 
@@ -44,12 +45,13 @@ Before task work:
 5. `workpads/architecture/state-model.md` for architecture, prototype, features, and dogfood work once A2 is complete
 6. `workpads/architecture/acp-replay-dedupe.md` for ACP/protocol, state, prototype, features, and dogfood work once A2a is complete
 7. `workpads/architecture/capability-permissions.md` for permission, runtime, tool, protocol, prototype, features, and dogfood work once A3 is complete
-8. `workpads/prototype/spec.md` for prototype and dogfood work
-9. Pick a pending task and mark it `in_progress`
-10. Complete the acceptance criteria with the smallest correct change
-11. Record findings in `knowledge.md` and source links in `references.md`
-12. Review per `WORKING.md`
-13. Mark complete only after evidence is recorded
+8. `workpads/architecture/runtime-tunnel.md` for runtime, tunnel, protocol, provider, prototype, features, and dogfood work once A4 is complete
+9. `workpads/prototype/spec.md` for prototype and dogfood work
+10. Pick a pending task and mark it `in_progress`
+11. Complete the acceptance criteria with the smallest correct change
+12. Record findings in `knowledge.md` and source links in `references.md`
+13. Review per `WORKING.md`
+14. Mark complete only after evidence is recorded
 
 ## Git Rules
 

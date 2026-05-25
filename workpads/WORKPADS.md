@@ -61,6 +61,7 @@ workpads/architecture/boundaries.md
 workpads/architecture/state-model.md
 workpads/architecture/acp-replay-dedupe.md
 workpads/architecture/capability-permissions.md
+workpads/architecture/runtime-tunnel.md
 workpads/research/knowledge.md
 ```
 
@@ -70,6 +71,7 @@ workpads/research/knowledge.md
 - `state-model.md` operational entities, event log, read models, SQLite/files layout, and restart recovery
 - `acp-replay-dedupe.md` ACP `session/load`, `session/resume`, streaming, and dedupe design
 - `capability-permissions.md` capability profiles, scopes, grants, permissions, revocation, and ACP option mapping
+- `runtime-tunnel.md` runtime runners, local process lifecycle, remote runtime abstraction, connectivity/tunnel boundary, and exposure policy
 - `tasks.md` A0-A8: event model, capability model, runtime, security, prototype plan
 - `knowledge.md` Architecture gate section
 
@@ -99,6 +101,7 @@ workpads/architecture/boundaries.md
 workpads/architecture/state-model.md
 workpads/architecture/acp-replay-dedupe.md
 workpads/architecture/capability-permissions.md
+workpads/architecture/runtime-tunnel.md
 workpads/architecture/knowledge.md
 ```
 
@@ -133,6 +136,7 @@ workpads/architecture/boundaries.md
 workpads/architecture/state-model.md
 workpads/architecture/acp-replay-dedupe.md
 workpads/architecture/capability-permissions.md
+workpads/architecture/runtime-tunnel.md
 workpads/prototype/knowledge.md
 ```
 
@@ -162,6 +166,7 @@ workpads/architecture/boundaries.md
 workpads/architecture/state-model.md
 workpads/architecture/acp-replay-dedupe.md
 workpads/architecture/capability-permissions.md
+workpads/architecture/runtime-tunnel.md
 ```
 
 **Rules:**

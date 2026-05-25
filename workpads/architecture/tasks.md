@@ -93,13 +93,20 @@ Evidence:
 
 ## A4 - Runtime And Tunnel Plan
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Define local runtime interface.
 - Define remote runtime/tunnel abstraction.
 - Choose prototype runtime and defer list.
+
+Evidence:
+
+- `workpads/architecture/runtime-tunnel.md`
+- `workpads/architecture/state-model.md` runtime/connectivity additions
+- `workpads/architecture/knowledge.md` A4 section
+- `workpads/architecture/references.md` Runtime And Connectivity section
 
 ## A5 - Protocol And Provider Plan
 

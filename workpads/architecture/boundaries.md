@@ -264,14 +264,16 @@ shutdown(ExternalSessionRef) -> ShutdownResult
 
 Executes local or remote agent processes.
 
+Detailed local runtime, remote runtime, tunnel separation, lifecycle, and recovery design lives in `runtime-tunnel.md`.
+
 Initial variants:
 
 ```text
 RuntimeRunner =
   LocalProcessRunner
-  | FakeRuntimeRunner
-  | ContainerRunner
   | RemoteProcessRunner
+  | ContainerRunner
+  | FakeRuntimeRunner
 ```
 
 Only `LocalProcessRunner` and `FakeRuntimeRunner` are prototype requirements.
@@ -279,18 +281,20 @@ Only `LocalProcessRunner` and `FakeRuntimeRunner` are prototype requirements.
 ### Contract
 
 ```text
-start_process(RuntimeRequest) -> RuntimeProcessRef
+prepare(RuntimeTarget) -> RuntimePrepared
+start_process(RuntimeRequest) -> RuntimeStartResult
 write_stdin(RuntimeProcessRef, Bytes) -> WriteResult
-interrupt(RuntimeProcessRef) -> InterruptResult
-terminate(RuntimeProcessRef) -> TerminateResult
+interrupt(RuntimeProcessRef, InterruptKind) -> InterruptResult
+terminate(RuntimeProcessRef, TerminationKind) -> TerminateResult
 kill(RuntimeProcessRef) -> KillResult
 stream_output(RuntimeProcessRef) -> RuntimeOutputStream
 health(RuntimeProcessRef) -> RuntimeHealth
+cleanup(RuntimeProcessRef, CleanupPolicy) -> CleanupResult
 ```
 
 ### Responsibilities
 
-- Start commands with cwd, workspace roots, environment allowlist, and redaction policy.
+- Start programs with explicit argv, launch mode, cwd, workspace roots, environment allowlist, and redaction policy.
 - Track process group/session and child process cleanup.
 - Capture stdout/stderr/PTY output with bounded retention.
 - Report exit status, health, and liveness.
@@ -322,6 +326,8 @@ health(RuntimeProcessRef) -> RuntimeHealth
 
 Connects Capo to remote runtimes and clients.
 
+Detailed endpoint, exposure, local loopback, SSH, Tailscale, reverse-tunnel, and runtime separation design lives in `runtime-tunnel.md`.
+
 Initial variants:
 
 ```text
@@ -330,17 +336,19 @@ ConnectivityTunnel =
   | SshTunnel
   | TailscaleTunnel
   | ReverseTunnel
+  | FakeTunnel
 ```
 
-Prototype requirement: `LocalLoopback`.
+Prototype requirements: `LocalLoopback` and `FakeTunnel`.
 
 ### Contract
 
 ```text
-resolve_endpoint(RuntimeTarget) -> Endpoint
-check_reachability(Endpoint) -> ConnectivityHealth
-open_channel(Endpoint, ChannelKind) -> ChannelRef
+resolve_endpoint(ConnectivityEndpoint, EndpointOwner, ChannelKind) -> ResolvedEndpoint
+check_reachability(ConnectivityEndpoint) -> ConnectivityHealth
+open_channel(ResolvedEndpoint) -> ChannelRef
 close_channel(ChannelRef) -> CloseResult
+exposure_report(ConnectivityEndpoint) -> ExposureReport
 ```
 
 ### Responsibilities
@@ -724,8 +732,8 @@ Use static dispatch for known in-tree boundaries in the first scaffold:
 
 ```text
 enum AgentAdapter { Codex(CodexExecAdapter), Claude(ClaudeCodeAdapter), Acp(AcpAdapter), Fake(FakeAdapter) }
-enum RuntimeRunner { Local(LocalProcessRunner), Fake(FakeRuntimeRunner) }
-enum ConnectivityTunnel { Local(LocalLoopback), Fake(FakeTunnel) }
+enum RuntimeRunner { LocalProcess(LocalProcessRunner), RemoteProcess(RemoteProcessRunner), Container(ContainerRunner), Fake(FakeRuntimeRunner) }
+enum ConnectivityTunnel { LocalLoopback(LocalLoopbackTunnel), Ssh(SshTunnel), Tailscale(TailscaleTunnel), Reverse(ReverseTunnel), Fake(FakeTunnel) }
 enum ProviderConnector { Codex(CodexSubscription), Claude(ClaudeSubscription), OpenAi(OpenAiApi), Anthropic(AnthropicApi), LocalModel(LocalModelEndpoint), Unknown(UnknownProvider), Fake(FakeProviderConnector) }
 enum PermissionPolicy { AllowTrustedLocalProfile(AllowTrustedLocalProfilePolicy), Static(StaticPolicy), UserApproval(UserApprovalPolicy), SecurityAgent(SecurityAgentPolicy), Fake(FakePermissionPolicy) }
 enum ToolExposure { Local(LocalToolExposure), Fake(FakeToolExposure) }
