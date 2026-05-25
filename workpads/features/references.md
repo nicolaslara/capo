@@ -49,3 +49,13 @@ Observed 2026-05-25.
 - CLI import command, source-hash drift check, idempotency key, and regression test: `../../crates/capo-cli/src/main.rs`
 - Dogfood bridge source workpad: `dogfood-bridge.md`
 - No new third-party dependencies were added for DB2.
+
+## F2/DB3 Reviewed Workpad Artifacts
+
+Observed 2026-05-25.
+
+- Command intents for proposal/apply surfaces: `../../crates/capo-core/src/lib.rs`
+- Proposal event kind and artifact/evidence projections: `../../crates/capo-state/src/lib.rs`
+- CLI proposal generation, guarded apply command, overwrite guards, and regression test: `../../crates/capo-cli/src/main.rs`
+- Dogfood bridge source workpad: `dogfood-bridge.md`
+- No new third-party dependencies were added for DB3.

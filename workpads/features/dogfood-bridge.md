@@ -83,10 +83,31 @@ Review:
 
 ### DB3 - Reviewed Workpad Artifacts
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Write Capo-owned evidence/update proposal artifacts without overwriting user-authored files.
 - Require explicit confirmation before applying changes to source workpads.
 - Provide rollback/fallback instructions for first dogfood.
+
+Evidence:
+
+- `crates/capo-core/src/lib.rs`
+- `crates/capo-state/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources`
+- Manual smoke: `capo workpad index`, `capo workpad import`, then `capo workpad propose` against this repo using temporary state/output directories.
+
+Decision:
+
+- Add `capo workpad propose --workpad-task WORKPAD_TASK_ID --out DIR [--expected-hash HASH] [--task TASK_ID] [--summary TEXT]` to write Capo-owned proposal artifacts.
+- Proposal artifacts start with `<!-- capo:workpad-proposal -->`, record source path/anchor/hash, and include apply policy plus rollback/fallback instructions.
+- Proposal writes do not modify source markdown and refuse to overwrite non-Capo files.
+- Proposal identity includes the proposal text as well as task/source refs, so different proposal bodies produce different artifacts.
+- Changed Capo proposal files are not overwritten; exact same proposal reruns remain idempotent.
+- Add `capo workpad apply --proposal PATH --confirm` as a guarded apply surface. DB3 intentionally keeps apply as a confirmed no-op that reports `workpad_apply_supported=false` and `source_modified=false`.
+
+Review:
+
+- Focused review found one blocker: repeated proposal writes with different bodies could overwrite an artifact while the event no-opped. Proposal identity and overwrite guards were fixed before completion.

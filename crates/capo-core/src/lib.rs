@@ -94,6 +94,8 @@ pub enum CommandIntent {
     ExportEvidence,
     IndexWorkpads,
     ImportWorkpadTask,
+    WriteWorkpadProposal,
+    ApplyWorkpadProposal,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

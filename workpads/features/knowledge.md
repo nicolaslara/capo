@@ -86,3 +86,33 @@ Follow-up:
 
 - DB3 should replace ad hoc source metadata in task summaries with Capo-owned proposal/evidence artifacts.
 - Dashboard/query work should expose imported workpad task refs without forcing consumers to parse task summaries.
+
+## F2/DB3 - Reviewed Workpad Artifacts
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo workpad propose --workpad-task WORKPAD_TASK_ID --out DIR` as the first safe write-adjacent dogfood command.
+- Proposal artifacts are Capo-owned markdown files marked with `<!-- capo:workpad-proposal -->`. They include source path, source anchor, source hash, observed markdown status, Capo execution status, proposed update text, apply policy, and rollback/fallback instructions.
+- Proposal generation records a safe `workpad_update_proposal` artifact row and evidence projection, but does not edit source workpad markdown.
+- `capo workpad apply --proposal PATH --confirm` exists as the explicit confirmation surface, but DB3 intentionally leaves source writeback disabled. Confirmed apply reports `workpad_apply_supported=false` and `source_modified=false`.
+- Proposal artifact identity includes task ID, workpad task ID, source hash, and proposal text. Different proposal bodies get different artifact files.
+- Existing non-Capo files are never overwritten. Existing changed Capo proposal files are also not overwritten, so human review notes cannot be silently erased.
+
+Verification:
+
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources`: passed.
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+- Manual smoke against this repo with temporary state/output dirs: `workpad index`, `workpad import`, `workpad propose`: passed.
+
+Review:
+
+- Focused review found one blocker in the first draft: repeated proposal writes with different bodies could overwrite the artifact while event idempotency no-opped. The fix was to include proposal text in artifact identity and refuse changed Capo proposal overwrites.
+
+Follow-up:
+
+- Future source writeback should validate source hash at apply time, generate a patch/diff artifact first, and keep a rollback artifact before modifying markdown.
+- Dashboard/query work should expose proposal artifact/evidence refs directly instead of making users parse CLI output.

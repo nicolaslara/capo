@@ -9,9 +9,9 @@ use capo_core::{
     SessionId, TaskId,
 };
 use capo_state::{
-    EventKind, EventRecord, EvidenceProjection, MemoryPacketProjection, NewEvent, ProjectionRecord,
-    RedactionState, RunProjection, SessionProjection, SqliteStateStore, ToolCallProjection,
-    WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
+    ArtifactRecord, EventKind, EventRecord, EvidenceProjection, MemoryPacketProjection, NewEvent,
+    ProjectionRecord, RedactionState, RunProjection, SessionProjection, SqliteStateStore,
+    ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
 use capo_workpads::{WorkpadIndex, index_project_workpads};
 
@@ -37,6 +37,8 @@ Usage:
   capo recover [--state PATH]
   capo workpad index --root PATH [--state PATH]
   capo workpad import --workpad-task WORKPAD_TASK_ID [--expected-hash HASH] [--task TASK_ID] [--state PATH]
+  capo workpad propose --workpad-task WORKPAD_TASK_ID --out DIR [--expected-hash HASH] [--task TASK_ID] [--summary TEXT] [--state PATH]
+  capo workpad apply --proposal PATH [--confirm] [--state PATH]
   capo evidence export --session SESSION_ID --out DIR [--state PATH]
 
 Prototype notes:
@@ -97,6 +99,12 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "workpad" && command == "import" => {
             import_workpad_task(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "workpad" && command == "propose" => {
+            propose_workpad_update(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "workpad" && command == "apply" => {
+            apply_workpad_proposal(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "evidence" && command == "export" => {
             export_evidence(&parsed, rest)
@@ -474,6 +482,10 @@ fn index_workpads(parsed: &ParsedArgs, args: &[String]) -> Result<String, String
     ))
 }
 
+fn default_workpad_task_id(workpad_task_id: &str) -> String {
+    format!("task-workpad-{}", sanitize_id_component(workpad_task_id))
+}
+
 fn import_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let workpad_task_id = required_arg(args, "--workpad-task")?;
     let state = state(parsed)?;
@@ -496,12 +508,10 @@ fn import_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, S
         ));
     }
 
-    let task_id = TaskId::new(optional_arg(args, "--task").unwrap_or_else(|| {
-        format!(
-            "task-workpad-{}",
-            sanitize_id_component(&workpad_task.workpad_task_id)
-        )
-    }));
+    let task_id = TaskId::new(
+        optional_arg(args, "--task")
+            .unwrap_or_else(|| default_workpad_task_id(&workpad_task.workpad_task_id)),
+    );
     if let Some(existing_task) = state.task(&task_id).map_err(debug_error)? {
         let same_source = existing_task
             .latest_summary
@@ -598,6 +608,150 @@ fn import_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, S
         workpad_task.source_anchor,
         workpad_file.content_hash,
         workpad_task.observed_status,
+        command.command_id
+    ))
+}
+
+fn propose_workpad_update(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let workpad_task_id = required_arg(args, "--workpad-task")?;
+    let out = PathBuf::from(required_arg(args, "--out")?);
+    let state = state(parsed)?;
+    let project_id = project_id();
+    let workpad_task = state
+        .workpad_task(&project_id, &workpad_task_id)
+        .map_err(debug_error)?
+        .ok_or_else(|| format!("missing workpad task read model: {workpad_task_id}"))?;
+    let workpad_file = state
+        .workpad_file(&project_id, &workpad_task.path)
+        .map_err(debug_error)?
+        .ok_or_else(|| format!("missing workpad file read model: {}", workpad_task.path))?;
+
+    if let Some(expected_hash) = optional_arg(args, "--expected-hash")
+        && expected_hash != workpad_file.content_hash
+    {
+        return Err(format!(
+            "source drift detected for {}: expected_hash={} current_hash={}",
+            workpad_task.path, expected_hash, workpad_file.content_hash
+        ));
+    }
+
+    let task_id = TaskId::new(
+        optional_arg(args, "--task").unwrap_or_else(|| default_workpad_task_id(&workpad_task_id)),
+    );
+    let summary = optional_arg(args, "--summary").unwrap_or_else(|| {
+        format!(
+            "Review imported workpad task `{}` before any source markdown update.",
+            workpad_task.workpad_task_id
+        )
+    });
+    let command = envelope(
+        "workpad-propose",
+        CommandTarget::Task(task_id.clone()),
+        CommandIntent::WriteWorkpadProposal,
+        Some(summary.clone()),
+    );
+    fs::create_dir_all(&out).map_err(|error| error.to_string())?;
+    let proposal_identity = stable_cli_hash(&format!(
+        "{}:{}:{}:{}",
+        task_id, workpad_task.workpad_task_id, workpad_file.content_hash, summary
+    ));
+    let artifact_id = format!("artifact-workpad-proposal-{proposal_identity}");
+    let path = out.join(format!("{artifact_id}.md"));
+    let markdown = render_workpad_proposal(
+        &task_id,
+        &workpad_task,
+        &workpad_file,
+        &summary,
+        &artifact_id,
+    );
+    write_workpad_proposal_file(&path, &markdown)?;
+    let content_hash = stable_cli_hash(&markdown);
+    state
+        .record_artifact(ArtifactRecord {
+            artifact_id: artifact_id.clone(),
+            project_id: Some(project_id.clone()),
+            session_id: None,
+            run_id: None,
+            kind: "workpad_update_proposal".to_string(),
+            uri: path.display().to_string(),
+            content_hash: content_hash.clone(),
+            size_bytes: markdown.len() as i64,
+            redaction_state: RedactionState::Safe,
+        })
+        .map_err(debug_error)?;
+    let evidence_id = format!("evidence-{artifact_id}");
+    let mut event = NewEvent::new(
+        format!("event-workpad-proposal-{}", stable_cli_hash(&artifact_id)),
+        EventKind::WorkpadProposalWritten,
+        "capo-cli",
+    );
+    event.project_id = Some(project_id.clone());
+    event.task_id = Some(task_id.clone());
+    event.payload_json = format!(
+        "{{\"task_id\":\"{}\",\"workpad_task_id\":\"{}\",\"artifact_id\":\"{}\",\"path\":\"{}\",\"content_hash\":\"{}\",\"source_hash\":\"{}\"}}",
+        escape_json(task_id.as_str()),
+        escape_json(&workpad_task.workpad_task_id),
+        escape_json(&artifact_id),
+        escape_json(&path.display().to_string()),
+        escape_json(&content_hash),
+        escape_json(&workpad_file.content_hash)
+    );
+    event.idempotency_key = Some(format!(
+        "workpad-proposal:{}:{}:{}:{}",
+        task_id, workpad_task.workpad_task_id, workpad_file.content_hash, proposal_identity
+    ));
+    event.redaction_state = RedactionState::Safe;
+    let sequence = state
+        .append_event(
+            event,
+            &[ProjectionRecord::Evidence(EvidenceProjection {
+                evidence_id: capo_core::EvidenceId::new(evidence_id.clone()),
+                project_id,
+                task_id: Some(task_id.clone()),
+                session_id: None,
+                run_id: None,
+                kind: "workpad_update_proposal".to_string(),
+                artifact_id: Some(artifact_id.clone()),
+                confidence: 80,
+                updated_sequence: 0,
+            })],
+        )
+        .map_err(debug_error)?;
+
+    Ok(format!(
+        "workpad_proposal_written=true\nworkpad_task_id={}\ntask_id={}\nartifact_id={artifact_id}\npath={}\nsource_hash={}\ncontent_hash={content_hash}\nsequence={sequence}\ncommand_id={}\n",
+        workpad_task.workpad_task_id,
+        task_id,
+        path.display(),
+        workpad_file.content_hash,
+        command.command_id
+    ))
+}
+
+fn apply_workpad_proposal(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let proposal = PathBuf::from(required_arg(args, "--proposal")?);
+    let command = envelope(
+        "workpad-apply",
+        CommandTarget::Project(project_id()),
+        CommandIntent::ApplyWorkpadProposal,
+        Some(proposal.display().to_string()),
+    );
+    if !has_flag(args, "--confirm") {
+        return Err(
+            "explicit --confirm is required before Capo applies workpad source changes".to_string(),
+        );
+    }
+    let markdown = fs::read_to_string(&proposal).map_err(|error| error.to_string())?;
+    if !markdown.starts_with("<!-- capo:workpad-proposal -->") {
+        return Err(format!(
+            "refusing to apply non-Capo workpad proposal: {}",
+            proposal.display()
+        ));
+    }
+    let _state = state(parsed)?;
+    Ok(format!(
+        "workpad_apply_supported=false\nproposal={}\nsource_modified=false\nreason=DB3 only supports reviewed proposal artifacts; apply manually after review using the rollback instructions in the proposal.\ncommand_id={}\n",
+        proposal.display(),
         command.command_id
     ))
 }
@@ -865,6 +1019,30 @@ fn render_evidence(
     markdown
 }
 
+fn render_workpad_proposal(
+    task_id: &TaskId,
+    workpad_task: &WorkpadTaskProjection,
+    workpad_file: &WorkpadFileProjection,
+    summary: &str,
+    artifact_id: &str,
+) -> String {
+    format!(
+        "<!-- capo:workpad-proposal -->\n# Capo Workpad Proposal - {}\n\n## Objective\n\nReview a Capo-owned proposal artifact before any source markdown is edited.\n\n## Source\n\n- Capo task: `{}`\n- Workpad task: `{}`\n- Source path: `{}`\n- Source anchor: `{}`\n- Source hash: `{}`\n- Observed markdown status: `{}`\n- Capo workpad execution status: `{}`\n- Artifact: `{}`\n\n## Proposed Update\n\n{}\n\n## Apply Policy\n\nCapo has not modified `{}`. Automated source writeback is disabled for this proposal. Any source update must be reviewed by a human and must require an explicit confirmation step in Capo before future automated apply support can write markdown.\n\n## Rollback And Fallback\n\n- Fallback: leave the source markdown unchanged and keep this proposal as evidence.\n- Manual apply: edit `{}` by hand after review, then run the normal git diff and test gates.\n- Rollback after manual edits: use git to inspect or restore only the reviewed source file before committing.\n- Recovery: re-run `capo workpad index --root <project> --state <state>` to refresh Capo's observed workpad refs after any manual change.\n",
+        workpad_task.title,
+        task_id,
+        workpad_task.workpad_task_id,
+        workpad_task.path,
+        workpad_task.source_anchor,
+        workpad_file.content_hash,
+        workpad_task.observed_status,
+        workpad_task.capo_execution_status,
+        artifact_id,
+        summary,
+        workpad_task.path,
+        workpad_task.path
+    )
+}
+
 fn write_evidence_file(path: &Path, markdown: &str) -> Result<(), String> {
     if let Ok(existing) = fs::read_to_string(path)
         && !existing.starts_with("<!-- capo:evidence-export -->")
@@ -873,6 +1051,24 @@ fn write_evidence_file(path: &Path, markdown: &str) -> Result<(), String> {
             "refusing to overwrite non-Capo evidence file: {}",
             path.display()
         ));
+    }
+    fs::write(path, markdown).map_err(|error| error.to_string())
+}
+
+fn write_workpad_proposal_file(path: &Path, markdown: &str) -> Result<(), String> {
+    if let Ok(existing) = fs::read_to_string(path) {
+        if !existing.starts_with("<!-- capo:workpad-proposal -->") {
+            return Err(format!(
+                "refusing to overwrite non-Capo workpad proposal file: {}",
+                path.display()
+            ));
+        }
+        if existing != markdown {
+            return Err(format!(
+                "refusing to overwrite changed Capo workpad proposal file: {}",
+                path.display()
+            ));
+        }
     }
     fs::write(path, markdown).map_err(|error| error.to_string())
 }
@@ -918,6 +1114,10 @@ fn optional_arg(args: &[String], key: &str) -> Option<String> {
         .find_map(|window| (window[0] == key).then(|| window[1].clone()))
 }
 
+fn has_flag(args: &[String], key: &str) -> bool {
+    args.iter().any(|arg| arg == key)
+}
+
 fn require_fake_arg(args: &[String], key: &str) -> Result<(), String> {
     match optional_arg(args, key).as_deref() {
         None | Some("fake") => Ok(()),
@@ -945,6 +1145,8 @@ mod tests {
         assert!(HELP.contains("command envelopes"));
         assert!(HELP.contains("does not read provider credentials"));
         assert!(HELP.contains("workpad index"));
+        assert!(HELP.contains("workpad propose"));
+        assert!(HELP.contains("workpad apply"));
     }
 
     #[test]
@@ -1053,6 +1255,128 @@ mod tests {
             .expect("workpad task");
         assert_eq!(imported_workpad_task.observed_status, "in_progress");
         assert_eq!(imported_workpad_task.capo_execution_status, "imported");
+        let proposal_dir = temp_root("workpad-proposal");
+        let proposal_output = run_cli(vec![
+            "workpad".to_string(),
+            "propose".to_string(),
+            "--workpad-task".to_string(),
+            "workpads:features:tasks.md#f2".to_string(),
+            "--expected-hash".to_string(),
+            source_hash.clone(),
+            "--out".to_string(),
+            proposal_dir.display().to_string(),
+            "--summary".to_string(),
+            "Mark DB3 reviewed artifacts complete after verification.".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("write proposal");
+        assert!(proposal_output.contains("workpad_proposal_written=true"));
+        assert!(proposal_output.contains("source_hash="));
+        let proposal_path = proposal_output
+            .lines()
+            .find_map(|line| line.strip_prefix("path="))
+            .map(PathBuf::from)
+            .expect("proposal path");
+        let proposal = fs::read_to_string(&proposal_path).expect("read proposal");
+        assert!(proposal.starts_with("<!-- capo:workpad-proposal -->"));
+        assert!(proposal.contains("## Apply Policy"));
+        assert!(proposal.contains("Automated source writeback is disabled"));
+        assert!(proposal.contains("## Rollback And Fallback"));
+        assert!(proposal.contains("Mark DB3 reviewed artifacts complete"));
+        assert_eq!(
+            fs::read_to_string(project_root.join("workpads/features/tasks.md"))
+                .expect("read source after proposal"),
+            before
+        );
+        let apply_without_confirm = run_cli(vec![
+            "workpad".to_string(),
+            "apply".to_string(),
+            "--proposal".to_string(),
+            proposal_path.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("apply should require confirmation");
+        assert!(apply_without_confirm.contains("explicit --confirm is required"));
+        let apply_with_confirm = run_cli(vec![
+            "workpad".to_string(),
+            "apply".to_string(),
+            "--proposal".to_string(),
+            proposal_path.display().to_string(),
+            "--confirm".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("confirmed apply is guarded no-op in DB3");
+        assert!(apply_with_confirm.contains("workpad_apply_supported=false"));
+        assert!(apply_with_confirm.contains("source_modified=false"));
+        assert_eq!(
+            fs::read_to_string(project_root.join("workpads/features/tasks.md"))
+                .expect("read source after apply"),
+            before
+        );
+        let second_proposal_output = run_cli(vec![
+            "workpad".to_string(),
+            "propose".to_string(),
+            "--workpad-task".to_string(),
+            "workpads:features:tasks.md#f2".to_string(),
+            "--expected-hash".to_string(),
+            source_hash.clone(),
+            "--out".to_string(),
+            proposal_dir.display().to_string(),
+            "--summary".to_string(),
+            "A different reviewed proposal body gets a distinct artifact.".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("write second proposal");
+        let second_proposal_path = second_proposal_output
+            .lines()
+            .find_map(|line| line.strip_prefix("path="))
+            .map(PathBuf::from)
+            .expect("second proposal path");
+        assert_ne!(proposal_path, second_proposal_path);
+        assert!(proposal_path.exists());
+        assert!(second_proposal_path.exists());
+        fs::write(
+            &second_proposal_path,
+            format!("{proposal}\nmanual review note\n"),
+        )
+        .expect("mutate Capo proposal");
+        let changed_proposal_overwrite = run_cli(vec![
+            "workpad".to_string(),
+            "propose".to_string(),
+            "--workpad-task".to_string(),
+            "workpads:features:tasks.md#f2".to_string(),
+            "--expected-hash".to_string(),
+            source_hash.clone(),
+            "--out".to_string(),
+            proposal_dir.display().to_string(),
+            "--summary".to_string(),
+            "A different reviewed proposal body gets a distinct artifact.".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("proposal should not overwrite changed Capo file");
+        assert!(changed_proposal_overwrite.contains("refusing to overwrite changed Capo"));
+        fs::write(&proposal_path, "# user-authored proposal\n").expect("replace proposal");
+        let proposal_overwrite = run_cli(vec![
+            "workpad".to_string(),
+            "propose".to_string(),
+            "--workpad-task".to_string(),
+            "workpads:features:tasks.md#f2".to_string(),
+            "--expected-hash".to_string(),
+            source_hash.clone(),
+            "--out".to_string(),
+            proposal_dir.display().to_string(),
+            "--summary".to_string(),
+            "Mark DB3 reviewed artifacts complete after verification.".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("proposal should not overwrite foreign file");
+        assert!(proposal_overwrite.contains("refusing to overwrite non-Capo"));
 
         let conflicting_task_id = TaskId::new("task-existing-active");
         state

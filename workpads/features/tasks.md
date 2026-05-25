@@ -53,7 +53,7 @@ Acceptance:
 
 ## F2 - Workpad Dogfood Bridge
 
-Status: in_progress
+Status: completed
 
 Source workpad: `dogfood-bridge.md`
 
@@ -66,7 +66,8 @@ Acceptance:
 Progress:
 
 - DB1 workpad index is completed.
-- DB2 task import is completed. DB3 reviewed artifacts remain pending.
+- DB2 task import is completed.
+- DB3 reviewed artifacts are completed.
 
 Evidence:
 
@@ -82,6 +83,10 @@ Evidence:
 - `capo workpad import --workpad-task WORKPAD_TASK_ID [--expected-hash HASH] [--task TASK_ID]`
 - `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources`
 - Focused DB2 review subagent: source-fingerprint recurrence and task overwrite blockers found and fixed
+- `capo workpad propose --workpad-task WORKPAD_TASK_ID --out DIR [--expected-hash HASH] [--task TASK_ID] [--summary TEXT]`
+- `capo workpad apply --proposal PATH --confirm`
+- Manual DB3 smoke: `workpad index`, `workpad import`, `workpad propose`
+- Focused DB3 review subagent: proposal overwrite/idempotency blocker found and fixed
 
 ## F3 - Query Surface And Dashboard Upgrade
 
