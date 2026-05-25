@@ -217,3 +217,27 @@ Decision:
 - A passed smoke report must include an artifact root and the artifact scan must pass. Operators can still record skipped/failed reports without artifacts to document blockers.
 - The scan reuses the adapter-layer sensitive marker scanner and does not launch provider CLIs, inspect subscriptions, or read credential stores.
 - This makes the dogfood readiness gate depend on a Capo-verified artifact scan rather than only an operator-provided `--credential-scan clean` flag.
+
+### AC9 - Local Adapter Launch Contract
+
+Status: completed
+
+Acceptance:
+
+- Define a reusable local launch plan for Codex and Claude Code that can build runtime configs and runtime requests without launching provider CLIs.
+- Keep subscription credential handling explicit as `user_local_subscription` with vendor CLI login, not API-key or token material.
+- Preserve restrictive defaults from the smoke harness for normal local launch planning.
+- Reject secret-like env allowlist entries or argv markers before a subscription-backed launch plan can be treated as safe.
+
+Evidence:
+
+- `LocalAdapterLaunchPlan` in `../../crates/capo-adapters/src/lib.rs`.
+- `CodexExecAdapter::local_launch_plan(...)` and `ClaudeCodeAdapter::local_launch_plan(...)` in `../../crates/capo-adapters/src/lib.rs`.
+- `cargo test -p capo-adapters launch_plan -- --nocapture`: passed.
+- `cargo test -p capo-adapters local_smoke_plan -- --nocapture`: passed.
+
+Decision:
+
+- Keep launch planning in `capo-adapters`, while actual process execution remains owned by `capo-runtime`.
+- Reuse the launch-plan shape for both smoke tests and future controller dispatch so Codex/Claude do not grow separate command-construction paths.
+- AC9 does not clear AC1 or AC3. Real subscription-backed execution remains gated on explicit user opt-in and artifact/state scanning.

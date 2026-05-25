@@ -90,6 +90,15 @@ Observed 2026-05-25.
 - Agent connectors source workpad: `agent-connectors.md`.
 - No new third-party dependencies were added for AC1/AC2 preflight.
 
+## F1/AC9 Local Adapter Launch Contract
+
+Observed 2026-05-25.
+
+- Local subscription launch-plan contract and Codex/Claude builders: `../../crates/capo-adapters/src/lib.rs`
+- Runtime request/config target types used by launch plans: `../../crates/capo-runtime/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC9.
+
 ## F3/DS1 Query Surface Extraction
 
 Observed 2026-05-25.

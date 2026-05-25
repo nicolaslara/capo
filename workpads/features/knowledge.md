@@ -230,6 +230,28 @@ Follow-up:
 
 - After the opt-in Codex smoke runs, use the generated artifact root directly with the smoke report command rather than relying on manual inspection notes.
 
+## F1/AC9 - Local Adapter Launch Contract
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `LocalAdapterLaunchPlan` as the adapter-owned launch contract for local subscription-backed CLIs. It builds `LocalProcessConfig` and `LocalProcessRequest`, but does not execute provider processes.
+- Keep process ownership in `capo-runtime`; adapters only construct launch metadata and normalized event parsers.
+- Encode local subscription use as `credential_scope=user_local_subscription`. The launch plan does not store credential paths, keychain refs, tokens, cookies, or API keys.
+- Preserve restrictive Codex defaults: JSONL output, read-only sandbox, ephemeral mode, ignored user config/rules, explicit workspace.
+- Preserve restrictive Claude Code defaults: stream-json output, plan permission mode, no session persistence, disabled slash commands, no tools, disallowed tools, empty strict MCP config.
+- Add `assert_subscription_safe` to fail closed on secret-like env allowlist entries or argv markers before a launch plan can be treated as safe.
+
+Verification:
+
+- `cargo test -p capo-adapters launch_plan -- --nocapture`: passed.
+- `cargo test -p capo-adapters local_smoke_plan -- --nocapture`: passed.
+
+Follow-up:
+
+- Wire the launch plan into the controller dispatch path only after the opt-in real Codex smoke produces clean evidence.
+
 ## F3/DS1 - Query Surface Extraction
 
 Status: completed on 2026-05-25.

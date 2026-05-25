@@ -218,6 +218,68 @@ pub struct FakeProviderInfo {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalAdapterLaunchPlan {
+    pub adapter_kind: NormalizedAdapterKind,
+    pub provider_kind: String,
+    pub credential_scope: String,
+    pub program: String,
+    pub argv: Vec<String>,
+    pub workspace_root: PathBuf,
+    pub artifact_root: PathBuf,
+    pub env_allowlist: Vec<String>,
+    pub redaction_rules: Vec<RedactionRule>,
+    pub output_limit_bytes: usize,
+    pub stdout_format: String,
+    pub stderr_policy: String,
+}
+
+impl LocalAdapterLaunchPlan {
+    pub fn runtime_config(&self) -> LocalProcessConfig {
+        LocalProcessConfig {
+            workspace_roots: vec![self.workspace_root.clone()],
+            artifact_root: self.artifact_root.clone(),
+            env_allowlist: self.env_allowlist.clone(),
+            redaction_rules: self.redaction_rules.clone(),
+            output_limit_bytes: self.output_limit_bytes,
+        }
+    }
+
+    pub fn runtime_request(&self, run_id: RunId) -> LocalProcessRequest {
+        LocalProcessRequest {
+            run_id,
+            program: self.program.clone(),
+            argv: self.argv.clone(),
+            cwd: self.workspace_root.clone(),
+            env: HashMap::new(),
+        }
+    }
+
+    pub fn assert_subscription_safe(&self) -> Result<(), String> {
+        if self.credential_scope != "user_local_subscription" {
+            return Err(format!(
+                "unsupported credential scope for local subscription launch: {}",
+                self.credential_scope
+            ));
+        }
+        if self.env_allowlist.iter().any(|name| {
+            let upper = name.to_ascii_uppercase();
+            upper.contains("TOKEN")
+                || upper.contains("KEY")
+                || upper.contains("SECRET")
+                || upper.contains("COOKIE")
+        }) {
+            return Err(
+                "local subscription launch env allowlist includes secret-like names".into(),
+            );
+        }
+        if self.argv.iter().any(|arg| sensitive_marker(arg).is_some()) {
+            return Err("local subscription launch argv includes secret-like markers".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalAdapterSmokePlan {
     pub adapter_kind: NormalizedAdapterKind,
     pub opt_in_env: &'static str,
@@ -315,13 +377,15 @@ impl LocalAdapterSmokeRunner {
 }
 
 impl CodexExecAdapter {
-    pub fn local_smoke_plan(
+    pub fn local_launch_plan(
         workspace_root: PathBuf,
         artifact_root: PathBuf,
-    ) -> LocalAdapterSmokePlan {
-        LocalAdapterSmokePlan {
+        prompt: impl Into<String>,
+    ) -> LocalAdapterLaunchPlan {
+        LocalAdapterLaunchPlan {
             adapter_kind: NormalizedAdapterKind::CodexExec,
-            opt_in_env: "CAPO_RUN_CODEX_LOCAL_SMOKE",
+            provider_kind: "codex_subscription".to_string(),
+            credential_scope: "user_local_subscription".to_string(),
             program: "codex".to_string(),
             argv: vec![
                 "exec".to_string(),
@@ -333,26 +397,52 @@ impl CodexExecAdapter {
                 "--ignore-rules".to_string(),
                 "--cd".to_string(),
                 workspace_root.to_string_lossy().to_string(),
-                "Reply with exactly CAPO_CODEX_SMOKE_OK and do not inspect files.".to_string(),
+                prompt.into(),
             ],
             workspace_root,
             artifact_root,
             env_allowlist: local_subscription_cli_env_allowlist(),
             redaction_rules: local_adapter_redaction_rules(),
             output_limit_bytes: 128 * 1024,
+            stdout_format: "jsonl".to_string(),
+            stderr_policy: "logs_redacted".to_string(),
+        }
+    }
+
+    pub fn local_smoke_plan(
+        workspace_root: PathBuf,
+        artifact_root: PathBuf,
+    ) -> LocalAdapterSmokePlan {
+        let launch_plan = Self::local_launch_plan(
+            workspace_root,
+            artifact_root,
+            "Reply with exactly CAPO_CODEX_SMOKE_OK and do not inspect files.",
+        );
+        LocalAdapterSmokePlan {
+            adapter_kind: NormalizedAdapterKind::CodexExec,
+            opt_in_env: "CAPO_RUN_CODEX_LOCAL_SMOKE",
+            program: launch_plan.program,
+            argv: launch_plan.argv,
+            workspace_root: launch_plan.workspace_root,
+            artifact_root: launch_plan.artifact_root,
+            env_allowlist: launch_plan.env_allowlist,
+            redaction_rules: launch_plan.redaction_rules,
+            output_limit_bytes: launch_plan.output_limit_bytes,
             expected_output_marker: "CAPO_CODEX_SMOKE_OK",
         }
     }
 }
 
 impl ClaudeCodeAdapter {
-    pub fn local_smoke_plan(
+    pub fn local_launch_plan(
         workspace_root: PathBuf,
         artifact_root: PathBuf,
-    ) -> LocalAdapterSmokePlan {
-        LocalAdapterSmokePlan {
+        prompt: impl Into<String>,
+    ) -> LocalAdapterLaunchPlan {
+        LocalAdapterLaunchPlan {
             adapter_kind: NormalizedAdapterKind::ClaudeCode,
-            opt_in_env: "CAPO_RUN_CLAUDE_LOCAL_SMOKE",
+            provider_kind: "claude_subscription".to_string(),
+            credential_scope: "user_local_subscription".to_string(),
             program: "claude".to_string(),
             argv: vec![
                 "-p".to_string(),
@@ -370,13 +460,37 @@ impl ClaudeCodeAdapter {
                 "--mcp-config".to_string(),
                 "/dev/null".to_string(),
                 "--strict-mcp-config".to_string(),
-                "Reply with exactly CAPO_CLAUDE_SMOKE_OK and do not inspect files.".to_string(),
+                prompt.into(),
             ],
             workspace_root,
             artifact_root,
             env_allowlist: local_subscription_cli_env_allowlist(),
             redaction_rules: local_adapter_redaction_rules(),
             output_limit_bytes: 128 * 1024,
+            stdout_format: "stream-json".to_string(),
+            stderr_policy: "logs_redacted".to_string(),
+        }
+    }
+
+    pub fn local_smoke_plan(
+        workspace_root: PathBuf,
+        artifact_root: PathBuf,
+    ) -> LocalAdapterSmokePlan {
+        let launch_plan = Self::local_launch_plan(
+            workspace_root,
+            artifact_root,
+            "Reply with exactly CAPO_CLAUDE_SMOKE_OK and do not inspect files.",
+        );
+        LocalAdapterSmokePlan {
+            adapter_kind: NormalizedAdapterKind::ClaudeCode,
+            opt_in_env: "CAPO_RUN_CLAUDE_LOCAL_SMOKE",
+            program: launch_plan.program,
+            argv: launch_plan.argv,
+            workspace_root: launch_plan.workspace_root,
+            artifact_root: launch_plan.artifact_root,
+            env_allowlist: launch_plan.env_allowlist,
+            redaction_rules: launch_plan.redaction_rules,
+            output_limit_bytes: launch_plan.output_limit_bytes,
             expected_output_marker: "CAPO_CLAUDE_SMOKE_OK",
         }
     }
@@ -1095,6 +1209,128 @@ mod tests {
 
         assert_eq!(before, 2);
         assert_eq!(after, 1);
+    }
+
+    #[test]
+    fn codex_launch_plan_builds_subscription_safe_runtime_request() {
+        let workspace = temp_root("codex-launch-workspace");
+        let artifacts = temp_root("codex-launch-artifacts");
+        let plan = CodexExecAdapter::local_launch_plan(
+            workspace.clone(),
+            artifacts.clone(),
+            "Summarize this project state.",
+        );
+
+        plan.assert_subscription_safe().unwrap();
+        assert_eq!(plan.provider_kind, "codex_subscription");
+        assert_eq!(plan.credential_scope, "user_local_subscription");
+        assert_eq!(plan.stdout_format, "jsonl");
+        assert_eq!(plan.stderr_policy, "logs_redacted");
+        assert_eq!(
+            plan.runtime_config().workspace_roots,
+            vec![workspace.clone()]
+        );
+        let request = plan.runtime_request(RunId::new("run-codex-launch"));
+        assert_eq!(request.program, "codex");
+        assert_eq!(request.cwd, workspace);
+        assert!(request.env.is_empty());
+        assert!(
+            request
+                .argv
+                .windows(2)
+                .any(|args| args == ["--sandbox", "read-only"])
+        );
+        assert!(request.argv.iter().any(|arg| arg == "--ephemeral"));
+        assert!(request.argv.iter().any(|arg| arg == "--ignore-user-config"));
+        assert!(request.argv.iter().any(|arg| arg == "--ignore-rules"));
+        assert!(
+            request
+                .argv
+                .windows(2)
+                .any(|args| args == ["--cd", workspace.to_string_lossy().as_ref()])
+        );
+        assert_eq!(
+            request.argv.last().map(String::as_str),
+            Some("Summarize this project state.")
+        );
+        assert_eq!(plan.artifact_root, artifacts);
+    }
+
+    #[test]
+    fn claude_launch_plan_builds_subscription_safe_runtime_request() {
+        let workspace = temp_root("claude-launch-workspace");
+        let artifacts = temp_root("claude-launch-artifacts");
+        let plan = ClaudeCodeAdapter::local_launch_plan(
+            workspace.clone(),
+            artifacts,
+            "Summarize this project state.",
+        );
+
+        plan.assert_subscription_safe().unwrap();
+        assert_eq!(plan.provider_kind, "claude_subscription");
+        assert_eq!(plan.credential_scope, "user_local_subscription");
+        assert_eq!(plan.stdout_format, "stream-json");
+        let request = plan.runtime_request(RunId::new("run-claude-launch"));
+        assert_eq!(request.program, "claude");
+        assert_eq!(request.cwd, workspace);
+        assert!(request.env.is_empty());
+        assert!(
+            request
+                .argv
+                .windows(2)
+                .any(|args| args == ["--output-format", "stream-json"])
+        );
+        assert!(
+            request
+                .argv
+                .windows(2)
+                .any(|args| args == ["--permission-mode", "plan"])
+        );
+        assert!(
+            request
+                .argv
+                .iter()
+                .any(|arg| arg == "--no-session-persistence")
+        );
+        assert!(
+            request
+                .argv
+                .iter()
+                .any(|arg| arg == "--disable-slash-commands")
+        );
+        assert!(request.argv.windows(2).any(|args| args == ["--tools", ""]));
+        assert!(
+            request
+                .argv
+                .windows(2)
+                .any(|args| args == ["--disallowedTools", "*"])
+        );
+        assert!(request.argv.iter().any(|arg| arg == "--strict-mcp-config"));
+        assert_eq!(
+            request.argv.last().map(String::as_str),
+            Some("Summarize this project state.")
+        );
+    }
+
+    #[test]
+    fn launch_plan_rejects_secret_like_env_or_argv_markers() {
+        let workspace = temp_root("unsafe-launch-workspace");
+        let artifacts = temp_root("unsafe-launch-artifacts");
+        let mut plan = CodexExecAdapter::local_launch_plan(workspace, artifacts, "hello");
+        plan.env_allowlist.push("OPENAI_API_KEY".to_string());
+        assert!(
+            plan.assert_subscription_safe()
+                .unwrap_err()
+                .contains("env allowlist")
+        );
+
+        plan.env_allowlist = local_subscription_cli_env_allowlist();
+        plan.argv.push("Authorization: bearer secret".to_string());
+        assert!(
+            plan.assert_subscription_safe()
+                .unwrap_err()
+                .contains("argv")
+        );
     }
 
     #[test]
