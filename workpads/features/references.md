@@ -138,3 +138,14 @@ Observed 2026-05-25.
 - Memory/evaluation source workpad: `memory-eval.md`
 - Existing source-linked packet builder retained as packet artifact evidence path: `../../crates/capo-memory/src/lib.rs`
 - No new third-party dependencies were added for ME1.
+
+## F5/ME2 Task Outcome Report
+
+Observed 2026-05-25.
+
+- Task outcome report builder, markdown rendering, terminal-run guard, and report derivation tests: `../../crates/capo-eval/src/lib.rs`
+- Task outcome report projection, event kind, rebuild decode/encode, read query, and rebuild test: `../../crates/capo-state/src/lib.rs`
+- CLI export command, report artifact persistence, idempotency, review-outcome derivation, overwrite guards, and e2e regression coverage: `../../crates/capo-cli/src/main.rs`
+- Eval crate dependency on state read models: `../../crates/capo-eval/Cargo.toml`, `../../Cargo.lock`
+- Memory/evaluation source workpad: `memory-eval.md`
+- No new third-party dependencies were added for ME2.

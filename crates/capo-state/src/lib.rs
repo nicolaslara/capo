@@ -955,6 +955,47 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn task_outcome_reports_for_task(
+        &self,
+        task_id: &TaskId,
+    ) -> StateResult<Vec<TaskOutcomeReportProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT task_outcome_report_id, project_id, task_id, session_id, run_id,
+                    outcome_status, started_sequence, completed_sequence,
+                    duration_sequence_span, action_count, tool_call_count, evidence_count,
+                    memory_packet_count, confidence, blocker, review_outcome, report_artifact_id,
+                    updated_sequence
+             FROM task_outcome_reports
+             WHERE task_id = ?1
+             ORDER BY updated_sequence ASC, task_outcome_report_id ASC",
+        )?;
+        let rows = statement.query_map(params![task_id.as_str()], |row| {
+            Ok(TaskOutcomeReportProjection {
+                task_outcome_report_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                task_id: TaskId::new(row.get::<_, String>(2)?),
+                session_id: SessionId::new(row.get::<_, String>(3)?),
+                run_id: RunId::new(row.get::<_, String>(4)?),
+                outcome_status: row.get(5)?,
+                started_sequence: row.get(6)?,
+                completed_sequence: row.get(7)?,
+                duration_sequence_span: row.get(8)?,
+                action_count: row.get(9)?,
+                tool_call_count: row.get(10)?,
+                evidence_count: row.get(11)?,
+                memory_packet_count: row.get(12)?,
+                confidence: row.get(13)?,
+                blocker: row.get(14)?,
+                review_outcome: row.get(15)?,
+                report_artifact_id: row.get(16)?,
+                updated_sequence: row.get(17)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn tool_calls_for_session(
         &self,
         session_id: &SessionId,
@@ -1154,6 +1195,7 @@ pub enum EventKind {
     MemoryPacketBuilt,
     MemoryRecordIngested,
     MemoryRecordInvalidated,
+    TaskOutcomeReportGenerated,
     EvidenceRecorded,
     WorkpadIndexed,
     WorkpadTaskImported,
@@ -1189,6 +1231,7 @@ impl EventKind {
             Self::MemoryPacketBuilt => "memory.packet_built",
             Self::MemoryRecordIngested => "memory.record_ingested",
             Self::MemoryRecordInvalidated => "memory.record_invalidated",
+            Self::TaskOutcomeReportGenerated => "task.outcome_report_generated",
             Self::EvidenceRecorded => "evidence.recorded",
             Self::WorkpadIndexed => "workpad.indexed",
             Self::WorkpadTaskImported => "workpad.task_imported",
@@ -1274,6 +1317,7 @@ pub enum ProjectionRecord {
     MemoryPacketRef(MemoryPacketProjection),
     MemoryRecord(Box<MemoryRecordProjection>),
     MemorySource(MemorySourceProjection),
+    TaskOutcomeReport(TaskOutcomeReportProjection),
     Evidence(EvidenceProjection),
     WorkpadIndexReset(WorkpadIndexResetProjection),
     WorkpadFile(WorkpadFileProjection),
@@ -1456,6 +1500,28 @@ pub struct EvidenceProjection {
     pub kind: String,
     pub artifact_id: Option<String>,
     pub confidence: i64,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskOutcomeReportProjection {
+    pub task_outcome_report_id: String,
+    pub project_id: ProjectId,
+    pub task_id: TaskId,
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    pub outcome_status: String,
+    pub started_sequence: i64,
+    pub completed_sequence: i64,
+    pub duration_sequence_span: i64,
+    pub action_count: i64,
+    pub tool_call_count: i64,
+    pub evidence_count: i64,
+    pub memory_packet_count: i64,
+    pub confidence: Option<i64>,
+    pub blocker: Option<String>,
+    pub review_outcome: String,
+    pub report_artifact_id: Option<String>,
     pub updated_sequence: i64,
 }
 
@@ -1729,6 +1795,26 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             confidence INTEGER NOT NULL,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS task_outcome_reports (
+            task_outcome_report_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            outcome_status TEXT NOT NULL,
+            started_sequence INTEGER NOT NULL,
+            completed_sequence INTEGER NOT NULL,
+            duration_sequence_span INTEGER NOT NULL,
+            action_count INTEGER NOT NULL,
+            tool_call_count INTEGER NOT NULL,
+            evidence_count INTEGER NOT NULL,
+            memory_packet_count INTEGER NOT NULL,
+            confidence INTEGER,
+            blocker TEXT,
+            review_outcome TEXT NOT NULL,
+            report_artifact_id TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS workpad_files (
             path TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -1812,6 +1898,7 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "memory_records",
         "memory_sources",
         "evidence",
+        "task_outcome_reports",
         "workpad_files",
         "workpad_tasks",
         "projection_watermarks",
@@ -2227,6 +2314,53 @@ fn apply_projection_record(
                 sequence,
             ],
         )?,
+        ProjectionRecord::TaskOutcomeReport(report) => transaction.execute(
+            "INSERT INTO task_outcome_reports(
+                task_outcome_report_id, project_id, task_id, session_id, run_id,
+                outcome_status, started_sequence, completed_sequence, duration_sequence_span,
+                action_count, tool_call_count, evidence_count, memory_packet_count,
+                confidence, blocker, review_outcome, report_artifact_id, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                ?14, ?15, ?16, ?17, ?18)
+             ON CONFLICT(task_outcome_report_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                task_id = excluded.task_id,
+                session_id = excluded.session_id,
+                run_id = excluded.run_id,
+                outcome_status = excluded.outcome_status,
+                started_sequence = excluded.started_sequence,
+                completed_sequence = excluded.completed_sequence,
+                duration_sequence_span = excluded.duration_sequence_span,
+                action_count = excluded.action_count,
+                tool_call_count = excluded.tool_call_count,
+                evidence_count = excluded.evidence_count,
+                memory_packet_count = excluded.memory_packet_count,
+                confidence = excluded.confidence,
+                blocker = excluded.blocker,
+                review_outcome = excluded.review_outcome,
+                report_artifact_id = excluded.report_artifact_id,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                report.task_outcome_report_id,
+                report.project_id.as_str(),
+                report.task_id.as_str(),
+                report.session_id.as_str(),
+                report.run_id.as_str(),
+                report.outcome_status,
+                report.started_sequence,
+                report.completed_sequence,
+                report.duration_sequence_span,
+                report.action_count,
+                report.tool_call_count,
+                report.evidence_count,
+                report.memory_packet_count,
+                report.confidence,
+                report.blocker,
+                report.review_outcome,
+                report.report_artifact_id,
+                sequence,
+            ],
+        )?,
         ProjectionRecord::WorkpadIndexReset(reset) => {
             transaction.execute(
                 "DELETE FROM workpad_files WHERE project_id = ?1",
@@ -2484,6 +2618,29 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
             g: Some(evidence.confidence.to_string()),
             h: None,
             payload_json: "{}".to_string(),
+        },
+        ProjectionRecord::TaskOutcomeReport(report) => ProjectionRecordRow {
+            kind: "task_outcome_report",
+            record_id: report.task_outcome_report_id.clone(),
+            a: Some(report.project_id.to_string()),
+            b: Some(report.task_id.to_string()),
+            c: Some(report.session_id.to_string()),
+            d: Some(report.run_id.to_string()),
+            e: Some(report.outcome_status.clone()),
+            f: Some(report.started_sequence.to_string()),
+            g: Some(report.completed_sequence.to_string()),
+            h: Some(report.duration_sequence_span.to_string()),
+            payload_json: json!({
+                "action_count": report.action_count,
+                "tool_call_count": report.tool_call_count,
+                "evidence_count": report.evidence_count,
+                "memory_packet_count": report.memory_packet_count,
+                "confidence": report.confidence,
+                "blocker": report.blocker,
+                "review_outcome": report.review_outcome,
+                "report_artifact_id": report.report_artifact_id,
+            })
+            .to_string(),
         },
         ProjectionRecord::WorkpadIndexReset(reset) => ProjectionRecordRow {
             kind: "workpad_index_reset",
@@ -2839,6 +2996,101 @@ fn projection_record_from_row(
             confidence: required_i64(&projection_kind, "evidence", g, "confidence")?,
             updated_sequence: 0,
         })),
+        "task_outcome_report" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::TaskOutcomeReport(
+                TaskOutcomeReportProjection {
+                    task_outcome_report_id: record_id,
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "task_outcome_report",
+                        a,
+                        "project_id",
+                    )?),
+                    task_id: TaskId::new(required_field(
+                        &projection_kind,
+                        "task_outcome_report",
+                        b,
+                        "task_id",
+                    )?),
+                    session_id: SessionId::new(required_field(
+                        &projection_kind,
+                        "task_outcome_report",
+                        c,
+                        "session_id",
+                    )?),
+                    run_id: RunId::new(required_field(
+                        &projection_kind,
+                        "task_outcome_report",
+                        d,
+                        "run_id",
+                    )?),
+                    outcome_status: required_field(
+                        &projection_kind,
+                        "task_outcome_report",
+                        e,
+                        "outcome_status",
+                    )?,
+                    started_sequence: required_i64(
+                        &projection_kind,
+                        "task_outcome_report",
+                        f,
+                        "started_sequence",
+                    )?,
+                    completed_sequence: required_i64(
+                        &projection_kind,
+                        "task_outcome_report",
+                        g,
+                        "completed_sequence",
+                    )?,
+                    duration_sequence_span: required_i64(
+                        &projection_kind,
+                        "task_outcome_report",
+                        h,
+                        "duration_sequence_span",
+                    )?,
+                    action_count: required_payload_i64(
+                        &projection_kind,
+                        "task_outcome_report",
+                        &payload,
+                        "action_count",
+                    )?,
+                    tool_call_count: required_payload_i64(
+                        &projection_kind,
+                        "task_outcome_report",
+                        &payload,
+                        "tool_call_count",
+                    )?,
+                    evidence_count: required_payload_i64(
+                        &projection_kind,
+                        "task_outcome_report",
+                        &payload,
+                        "evidence_count",
+                    )?,
+                    memory_packet_count: required_payload_i64(
+                        &projection_kind,
+                        "task_outcome_report",
+                        &payload,
+                        "memory_packet_count",
+                    )?,
+                    confidence: payload_optional_i64(
+                        &projection_kind,
+                        "task_outcome_report",
+                        &payload,
+                        "confidence",
+                    )?,
+                    blocker: payload_optional_string(&payload, "blocker"),
+                    review_outcome: required_payload_string(
+                        &projection_kind,
+                        "task_outcome_report",
+                        &payload,
+                        "review_outcome",
+                    )?,
+                    report_artifact_id: payload_optional_string(&payload, "report_artifact_id"),
+                    updated_sequence: 0,
+                },
+            ))
+        }
         "workpad_index_reset" => Ok(ProjectionRecord::WorkpadIndexReset(
             WorkpadIndexResetProjection {
                 project_id: ProjectId::new(record_id),
@@ -2941,6 +3193,41 @@ fn required_payload_string(
     payload_string(payload, key).ok_or_else(|| {
         ProjectionDecodeError(format!("{projection_kind}.{record_id} missing {key}"))
     })
+}
+
+fn required_payload_i64(
+    projection_kind: &str,
+    record_id: &str,
+    payload: &Value,
+    key: &str,
+) -> Result<i64, ProjectionDecodeError> {
+    payload_optional_i64(projection_kind, record_id, payload, key)?.ok_or_else(|| {
+        ProjectionDecodeError(format!("{projection_kind}.{record_id} missing {key}"))
+    })
+}
+
+fn payload_optional_i64(
+    projection_kind: &str,
+    record_id: &str,
+    payload: &Value,
+    key: &str,
+) -> Result<Option<i64>, ProjectionDecodeError> {
+    match payload.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(value)) => value.as_i64().map(Some).ok_or_else(|| {
+            ProjectionDecodeError(format!(
+                "{projection_kind}.{record_id} invalid {key}: not an i64"
+            ))
+        }),
+        Some(Value::String(value)) => value.parse::<i64>().map(Some).map_err(|error| {
+            ProjectionDecodeError(format!(
+                "{projection_kind}.{record_id} invalid {key}: {error}"
+            ))
+        }),
+        Some(_) => Err(ProjectionDecodeError(format!(
+            "{projection_kind}.{record_id} invalid {key}: not a number"
+        ))),
+    }
 }
 
 fn validate_projection_json(
@@ -3629,6 +3916,73 @@ mod tests {
             .unwrap();
 
         assert!(store.rebuild_projections().is_err());
+    }
+
+    #[test]
+    fn task_outcome_reports_are_persisted_and_rebuilt() {
+        let store = temp_store("task-outcome-report-rebuild");
+        let project_id = ProjectId::new("project-capo");
+        let task_id = TaskId::new("task-me2");
+        let session_id = SessionId::new("session-me2");
+        let run_id = RunId::new("run-me2");
+        let report_id = "task-outcome-task-me2";
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-task-outcome-report".to_string(),
+                    kind: EventKind::TaskOutcomeReportGenerated,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: Some(task_id.clone()),
+                    agent_id: None,
+                    session_id: Some(session_id.clone()),
+                    run_id: Some(run_id.clone()),
+                    turn_id: None,
+                    item_id: Some(report_id.to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::TaskOutcomeReport(
+                    TaskOutcomeReportProjection {
+                        task_outcome_report_id: report_id.to_string(),
+                        project_id: project_id.clone(),
+                        task_id: task_id.clone(),
+                        session_id,
+                        run_id,
+                        outcome_status: "completed".to_string(),
+                        started_sequence: 2,
+                        completed_sequence: 8,
+                        duration_sequence_span: 6,
+                        action_count: 7,
+                        tool_call_count: 2,
+                        evidence_count: 3,
+                        memory_packet_count: 1,
+                        confidence: Some(84),
+                        blocker: None,
+                        review_outcome: "reviewed_no_blockers".to_string(),
+                        report_artifact_id: Some("artifact-task-outcome".to_string()),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append task outcome report");
+
+        store.rebuild_projections().expect("rebuild projections");
+        let reports = store
+            .task_outcome_reports_for_task(&task_id)
+            .expect("task outcome reports");
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].project_id, project_id);
+        assert_eq!(reports[0].outcome_status, "completed");
+        assert_eq!(reports[0].duration_sequence_span, 6);
+        assert_eq!(reports[0].tool_call_count, 2);
+        assert_eq!(reports[0].review_outcome, "reviewed_no_blockers");
+        assert_eq!(
+            reports[0].report_artifact_id.as_deref(),
+            Some("artifact-task-outcome")
+        );
     }
 
     #[test]

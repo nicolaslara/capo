@@ -242,6 +242,41 @@ Follow-up:
 - ME2 should derive task outcome reports from events, tool calls, evidence, and memory refs rather than free-form summaries.
 - Future packet builder integration should consume `packet_eligible_memory_records` with `memory_sources_for_record` rather than reading packet artifacts as the memory authority.
 
+## F5/ME2 - Task Outcome Report
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `TaskOutcomeReport` generation in `capo-eval` as a local evidence-backed report builder, not an LLM summary.
+- Derive report content from state read models: session, latest run, event trace, tool calls, evidence refs, and memory packet refs.
+- Add `task_outcome_reports` as the durable state projection for report refs, counts, duration sequence span, confidence, blocker, review outcome, and report artifact ID.
+- Add `capo eval task-outcome --session SESSION_ID --out DIR` as the first CLI export path for task outcome reports.
+- Treat outcome report markdown as evidence artifacts with `<!-- capo:task-outcome-report -->` markers. Changed Capo-owned report files and non-Capo files are not overwritten.
+- Filter prior `task_outcome_report` evidence and `task.outcome_report_generated` events out of report generation so reruns do not become self-referential.
+- Derive `review_outcome` from recorded evidence kinds for ME2. `review_blockers` / `review_findings` and `review_no_blockers` / `reviewed_no_blockers` drive the initial outcome value until ME3 adds first-class review finding records.
+- Key report, artifact, event, and idempotency identity from the same stable snapshot inputs, including completed sequence and review outcome.
+- Refuse reports for non-terminal runs. The current terminal set covers completed/failed/canceled/interrupted/exited/exited_unknown, with interrupted fake-controller flows becoming reportable after recovery marks the run `exited_unknown`.
+
+Verification:
+
+- `cargo test -p capo-eval`: passed.
+- `cargo test -p capo-state task_outcome`: passed.
+- `cargo test -p capo-cli cli_drives_fake_controller_and_exports_evidence`: passed.
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Review:
+
+- Focused reviews found blockers in report idempotency, self-referential reruns, overwrite safety, free-form review outcome input, missing terminal-status guard, conflicting review evidence precedence, and report/artifact/event identity alignment. Fixes and regression coverage were added before completion.
+- Final focused re-review found no blockers in no-review reruns, later review evidence behavior, overwrite guards, idempotency/state consistency, or terminal status gating.
+
+Follow-up:
+
+- ME3 should replace evidence-kind review derivation with first-class review finding records linked to tasks, sessions, tools, and follow-up workpad items.
+- Later UI/query work should expose task outcome reports without requiring users to inspect CLI markdown artifacts manually.
+
 ## F4/PT1 - Static Policy Variant
 
 Status: completed on 2026-05-25.

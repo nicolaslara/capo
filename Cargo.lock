@@ -62,6 +62,7 @@ name = "capo-eval"
 version = "0.1.0"
 dependencies = [
  "capo-core",
+ "capo-state",
 ]
 
 [[package]]

@@ -190,17 +190,23 @@ Acceptance:
 Progress:
 
 - ME1 memory record read models are completed.
-- ME2 task outcome reports are pending.
+- ME2 task outcome reports are completed.
 - ME3 review feedback loop is pending.
 
 Evidence:
 
 - `crates/capo-state/src/lib.rs`
+- `crates/capo-eval/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
 - `cargo test -p capo-state memory_record`
+- `cargo test -p capo-state task_outcome`
+- `cargo test -p capo-eval`
+- `cargo test -p capo-cli cli_drives_fake_controller_and_exports_evidence`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`
 - Focused ME1 memory read-model review: replayable-source filtering and fail-closed projection decode blockers found and fixed.
+- Focused ME2 report reviews: self-referential reruns, overwrite safety, review-outcome derivation, terminal-status guard, and report/artifact/event identity blockers found and fixed; final focused review found no blockers.
 
 ## F6 - Voice Control Integration
 

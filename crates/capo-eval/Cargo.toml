@@ -8,3 +8,4 @@ version.workspace = true
 
 [dependencies]
 capo-core.workspace = true
+capo-state.workspace = true

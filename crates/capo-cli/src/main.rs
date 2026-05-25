@@ -8,6 +8,7 @@ use capo_core::{
     AgentId, CommandEnvelope, CommandId, CommandIntent, CommandTarget, InputOrigin, ProjectId,
     SessionId, TaskId, ToolCallId,
 };
+use capo_eval::TaskOutcomeReport;
 use capo_query::{ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 use capo_state::{
     ArtifactRecord, CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection,
@@ -45,6 +46,7 @@ Usage:
   capo workpad propose --workpad-task WORKPAD_TASK_ID --out DIR [--expected-hash HASH] [--task TASK_ID] [--summary TEXT] [--state PATH]
   capo workpad apply --proposal PATH [--confirm] [--state PATH]
   capo evidence export --session SESSION_ID --out DIR [--state PATH]
+  capo eval task-outcome --session SESSION_ID --out DIR [--state PATH]
 
 Prototype notes:
   The P4 CLI uses command envelopes, the fake controller, and SQLite read models.
@@ -122,6 +124,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "evidence" && command == "export" => {
             export_evidence(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "eval" && command == "task-outcome" => {
+            export_task_outcome_report(&parsed, rest)
         }
         [unknown, ..] => Err(format!("unknown command: {unknown}\nrun `capo --help`")),
     }
@@ -1108,6 +1113,102 @@ fn export_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, Strin
     ))
 }
 
+fn export_task_outcome_report(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let session_id = SessionId::new(required_arg(args, "--session")?);
+    let out = PathBuf::from(required_arg(args, "--out")?);
+    let command = envelope(
+        "eval-task-outcome",
+        CommandTarget::Session(session_id.clone()),
+        CommandIntent::ExportEvidence,
+        Some(out.display().to_string()),
+    );
+    let state = state(parsed)?;
+    let review_outcome = derive_review_outcome(&state, &session_id)?;
+    let report = TaskOutcomeReport::from_state(&state, &session_id, review_outcome.clone(), None)?;
+    let artifact_seed = format!(
+        "{}:{}",
+        report.projection.task_outcome_report_id, review_outcome
+    );
+    let artifact_id = format!("artifact-task-outcome-{}", stable_cli_hash(&artifact_seed));
+    let mut projection = report.projection.clone();
+    projection.report_artifact_id = Some(artifact_id.clone());
+    fs::create_dir_all(&out).map_err(|error| error.to_string())?;
+    let path = out.join(format!("{artifact_id}.md"));
+    write_task_outcome_report_file(&path, &report.markdown)?;
+    let content_hash = stable_cli_hash(&report.markdown);
+    state
+        .record_artifact(ArtifactRecord {
+            artifact_id: artifact_id.clone(),
+            project_id: Some(projection.project_id.clone()),
+            session_id: Some(session_id.clone()),
+            run_id: Some(projection.run_id.clone()),
+            kind: "task_outcome_report".to_string(),
+            uri: path.display().to_string(),
+            content_hash: content_hash.clone(),
+            size_bytes: report.markdown.len() as i64,
+            redaction_state: RedactionState::Safe,
+        })
+        .map_err(debug_error)?;
+
+    let evidence_id = format!("evidence-{artifact_id}");
+    let sequence = state
+        .append_event(
+            NewEvent {
+                event_id: format!(
+                    "event-task-outcome-{}",
+                    stable_cli_hash(&projection.task_outcome_report_id)
+                ),
+                kind: EventKind::TaskOutcomeReportGenerated,
+                actor: "cli".to_string(),
+                project_id: Some(projection.project_id.clone()),
+                task_id: Some(projection.task_id.clone()),
+                agent_id: None,
+                session_id: Some(session_id.clone()),
+                run_id: Some(projection.run_id.clone()),
+                turn_id: None,
+                item_id: Some(projection.task_outcome_report_id.clone()),
+                payload_json: format!(
+                    "{{\"task_outcome_report_id\":\"{}\",\"artifact_id\":\"{}\",\"content_hash\":\"{}\",\"review_outcome\":\"{}\"}}",
+                    escape_json(&projection.task_outcome_report_id),
+                    escape_json(&artifact_id),
+                    escape_json(&content_hash),
+                    escape_json(&review_outcome)
+                ),
+                idempotency_key: Some(format!(
+                    "task-outcome:{}:{}:{}:{}",
+                    projection.task_id,
+                    session_id,
+                    review_outcome,
+                    projection.completed_sequence
+                )),
+                redaction_state: RedactionState::Safe,
+            },
+            &[
+                ProjectionRecord::TaskOutcomeReport(projection.clone()),
+                ProjectionRecord::Evidence(EvidenceProjection {
+                    evidence_id: capo_core::EvidenceId::new(evidence_id.clone()),
+                    project_id: projection.project_id.clone(),
+                    task_id: Some(projection.task_id.clone()),
+                    session_id: Some(session_id.clone()),
+                    run_id: Some(projection.run_id.clone()),
+                    kind: "task_outcome_report".to_string(),
+                    artifact_id: Some(artifact_id.clone()),
+                    confidence: projection.confidence.unwrap_or(0),
+                    updated_sequence: 0,
+                }),
+            ],
+        )
+        .map_err(debug_error)?;
+
+    Ok(format!(
+        "task_outcome_report_exported=true\nreport_id={}\ntask_id={}\nsession_id={session_id}\nartifact_id={artifact_id}\npath={}\ncontent_hash={content_hash}\nsequence={sequence}\ncommand_id={}\n",
+        projection.task_outcome_report_id,
+        projection.task_id,
+        path.display(),
+        command.command_id
+    ))
+}
+
 fn workpad_index_projections(
     index: &WorkpadIndex,
     existing_statuses: &HashMap<String, String>,
@@ -1227,6 +1328,33 @@ fn render_status(
         output.push_str(&format!("event={} kind={}\n", event.sequence, event.kind));
     }
     output
+}
+
+fn derive_review_outcome(
+    state: &SqliteStateStore,
+    session_id: &SessionId,
+) -> Result<String, String> {
+    let evidence = state
+        .evidence_for_session(session_id)
+        .map_err(debug_error)?;
+    let latest = evidence
+        .iter()
+        .filter_map(|item| {
+            let rank = match item.kind.as_str() {
+                "review_blockers" | "review_findings" => 2,
+                "review_no_blockers" | "reviewed_no_blockers" => 1,
+                _ => return None,
+            };
+            Some((item.updated_sequence, rank, item.kind.as_str()))
+        })
+        .max_by_key(|(sequence, rank, _)| (*sequence, *rank));
+
+    Ok(match latest.map(|(_, _, kind)| kind) {
+        Some("review_blockers" | "review_findings") => "reviewed_with_findings",
+        Some("review_no_blockers" | "reviewed_no_blockers") => "reviewed_no_blockers",
+        _ => "not_reviewed",
+    }
+    .to_string())
 }
 
 fn render_evidence(
@@ -1353,6 +1481,24 @@ fn write_evidence_file(path: &Path, markdown: &str) -> Result<(), String> {
             "refusing to overwrite non-Capo evidence file: {}",
             path.display()
         ));
+    }
+    fs::write(path, markdown).map_err(|error| error.to_string())
+}
+
+fn write_task_outcome_report_file(path: &Path, markdown: &str) -> Result<(), String> {
+    if let Ok(existing) = fs::read_to_string(path) {
+        if !existing.starts_with("<!-- capo:task-outcome-report -->") {
+            return Err(format!(
+                "refusing to overwrite non-Capo task outcome report file: {}",
+                path.display()
+            ));
+        }
+        if existing != markdown {
+            return Err(format!(
+                "refusing to overwrite changed Capo task outcome report file: {}",
+                path.display()
+            ));
+        }
     }
     fs::write(path, markdown).map_err(|error| error.to_string())
 }
@@ -2260,6 +2406,133 @@ mod tests {
         assert!(exported.contains("session.interrupted"));
         assert!(!exported.contains("OPENAI_API_KEY"));
         assert!(!exported.contains("ANTHROPIC_API_KEY"));
+        let state = SqliteStateStore::open(&state_root).expect("open state");
+        state
+            .append_event(
+                NewEvent::new(
+                    "event-review-no-blockers",
+                    EventKind::EvidenceRecorded,
+                    "test",
+                ),
+                &[ProjectionRecord::Evidence(EvidenceProjection {
+                    evidence_id: capo_core::EvidenceId::new("evidence-review-no-blockers"),
+                    project_id: project_id(),
+                    task_id: Some(TaskId::new(
+                        "task-inspect-the-project-and-write-a-short-status-summary",
+                    )),
+                    session_id: Some(SessionId::new("session-fake-codex")),
+                    run_id: Some(capo_core::RunId::new("run-fake-codex")),
+                    kind: "review_no_blockers".to_string(),
+                    artifact_id: Some("artifact-review-no-blockers".to_string()),
+                    confidence: 90,
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append review evidence");
+
+        let outcome = run_cli(vec![
+            "eval".to_string(),
+            "task-outcome".to_string(),
+            "--session".to_string(),
+            "session-fake-codex".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap();
+        assert!(outcome.contains("task_outcome_report_exported=true"));
+        assert!(outcome.contains("artifact_id=artifact-task-outcome-"));
+        let reports = state
+            .task_outcome_reports_for_task(&TaskId::new(
+                "task-inspect-the-project-and-write-a-short-status-summary",
+            ))
+            .expect("task outcome reports");
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].review_outcome, "reviewed_no_blockers");
+        assert!(reports[0].tool_call_count >= 1);
+        assert!(reports[0].evidence_count >= 1);
+        let report_path = evidence_dir.join(format!(
+            "{}.md",
+            reports[0]
+                .report_artifact_id
+                .as_deref()
+                .expect("report artifact")
+        ));
+        let report = fs::read_to_string(report_path).expect("read task outcome report");
+        assert!(report.starts_with("<!-- capo:task-outcome-report -->"));
+        assert!(report.contains("Review outcome: `reviewed_no_blockers`"));
+        assert!(report.contains("## Event Trace"));
+        let rerun = run_cli(vec![
+            "eval".to_string(),
+            "task-outcome".to_string(),
+            "--session".to_string(),
+            "session-fake-codex".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap();
+        assert!(rerun.contains("task_outcome_report_exported=true"));
+        assert!(
+            rerun.contains(
+                reports[0]
+                    .report_artifact_id
+                    .as_deref()
+                    .expect("stable report artifact")
+            )
+        );
+        assert_eq!(
+            state
+                .task_outcome_reports_for_task(&TaskId::new(
+                    "task-inspect-the-project-and-write-a-short-status-summary",
+                ))
+                .expect("task outcome reports")
+                .len(),
+            1
+        );
+
+        state
+            .append_event(
+                NewEvent::new("event-review-blockers", EventKind::EvidenceRecorded, "test"),
+                &[ProjectionRecord::Evidence(EvidenceProjection {
+                    evidence_id: capo_core::EvidenceId::new("evidence-review-blockers"),
+                    project_id: project_id(),
+                    task_id: Some(TaskId::new(
+                        "task-inspect-the-project-and-write-a-short-status-summary",
+                    )),
+                    session_id: Some(SessionId::new("session-fake-codex")),
+                    run_id: Some(capo_core::RunId::new("run-fake-codex")),
+                    kind: "review_blockers".to_string(),
+                    artifact_id: Some("artifact-review-blockers".to_string()),
+                    confidence: 60,
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append blocker review evidence");
+        let blocker_outcome = run_cli(vec![
+            "eval".to_string(),
+            "task-outcome".to_string(),
+            "--session".to_string(),
+            "session-fake-codex".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap();
+        assert!(blocker_outcome.contains("task_outcome_report_exported=true"));
+        let blocker_reports = state
+            .task_outcome_reports_for_task(&TaskId::new(
+                "task-inspect-the-project-and-write-a-short-status-summary",
+            ))
+            .expect("task outcome reports after blocker review");
+        assert!(
+            blocker_reports
+                .iter()
+                .any(|report| report.review_outcome == "reviewed_with_findings")
+        );
     }
 
     #[test]

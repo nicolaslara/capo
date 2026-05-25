@@ -38,13 +38,26 @@ Evidence:
 
 ### ME2 - Task Outcome Report
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Generate a report for completed/interrupted tasks with duration, actions, tool calls, evidence, confidence, blockers, and review outcome.
 - Export the report as markdown evidence.
 - Record report refs in state.
+
+Evidence:
+
+- `crates/capo-eval/src/lib.rs`
+- `crates/capo-state/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
+- `cargo test -p capo-eval`
+- `cargo test -p capo-state task_outcome`
+- `cargo test -p capo-cli cli_drives_fake_controller_and_exports_evidence`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+- Focused ME2 reviews: self-referential reruns, overwrite safety, review-outcome derivation, terminal-status guard, and report/artifact/event identity blockers found and fixed; final focused review found no blockers.
 
 ### ME3 - Review Feedback Loop
 
