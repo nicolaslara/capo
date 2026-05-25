@@ -76,6 +76,7 @@ Progress:
 - AC21 real dispatch runner preflight is completed. `capo adapter run-preflight` composes recorded plans, execution requests, prompt materialization, and explicit provider opt-in into one provider-free readiness check.
 - AC22 guarded local dispatch runner surface is completed. `capo adapter run-local` consumes the preflight, fails closed until explicit opt-in, and only reaches `LocalProcessRunner` for hash-verified workpad prompts.
 - AC23 dispatch execution outcome read model is completed. `run-local --record` now persists blocked or future executed local dispatch outcomes through shared state/query/dashboard rows.
+- AC24 dispatch status execution introspection is completed. `dispatch-status` now summarizes the latest dispatch execution outcome alongside plan, gate, and replay state.
 
 Evidence:
 
@@ -116,6 +117,8 @@ Evidence:
 - `capo adapter run-preflight --dispatch-plan DISPATCH_PLAN_ID [--state PATH]`
 - `capo adapter run-local --dispatch-plan DISPATCH_PLAN_ID [--state PATH]`
 - `cargo test -p capo-state adapter_dispatch_execution -- --nocapture`
+- `capo adapter dispatch-status --dispatch-plan DISPATCH_PLAN_ID [--state PATH]`
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`
 - Focused F1 connector safety reviews: provider-artifact cleanup blocker found and fixed; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge

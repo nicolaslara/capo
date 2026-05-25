@@ -1314,10 +1314,16 @@ fn adapter_dispatch_status(parsed: &ParsedArgs, args: &[String]) -> Result<Strin
         .iter()
         .rev()
         .find(|replay| replay.dispatch_plan_id == plan.dispatch_plan_id);
+    let latest_execution = dashboard
+        .adapter_dispatch_executions
+        .iter()
+        .rev()
+        .find(|execution| execution.dispatch_plan_id == plan.dispatch_plan_id);
     Ok(render_adapter_dispatch_status(
         plan,
         latest_gate,
         latest_replay,
+        latest_execution,
         &dashboard.adapter_dogfood_gate,
     ))
 }
@@ -2197,6 +2203,7 @@ fn render_adapter_dispatch_status(
     plan: &AdapterDispatchPlanProjection,
     latest_gate: Option<&AdapterDispatchGateProjection>,
     latest_replay: Option<&AdapterDispatchReplayProjection>,
+    latest_execution: Option<&AdapterDispatchExecutionProjection>,
     dogfood_gate: &AdapterDogfoodGate,
 ) -> String {
     let gate_id = latest_gate
@@ -2220,8 +2227,39 @@ fn render_adapter_dispatch_status(
     let replay_raw_policy = latest_replay
         .map(|replay| replay.raw_content_policy.as_str())
         .unwrap_or("none");
-    let next_action = if latest_replay.is_some() {
+    let execution_id = latest_execution
+        .map(|execution| execution.dispatch_execution_id.as_str())
+        .unwrap_or("none");
+    let execution_status = latest_execution
+        .map(|execution| execution.status.as_str())
+        .unwrap_or("missing");
+    let execution_allowed = latest_execution
+        .map(|execution| execution.provider_cli_execution_allowed.to_string())
+        .unwrap_or_else(|| "false".to_string());
+    let execution_provider_cli_executed = latest_execution
+        .map(|execution| execution.provider_cli_executed.to_string())
+        .unwrap_or_else(|| "false".to_string());
+    let execution_credential_scan = latest_execution
+        .map(|execution| execution.credential_scan_status.as_str())
+        .unwrap_or("none");
+    let execution_stdout_artifact = latest_execution
+        .and_then(|execution| execution.stdout_artifact_id.as_deref())
+        .unwrap_or("none");
+    let execution_stderr_artifact = latest_execution
+        .and_then(|execution| execution.stderr_artifact_id.as_deref())
+        .unwrap_or("none");
+    let execution_reasons = latest_execution
+        .map(|execution| execution.reason_codes.as_str())
+        .unwrap_or("none");
+    let next_action = if latest_execution
+        .map(|execution| execution.provider_cli_executed)
+        .unwrap_or(false)
+    {
+        "inspect_execution_artifacts_and_export_evidence"
+    } else if latest_replay.is_some() {
         "inspect_replay_or_prepare_real_execution"
+    } else if latest_execution.is_some() {
+        "resolve_latest_execution_blocker"
     } else if latest_gate
         .map(|gate| gate.provider_cli_execution_allowed && gate.status == "ready_for_execution")
         .unwrap_or(false)
@@ -2234,7 +2272,7 @@ fn render_adapter_dispatch_status(
     };
 
     format!(
-        "adapter_dispatch_status=true\ndispatch_plan={}\nadapter={}\nagent={}\nsession_id={}\nrun_id={}\nplan_status={}\nprovider_kind={}\ncredential_scope={}\nruntime_program={}\nruntime_arg_count={}\nruntime_prompt_policy={}\nprovider_cli_executed={}\ndogfood_gate={}\nlatest_dispatch_gate={}\nlatest_gate_status={}\nlatest_gate_provider_cli_execution_allowed={}\nlatest_gate_reasons={}\nlatest_dispatch_replay={}\nlatest_replay_appended_events={}\nlatest_replay_raw_content_policy={}\nnext_action={}\n",
+        "adapter_dispatch_status=true\ndispatch_plan={}\nadapter={}\nagent={}\nsession_id={}\nrun_id={}\nplan_status={}\nprovider_kind={}\ncredential_scope={}\nruntime_program={}\nruntime_arg_count={}\nruntime_prompt_policy={}\nprovider_cli_executed={}\ndogfood_gate={}\nlatest_dispatch_gate={}\nlatest_gate_status={}\nlatest_gate_provider_cli_execution_allowed={}\nlatest_gate_reasons={}\nlatest_dispatch_replay={}\nlatest_replay_appended_events={}\nlatest_replay_raw_content_policy={}\nlatest_dispatch_execution={}\nlatest_execution_status={}\nlatest_execution_provider_cli_execution_allowed={}\nlatest_execution_provider_cli_executed={}\nlatest_execution_credential_scan_status={}\nlatest_execution_stdout_artifact={}\nlatest_execution_stderr_artifact={}\nlatest_execution_reasons={}\nnext_action={}\n",
         plan.dispatch_plan_id,
         plan.adapter_kind,
         plan.agent_name,
@@ -2255,6 +2293,14 @@ fn render_adapter_dispatch_status(
         replay_id,
         replay_count,
         replay_raw_policy,
+        execution_id,
+        execution_status,
+        execution_allowed,
+        execution_provider_cli_executed,
+        execution_credential_scan,
+        execution_stdout_artifact,
+        execution_stderr_artifact,
+        execution_reasons,
         next_action
     )
 }
@@ -6000,6 +6046,8 @@ mod tests {
         assert!(blocked_status.contains("latest_dispatch_gate=none"));
         assert!(blocked_status.contains("latest_gate_status=missing"));
         assert!(blocked_status.contains("latest_dispatch_replay=none"));
+        assert!(blocked_status.contains("latest_dispatch_execution=none"));
+        assert!(blocked_status.contains("latest_execution_status=missing"));
         assert!(blocked_status.contains("next_action=record_clean_real_smoke_evidence"));
         assert!(!blocked_status.contains("Do not render this dispatch prompt"));
         let blocked_execution_request = run_cli(vec![
@@ -6186,6 +6234,26 @@ mod tests {
         assert!(
             execution_dashboard.contains("execution_status=blocked_missing_prompt_materialization")
         );
+        let blocked_execution_status = run_cli(vec![
+            "adapter".to_string(),
+            "dispatch-status".to_string(),
+            "--dispatch-plan".to_string(),
+            gates[0].dispatch_plan_id.clone(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dispatch status after blocked local run");
+        assert!(blocked_execution_status.contains("latest_dispatch_execution="));
+        assert!(
+            blocked_execution_status
+                .contains("latest_execution_status=blocked_missing_prompt_materialization")
+        );
+        assert!(blocked_execution_status.contains("latest_execution_provider_cli_executed=false"));
+        assert!(
+            blocked_execution_status.contains("latest_execution_credential_scan_status=not_run")
+        );
+        assert!(blocked_execution_status.contains("next_action=resolve_latest_execution_blocker"));
+        assert!(!blocked_execution_status.contains("Do not render this dispatch prompt"));
         let inline_materialization = run_cli(vec![
             "adapter".to_string(),
             "materialize-prompt".to_string(),
@@ -6291,6 +6359,10 @@ mod tests {
         assert!(replay_status.contains("latest_gate_status=ready_for_execution"));
         assert!(
             replay_status.contains("latest_replay_raw_content_policy=content_hashed_not_rendered")
+        );
+        assert!(
+            replay_status
+                .contains("latest_execution_status=blocked_missing_prompt_materialization")
         );
         assert!(replay_status.contains("latest_replay_appended_events="));
         assert!(replay_status.contains("next_action=inspect_replay_or_prepare_real_execution"));

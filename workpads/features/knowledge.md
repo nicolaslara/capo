@@ -1177,3 +1177,22 @@ Skipped verification:
 Follow-up:
 
 - After explicit opt-in, run `capo adapter run-local --record` against a hash-verified workpad plan and verify that the successful execution row, artifact refs, and credential scan status rebuild correctly after restart.
+
+## F1/AC24 - Dispatch Status Execution Introspection
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Extend `capo adapter dispatch-status` to include the latest dispatch execution outcome from the shared dashboard query contract.
+- Keep the status command read-only. It does not recompute preflight, materialize prompts, create runtime directories, inspect credentials, or launch provider CLIs.
+- Show execution outcome metadata only: execution ID, status, provider execution flags, credential scan status, stdout/stderr artifact refs, and reason codes. Raw prompts and provider output remain outside command output.
+- Use `resolve_latest_execution_blocker` as the next action when a blocked execution outcome is the latest useful fact and no fixture replay or successful execution has superseded it.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Follow-up:
+
+- After an explicit real provider opt-in run, verify that `dispatch-status` reports successful execution artifact refs and points the operator toward evidence export/review.

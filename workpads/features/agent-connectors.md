@@ -595,3 +595,25 @@ Decision:
 - Treat local dispatch executions as a fourth durable fact after plans, gates, and execution requests. This keeps real provider side effects auditable instead of only returning transient CLI output.
 - Blocked execution outcomes are useful state: they let dashboard/voice/mobile surfaces explain why execution did not happen without re-running the command.
 - Successful execution outcome recording is wired into `run-local`, but real Codex/Claude execution remains skipped until explicit opt-in.
+
+### AC24 - Dispatch Status Execution Introspection
+
+Status: completed
+
+Acceptance:
+
+- Add latest dispatch execution outcome visibility to `capo adapter dispatch-status`.
+- Keep `dispatch-status` read-only over shared query/read-model state.
+- Report blocked execution reasons and successful execution artifact refs without rendering raw prompts or provider output.
+- Preserve provider execution gating; status inspection must not launch provider CLIs or create runtime artifacts.
+
+Evidence:
+
+- `capo adapter dispatch-status --dispatch-plan DISPATCH_PLAN_ID` now renders latest execution ID, status, provider execution flags, credential scan status, stdout/stderr artifact refs, and reason codes from `ProjectDashboard.adapter_dispatch_executions`.
+- Blocked `run-local --record` outcomes change the dispatch next action to `resolve_latest_execution_blocker` until fixture replay or future successful execution supersedes the operator action.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Treat `dispatch-status` as the compact operator surface for the full dispatch chain: plan, gate, replay, and execution outcome.
+- Execution outcome introspection is read-only and query-derived. It does not recompute preflight, rematerialize prompts, or cross the provider boundary.

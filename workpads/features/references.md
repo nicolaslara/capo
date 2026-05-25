@@ -514,3 +514,13 @@ Observed 2026-05-26.
 - CLI `run-local --record` outcome recording and dashboard rendering: `../../crates/capo-cli/src/main.rs`
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC23.
+
+## F1/AC24 Dispatch Status Execution Introspection
+
+Observed 2026-05-26.
+
+- CLI `dispatch-status` execution outcome rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared dashboard execution rows consumed by status rendering: `../../crates/capo-query/src/lib.rs`
+- Dispatch execution projection source: `../../crates/capo-state/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC24.
