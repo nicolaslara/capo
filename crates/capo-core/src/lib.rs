@@ -20,6 +20,7 @@ pub const BOUNDARY_CRATES: &[&str] = &[
     "capo-memory",
     "capo-eval",
     "capo-voice",
+    "capo-workpads",
 ];
 
 macro_rules! typed_id {
@@ -91,6 +92,7 @@ pub enum CommandIntent {
     InterruptSession,
     Recover,
     ExportEvidence,
+    IndexWorkpads,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

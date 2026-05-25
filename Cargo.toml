@@ -10,6 +10,7 @@ members = [
     "crates/capo-state",
     "crates/capo-tools",
     "crates/capo-voice",
+    "crates/capo-workpads",
 ]
 resolver = "3"
 
@@ -29,3 +30,4 @@ capo-runtime = { path = "crates/capo-runtime" }
 capo-state = { path = "crates/capo-state" }
 capo-tools = { path = "crates/capo-tools" }
 capo-voice = { path = "crates/capo-voice" }
+capo-workpads = { path = "crates/capo-workpads" }

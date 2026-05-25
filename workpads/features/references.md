@@ -27,3 +27,15 @@ Observed 2026-05-25.
 - Memory and evaluation: `memory-eval.md`
 - Voice: `voice.md`
 - Remote runtime and tunnel: `remote-runtime.md`
+
+## F2/DB1 Workpad Index
+
+Observed 2026-05-25.
+
+- Workpad scanner crate: `../../crates/capo-workpads/src/lib.rs`
+- Workpad scanner manifest: `../../crates/capo-workpads/Cargo.toml`
+- Workspace manifest and lockfile: `../../Cargo.toml`, `../../Cargo.lock`
+- SQLite workpad projections and event kind: `../../crates/capo-state/src/lib.rs`
+- CLI index command and tests: `../../crates/capo-cli/src/main.rs`
+- Dogfood bridge source workpad: `dogfood-bridge.md`
+- No new third-party dependencies were added for DB1.

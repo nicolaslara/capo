@@ -19,3 +19,4 @@ capo-memory.workspace = true
 capo-runtime.workspace = true
 capo-state.workspace = true
 capo-tools.workspace = true
+capo-workpads.workspace = true

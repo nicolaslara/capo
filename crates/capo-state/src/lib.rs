@@ -660,6 +660,55 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn workpad_files(&self, project_id: &ProjectId) -> StateResult<Vec<WorkpadFileProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT path, project_id, content_hash, headings, objective, observed_unix, updated_sequence
+             FROM workpad_files
+             WHERE project_id = ?1
+             ORDER BY path ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(WorkpadFileProjection {
+                path: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                content_hash: row.get(2)?,
+                headings: row.get(3)?,
+                objective: row.get(4)?,
+                observed_unix: row.get(5)?,
+                updated_sequence: row.get(6)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    pub fn workpad_tasks(&self, project_id: &ProjectId) -> StateResult<Vec<WorkpadTaskProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT workpad_task_id, project_id, path, source_anchor, title, observed_status,
+                    capo_execution_status, observed_unix, updated_sequence
+             FROM workpad_tasks
+             WHERE project_id = ?1
+             ORDER BY path ASC, source_anchor ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(WorkpadTaskProjection {
+                workpad_task_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                path: row.get(2)?,
+                source_anchor: row.get(3)?,
+                title: row.get(4)?,
+                observed_status: row.get(5)?,
+                capo_execution_status: row.get(6)?,
+                observed_unix: row.get(7)?,
+                updated_sequence: row.get(8)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn recent_events_for_session(
         &self,
         session_id: &SessionId,
@@ -720,6 +769,7 @@ pub enum EventKind {
     ToolResultDelivered,
     MemoryPacketBuilt,
     EvidenceRecorded,
+    WorkpadIndexed,
     RecoveryStarted,
     RecoveryCompleted,
     SessionInterrupted,
@@ -749,6 +799,7 @@ impl EventKind {
             Self::ToolResultDelivered => "tool.result_delivered",
             Self::MemoryPacketBuilt => "memory.packet_built",
             Self::EvidenceRecorded => "evidence.recorded",
+            Self::WorkpadIndexed => "workpad.indexed",
             Self::RecoveryStarted => "recovery.started",
             Self::RecoveryCompleted => "recovery.completed",
             Self::SessionInterrupted => "session.interrupted",
@@ -828,6 +879,9 @@ pub enum ProjectionRecord {
     ToolCall(ToolCallProjection),
     MemoryPacketRef(MemoryPacketProjection),
     Evidence(EvidenceProjection),
+    WorkpadIndexReset(WorkpadIndexResetProjection),
+    WorkpadFile(WorkpadFileProjection),
+    WorkpadTask(WorkpadTaskProjection),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -931,6 +985,37 @@ pub struct EvidenceProjection {
     pub kind: String,
     pub artifact_id: Option<String>,
     pub confidence: i64,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkpadIndexResetProjection {
+    pub project_id: ProjectId,
+    pub observed_unix: i64,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkpadFileProjection {
+    pub path: String,
+    pub project_id: ProjectId,
+    pub content_hash: String,
+    pub headings: String,
+    pub objective: Option<String>,
+    pub observed_unix: i64,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkpadTaskProjection {
+    pub workpad_task_id: String,
+    pub project_id: ProjectId,
+    pub path: String,
+    pub source_anchor: String,
+    pub title: String,
+    pub observed_status: String,
+    pub capo_execution_status: String,
+    pub observed_unix: i64,
     pub updated_sequence: i64,
 }
 
@@ -1116,6 +1201,26 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             confidence INTEGER NOT NULL,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS workpad_files (
+            path TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            headings TEXT NOT NULL,
+            objective TEXT,
+            observed_unix INTEGER NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS workpad_tasks (
+            workpad_task_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            source_anchor TEXT NOT NULL,
+            title TEXT NOT NULL,
+            observed_status TEXT NOT NULL,
+            capo_execution_status TEXT NOT NULL,
+            observed_unix INTEGER NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS recovery_attempts (
             recovery_attempt_id TEXT PRIMARY KEY,
             status TEXT NOT NULL,
@@ -1139,6 +1244,8 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "tool_calls",
         "memory_packet_refs",
         "evidence",
+        "workpad_files",
+        "workpad_tasks",
         "projection_watermarks",
     ] {
         transaction.execute(&format!("DELETE FROM {table}"), [])?;
@@ -1392,6 +1499,64 @@ fn apply_projection_record(
                 sequence,
             ],
         )?,
+        ProjectionRecord::WorkpadIndexReset(reset) => {
+            transaction.execute(
+                "DELETE FROM workpad_files WHERE project_id = ?1",
+                params![reset.project_id.as_str()],
+            )?;
+            transaction.execute(
+                "DELETE FROM workpad_tasks WHERE project_id = ?1",
+                params![reset.project_id.as_str()],
+            )?
+        }
+        ProjectionRecord::WorkpadFile(file) => transaction.execute(
+            "INSERT INTO workpad_files(
+                path, project_id, content_hash, headings, objective, observed_unix,
+                updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(path) DO UPDATE SET
+                project_id = excluded.project_id,
+                content_hash = excluded.content_hash,
+                headings = excluded.headings,
+                objective = excluded.objective,
+                observed_unix = excluded.observed_unix,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                file.path,
+                file.project_id.as_str(),
+                file.content_hash,
+                file.headings,
+                file.objective,
+                file.observed_unix,
+                sequence,
+            ],
+        )?,
+        ProjectionRecord::WorkpadTask(task) => transaction.execute(
+            "INSERT INTO workpad_tasks(
+                workpad_task_id, project_id, path, source_anchor, title, observed_status,
+                capo_execution_status, observed_unix, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(workpad_task_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                path = excluded.path,
+                source_anchor = excluded.source_anchor,
+                title = excluded.title,
+                observed_status = excluded.observed_status,
+                capo_execution_status = excluded.capo_execution_status,
+                observed_unix = excluded.observed_unix,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                task.workpad_task_id,
+                task.project_id.as_str(),
+                task.path,
+                task.source_anchor,
+                task.title,
+                task.observed_status,
+                task.capo_execution_status,
+                task.observed_unix,
+                sequence,
+            ],
+        )?,
     };
     Ok(())
 }
@@ -1526,6 +1691,45 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
             e: Some(evidence.kind.clone()),
             f: evidence.artifact_id.clone(),
             g: Some(evidence.confidence.to_string()),
+            h: None,
+            payload_json: "{}".to_string(),
+        },
+        ProjectionRecord::WorkpadIndexReset(reset) => ProjectionRecordRow {
+            kind: "workpad_index_reset",
+            record_id: reset.project_id.to_string(),
+            a: Some(reset.observed_unix.to_string()),
+            b: None,
+            c: None,
+            d: None,
+            e: None,
+            f: None,
+            g: None,
+            h: None,
+            payload_json: "{}".to_string(),
+        },
+        ProjectionRecord::WorkpadFile(file) => ProjectionRecordRow {
+            kind: "workpad_file",
+            record_id: file.path.clone(),
+            a: Some(file.project_id.to_string()),
+            b: Some(file.content_hash.clone()),
+            c: Some(file.headings.clone()),
+            d: file.objective.clone(),
+            e: Some(file.observed_unix.to_string()),
+            f: None,
+            g: None,
+            h: None,
+            payload_json: "{}".to_string(),
+        },
+        ProjectionRecord::WorkpadTask(task) => ProjectionRecordRow {
+            kind: "workpad_task",
+            record_id: task.workpad_task_id.clone(),
+            a: Some(task.project_id.to_string()),
+            b: Some(task.path.clone()),
+            c: Some(task.source_anchor.clone()),
+            d: Some(task.title.clone()),
+            e: Some(task.observed_status.clone()),
+            f: Some(task.capo_execution_status.clone()),
+            g: Some(task.observed_unix.to_string()),
             h: None,
             payload_json: "{}".to_string(),
         },
@@ -1679,6 +1883,58 @@ fn projection_record_from_row(
             kind: required_field(&projection_kind, "evidence", e, "kind")?,
             artifact_id: f,
             confidence: required_i64(&projection_kind, "evidence", g, "confidence")?,
+            updated_sequence: 0,
+        })),
+        "workpad_index_reset" => Ok(ProjectionRecord::WorkpadIndexReset(
+            WorkpadIndexResetProjection {
+                project_id: ProjectId::new(record_id),
+                observed_unix: required_i64(
+                    &projection_kind,
+                    "workpad_index_reset",
+                    a,
+                    "observed_unix",
+                )?,
+                updated_sequence: 0,
+            },
+        )),
+        "workpad_file" => Ok(ProjectionRecord::WorkpadFile(WorkpadFileProjection {
+            path: record_id,
+            project_id: ProjectId::new(required_field(
+                &projection_kind,
+                "workpad_file",
+                a,
+                "project_id",
+            )?),
+            content_hash: required_field(&projection_kind, "workpad_file", b, "content_hash")?,
+            headings: required_field(&projection_kind, "workpad_file", c, "headings")?,
+            objective: d,
+            observed_unix: required_i64(&projection_kind, "workpad_file", e, "observed_unix")?,
+            updated_sequence: 0,
+        })),
+        "workpad_task" => Ok(ProjectionRecord::WorkpadTask(WorkpadTaskProjection {
+            workpad_task_id: record_id,
+            project_id: ProjectId::new(required_field(
+                &projection_kind,
+                "workpad_task",
+                a,
+                "project_id",
+            )?),
+            path: required_field(&projection_kind, "workpad_task", b, "path")?,
+            source_anchor: required_field(&projection_kind, "workpad_task", c, "source_anchor")?,
+            title: required_field(&projection_kind, "workpad_task", d, "title")?,
+            observed_status: required_field(
+                &projection_kind,
+                "workpad_task",
+                e,
+                "observed_status",
+            )?,
+            capo_execution_status: required_field(
+                &projection_kind,
+                "workpad_task",
+                f,
+                "capo_execution_status",
+            )?,
+            observed_unix: required_i64(&projection_kind, "workpad_task", g, "observed_unix")?,
             updated_sequence: 0,
         })),
         other => Err(ProjectionDecodeError(format!(

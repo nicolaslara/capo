@@ -36,6 +36,7 @@ dependencies = [
  "capo-runtime",
  "capo-state",
  "capo-tools",
+ "capo-workpads",
 ]
 
 [[package]]
@@ -96,6 +97,10 @@ version = "0.1.0"
 dependencies = [
  "capo-core",
 ]
+
+[[package]]
+name = "capo-workpads"
+version = "0.1.0"
 
 [[package]]
 name = "cc"

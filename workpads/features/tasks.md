@@ -53,7 +53,7 @@ Acceptance:
 
 ## F2 - Workpad Dogfood Bridge
 
-Status: pending
+Status: in_progress
 
 Source workpad: `dogfood-bridge.md`
 
@@ -62,6 +62,22 @@ Acceptance:
 - Index/import `TASKS.md`, `project.md`, and workpad files into Capo-readable task records.
 - Write Capo-owned evidence/update artifacts without corrupting user-authored markdown.
 - Preserve markdown as the source-of-truth fallback.
+
+Progress:
+
+- DB1 workpad index is completed. DB2 task import and DB3 reviewed artifacts remain pending.
+
+Evidence:
+
+- `crates/capo-workpads/src/lib.rs`
+- `crates/capo-state/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
+- `cargo test -p capo-workpads`
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+- Focused review subagent: blockers found and fixed
 
 ## F3 - Query Surface And Dashboard Upgrade
 

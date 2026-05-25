@@ -8,9 +8,11 @@ use capo_core::{
     SessionId,
 };
 use capo_state::{
-    EventRecord, EvidenceProjection, MemoryPacketProjection, RunProjection, SessionProjection,
-    SqliteStateStore, ToolCallProjection,
+    EventKind, EventRecord, EvidenceProjection, MemoryPacketProjection, NewEvent, ProjectionRecord,
+    RedactionState, RunProjection, SessionProjection, SqliteStateStore, ToolCallProjection,
+    WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
+use capo_workpads::{WorkpadIndex, index_project_workpads};
 
 const DEFAULT_STATE_ROOT: &str = ".capo-dev";
 const DEFAULT_PROJECT_ID: &str = "project-capo";
@@ -32,6 +34,7 @@ Usage:
   capo session interrupt --agent NAME --reason REASON [--state PATH]
   capo session stop --agent NAME --reason REASON [--state PATH]
   capo recover [--state PATH]
+  capo workpad index --root PATH [--state PATH]
   capo evidence export --session SESSION_ID --out DIR [--state PATH]
 
 Prototype notes:
@@ -87,6 +90,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             interrupt_session(&parsed, rest, "stop")
         }
         [command] if command == "recover" => recover(&parsed),
+        [area, command, rest @ ..] if area == "workpad" && command == "index" => {
+            index_workpads(&parsed, rest)
+        }
         [area, command, rest @ ..] if area == "evidence" && command == "export" => {
             export_evidence(&parsed, rest)
         }
@@ -407,6 +413,54 @@ fn recover(parsed: &ParsedArgs) -> Result<String, String> {
     ))
 }
 
+fn index_workpads(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let root = PathBuf::from(required_arg(args, "--root")?);
+    let index = index_project_workpads(&root)?;
+    let command = envelope(
+        "workpad-index",
+        CommandTarget::Project(project_id()),
+        CommandIntent::IndexWorkpads,
+        Some(root.display().to_string()),
+    );
+    let projections = workpad_index_projections(&index);
+    let index_fingerprint = index
+        .files
+        .iter()
+        .map(|file| file.content_hash.as_str())
+        .collect::<Vec<_>>()
+        .join(":");
+    let event_suffix = stable_cli_hash(&format!("{}:{index_fingerprint}", root.display()));
+    let mut event = NewEvent::new(
+        format!("event-workpad-index-{}-{event_suffix}", index.observed_unix),
+        EventKind::WorkpadIndexed,
+        "capo-cli",
+    );
+    event.project_id = Some(project_id());
+    event.payload_json = format!(
+        "{{\"root\":\"{}\",\"files\":{},\"tasks\":{},\"observed_unix\":{}}}",
+        escape_json(&root.display().to_string()),
+        index.files.len(),
+        index.tasks.len(),
+        index.observed_unix
+    );
+    event.idempotency_key = Some(format!(
+        "workpad-index:{}:{}",
+        root.display(),
+        index_fingerprint
+    ));
+    event.redaction_state = RedactionState::Safe;
+    let sequence = state(parsed)?
+        .append_event(event, &projections)
+        .map_err(debug_error)?;
+    Ok(format!(
+        "workpads_indexed=true\nroot={}\nfiles={}\ntasks={}\nsequence={sequence}\ncommand_id={}\n",
+        root.display(),
+        index.files.len(),
+        index.tasks.len(),
+        command.command_id
+    ))
+}
+
 fn export_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let session_id = SessionId::new(required_arg(args, "--session")?);
     let out = PathBuf::from(required_arg(args, "--out")?);
@@ -455,6 +509,58 @@ fn export_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, Strin
         path.display(),
         command.command_id
     ))
+}
+
+fn workpad_index_projections(index: &WorkpadIndex) -> Vec<ProjectionRecord> {
+    let project_id = project_id();
+    let mut projections = vec![ProjectionRecord::WorkpadIndexReset(
+        WorkpadIndexResetProjection {
+            project_id: project_id.clone(),
+            observed_unix: index.observed_unix,
+            updated_sequence: 0,
+        },
+    )];
+    for file in &index.files {
+        projections.push(ProjectionRecord::WorkpadFile(WorkpadFileProjection {
+            path: file.path.clone(),
+            project_id: project_id.clone(),
+            content_hash: file.content_hash.clone(),
+            headings: file.headings.join("\n"),
+            objective: file.objective.clone(),
+            observed_unix: index.observed_unix,
+            updated_sequence: 0,
+        }));
+    }
+    for task in &index.tasks {
+        projections.push(ProjectionRecord::WorkpadTask(WorkpadTaskProjection {
+            workpad_task_id: task.workpad_task_id.clone(),
+            project_id: project_id.clone(),
+            path: task.path.clone(),
+            source_anchor: task.source_anchor.clone(),
+            title: task.title.clone(),
+            observed_status: task.observed_status.clone(),
+            capo_execution_status: task.capo_execution_status.clone(),
+            observed_unix: index.observed_unix,
+            updated_sequence: 0,
+        }));
+    }
+    projections
+}
+
+fn escape_json(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+fn stable_cli_hash(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn render_status(
@@ -671,6 +777,98 @@ mod tests {
     fn help_mentions_command_envelopes_and_no_credentials() {
         assert!(HELP.contains("command envelopes"));
         assert!(HELP.contains("does not read provider credentials"));
+        assert!(HELP.contains("workpad index"));
+    }
+
+    #[test]
+    fn workpad_index_imports_markdown_refs_without_modifying_sources() {
+        let state_root = temp_root("workpad-index-state");
+        let project_root = temp_root("workpad-index-project");
+        fs::create_dir_all(project_root.join("workpads/features")).expect("feature dir");
+        fs::write(
+            project_root.join("TASKS.md"),
+            "# Project Task Queue\n\n## Objective\n\nRoute work.\n\n## F2 - Workpad Dogfood Bridge\n\nStatus: pending\n",
+        )
+        .expect("write tasks");
+        fs::write(
+            project_root.join("project.md"),
+            "# Capo\n\n## Objective\n\nBuild Capo.\n",
+        )
+        .expect("write project");
+        fs::write(
+            project_root.join("workpads/features/tasks.md"),
+            "# Feature Tasks\n\n## Objective\n\nSplit work.\n\n## F1 - Real Local Agent Connector Proof\n\nStatus: pending\n\n## F2 - Workpad Dogfood Bridge\n\nStatus: in_progress\n",
+        )
+        .expect("write feature tasks");
+        let before = fs::read_to_string(project_root.join("workpads/features/tasks.md"))
+            .expect("read before");
+
+        let output = run_cli(vec![
+            "workpad".to_string(),
+            "index".to_string(),
+            "--root".to_string(),
+            project_root.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("index workpads");
+
+        assert!(output.contains("workpads_indexed=true"));
+        assert!(output.contains("files=3"));
+        assert!(output.contains("tasks=3"));
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        state
+            .rebuild_projections()
+            .expect("rebuild workpad projections");
+        let files = state.workpad_files(&project_id()).expect("workpad files");
+        let tasks = state.workpad_tasks(&project_id()).expect("workpad tasks");
+        assert_eq!(files.len(), 3);
+        assert!(files.iter().any(|file| file.path == "TASKS.md"));
+        assert!(files.iter().any(|file| {
+            file.path == "workpads/features/tasks.md"
+                && file.objective.as_deref() == Some("Split work.")
+        }));
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|task| task.workpad_task_id == "workpads:features:tasks.md#f2")
+                .map(|task| {
+                    (
+                        task.observed_status.as_str(),
+                        task.capo_execution_status.as_str(),
+                    )
+                }),
+            Some(("in_progress", "observed_only"))
+        );
+        assert_eq!(
+            fs::read_to_string(project_root.join("workpads/features/tasks.md"))
+                .expect("read after"),
+            before
+        );
+
+        fs::write(
+            project_root.join("workpads/features/tasks.md"),
+            "# Feature Tasks\n\n## Objective\n\nSplit work.\n\n## F1 - Real Local Agent Connector Proof\n\nStatus: pending\n",
+        )
+        .expect("remove f2 from feature tasks");
+        run_cli(vec![
+            "workpad".to_string(),
+            "index".to_string(),
+            "--root".to_string(),
+            project_root.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("re-index workpads");
+        state.rebuild_projections().expect("rebuild after re-index");
+        let tasks = state
+            .workpad_tasks(&project_id())
+            .expect("tasks after re-index");
+        assert!(
+            !tasks
+                .iter()
+                .any(|task| task.workpad_task_id == "workpads:features:tasks.md#f2")
+        );
     }
 
     #[test]

@@ -19,13 +19,37 @@ Make Capo able to read and track its own project workpads while preserving markd
 
 ### DB1 - Workpad Index
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Index `TASKS.md`, `project.md`, and selected `workpads/**` files into Capo-readable workpad refs.
 - Store paths, hashes, headings, objective text, task IDs/statuses, and observed timestamps.
 - Do not modify source markdown.
+
+Evidence:
+
+- `crates/capo-workpads/src/lib.rs`
+- `crates/capo-state/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
+- `Cargo.toml`
+- `Cargo.lock`
+- `cargo test -p capo-workpads`
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources`
+
+Decision:
+
+- Add `capo-workpads` as a non-destructive markdown observation crate. It reads markdown and returns observed refs; it does not write source workpads or claim ownership of markdown status.
+- Add SQLite projections for `workpad_files` and `workpad_tasks`, fed by a durable `workpad.indexed` event.
+- Store `observed_status` separately from `capo_execution_status`, initialized as `observed_only`, so later imports can distinguish markdown truth from Capo execution state.
+- Expose the first operator command as `capo workpad index --root <project> --state <state>`.
+- Scope indexing to Capo-owned project/workpad docs and direct finding/feature files; do not recurse into `workpads/references/repos/**` or prior-art clone markdown.
+- Clear prior workpad projections for the project at the start of each index projection batch so deleted or removed markdown tasks do not remain current after rebuild.
+- Accept mixed-case task IDs such as `A2a`, `A5a`, and `R2a`.
+
+Review:
+
+- Focused review found three blockers in the first draft: over-indexing prior-art repos, missing mixed-case task IDs, and stale projection risk. All were fixed before completion.
 
 ### DB2 - Capo Task Import
 
