@@ -14,6 +14,8 @@ use capo_core::{BoundaryBinding, BoundaryKind, RunId};
 
 /// First runtime variants from the prototype plan.
 pub const PLANNED_RUNTIMES: &[&str] = &["fake", "local-process", "remote-process"];
+/// First tunnel variants from the runtime/tunnel plan.
+pub const PLANNED_TUNNELS: &[&str] = &["fake", "local-loopback", "endpoint-stub"];
 
 pub type RuntimeResult<T> = Result<T, RuntimeError>;
 
@@ -884,6 +886,7 @@ fn prepend_remote_events(
 pub enum ConnectivityTunnel {
     Fake(FakeTunnel),
     LocalLoopback(LocalLoopbackTunnel),
+    EndpointStub(EndpointStubTunnel),
 }
 
 impl ConnectivityTunnel {
@@ -895,10 +898,43 @@ impl ConnectivityTunnel {
         Self::LocalLoopback(LocalLoopbackTunnel)
     }
 
+    pub fn endpoint_stub(config: ConnectivityEndpointConfig) -> Self {
+        Self::EndpointStub(EndpointStubTunnel::new(config))
+    }
+
     pub fn binding(&self) -> BoundaryBinding {
         match self {
             Self::Fake(tunnel) => tunnel.binding(),
             Self::LocalLoopback(tunnel) => tunnel.binding(),
+            Self::EndpointStub(tunnel) => tunnel.binding(),
+        }
+    }
+
+    pub fn resolve_endpoint(
+        &self,
+        owner: EndpointOwner,
+        channel_kind: ChannelKind,
+    ) -> ConnectivityResult<ResolvedEndpoint> {
+        match self {
+            Self::Fake(tunnel) => tunnel.resolve_endpoint(owner, channel_kind),
+            Self::LocalLoopback(tunnel) => tunnel.resolve_endpoint(owner, channel_kind),
+            Self::EndpointStub(tunnel) => tunnel.resolve_endpoint(owner, channel_kind),
+        }
+    }
+
+    pub fn check_reachability(&self) -> ConnectivityHealth {
+        match self {
+            Self::Fake(tunnel) => tunnel.check_reachability(),
+            Self::LocalLoopback(tunnel) => tunnel.check_reachability(),
+            Self::EndpointStub(tunnel) => tunnel.check_reachability(),
+        }
+    }
+
+    pub fn exposure_report(&self) -> ExposureReport {
+        match self {
+            Self::Fake(tunnel) => tunnel.exposure_report(),
+            Self::LocalLoopback(tunnel) => tunnel.exposure_report(),
+            Self::EndpointStub(tunnel) => tunnel.exposure_report(),
         }
     }
 }
@@ -909,6 +945,35 @@ pub struct FakeTunnel;
 impl FakeTunnel {
     pub fn binding(&self) -> BoundaryBinding {
         BoundaryBinding::fake(BoundaryKind::ConnectivityTunnel, "fake-tunnel")
+    }
+
+    pub fn resolve_endpoint(
+        &self,
+        owner: EndpointOwner,
+        channel_kind: ChannelKind,
+    ) -> ConnectivityResult<ResolvedEndpoint> {
+        Ok(ResolvedEndpoint::new(
+            "fake-endpoint",
+            owner,
+            channel_kind,
+            "fake://endpoint",
+            ExposureScope::Loopback,
+            false,
+        ))
+    }
+
+    pub fn check_reachability(&self) -> ConnectivityHealth {
+        ConnectivityHealth {
+            endpoint_id: "fake-endpoint".to_string(),
+            status: "available".to_string(),
+            reachable: true,
+            exposure: ExposureScope::Loopback,
+            detail: "fake tunnel is always reachable in tests".to_string(),
+        }
+    }
+
+    pub fn exposure_report(&self) -> ExposureReport {
+        ExposureReport::for_exposure("fake-endpoint", ExposureScope::Loopback)
     }
 }
 
@@ -921,6 +986,296 @@ impl LocalLoopbackTunnel {
             kind: BoundaryKind::ConnectivityTunnel,
             variant: "local-loopback",
             fake: false,
+        }
+    }
+
+    pub fn resolve_endpoint(
+        &self,
+        owner: EndpointOwner,
+        channel_kind: ChannelKind,
+    ) -> ConnectivityResult<ResolvedEndpoint> {
+        if !channel_kind.is_loopback_safe() {
+            return Err(ConnectivityError::ChannelNotAllowed {
+                endpoint_id: "local-loopback".to_string(),
+                channel_kind,
+            });
+        }
+
+        Ok(ResolvedEndpoint::new(
+            "local-loopback",
+            owner,
+            channel_kind,
+            "http://127.0.0.1",
+            ExposureScope::Loopback,
+            false,
+        ))
+    }
+
+    pub fn check_reachability(&self) -> ConnectivityHealth {
+        ConnectivityHealth {
+            endpoint_id: "local-loopback".to_string(),
+            status: "available".to_string(),
+            reachable: true,
+            exposure: ExposureScope::Loopback,
+            detail: "loopback endpoint resolves to localhost only".to_string(),
+        }
+    }
+
+    pub fn exposure_report(&self) -> ExposureReport {
+        ExposureReport::for_exposure("local-loopback", ExposureScope::Loopback)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EndpointStubTunnel {
+    config: ConnectivityEndpointConfig,
+}
+
+impl EndpointStubTunnel {
+    pub fn new(config: ConnectivityEndpointConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn binding(&self) -> BoundaryBinding {
+        BoundaryBinding {
+            kind: BoundaryKind::ConnectivityTunnel,
+            variant: "endpoint-stub",
+            fake: false,
+        }
+    }
+
+    pub fn resolve_endpoint(
+        &self,
+        owner: EndpointOwner,
+        channel_kind: ChannelKind,
+    ) -> ConnectivityResult<ResolvedEndpoint> {
+        if !self.config.allowed_channels.contains(&channel_kind) {
+            return Err(ConnectivityError::ChannelNotAllowed {
+                endpoint_id: self.config.endpoint_id.clone(),
+                channel_kind,
+            });
+        }
+
+        Ok(ResolvedEndpoint::new(
+            self.config.endpoint_id.clone(),
+            owner,
+            channel_kind,
+            self.config.resolved_uri(),
+            self.config.exposure,
+            self.config.exposure.requires_permission(),
+        ))
+    }
+
+    pub fn check_reachability(&self) -> ConnectivityHealth {
+        ConnectivityHealth {
+            endpoint_id: self.config.endpoint_id.clone(),
+            status: self.config.status.clone(),
+            reachable: self.config.status == "available",
+            exposure: self.config.exposure,
+            detail: format!(
+                "stub endpoint {} via {}",
+                self.config.endpoint_id, self.config.tunnel_kind
+            ),
+        }
+    }
+
+    pub fn exposure_report(&self) -> ExposureReport {
+        ExposureReport::for_exposure(&self.config.endpoint_id, self.config.exposure)
+    }
+}
+
+pub type ConnectivityResult<T> = Result<T, ConnectivityError>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConnectivityError {
+    ChannelNotAllowed {
+        endpoint_id: String,
+        channel_kind: ChannelKind,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExposureScope {
+    Loopback,
+    Private,
+    Public,
+}
+
+impl ExposureScope {
+    pub fn permission_scope(self) -> &'static str {
+        match self {
+            Self::Loopback => "network:connect:localhost",
+            Self::Private => "network:connect:private_tunnel",
+            Self::Public => "network:expose:public",
+        }
+    }
+
+    pub fn requires_permission(self) -> bool {
+        !matches!(self, Self::Loopback)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChannelKind {
+    Control,
+    Stdio,
+    Logs,
+    Dashboard,
+    Artifact,
+}
+
+impl ChannelKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Control => "control",
+            Self::Stdio => "stdio",
+            Self::Logs => "logs",
+            Self::Dashboard => "dashboard",
+            Self::Artifact => "artifact",
+        }
+    }
+
+    fn is_loopback_safe(self) -> bool {
+        matches!(self, Self::Control | Self::Dashboard | Self::Artifact)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EndpointOwner {
+    pub owner_kind: String,
+    pub owner_id: String,
+}
+
+impl EndpointOwner {
+    pub fn runtime_target(owner_id: impl Into<String>) -> Self {
+        Self {
+            owner_kind: "runtime_target".to_string(),
+            owner_id: owner_id.into(),
+        }
+    }
+
+    pub fn capo_server(owner_id: impl Into<String>) -> Self {
+        Self {
+            owner_kind: "capo_server".to_string(),
+            owner_id: owner_id.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectivityEndpointConfig {
+    pub endpoint_id: String,
+    pub name: String,
+    pub tunnel_kind: String,
+    pub address_ref: String,
+    pub exposure: ExposureScope,
+    pub allowed_channels: Vec<ChannelKind>,
+    pub status: String,
+}
+
+impl ConnectivityEndpointConfig {
+    pub fn stub_private(endpoint_id: impl Into<String>, address_ref: impl Into<String>) -> Self {
+        Self {
+            endpoint_id: endpoint_id.into(),
+            name: "private endpoint stub".to_string(),
+            tunnel_kind: "endpoint-stub".to_string(),
+            address_ref: address_ref.into(),
+            exposure: ExposureScope::Private,
+            allowed_channels: vec![ChannelKind::Control, ChannelKind::Stdio, ChannelKind::Logs],
+            status: "available".to_string(),
+        }
+    }
+
+    pub fn stub_public(endpoint_id: impl Into<String>, address_ref: impl Into<String>) -> Self {
+        Self {
+            endpoint_id: endpoint_id.into(),
+            name: "public endpoint stub".to_string(),
+            tunnel_kind: "endpoint-stub".to_string(),
+            address_ref: address_ref.into(),
+            exposure: ExposureScope::Public,
+            allowed_channels: vec![ChannelKind::Dashboard],
+            status: "available".to_string(),
+        }
+    }
+
+    fn resolved_uri(&self) -> String {
+        format!(
+            "stub://{}/{}",
+            self.endpoint_id,
+            self.address_ref.trim_start_matches('/')
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedEndpoint {
+    pub resolved_endpoint_id: String,
+    pub connectivity_endpoint_id: String,
+    pub owner: EndpointOwner,
+    pub channel_kind: ChannelKind,
+    pub resolved_uri: String,
+    pub exposure: ExposureScope,
+    pub permission_scope: String,
+    pub permission_required: bool,
+}
+
+impl ResolvedEndpoint {
+    fn new(
+        connectivity_endpoint_id: impl Into<String>,
+        owner: EndpointOwner,
+        channel_kind: ChannelKind,
+        resolved_uri: impl Into<String>,
+        exposure: ExposureScope,
+        permission_required: bool,
+    ) -> Self {
+        let connectivity_endpoint_id = connectivity_endpoint_id.into();
+        let resolved_uri = resolved_uri.into();
+        let resolved_endpoint_id = format!(
+            "{}:{}:{}:{}",
+            connectivity_endpoint_id,
+            owner.owner_kind,
+            owner.owner_id,
+            channel_kind.as_str()
+        );
+        Self {
+            resolved_endpoint_id,
+            connectivity_endpoint_id,
+            owner,
+            channel_kind,
+            resolved_uri,
+            exposure,
+            permission_scope: exposure.permission_scope().to_string(),
+            permission_required,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectivityHealth {
+    pub endpoint_id: String,
+    pub status: String,
+    pub reachable: bool,
+    pub exposure: ExposureScope,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExposureReport {
+    pub endpoint_id: String,
+    pub exposure: ExposureScope,
+    pub permission_scope: String,
+    pub permission_required: bool,
+    pub audit_event_kind: String,
+}
+
+impl ExposureReport {
+    fn for_exposure(endpoint_id: impl Into<String>, exposure: ExposureScope) -> Self {
+        Self {
+            endpoint_id: endpoint_id.into(),
+            exposure,
+            permission_scope: exposure.permission_scope().to_string(),
+            permission_required: exposure.requires_permission(),
+            audit_event_kind: "connectivity.exposure_changed".to_string(),
         }
     }
 }
@@ -965,6 +1320,7 @@ mod tests {
             PLANNED_RUNTIMES,
             ["fake", "local-process", "remote-process"]
         );
+        assert_eq!(PLANNED_TUNNELS, ["fake", "local-loopback", "endpoint-stub"]);
     }
 
     #[test]
@@ -977,6 +1333,84 @@ mod tests {
             ConnectivityTunnel::fake().binding().kind,
             BoundaryKind::ConnectivityTunnel
         );
+    }
+
+    #[test]
+    fn tunnel_endpoint_stub_separates_resolution_health_and_exposure_policy() {
+        let tunnel = ConnectivityTunnel::endpoint_stub(ConnectivityEndpointConfig::stub_private(
+            "endpoint-private-1",
+            "tailnet/capo-worker",
+        ));
+
+        assert_eq!(tunnel.binding().kind, BoundaryKind::ConnectivityTunnel);
+        assert_eq!(tunnel.binding().variant, "endpoint-stub");
+
+        let owner = EndpointOwner::runtime_target("remote-target-1");
+        let resolved = tunnel
+            .resolve_endpoint(owner.clone(), ChannelKind::Control)
+            .expect("resolve private control endpoint");
+        assert_eq!(resolved.connectivity_endpoint_id, "endpoint-private-1");
+        assert_eq!(resolved.owner, owner);
+        assert_eq!(resolved.channel_kind, ChannelKind::Control);
+        assert_eq!(resolved.exposure, ExposureScope::Private);
+        assert_eq!(resolved.permission_scope, "network:connect:private_tunnel");
+        assert!(resolved.permission_required);
+        assert!(
+            resolved
+                .resolved_endpoint_id
+                .contains("runtime_target:remote-target-1:control")
+        );
+        assert!(resolved.resolved_uri.contains("tailnet/capo-worker"));
+
+        let health = tunnel.check_reachability();
+        assert!(health.reachable);
+        assert_eq!(health.endpoint_id, "endpoint-private-1");
+        assert_eq!(health.exposure, ExposureScope::Private);
+
+        let exposure = tunnel.exposure_report();
+        assert_eq!(exposure.permission_scope, "network:connect:private_tunnel");
+        assert!(exposure.permission_required);
+        assert_eq!(exposure.audit_event_kind, "connectivity.exposure_changed");
+
+        let denied = tunnel
+            .resolve_endpoint(
+                EndpointOwner::capo_server("dashboard"),
+                ChannelKind::Dashboard,
+            )
+            .expect_err("dashboard channel is not allowed on private runtime stub");
+        assert_eq!(
+            denied,
+            ConnectivityError::ChannelNotAllowed {
+                endpoint_id: "endpoint-private-1".to_string(),
+                channel_kind: ChannelKind::Dashboard,
+            }
+        );
+    }
+
+    #[test]
+    fn local_loopback_tunnel_resolves_only_loopback_safe_channels_without_remote_permission() {
+        let tunnel = ConnectivityTunnel::local_loopback();
+        let resolved = tunnel
+            .resolve_endpoint(
+                EndpointOwner::capo_server("local-api"),
+                ChannelKind::Dashboard,
+            )
+            .expect("resolve local dashboard");
+
+        assert_eq!(resolved.connectivity_endpoint_id, "local-loopback");
+        assert_eq!(resolved.exposure, ExposureScope::Loopback);
+        assert_eq!(resolved.permission_scope, "network:connect:localhost");
+        assert!(!resolved.permission_required);
+        assert!(resolved.resolved_uri.starts_with("http://127.0.0.1"));
+
+        let health = tunnel.check_reachability();
+        assert!(health.reachable);
+        assert_eq!(health.exposure, ExposureScope::Loopback);
+
+        assert!(matches!(
+            tunnel.resolve_endpoint(EndpointOwner::runtime_target("target"), ChannelKind::Stdio),
+            Err(ConnectivityError::ChannelNotAllowed { .. })
+        ));
     }
 
     #[test]

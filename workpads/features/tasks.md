@@ -254,8 +254,10 @@ Acceptance:
 Progress:
 
 - RR1 loopback remote runtime contract is completed without Tailscale or cloud credentials.
+- RR2 tunnel adapter stub is completed with endpoint resolution, health, exposure scope, and permission requirement records kept separate from runtime process refs.
 
 Evidence:
 
 - `crates/capo-runtime/src/lib.rs`
 - `cargo test -p capo-runtime remote_runtime -- --nocapture`
+- `cargo test -p capo-runtime tunnel -- --nocapture`

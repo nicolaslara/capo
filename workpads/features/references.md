@@ -222,3 +222,13 @@ Observed 2026-05-25.
 - Runtime/tunnel separation architecture: `../architecture/runtime-tunnel.md`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR1.
+
+## F7/RR2 Tunnel Adapter Stub
+
+Observed 2026-05-25.
+
+- Tunnel endpoint stub, endpoint config, resolved endpoint, connectivity health, exposure report, and contract tests: `../../crates/capo-runtime/src/lib.rs`
+- Runtime/tunnel separation and connectivity event model architecture: `../architecture/runtime-tunnel.md`
+- Capability permission scopes for private/public network exposure: `../architecture/capability-permissions.md`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR2.

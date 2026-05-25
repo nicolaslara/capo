@@ -541,3 +541,26 @@ Verification:
 Follow-up:
 
 - RR2 should add a tunnel/endpoint adapter stub and keep endpoint health/readiness records separate from runtime process refs.
+
+## F7/RR2 - Tunnel Adapter Stub
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `PLANNED_TUNNELS = ["fake", "local-loopback", "endpoint-stub"]` beside planned runtimes so connectivity variants are explicit without becoming runtime runners.
+- Add `EndpointStubTunnel` as a deterministic non-credentialed connectivity adapter for endpoint resolution, reachability, and exposure policy. It does not start or control agent processes.
+- Keep endpoint records distinct from runtime process refs:
+  - `ResolvedEndpoint` records endpoint ID, owner, channel, URI, exposure, permission scope, and permission-required status.
+  - `ConnectivityHealth` records endpoint reachability, status, exposure, and detail.
+  - `ExposureReport` records permission scope and the `connectivity.exposure_changed` audit event kind.
+- Model exposure permission scope at the connectivity boundary: loopback maps to `network:connect:localhost`, private maps to `network:connect:private_tunnel`, and public maps to `network:expose:public`.
+- Keep `LocalLoopbackTunnel` strict: it resolves dashboard/control/artifact-style local channels and rejects stdio channels so the local tunnel does not accidentally look like a remote runtime transport.
+
+Verification:
+
+- `cargo test -p capo-runtime tunnel -- --nocapture`: passed.
+
+Follow-up:
+
+- RR3 should wire explicit exposure policy into durable permission events/read models before public or remote-control exposure is treated as available.

@@ -36,13 +36,22 @@ Evidence:
 
 ### RR2 - Tunnel Adapter Stub
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Add a tunnel adapter stub for endpoint resolution and health.
 - Keep tunnel records separate from runtime process records.
 - Record exposure scope and permission requirements.
+
+Evidence:
+
+- `EndpointStubTunnel`, `ConnectivityEndpointConfig`, `ResolvedEndpoint`, `ConnectivityHealth`, and `ExposureReport` in `../../crates/capo-runtime/src/lib.rs`.
+- Endpoint resolution records `connectivity_endpoint_id`, typed owner, channel kind, resolved URI, exposure scope, permission scope, and whether permission is required.
+- Runtime process refs remain in `RemoteProcessRunner` / `LocalRuntimeProcessRef`; tunnel health and exposure data remain in connectivity-only records.
+- Loopback exposure resolves only loopback-safe channels and does not require remote/public permission.
+- Private/public stub exposures report `network:connect:private_tunnel` or `network:expose:public` permission requirements and `connectivity.exposure_changed` audit kind.
+- `cargo test -p capo-runtime tunnel -- --nocapture`: passed.
 
 ### RR3 - Explicit Exposure Policy
 
