@@ -893,6 +893,21 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
     output.push_str(&render_adapter_dogfood_gate(
         &dashboard.adapter_dogfood_gate,
     ));
+    output.push_str(&format!(
+        "workpad_tasks={}\n",
+        dashboard.workpad_tasks.len()
+    ));
+    for task in &dashboard.workpad_tasks {
+        output.push_str(&format!(
+            "workpad_task={} path={} source_anchor={} observed_status={} capo_execution_status={} default_task_id={}\n",
+            task.workpad_task_id,
+            task.path,
+            task.source_anchor,
+            task.observed_status,
+            task.capo_execution_status,
+            default_workpad_task_id(&task.workpad_task_id)
+        ));
+    }
 
     output.push_str(&format!(
         "active_sessions={}\n",
@@ -3632,6 +3647,15 @@ mod tests {
         assert!(next_output.contains("observed_status=in_progress"));
         assert!(next_output.contains("capo_execution_status=observed_only"));
         assert!(next_output.contains("default_task_id=task-workpad-workpads-features-tasks-md-f2"));
+        let dashboard_after_index = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard after workpad index");
+        assert!(dashboard_after_index.contains("workpad_tasks=3"));
+        assert!(dashboard_after_index.contains("workpad_task=workpads:features:tasks.md#f2"));
+        assert!(dashboard_after_index.contains("capo_execution_status=observed_only"));
         let source_hash = files
             .iter()
             .find(|file| file.path == "workpads/features/tasks.md")

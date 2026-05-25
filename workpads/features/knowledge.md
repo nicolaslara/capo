@@ -293,6 +293,25 @@ Follow-up:
 - If `--status` becomes confusing during dogfood, split it into explicit `--agent-status`, `--session-status`, and `--run-status` filters.
 - Future web/TUI work should consume `capo-query` structs directly rather than adding state reads in a UI crate.
 
+## F3/DS3 - Workpad Queue Visibility
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Extend `ProjectDashboard` with `workpad_tasks` so all operator surfaces can see the indexed dogfood queue through the shared query contract.
+- Render workpad task rows in the CLI dashboard with source path, source anchor, observed markdown status, Capo execution status, and deterministic default Capo task ID.
+- Keep dashboard rendering read-only. Workpad import/start/propose commands remain explicit mutation surfaces.
+
+Verification:
+
+- `cargo test -p capo-query workpad_tasks -- --nocapture`: passed.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+
+Follow-up:
+
+- Future TUI/web/mobile dashboards should consume `ProjectDashboard.workpad_tasks` instead of querying state directly.
+
 ## F5/ME1 - Memory Record Read Models
 
 Status: completed on 2026-05-25.

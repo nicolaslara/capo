@@ -9,6 +9,7 @@ use capo_state::{
     AdapterReadinessProjection, AdapterSmokeReportProjection, AgentProjection,
     ConnectivityExposureProjection, EventRecord, EvidenceProjection, MemoryPacketProjection,
     RunProjection, SessionProjection, SqliteStateStore, StateResult, ToolCallProjection,
+    WorkpadTaskProjection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,6 +20,7 @@ pub struct ProjectDashboard {
     pub adapter_readiness: Vec<AdapterReadinessProjection>,
     pub adapter_smoke_reports: Vec<AdapterSmokeReportProjection>,
     pub adapter_dogfood_gate: AdapterDogfoodGate,
+    pub workpad_tasks: Vec<WorkpadTaskProjection>,
 }
 
 impl ProjectDashboard {
@@ -115,6 +117,7 @@ pub fn project_dashboard(
     let adapter_readiness = state.adapter_readiness(&query.project_id)?;
     let adapter_smoke_reports = state.adapter_smoke_reports(&query.project_id)?;
     let adapter_dogfood_gate = adapter_dogfood_gate(&adapter_smoke_reports);
+    let workpad_tasks = state.workpad_tasks(&query.project_id)?;
     Ok(ProjectDashboard {
         project_id: query.project_id,
         agents: rows,
@@ -122,6 +125,7 @@ pub fn project_dashboard(
         adapter_readiness,
         adapter_smoke_reports,
         adapter_dogfood_gate,
+        workpad_tasks,
     })
 }
 
@@ -214,6 +218,7 @@ mod tests {
         AdapterSmokeReportProjection, AgentProjection, ConnectivityExposureProjection, EventKind,
         EvidenceProjection, MemoryPacketProjection, NewEvent, ProjectionRecord, RedactionState,
         RunProjection, SessionProjection, TaskProjection, ToolCallProjection,
+        WorkpadTaskProjection,
     };
 
     #[test]
@@ -404,6 +409,29 @@ mod tests {
         assert_eq!(
             ready.adapter_dogfood_gate.proven_adapters,
             vec!["codex_exec"]
+        );
+    }
+
+    #[test]
+    fn project_dashboard_includes_workpad_tasks() {
+        let root = temp_root("query-dashboard-workpad-tasks");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        append_agent(&state, &project_id, "agent-idle", None);
+        append_workpad_task(&state, &project_id, "workpads:features:tasks.md#f2");
+
+        let dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+
+        assert_eq!(dashboard.workpad_tasks.len(), 1);
+        assert_eq!(
+            dashboard.workpad_tasks[0].workpad_task_id,
+            "workpads:features:tasks.md#f2"
+        );
+        assert_eq!(dashboard.workpad_tasks[0].observed_status, "in_progress");
+        assert_eq!(
+            dashboard.workpad_tasks[0].capo_execution_status,
+            "observed_only"
         );
     }
 
@@ -741,6 +769,43 @@ mod tests {
                 )],
             )
             .expect("append adapter smoke report");
+    }
+
+    fn append_workpad_task(
+        state: &SqliteStateStore,
+        project_id: &ProjectId,
+        workpad_task_id: &str,
+    ) {
+        state
+            .append_event(
+                NewEvent {
+                    event_id: format!("event-{workpad_task_id}"),
+                    kind: EventKind::WorkpadIndexed,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some(workpad_task_id.to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::WorkpadTask(WorkpadTaskProjection {
+                    workpad_task_id: workpad_task_id.to_string(),
+                    project_id: project_id.clone(),
+                    path: "workpads/features/tasks.md".to_string(),
+                    source_anchor: "F2 - Workpad Dogfood Bridge".to_string(),
+                    title: "Workpad Dogfood Bridge".to_string(),
+                    observed_status: "in_progress".to_string(),
+                    capo_execution_status: "observed_only".to_string(),
+                    observed_unix: 123,
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append workpad task");
     }
 
     fn temp_root(name: &str) -> std::path::PathBuf {

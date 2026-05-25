@@ -110,6 +110,16 @@ Observed 2026-05-25.
 - Dashboard source workpad: `dashboard.md`
 - No new third-party dependencies were added for DS2.
 
+## F3/DS3 Workpad Queue Visibility
+
+Observed 2026-05-25.
+
+- Shared dashboard workpad task rows and query regression test: `../../crates/capo-query/src/lib.rs`
+- CLI dashboard workpad task rendering and dogfood bridge regression coverage: `../../crates/capo-cli/src/main.rs`
+- Dashboard source workpad: `dashboard.md`
+- Dogfood bridge source workpad: `dogfood-bridge.md`
+- No new third-party dependencies were added for DS3.
+
 ## F4/PT1 Static Policy Variant
 
 Observed 2026-05-25.

@@ -143,6 +143,7 @@ Progress:
 
 - DS1 query surface extraction is completed.
 - DS2 richer operator dashboard view is completed with project/session/status filters, tool-call refs, memory-packet refs, and fail-closed filter parsing.
+- DS3 workpad queue visibility is completed with shared query rows and CLI dashboard rendering.
 
 Evidence:
 
@@ -152,6 +153,8 @@ Evidence:
 - `cargo test -p capo-cli dashboard_rejects_malformed_filters`
 - `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence`
 - `cargo test -p capo-cli cli_drives_fake_controller_and_exports_evidence`
+- `cargo test -p capo-query workpad_tasks -- --nocapture`
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`

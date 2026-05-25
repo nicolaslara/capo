@@ -84,3 +84,25 @@ Review:
 
 - Focused dashboard review found two completion blockers: no user-facing project filter and malformed filters that could be silently ignored. Both were fixed with CLI regression coverage before completion.
 - The same review noted broad `--status` semantics as a low residual risk. The behavior is documented above and left intentionally broad for the first CLI operator view.
+
+### DS3 - Workpad Queue Visibility
+
+Status: completed
+
+Acceptance:
+
+- Expose indexed workpad task rows through the shared dashboard/query surface.
+- Render source path, source anchor, observed markdown status, Capo execution status, and default Capo task ID in the CLI dashboard.
+- Keep the dashboard read-only and preserve markdown as the source-of-truth fallback.
+
+Evidence:
+
+- `ProjectDashboard.workpad_tasks` in `../../crates/capo-query/src/lib.rs`.
+- CLI dashboard workpad task rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query workpad_tasks -- --nocapture`: passed.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+
+Decision:
+
+- Put workpad queue visibility in the shared query contract rather than a CLI-only read. Voice, web, mobile, and future TUI views should consume the same `ProjectDashboard` workpad task rows.
+- Render both observed markdown status and Capo execution status so operators can distinguish source truth from Capo-tracked execution.
