@@ -10,7 +10,8 @@ use capo_adapters::{
     AgentAdapter, FakeAdapterSessionRequest, FakeAdapterTurnRequest, ProviderConnector,
 };
 use capo_core::{
-    AgentId, EvidenceId, MemoryPacketId, ProjectId, RunId, SessionId, TaskId, ToolCallId, TurnId,
+    AgentId, CommandEnvelope, CommandIntent, EvidenceId, MemoryPacketId, ProjectId, RunId,
+    SessionId, TaskId, ToolCallId, TurnId,
 };
 use capo_memory::{FakeMemoryPacketRequest, MemoryBackend};
 use capo_runtime::{FakeRuntimeStartRequest, RuntimeRunner};
@@ -51,6 +52,79 @@ impl FakeBoundaryController {
         &self.state
     }
 
+    pub fn initialize(&self, command: &CommandEnvelope) -> StateResult<ControllerInit> {
+        require_intent(command, CommandIntent::InitializeProject);
+        Ok(ControllerInit {
+            command_id: command.command_id.to_string(),
+            state_db_path: self.state.db_path().display().to_string(),
+        })
+    }
+
+    pub fn register_agent_command(
+        &self,
+        command: &CommandEnvelope,
+    ) -> StateResult<FakeAgentRegistration> {
+        require_intent(command, CommandIntent::RegisterAgent);
+        let name = command
+            .text
+            .as_deref()
+            .ok_or_else(|| missing_read_model("command.text", &command.command_id))?;
+        self.register_agent(name)
+    }
+
+    pub fn spawn_agent_command(
+        &self,
+        command: &CommandEnvelope,
+    ) -> StateResult<FakeAgentRegistration> {
+        require_intent(command, CommandIntent::RegisterAgent);
+        let name = command
+            .text
+            .as_deref()
+            .ok_or_else(|| missing_read_model("command.text", &command.command_id))?;
+        self.register_agent(name)
+    }
+
+    pub fn send_task_command(&self, command: &CommandEnvelope) -> StateResult<FakeRunRefs> {
+        require_intent(command, CommandIntent::SendTask);
+        let agent_name = required_structured_arg(command, "agent")?;
+        let goal = command
+            .text
+            .as_deref()
+            .ok_or_else(|| missing_read_model("command.text", &command.command_id))?;
+        self.send_task_to_agent_name(agent_name, goal)
+    }
+
+    pub fn interrupt_command(
+        &self,
+        command: &CommandEnvelope,
+    ) -> StateResult<FakeReadModelObservation> {
+        require_intent(command, CommandIntent::InterruptSession);
+        let agent_name = required_structured_arg(command, "agent")?;
+        let reason = command.text.as_deref().unwrap_or("interrupt requested");
+        self.interrupt_agent_name(agent_name, reason)
+    }
+
+    pub fn stop_command(&self, command: &CommandEnvelope) -> StateResult<FakeReadModelObservation> {
+        require_intent(command, CommandIntent::InterruptSession);
+        let agent_name = required_structured_arg(command, "agent")?;
+        let reason = command.text.as_deref().unwrap_or("stop requested");
+        self.stop_agent_name(agent_name, reason)
+    }
+
+    pub fn recover_command(&self, command: &CommandEnvelope) -> StateResult<RecoveryReport> {
+        require_intent(command, CommandIntent::Recover);
+        let recovery_attempt_id = format!("recovery-{}", command.command_id);
+        let started = self.state.begin_recovery(&recovery_attempt_id)?;
+        self.state.rebuild_projections()?;
+        let completed = self.state.complete_recovery(&recovery_attempt_id)?;
+        Ok(RecoveryReport {
+            recovery_attempt_id,
+            started_sequence: started.started_sequence,
+            completed_sequence: completed.completed_sequence.unwrap_or_default(),
+            watermark: self.state.watermark("default")?,
+        })
+    }
+
     pub fn register_agent(&self, agent_name: &str) -> StateResult<FakeAgentRegistration> {
         let agent_id = AgentId::new(format!("agent-{agent_name}"));
         let provider = self.provider.describe_provider();
@@ -86,6 +160,20 @@ impl FakeBoundaryController {
         Ok(FakeAgentRegistration {
             agent_id,
             agent_name: agent_name.to_string(),
+        })
+    }
+
+    pub fn registration_for_agent_name(
+        &self,
+        agent_name: &str,
+    ) -> StateResult<FakeAgentRegistration> {
+        let agent = self
+            .state
+            .agent_by_name(agent_name)?
+            .ok_or_else(|| missing_read_model("agent.name", &agent_name))?;
+        Ok(FakeAgentRegistration {
+            agent_id: agent.agent_id,
+            agent_name: agent.name,
         })
     }
 
@@ -205,6 +293,7 @@ impl FakeBoundaryController {
                     current_goal: goal.to_string(),
                     latest_summary: Some(adapter_output.summary.clone()),
                     latest_confidence: Some(adapter_output.confidence),
+                    latest_blocker: None,
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Run(RunProjection {
@@ -366,6 +455,69 @@ impl FakeBoundaryController {
         })
     }
 
+    pub fn send_task_to_agent_name(
+        &self,
+        agent_name: &str,
+        goal: &str,
+    ) -> StateResult<FakeRunRefs> {
+        let registration = self.registration_for_agent_name(agent_name)?;
+        self.send_task(&registration, goal)
+    }
+
+    pub fn refs_for_agent_name(&self, agent_name: &str) -> StateResult<FakeRunRefs> {
+        let agent = self
+            .state
+            .agent_by_name(agent_name)?
+            .ok_or_else(|| missing_read_model("agent.name", &agent_name))?;
+        let session_id = agent
+            .current_session_id
+            .clone()
+            .ok_or_else(|| missing_read_model("agent.current_session_id", &agent.agent_id))?;
+        let session = self
+            .state
+            .session(&session_id)?
+            .ok_or_else(|| missing_read_model("session", &session_id))?;
+        let run = self
+            .state
+            .run_for_session(&session_id)?
+            .ok_or_else(|| missing_read_model("run.session_id", &session_id))?;
+        Ok(FakeRunRefs {
+            task_id: session
+                .task_id
+                .ok_or_else(|| missing_read_model("session.task_id", &session_id))?,
+            agent_id: agent.agent_id,
+            session_id,
+            run_id: run.run_id,
+            runtime_process_ref: format!("fake-runtime-process-{agent_name}"),
+            external_session_ref: format!("fake-adapter-session-{agent_name}"),
+        })
+    }
+
+    pub fn observe_agent_name(&self, agent_name: &str) -> StateResult<FakeReadModelObservation> {
+        let refs = self.refs_for_agent_name(agent_name)?;
+        self.observe(&refs)
+    }
+
+    pub fn interrupt_agent_name(
+        &self,
+        agent_name: &str,
+        reason: &str,
+    ) -> StateResult<FakeReadModelObservation> {
+        let registration = self.registration_for_agent_name(agent_name)?;
+        let refs = self.refs_for_agent_name(agent_name)?;
+        self.interrupt(&registration, &refs, reason)
+    }
+
+    pub fn stop_agent_name(
+        &self,
+        agent_name: &str,
+        reason: &str,
+    ) -> StateResult<FakeReadModelObservation> {
+        let registration = self.registration_for_agent_name(agent_name)?;
+        let refs = self.refs_for_agent_name(agent_name)?;
+        self.stop(&registration, &refs, reason)
+    }
+
     pub fn interrupt(
         &self,
         registration: &FakeAgentRegistration,
@@ -429,12 +581,92 @@ impl FakeBoundaryController {
                     current_goal: session.current_goal,
                     latest_summary: Some(format!("Interrupted: {reason}")),
                     latest_confidence: Some(70),
+                    latest_blocker: None,
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Run(RunProjection {
                     run_id: refs.run_id.clone(),
                     session_id: refs.session_id.clone(),
                     status: interrupted_process.status,
+                    recovery_of_run_id: None,
+                    updated_sequence: 0,
+                }),
+            ],
+        )?;
+
+        self.observe(refs)
+    }
+
+    pub fn stop(
+        &self,
+        registration: &FakeAgentRegistration,
+        refs: &FakeRunRefs,
+        reason: &str,
+    ) -> StateResult<FakeReadModelObservation> {
+        let session = self
+            .state
+            .session(&refs.session_id)?
+            .ok_or_else(|| missing_read_model("session", &refs.session_id))?;
+        let runtime_process = self
+            .runtime
+            .attach_process(refs.run_id.clone(), refs.runtime_process_ref.clone());
+        let stopped_process = self.runtime.stop(&runtime_process, reason);
+        let adapter_session = self
+            .adapter
+            .attach_session(refs.session_id.clone(), refs.external_session_ref.clone());
+        let adapter_output = self.adapter.stop(&adapter_session, reason);
+
+        self.state.append_event(
+            scoped_event(
+                &format!("event-session-stopped-{}", refs.session_id),
+                EventKind::SessionStopped,
+                &self.project_id,
+                &refs.task_id,
+                &registration.agent_id,
+                &refs.session_id,
+                &refs.run_id,
+            )
+            .with_payload(format!(
+                "{{\"reason\":\"{}\",\"adapter_summary\":\"{}\"}}",
+                escape_json(reason),
+                escape_json(&adapter_output.summary)
+            )),
+            &[
+                ProjectionRecord::Task(TaskProjection {
+                    task_id: refs.task_id.clone(),
+                    project_id: self.project_id.clone(),
+                    title: session.title.clone(),
+                    capo_execution_status: "completed".to_string(),
+                    active_session_id: Some(refs.session_id.clone()),
+                    latest_summary: Some(adapter_output.summary),
+                    evidence_id: None,
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Agent(AgentProjection {
+                    agent_id: refs.agent_id.clone(),
+                    project_id: self.project_id.clone(),
+                    name: registration.agent_name.clone(),
+                    status: "available".to_string(),
+                    current_session_id: None,
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Session(SessionProjection {
+                    session_id: refs.session_id.clone(),
+                    project_id: self.project_id.clone(),
+                    task_id: Some(refs.task_id.clone()),
+                    agent_id: refs.agent_id.clone(),
+                    title: session.title,
+                    status: "completed".to_string(),
+                    current_goal: session.current_goal,
+                    latest_summary: Some(format!("Stopped: {reason}")),
+                    latest_confidence: Some(70),
+                    latest_blocker: None,
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Run(RunProjection {
+                    run_id: refs.run_id.clone(),
+                    session_id: refs.session_id.clone(),
+                    status: stopped_process.status,
                     recovery_of_run_id: None,
                     updated_sequence: 0,
                 }),
@@ -490,6 +722,20 @@ pub struct FakeReadModelObservation {
     pub session: SessionProjection,
     pub run: RunProjection,
     pub recent_events: Vec<EventRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControllerInit {
+    pub command_id: String,
+    pub state_db_path: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryReport {
+    pub recovery_attempt_id: String,
+    pub started_sequence: i64,
+    pub completed_sequence: i64,
+    pub watermark: Option<i64>,
 }
 
 fn event(event_id: &str, kind: EventKind, project_id: &ProjectId) -> NewEvent {
@@ -565,6 +811,21 @@ fn missing_read_model(kind: &'static str, id: &impl ToString) -> StateError {
         kind,
         id: id.to_string(),
     }
+}
+
+fn require_intent(command: &CommandEnvelope, expected: CommandIntent) {
+    assert_eq!(
+        command.intent, expected,
+        "controller command intent did not match handler"
+    );
+}
+
+fn required_structured_arg<'a>(command: &'a CommandEnvelope, key: &str) -> StateResult<&'a str> {
+    command
+        .structured_args
+        .iter()
+        .find_map(|(candidate, value)| (candidate == key).then_some(value.as_str()))
+        .ok_or_else(|| missing_read_model("command.structured_args", &key))
 }
 
 fn escape_json(value: &str) -> String {

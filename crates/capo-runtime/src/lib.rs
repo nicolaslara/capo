@@ -36,6 +36,12 @@ impl RuntimeRunner {
         }
     }
 
+    pub fn stop(&self, process: &FakeRuntimeProcess, reason: &str) -> FakeRuntimeProcess {
+        match self {
+            Self::Fake(runner) => runner.stop(process, reason),
+        }
+    }
+
     pub fn attach_process(&self, run_id: RunId, runtime_process_ref: String) -> FakeRuntimeProcess {
         match self {
             Self::Fake(runner) => runner.attach_process(run_id, runtime_process_ref),
@@ -64,6 +70,14 @@ impl FakeRuntimeRunner {
             run_id: process.run_id.clone(),
             runtime_process_ref: process.runtime_process_ref.clone(),
             status: "stopping".to_string(),
+        }
+    }
+
+    pub fn stop(&self, process: &FakeRuntimeProcess, _reason: &str) -> FakeRuntimeProcess {
+        FakeRuntimeProcess {
+            run_id: process.run_id.clone(),
+            runtime_process_ref: process.runtime_process_ref.clone(),
+            status: "exited".to_string(),
         }
     }
 

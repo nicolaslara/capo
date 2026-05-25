@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 capo-adapters.workspace = true
+capo-controller.workspace = true
 capo-core.workspace = true
 capo-eval.workspace = true
 capo-memory.workspace = true

@@ -141,6 +141,36 @@ Follow-up:
 - P4 should wire this controller loop into CLI commands instead of test-only APIs.
 - P5/P10 should persist adapter session refs and runtime process refs as first-class read models before local process recovery claims.
 
+## P4 - First CLI Control Surface
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Keep the CLI dependency-free for P4. The command grammar is handwritten and intentionally narrow while the Capo command model is still stabilizing.
+- Wire write commands through `CommandEnvelope`-taking controller methods. The CLI still renders directly, but it does not own orchestration state.
+- Support `init`, `agent register`, `agent spawn`, `agent list`, `task send`, `session status`, `session interrupt`, `session stop`, `recover`, and `evidence export`.
+- Treat `agent spawn` honestly in P4: it creates the fake agent identity and records that the fake runtime starts on `task send`. Real runtime spawn semantics are deferred to P5.
+- Make `session stop` distinct from interrupt: stop emits `session.stopped`, sets the session to `completed`, and sets the run to `exited`.
+- Route `recover` through controller recovery bookkeeping with `begin_recovery`, projection rebuild, and `complete_recovery`.
+- Add `latest_blocker` to the session read model so CLI status renders blocker state from SQLite instead of fabricating it.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+- Manual CLI smoke passed with temporary state and evidence directories: init, spawn, task send, status, recover, evidence export, and stop.
+
+Review:
+
+- A focused review found envelope handling, spawn naming, stop behavior, recover behavior, and blocker rendering gaps. All were fixed before completion.
+
+Follow-up:
+
+- P5 should replace fake spawn semantics with local runtime process lifecycle.
+- P10 should harden repeated command idempotency and recovery behavior for multiple repeated CLI invocations in the same store.
+
 ## Prototype Gate
 
 Status: not passed.

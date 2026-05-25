@@ -300,7 +300,7 @@ impl SqliteStateStore {
         let session = connection
             .query_row(
                 "SELECT session_id, project_id, task_id, agent_id, title, status, current_goal,
-                        latest_summary, latest_confidence, updated_sequence
+                        latest_summary, latest_confidence, latest_blocker, updated_sequence
                  FROM sessions
                  WHERE session_id = ?1",
                 params![session_id.as_str()],
@@ -315,7 +315,8 @@ impl SqliteStateStore {
                         current_goal: row.get(6)?,
                         latest_summary: row.get(7)?,
                         latest_confidence: row.get(8)?,
-                        updated_sequence: row.get(9)?,
+                        latest_blocker: row.get(9)?,
+                        updated_sequence: row.get(10)?,
                     })
                 },
             )
@@ -372,6 +373,52 @@ impl SqliteStateStore {
         Ok(agent)
     }
 
+    pub fn agent_by_name(&self, name: &str) -> StateResult<Option<AgentProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let agent = connection
+            .query_row(
+                "SELECT agent_id, project_id, name, status, current_session_id, updated_sequence
+                 FROM agents
+                 WHERE name = ?1
+                 ORDER BY updated_sequence DESC
+                 LIMIT 1",
+                params![name],
+                |row| {
+                    Ok(AgentProjection {
+                        agent_id: AgentId::new(row.get::<_, String>(0)?),
+                        project_id: ProjectId::new(row.get::<_, String>(1)?),
+                        name: row.get(2)?,
+                        status: row.get(3)?,
+                        current_session_id: optional_id(row.get::<_, Option<String>>(4)?),
+                        updated_sequence: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(agent)
+    }
+
+    pub fn agents(&self) -> StateResult<Vec<AgentProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT agent_id, project_id, name, status, current_session_id, updated_sequence
+             FROM agents
+             ORDER BY name ASC, agent_id ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(AgentProjection {
+                agent_id: AgentId::new(row.get::<_, String>(0)?),
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                name: row.get(2)?,
+                status: row.get(3)?,
+                current_session_id: optional_id(row.get::<_, Option<String>>(4)?),
+                updated_sequence: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn run(&self, run_id: &RunId) -> StateResult<Option<RunProjection>> {
         let connection = Connection::open(&self.db_path)?;
         let run = connection
@@ -392,6 +439,59 @@ impl SqliteStateStore {
             )
             .optional()?;
         Ok(run)
+    }
+
+    pub fn run_for_session(&self, session_id: &SessionId) -> StateResult<Option<RunProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let run = connection
+            .query_row(
+                "SELECT run_id, session_id, status, recovery_of_run_id, updated_sequence
+                 FROM runs
+                 WHERE session_id = ?1
+                 ORDER BY updated_sequence DESC
+                 LIMIT 1",
+                params![session_id.as_str()],
+                |row| {
+                    Ok(RunProjection {
+                        run_id: RunId::new(row.get::<_, String>(0)?),
+                        session_id: SessionId::new(row.get::<_, String>(1)?),
+                        status: row.get(2)?,
+                        recovery_of_run_id: optional_id(row.get::<_, Option<String>>(3)?),
+                        updated_sequence: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(run)
+    }
+
+    pub fn evidence_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> StateResult<Vec<EvidenceProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT evidence_id, project_id, task_id, session_id, run_id, kind, artifact_id,
+                    confidence, updated_sequence
+             FROM evidence
+             WHERE session_id = ?1
+             ORDER BY updated_sequence ASC, evidence_id ASC",
+        )?;
+        let rows = statement.query_map(params![session_id.as_str()], |row| {
+            Ok(EvidenceProjection {
+                evidence_id: EvidenceId::new(row.get::<_, String>(0)?),
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                task_id: optional_id(row.get::<_, Option<String>>(2)?),
+                session_id: optional_id(row.get::<_, Option<String>>(3)?),
+                run_id: optional_id(row.get::<_, Option<String>>(4)?),
+                kind: row.get(5)?,
+                artifact_id: row.get(6)?,
+                confidence: row.get(7)?,
+                updated_sequence: row.get(8)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
     }
 
     pub fn recent_events_for_session(
@@ -448,6 +548,7 @@ pub enum EventKind {
     RecoveryStarted,
     RecoveryCompleted,
     SessionInterrupted,
+    SessionStopped,
 }
 
 impl EventKind {
@@ -467,6 +568,7 @@ impl EventKind {
             Self::RecoveryStarted => "recovery.started",
             Self::RecoveryCompleted => "recovery.completed",
             Self::SessionInterrupted => "session.interrupted",
+            Self::SessionStopped => "session.stopped",
         }
     }
 }
@@ -585,6 +687,7 @@ pub struct SessionProjection {
     pub current_goal: String,
     pub latest_summary: Option<String>,
     pub latest_confidence: Option<i64>,
+    pub latest_blocker: Option<String>,
     pub updated_sequence: i64,
 }
 
@@ -774,6 +877,7 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             current_goal TEXT NOT NULL,
             latest_summary TEXT,
             latest_confidence INTEGER,
+            latest_blocker TEXT,
             updated_sequence INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS runs (
@@ -958,8 +1062,8 @@ fn apply_projection_record(
         ProjectionRecord::Session(session) => transaction.execute(
             "INSERT INTO sessions(
                 session_id, project_id, task_id, agent_id, title, status, current_goal,
-                latest_summary, latest_confidence, updated_sequence
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                latest_summary, latest_confidence, latest_blocker, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(session_id) DO UPDATE SET
                 project_id = excluded.project_id,
                 task_id = excluded.task_id,
@@ -969,6 +1073,7 @@ fn apply_projection_record(
                 current_goal = excluded.current_goal,
                 latest_summary = excluded.latest_summary,
                 latest_confidence = excluded.latest_confidence,
+                latest_blocker = excluded.latest_blocker,
                 updated_sequence = excluded.updated_sequence",
             params![
                 session.session_id.as_str(),
@@ -980,6 +1085,7 @@ fn apply_projection_record(
                 session.current_goal,
                 session.latest_summary,
                 session.latest_confidence,
+                session.latest_blocker,
                 sequence,
             ],
         )?,
@@ -1309,6 +1415,7 @@ fn projection_record_from_row(
             current_goal: required_field(&projection_kind, "session", f, "current_goal")?,
             latest_summary: g,
             latest_confidence: optional_i64(&projection_kind, "session", h, "latest_confidence")?,
+            latest_blocker: None,
             updated_sequence: 0,
         })),
         "run" => Ok(ProjectionRecord::Run(RunProjection {
@@ -1545,6 +1652,7 @@ mod tests {
                         current_goal: "prove state".to_string(),
                         latest_summary: Some("booting".to_string()),
                         latest_confidence: Some(70),
+                        latest_blocker: None,
                         updated_sequence: 0,
                     }),
                     ProjectionRecord::Run(RunProjection {

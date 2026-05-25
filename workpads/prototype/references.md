@@ -74,3 +74,13 @@ Observed 2026-05-25.
 - Trusted-local permission and fake tool methods: `../../crates/capo-tools/src/lib.rs`
 - Fake memory packet builder: `../../crates/capo-memory/src/lib.rs`
 - SQLite read-model queries and event kinds used by controller: `../../crates/capo-state/src/lib.rs`
+
+## P4 First CLI Control Surface
+
+Observed 2026-05-25.
+
+- CLI command parser and renderers: `../../crates/capo-cli/src/main.rs`
+- CLI manifest: `../../crates/capo-cli/Cargo.toml`
+- Controller command-envelope handlers: `../../crates/capo-controller/src/lib.rs`
+- SQLite agent/session/run/evidence read-model queries: `../../crates/capo-state/src/lib.rs`
+- Manual smoke used `cargo run -p capo-cli` with temporary state and evidence directories.

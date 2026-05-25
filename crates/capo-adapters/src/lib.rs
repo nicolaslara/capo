@@ -56,6 +56,12 @@ impl AgentAdapter {
             Self::Fake(adapter) => adapter.interrupt(session, reason),
         }
     }
+
+    pub fn stop(&self, session: &FakeAdapterSession, reason: &str) -> FakeAdapterTurnOutput {
+        match self {
+            Self::Fake(adapter) => adapter.stop(session, reason),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,6 +117,17 @@ impl FakeAdapter {
             summary: format!("Fake adapter interrupted session: {reason}"),
             confidence: 70,
             status: "canceled".to_string(),
+            tool_name: "capo.session_summary".to_string(),
+        }
+    }
+
+    pub fn stop(&self, session: &FakeAdapterSession, reason: &str) -> FakeAdapterTurnOutput {
+        FakeAdapterTurnOutput {
+            turn_id: TurnId::new(format!("stop-{}", session.session_id)),
+            external_session_ref: session.external_session_ref.clone(),
+            summary: format!("Fake adapter stopped session: {reason}"),
+            confidence: 70,
+            status: "completed".to_string(),
             tool_name: "capo.session_summary".to_string(),
         }
     }

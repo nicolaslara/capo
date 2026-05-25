@@ -102,13 +102,31 @@ Evidence:
 
 ## P4 - First CLI Control Surface
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Provide CLI commands for init, agent register/spawn, task send, session status, interrupt/stop, recover, and evidence export.
 - Show active agents, status, current goal, recent events, latest summary, blockers, confidence, and evidence refs.
 - CLI commands use command envelopes and read models.
+
+Evidence:
+
+- `crates/capo-cli/src/main.rs`
+- `crates/capo-cli/Cargo.toml`
+- `crates/capo-controller/src/lib.rs`
+- `crates/capo-state/src/lib.rs`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+- Manual CLI smoke with temporary state/evidence directories:
+  - `cargo run -p capo-cli -- init --state <tmp>`
+  - `cargo run -p capo-cli -- agent spawn --name fake-codex --adapter fake --runtime fake --state <tmp>`
+  - `cargo run -p capo-cli -- task send --agent fake-codex --goal "Inspect the project and write a short status summary" --scenario tool-memory --state <tmp>`
+  - `cargo run -p capo-cli -- session status --agent fake-codex --state <tmp>`
+  - `cargo run -p capo-cli -- recover --state <tmp>`
+  - `cargo run -p capo-cli -- evidence export --session session-fake-codex --out <tmp-evidence> --state <tmp>`
+  - `cargo run -p capo-cli -- session stop --agent fake-codex --reason "smoke stop" --state <tmp>`
 
 ## P5 - Local Process Runtime
 
