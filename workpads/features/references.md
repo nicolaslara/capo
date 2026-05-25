@@ -494,3 +494,13 @@ Observed 2026-05-26.
 - Dispatch plan, execution request, and prompt materialization read models consumed through shared query surface: `../../crates/capo-query/src/lib.rs`, `../../crates/capo-state/src/lib.rs`
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC21.
+
+## F1/AC22 Guarded Local Dispatch Runner Surface
+
+Observed 2026-05-26.
+
+- CLI `adapter run-local` command, fail-closed preflight consumption, workpad prompt reconstruction, and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Local provider launch plans reused by the runner: `../../crates/capo-adapters/src/lib.rs`
+- Process execution boundary used only after explicit opt-in: `../../crates/capo-runtime/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC22.

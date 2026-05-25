@@ -5,18 +5,20 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use capo_adapters::{
-    AcpAdapter, AdapterFixtureParse, ClaudeCodeAdapter, CodexExecAdapter, LocalAdapterSmokeError,
-    LocalAdapterSmokePlan, NormalizedAdapterEvent, scan_artifacts_for_sensitive_markers,
+    AcpAdapter, AdapterFixtureParse, ClaudeCodeAdapter, CodexExecAdapter, LocalAdapterLaunchPlan,
+    LocalAdapterSmokeError, LocalAdapterSmokePlan, NormalizedAdapterEvent,
+    scan_artifacts_for_sensitive_markers,
 };
 use capo_controller::FakeBoundaryController;
 use capo_core::{
     AgentId, CommandEnvelope, CommandId, CommandIntent, CommandTarget, InputOrigin, ProjectId,
-    SessionId, TaskId, ToolCallId,
+    RunId, SessionId, TaskId, ToolCallId,
 };
 use capo_eval::TaskOutcomeReport;
 use capo_query::{AdapterDogfoodGate, ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 use capo_runtime::{
     ChannelKind, ConnectivityEndpointConfig, ConnectivityTunnel, EndpointOwner, ExposureScope,
+    LocalProcessRunner,
 };
 use capo_state::{
     AdapterDispatchExecutionRequestProjection, AdapterDispatchGateProjection,
@@ -56,6 +58,7 @@ Usage:
   capo adapter execution-request --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter materialize-prompt --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter run-preflight --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
+  capo adapter run-local --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
   capo adapter dogfood-gate [--state PATH]
   capo adapter smoke-report scan --artifact-root PATH [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
@@ -149,6 +152,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "adapter" && command == "run-preflight" => {
             adapter_dispatch_run_preflight(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "adapter" && command == "run-local" => {
+            adapter_dispatch_run_local(&parsed, rest)
         }
         [area, command] if area == "adapter" && command == "dogfood-gate" => {
             adapter_dogfood_gate(&parsed)
@@ -1199,6 +1205,21 @@ fn format_smoke_scan_error(error: LocalAdapterSmokeError) -> String {
     }
 }
 
+fn scan_dispatch_artifacts_or_delete<'a>(
+    paths: impl IntoIterator<Item = &'a PathBuf>,
+) -> Result<(), LocalAdapterSmokeError> {
+    let paths = paths.into_iter().cloned().collect::<Vec<_>>();
+    match scan_artifacts_for_sensitive_markers(paths.iter()) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            for path in &paths {
+                let _ = fs::remove_file(path);
+            }
+            Err(error)
+        }
+    }
+}
+
 fn adapter_dogfood_gate(parsed: &ParsedArgs) -> Result<String, String> {
     let state = state(parsed)?;
     let dashboard =
@@ -1479,17 +1500,105 @@ fn adapter_dispatch_run_preflight(parsed: &ParsedArgs, args: &[String]) -> Resul
         .rev()
         .find(|row| row.dispatch_plan_id == plan.dispatch_plan_id);
     Ok(render_adapter_dispatch_run_preflight(
-        plan,
-        execution_request,
-        materialization,
+        &dispatch_run_preflight(plan, execution_request, materialization),
     ))
 }
 
-fn render_adapter_dispatch_run_preflight(
+fn adapter_dispatch_run_local(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let dispatch_plan_id = required_arg(args, "--dispatch-plan")?;
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan"))
+    {
+        return Err(format!("unknown adapter run-local option: {unknown}"));
+    }
+    let state = state(parsed)?;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    let plan = dashboard
+        .adapter_dispatch_plans
+        .iter()
+        .find(|plan| plan.dispatch_plan_id == dispatch_plan_id)
+        .ok_or_else(|| format!("unknown adapter dispatch plan: {dispatch_plan_id}"))?;
+    let execution_request = dashboard
+        .adapter_dispatch_execution_requests
+        .iter()
+        .rev()
+        .find(|request| request.dispatch_plan_id == plan.dispatch_plan_id);
+    let materialization = dashboard
+        .adapter_dispatch_prompt_materializations
+        .iter()
+        .rev()
+        .find(|row| row.dispatch_plan_id == plan.dispatch_plan_id);
+    let preflight = dispatch_run_preflight(plan, execution_request, materialization);
+    if !preflight.provider_cli_execution_allowed {
+        return Ok(render_adapter_dispatch_run_local_blocked(&preflight));
+    }
+
+    let prompt_source = dashboard
+        .adapter_dispatch_prompt_sources
+        .iter()
+        .rev()
+        .find(|source| source.dispatch_plan_id == plan.dispatch_plan_id)
+        .ok_or_else(|| {
+            format!(
+                "dispatch plan has no prompt source for local run: {}",
+                plan.dispatch_plan_id
+            )
+        })?;
+    let launch_plan = build_dispatch_run_launch_plan(&state, plan, prompt_source, materialization)?;
+    launch_plan.assert_subscription_safe()?;
+    fs::create_dir_all(&launch_plan.workspace_root)
+        .map_err(|error| format!("failed to create dispatch workspace: {error}"))?;
+    fs::create_dir_all(&launch_plan.artifact_root)
+        .map_err(|error| format!("failed to create dispatch artifact root: {error}"))?;
+    let runner = LocalProcessRunner::new(launch_plan.runtime_config());
+    let outcome = runner
+        .start_process(launch_plan.runtime_request(RunId::new(plan.run_id.to_string())))
+        .map_err(LocalAdapterSmokeError::Runtime)
+        .map_err(format_smoke_scan_error)?;
+    scan_dispatch_artifacts_or_delete([&outcome.stdout.path, &outcome.stderr.path])
+        .map_err(format_smoke_scan_error)?;
+    Ok(format!(
+        "adapter_dispatch_run_local=true\ndispatch_plan={}\nadapter={}\nprovider_cli_execution_allowed=true\nprovider_cli_executed=true\nstatus={}\nruntime_process_ref={}\nexit_code={}\nstdout_artifact={}\nstderr_artifact={}\nartifact_root={}\nraw_prompt_policy={}\nraw_output_policy=bounded_redacted_artifacts\n",
+        plan.dispatch_plan_id,
+        plan.adapter_kind,
+        outcome.process.status,
+        outcome.process.runtime_process_ref,
+        outcome
+            .exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "signal".to_string()),
+        outcome.stdout.artifact_id,
+        outcome.stderr.artifact_id,
+        launch_plan.artifact_root.display(),
+        materialization
+            .map(|row| row.raw_prompt_policy.as_str())
+            .unwrap_or("none")
+    ))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AdapterDispatchRunPreflight {
+    dispatch_plan_id: String,
+    adapter_kind: String,
+    execution_request_id: String,
+    materialization_id: String,
+    provider_cli_execution_allowed: bool,
+    opt_in_env: String,
+    opt_in_set: bool,
+    status: String,
+    runtime_prompt_policy: String,
+    raw_prompt_policy: String,
+    reasons: Vec<String>,
+    next_action: String,
+}
+
+fn dispatch_run_preflight(
     plan: &AdapterDispatchPlanProjection,
     execution_request: Option<&AdapterDispatchExecutionRequestProjection>,
     materialization: Option<&AdapterDispatchPromptMaterializationProjection>,
-) -> String {
+) -> AdapterDispatchRunPreflight {
     let opt_in_env = adapter_dispatch_opt_in_env(&plan.adapter_kind);
     let opt_in_set = env::var(&opt_in_env).as_deref() == Ok("1");
     let mut reasons = Vec::new();
@@ -1542,27 +1651,109 @@ fn render_adapter_dispatch_run_preflight(
         "resolve_preflight_blockers_before_provider_execution"
     };
 
-    format!(
-        "adapter_dispatch_run_preflight=true\ndispatch_plan={}\nadapter={}\nexecution_request={}\nprompt_materialization={}\nprovider_cli_execution_allowed={}\nprovider_cli_executed=false\nopt_in_env={}\nopt_in_set={}\nstatus={}\nruntime_prompt_policy={}\nraw_prompt_policy={}\nreasons={}\nnext_action={}\n",
-        plan.dispatch_plan_id,
-        plan.adapter_kind,
-        execution_request
-            .map(|request| request.execution_request_id.as_str())
-            .unwrap_or("none"),
-        materialization
-            .map(|row| row.materialization_id.as_str())
-            .unwrap_or("none"),
+    AdapterDispatchRunPreflight {
+        dispatch_plan_id: plan.dispatch_plan_id.clone(),
+        adapter_kind: plan.adapter_kind.clone(),
+        execution_request_id: execution_request
+            .map(|request| request.execution_request_id.clone())
+            .unwrap_or_else(|| "none".to_string()),
+        materialization_id: materialization
+            .map(|row| row.materialization_id.clone())
+            .unwrap_or_else(|| "none".to_string()),
         provider_cli_execution_allowed,
         opt_in_env,
         opt_in_set,
         status,
-        plan.runtime_prompt_policy,
-        materialization
-            .map(|row| row.raw_prompt_policy.as_str())
-            .unwrap_or("none"),
-        reasons.join(","),
-        next_action
+        runtime_prompt_policy: plan.runtime_prompt_policy.clone(),
+        raw_prompt_policy: materialization
+            .map(|row| row.raw_prompt_policy.clone())
+            .unwrap_or_else(|| "none".to_string()),
+        reasons,
+        next_action: next_action.to_string(),
+    }
+}
+
+fn render_adapter_dispatch_run_preflight(preflight: &AdapterDispatchRunPreflight) -> String {
+    format!(
+        "adapter_dispatch_run_preflight=true\ndispatch_plan={}\nadapter={}\nexecution_request={}\nprompt_materialization={}\nprovider_cli_execution_allowed={}\nprovider_cli_executed=false\nopt_in_env={}\nopt_in_set={}\nstatus={}\nruntime_prompt_policy={}\nraw_prompt_policy={}\nreasons={}\nnext_action={}\n",
+        preflight.dispatch_plan_id,
+        preflight.adapter_kind,
+        preflight.execution_request_id,
+        preflight.materialization_id,
+        preflight.provider_cli_execution_allowed,
+        preflight.opt_in_env,
+        preflight.opt_in_set,
+        preflight.status,
+        preflight.runtime_prompt_policy,
+        preflight.raw_prompt_policy,
+        preflight.reasons.join(","),
+        preflight.next_action
     )
+}
+
+fn render_adapter_dispatch_run_local_blocked(preflight: &AdapterDispatchRunPreflight) -> String {
+    format!(
+        "adapter_dispatch_run_local=true\ndispatch_plan={}\nadapter={}\nexecution_request={}\nprompt_materialization={}\nprovider_cli_execution_allowed=false\nprovider_cli_executed=false\nopt_in_env={}\nopt_in_set={}\nstatus={}\nruntime_prompt_policy={}\nraw_prompt_policy={}\nreasons={}\nnext_action={}\n",
+        preflight.dispatch_plan_id,
+        preflight.adapter_kind,
+        preflight.execution_request_id,
+        preflight.materialization_id,
+        preflight.opt_in_env,
+        preflight.opt_in_set,
+        preflight.status,
+        preflight.runtime_prompt_policy,
+        preflight.raw_prompt_policy,
+        preflight.reasons.join(","),
+        preflight.next_action
+    )
+}
+
+fn build_dispatch_run_launch_plan(
+    state: &SqliteStateStore,
+    plan: &AdapterDispatchPlanProjection,
+    source: &AdapterDispatchPromptSourceProjection,
+    materialization: Option<&AdapterDispatchPromptMaterializationProjection>,
+) -> Result<LocalAdapterLaunchPlan, String> {
+    if source.source_kind != "workpad_task" {
+        return Err(format!(
+            "dispatch prompt source is not replayable for local run: {}",
+            source.source_kind
+        ));
+    }
+    let materialization = materialization
+        .filter(|row| row.status == "ready_without_rendering_prompt")
+        .ok_or_else(|| "dispatch prompt is not materialized for local run".to_string())?;
+    let source_ref = source
+        .source_ref
+        .as_deref()
+        .ok_or_else(|| "workpad prompt source missing source_ref".to_string())?;
+    let (path, anchor) = split_source_ref(source_ref)?;
+    let task = state
+        .workpad_tasks(&source.project_id)
+        .map_err(debug_error)?
+        .into_iter()
+        .find(|task| task.path == path && task.source_anchor == anchor)
+        .ok_or_else(|| format!("workpad prompt source is missing: {source_ref}"))?;
+    let prompt = workpad_task_goal(&task);
+    let prompt_hash = stable_cli_hash(&prompt);
+    if materialization.materialized_prompt_hash.as_deref() != Some(prompt_hash.as_str()) {
+        return Err("dispatch prompt materialization no longer matches source".to_string());
+    }
+    let workspace_root = PathBuf::from(&plan.runtime_cwd);
+    let artifact_root = PathBuf::from(&plan.artifact_root);
+    match plan.adapter_kind.as_str() {
+        "codex_exec" => Ok(CodexExecAdapter::local_launch_plan(
+            workspace_root,
+            artifact_root,
+            prompt,
+        )),
+        "claude_code" => Ok(ClaudeCodeAdapter::local_launch_plan(
+            workspace_root,
+            artifact_root,
+            prompt,
+        )),
+        other => Err(format!("unsupported adapter for local run: {other}")),
+    }
 }
 
 fn adapter_dispatch_prompt_materialization_projection(
@@ -5347,6 +5538,7 @@ mod tests {
         assert!(HELP.contains("adapter execution-request"));
         assert!(HELP.contains("adapter materialize-prompt"));
         assert!(HELP.contains("adapter run-preflight"));
+        assert!(HELP.contains("adapter run-local"));
         assert!(HELP.contains("adapter replay-dispatch"));
         assert!(HELP.contains("adapter dogfood-gate"));
         assert!(HELP.contains("connectivity expose-stub"));
@@ -5359,6 +5551,25 @@ mod tests {
         assert!(HELP.contains("workpad start-next"));
         assert!(HELP.contains("workpad propose"));
         assert!(HELP.contains("workpad apply"));
+    }
+
+    #[test]
+    fn dispatch_artifact_scan_deletes_sensitive_outputs_on_failure() {
+        let artifact_root = temp_root("dispatch-sensitive-artifacts");
+        fs::create_dir_all(&artifact_root).expect("artifact root");
+        let stdout = artifact_root.join("stdout.txt");
+        let stderr = artifact_root.join("stderr.txt");
+        fs::write(&stdout, "Authorization: leaked\n").expect("stdout");
+        fs::write(&stderr, "ordinary stderr\n").expect("stderr");
+
+        let error = scan_dispatch_artifacts_or_delete([&stdout, &stderr])
+            .expect_err("sensitive marker should fail scan");
+        assert!(matches!(
+            error,
+            LocalAdapterSmokeError::SensitiveArtifact { .. }
+        ));
+        assert!(!stdout.exists());
+        assert!(!stderr.exists());
     }
 
     #[test]
@@ -5735,6 +5946,22 @@ mod tests {
         assert!(preflight_without_materialization.contains("provider_cli_execution_allowed=false"));
         assert!(preflight_without_materialization.contains("provider_cli_executed=false"));
         assert!(!preflight_without_materialization.contains("Do not render this dispatch prompt"));
+        let run_local_without_materialization = run_cli(vec![
+            "adapter".to_string(),
+            "run-local".to_string(),
+            "--dispatch-plan".to_string(),
+            gates[0].dispatch_plan_id.clone(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("local dispatch runner blocks without materialization");
+        assert!(run_local_without_materialization.contains("adapter_dispatch_run_local=true"));
+        assert!(
+            run_local_without_materialization
+                .contains("status=blocked_missing_prompt_materialization")
+        );
+        assert!(run_local_without_materialization.contains("provider_cli_executed=false"));
+        assert!(!run_local_without_materialization.contains("Do not render this dispatch prompt"));
         let inline_materialization = run_cli(vec![
             "adapter".to_string(),
             "materialize-prompt".to_string(),

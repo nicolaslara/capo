@@ -538,3 +538,35 @@ Decision:
 
 - Treat `run-preflight` as the final provider-free seam before a future runtime-running command. It proves all recorded Capo facts are aligned and names the exact opt-in env required for a real provider boundary crossing.
 - Do not execute provider CLIs or call `LocalProcessRunner` in AC21. Actual execution remains gated behind explicit user opt-in and a future command that consumes this preflight.
+
+### AC22 - Guarded Local Dispatch Runner Surface
+
+Status: completed
+
+Acceptance:
+
+- Add a runner command that consumes the recorded run preflight and fails closed unless every preflight fact allows provider execution.
+- Keep provider CLIs unexecuted in normal tests and unless the adapter-specific opt-in env is explicitly set.
+- When execution is allowed, reconstruct workpad-derived prompts from source, call `LocalProcessRunner`, capture bounded/redacted artifacts, scan artifacts for credential/session markers, and delete captured artifacts on failed marker scans.
+- Do not support inline CLI prompt execution because Capo intentionally does not retain the raw prompt.
+
+Evidence:
+
+- CLI `capo adapter run-local --dispatch-plan DISPATCH_PLAN_ID` in `../../crates/capo-cli/src/main.rs`.
+- Missing prompt materialization returns `status=blocked_missing_prompt_materialization` and `provider_cli_executed=false`.
+- The shared preflight for ready workpad prompt materialization still returns `status=blocked_missing_explicit_provider_opt_in` and `provider_cli_executed=false` until `CAPO_RUN_CODEX_LOCAL_DISPATCH=1`.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+- Regression coverage deletes stdout/stderr artifacts when the post-run marker scan fails.
+
+Decision:
+
+- `run-local` is the first real provider-boundary command surface, but it is fail-closed by default. It only reaches `LocalProcessRunner` after dispatch plan, execution request, prompt materialization, dogfood gate, and explicit opt-in agree.
+- The runner reconstructs only workpad-derived prompts whose source and prompt hashes already matched in prompt materialization. Inline CLI dispatch plans remain non-replayable.
+- Execution outcomes are currently returned by the command with runtime artifact refs. A follow-up should persist provider execution outcomes as their own read model before claiming AC3 real-agent controller completion.
+
+Review:
+
+- Focused provider-safety review found one blocker: a failed credential marker scan could leave captured runtime artifacts on disk. The runner path now deletes captured stdout/stderr artifacts before returning the scan error.
+- The review also noted that `run-local` recomputes preflight from recorded facts rather than requiring a separately persisted preflight row. This is accepted for AC22 because there is no preflight projection yet and the command still requires the same recorded plan/request/materialization facts plus explicit opt-in.

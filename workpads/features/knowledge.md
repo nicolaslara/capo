@@ -1121,3 +1121,35 @@ Follow-up:
 
 - The future real runner command should consume this preflight result and refuse execution unless status is `ready_to_execute_provider_cli`.
 - The future runner must use `LocalProcessRunner`, record bounded/redacted runtime artifacts, scan artifacts before any passed report, and persist execution outcomes without raw prompt/provider text.
+
+## F1/AC22 - Guarded Local Dispatch Runner Surface
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo adapter run-local` as the first command that can cross the local provider execution boundary, but keep it fail-closed unless the existing preflight says `ready_to_execute_provider_cli`.
+- Do not render or store raw prompts in the command surface. The runner reconstructs only workpad-derived prompts whose source hash and prompt hash were already proven by `materialize-prompt`.
+- Inline CLI prompt dispatch plans stay blocked for execution because Capo does not retain the raw prompt.
+- Use `LocalProcessRunner` for actual execution after explicit opt-in, preserving runtime ownership of process launch and bounded/redacted output artifacts.
+- Scan stdout/stderr artifacts for credential/session markers after execution before returning a successful local-run result. If the marker scan fails, delete the captured runtime artifacts before returning the error.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Review:
+
+- Focused provider-safety review found a blocker in the first draft: failed marker scans happened after runtime artifacts were written, so sensitive stdout/stderr could remain persisted. The fix deletes captured stdout/stderr artifacts on scan failure and adds regression coverage.
+- The same review noted that `run-local` recomputes the preflight from recorded facts instead of requiring a separately recorded preflight row. Accepted for AC22 because Capo does not yet persist preflight rows and the execution predicate still requires recorded plan, execution request, materialization, dogfood gate evidence, and explicit opt-in.
+
+Skipped verification:
+
+- Real Codex or Claude provider execution through `run-local` was not run because `CAPO_RUN_CODEX_LOCAL_DISPATCH=1` or `CAPO_RUN_CLAUDE_LOCAL_DISPATCH=1` requires explicit user opt-in.
+
+Follow-up:
+
+- Persist local dispatch execution outcomes as dedicated state/query/dashboard rows before using `run-local` to satisfy AC3 real-agent controller path.
+- After explicit opt-in, run a small workpad-derived Codex dispatch, inspect artifact scans, and record the result without raw prompt/provider text.

@@ -74,6 +74,7 @@ Progress:
 - AC19 dispatch prompt source contract is completed. Recorded dispatch plans now get prompt-source rows that distinguish non-replayable inline prompts from hash-guarded workpad-derived prompts without storing raw prompt text.
 - AC20 dispatch prompt materialization dry run is completed. `capo adapter materialize-prompt --record` verifies prompt materialization readiness without rendering prompts or launching provider CLIs.
 - AC21 real dispatch runner preflight is completed. `capo adapter run-preflight` composes recorded plans, execution requests, prompt materialization, and explicit provider opt-in into one provider-free readiness check.
+- AC22 guarded local dispatch runner surface is completed. `capo adapter run-local` consumes the preflight, fails closed until explicit opt-in, and only reaches `LocalProcessRunner` for hash-verified workpad prompts.
 
 Evidence:
 
@@ -112,7 +113,8 @@ Evidence:
 - `cargo test -p capo-state adapter_dispatch_prompt_materialization -- --nocapture`
 - `capo adapter materialize-prompt --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]`
 - `capo adapter run-preflight --dispatch-plan DISPATCH_PLAN_ID [--state PATH]`
-- Focused F1 connector safety review: no blocking findings; real-agent readiness remains unclaimed pending opt-in smoke
+- `capo adapter run-local --dispatch-plan DISPATCH_PLAN_ID [--state PATH]`
+- Focused F1 connector safety reviews: provider-artifact cleanup blocker found and fixed; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge
 
