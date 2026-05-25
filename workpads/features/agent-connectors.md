@@ -513,3 +513,28 @@ Decision:
 - Treat prompt materialization as a dry-run audit fact before any provider execution. This lets Capo prove whether the future runner can build the prompt from source without exposing the prompt in CLI output, state, or dashboard.
 - Inline CLI plans materialize to `blocked_non_replayable_prompt`.
 - Workpad plans materialize to `ready_without_rendering_prompt` only when the current indexed source hash and derived prompt hash match the recorded prompt source.
+
+### AC21 - Real Dispatch Runner Preflight
+
+Status: completed
+
+Acceptance:
+
+- Add a provider-free command that composes dispatch plan, execution request, prompt materialization, and explicit provider opt-in into one runner preflight.
+- Keep provider CLIs unexecuted; the command must not create runtime workspaces or artifact roots.
+- Report why real execution is blocked when execution request, prompt materialization, or opt-in evidence is missing.
+- For workpad-derived ready prompts, report the remaining explicit opt-in blocker without rendering the prompt.
+
+Evidence:
+
+- CLI `capo adapter run-preflight --dispatch-plan DISPATCH_PLAN_ID` in `../../crates/capo-cli/src/main.rs`.
+- Inline CLI prompt dispatch preflight blocks on `blocked_prompt_materialization_not_ready`.
+- Workpad-derived dispatch preflight with ready gate, execution request, and prompt materialization blocks on `blocked_missing_explicit_provider_opt_in` until `CAPO_RUN_CODEX_LOCAL_DISPATCH=1`.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Decision:
+
+- Treat `run-preflight` as the final provider-free seam before a future runtime-running command. It proves all recorded Capo facts are aligned and names the exact opt-in env required for a real provider boundary crossing.
+- Do not execute provider CLIs or call `LocalProcessRunner` in AC21. Actual execution remains gated behind explicit user opt-in and a future command that consumes this preflight.

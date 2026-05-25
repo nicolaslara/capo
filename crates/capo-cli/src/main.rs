@@ -55,6 +55,7 @@ Usage:
   capo adapter dispatch-status --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
   capo adapter execution-request --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter materialize-prompt --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
+  capo adapter run-preflight --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
   capo adapter dogfood-gate [--state PATH]
   capo adapter smoke-report scan --artifact-root PATH [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
@@ -145,6 +146,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "adapter" && command == "materialize-prompt" => {
             adapter_dispatch_materialize_prompt(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "adapter" && command == "run-preflight" => {
+            adapter_dispatch_run_preflight(&parsed, rest)
         }
         [area, command] if area == "adapter" && command == "dogfood-gate" => {
             adapter_dogfood_gate(&parsed)
@@ -1446,6 +1450,119 @@ fn adapter_dispatch_materialize_prompt(
         record,
         recorded_sequence,
     ))
+}
+
+fn adapter_dispatch_run_preflight(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let dispatch_plan_id = required_arg(args, "--dispatch-plan")?;
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan"))
+    {
+        return Err(format!("unknown adapter run-preflight option: {unknown}"));
+    }
+    let state = state(parsed)?;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    let plan = dashboard
+        .adapter_dispatch_plans
+        .iter()
+        .find(|plan| plan.dispatch_plan_id == dispatch_plan_id)
+        .ok_or_else(|| format!("unknown adapter dispatch plan: {dispatch_plan_id}"))?;
+    let execution_request = dashboard
+        .adapter_dispatch_execution_requests
+        .iter()
+        .rev()
+        .find(|request| request.dispatch_plan_id == plan.dispatch_plan_id);
+    let materialization = dashboard
+        .adapter_dispatch_prompt_materializations
+        .iter()
+        .rev()
+        .find(|row| row.dispatch_plan_id == plan.dispatch_plan_id);
+    Ok(render_adapter_dispatch_run_preflight(
+        plan,
+        execution_request,
+        materialization,
+    ))
+}
+
+fn render_adapter_dispatch_run_preflight(
+    plan: &AdapterDispatchPlanProjection,
+    execution_request: Option<&AdapterDispatchExecutionRequestProjection>,
+    materialization: Option<&AdapterDispatchPromptMaterializationProjection>,
+) -> String {
+    let opt_in_env = adapter_dispatch_opt_in_env(&plan.adapter_kind);
+    let opt_in_set = env::var(&opt_in_env).as_deref() == Ok("1");
+    let mut reasons = Vec::new();
+    let mut status = "ready_to_execute_provider_cli".to_string();
+
+    match execution_request {
+        Some(request)
+            if request.provider_cli_execution_allowed
+                && request.status == "waiting_on_explicit_provider_opt_in"
+                && !request.provider_cli_executed => {}
+        Some(request) => {
+            status = "blocked_execution_request_not_ready".to_string();
+            reasons.push(request.status.clone());
+        }
+        None => {
+            status = "blocked_missing_execution_request".to_string();
+            reasons.push("recorded_execution_request_missing".to_string());
+        }
+    }
+
+    match materialization {
+        Some(row) if row.status == "ready_without_rendering_prompt" => {}
+        Some(row) => {
+            if status == "ready_to_execute_provider_cli" {
+                status = "blocked_prompt_materialization_not_ready".to_string();
+            }
+            reasons.push(row.status.clone());
+        }
+        None => {
+            if status == "ready_to_execute_provider_cli" {
+                status = "blocked_missing_prompt_materialization".to_string();
+            }
+            reasons.push("recorded_prompt_materialization_missing".to_string());
+        }
+    }
+
+    if !opt_in_set {
+        if status == "ready_to_execute_provider_cli" {
+            status = "blocked_missing_explicit_provider_opt_in".to_string();
+        }
+        reasons.push(format!("{opt_in_env}=1_required"));
+    }
+    if reasons.is_empty() {
+        reasons.push("all_preflight_checks_passed".to_string());
+    }
+    let provider_cli_execution_allowed = status == "ready_to_execute_provider_cli";
+    let next_action = if provider_cli_execution_allowed {
+        "execute_provider_cli_through_runtime_runner"
+    } else {
+        "resolve_preflight_blockers_before_provider_execution"
+    };
+
+    format!(
+        "adapter_dispatch_run_preflight=true\ndispatch_plan={}\nadapter={}\nexecution_request={}\nprompt_materialization={}\nprovider_cli_execution_allowed={}\nprovider_cli_executed=false\nopt_in_env={}\nopt_in_set={}\nstatus={}\nruntime_prompt_policy={}\nraw_prompt_policy={}\nreasons={}\nnext_action={}\n",
+        plan.dispatch_plan_id,
+        plan.adapter_kind,
+        execution_request
+            .map(|request| request.execution_request_id.as_str())
+            .unwrap_or("none"),
+        materialization
+            .map(|row| row.materialization_id.as_str())
+            .unwrap_or("none"),
+        provider_cli_execution_allowed,
+        opt_in_env,
+        opt_in_set,
+        status,
+        plan.runtime_prompt_policy,
+        materialization
+            .map(|row| row.raw_prompt_policy.as_str())
+            .unwrap_or("none"),
+        reasons.join(","),
+        next_action
+    )
 }
 
 fn adapter_dispatch_prompt_materialization_projection(
@@ -5229,6 +5346,7 @@ mod tests {
         assert!(HELP.contains("adapter dispatch-status"));
         assert!(HELP.contains("adapter execution-request"));
         assert!(HELP.contains("adapter materialize-prompt"));
+        assert!(HELP.contains("adapter run-preflight"));
         assert!(HELP.contains("adapter replay-dispatch"));
         assert!(HELP.contains("adapter dogfood-gate"));
         assert!(HELP.contains("connectivity expose-stub"));
@@ -5596,6 +5714,57 @@ mod tests {
             ready_execution_request.contains("reasons=explicit_provider_execution_opt_in_required")
         );
         assert!(!ready_execution_request.contains("Do not render this dispatch prompt"));
+        let preflight_without_materialization = run_cli(vec![
+            "adapter".to_string(),
+            "run-preflight".to_string(),
+            "--dispatch-plan".to_string(),
+            gates[0].dispatch_plan_id.clone(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dispatch preflight without materialization");
+        assert!(preflight_without_materialization.contains("adapter_dispatch_run_preflight=true"));
+        assert!(
+            preflight_without_materialization
+                .contains("status=blocked_missing_prompt_materialization")
+        );
+        assert!(
+            preflight_without_materialization
+                .contains("reasons=recorded_prompt_materialization_missing")
+        );
+        assert!(preflight_without_materialization.contains("provider_cli_execution_allowed=false"));
+        assert!(preflight_without_materialization.contains("provider_cli_executed=false"));
+        assert!(!preflight_without_materialization.contains("Do not render this dispatch prompt"));
+        let inline_materialization = run_cli(vec![
+            "adapter".to_string(),
+            "materialize-prompt".to_string(),
+            "--dispatch-plan".to_string(),
+            gates[0].dispatch_plan_id.clone(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("materialize inline prompt");
+        assert!(inline_materialization.contains("status=blocked_non_replayable_prompt"));
+        assert!(!inline_materialization.contains("Do not render this dispatch prompt"));
+        let preflight_with_blocked_materialization = run_cli(vec![
+            "adapter".to_string(),
+            "run-preflight".to_string(),
+            "--dispatch-plan".to_string(),
+            gates[0].dispatch_plan_id.clone(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dispatch preflight with blocked materialization");
+        assert!(
+            preflight_with_blocked_materialization
+                .contains("status=blocked_prompt_materialization_not_ready")
+        );
+        assert!(preflight_with_blocked_materialization.contains("blocked_non_replayable_prompt"));
+        assert!(preflight_with_blocked_materialization.contains("raw_prompt_policy=not_rendered"));
+        assert!(
+            !preflight_with_blocked_materialization.contains("Do not render this dispatch prompt")
+        );
         let execution_requests = SqliteStateStore::open(&state_root)
             .expect("state")
             .adapter_dispatch_execution_requests(&project_id())
@@ -6135,6 +6304,67 @@ mod tests {
         assert!(materialize.contains("reasons=prompt_hash_matches_source"));
         assert!(materialize.contains("raw_prompt_policy=not_rendered"));
         assert!(!materialize.contains("Work on Workpad Dogfood Bridge"));
+        let artifact_root = temp_root("workpad-plan-dispatch-smoke-artifacts");
+        fs::create_dir_all(&artifact_root).expect("artifact dir");
+        fs::write(artifact_root.join("stdout.txt"), "CAPO_CODEX_SMOKE_OK\n").expect("artifact");
+        run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "record".to_string(),
+            "--adapter".to_string(),
+            "codex".to_string(),
+            "--status".to_string(),
+            "passed".to_string(),
+            "--credential-scan".to_string(),
+            "clean".to_string(),
+            "--marker-found".to_string(),
+            "--artifact-root".to_string(),
+            artifact_root.display().to_string(),
+            "--reason".to_string(),
+            "operator recorded clean opt-in smoke".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record passed smoke");
+        let ready_gate = run_cli(vec![
+            "adapter".to_string(),
+            "dispatch-gate".to_string(),
+            "--dispatch-plan".to_string(),
+            plans[0].dispatch_plan_id.clone(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record ready dispatch gate");
+        assert!(ready_gate.contains("status=ready_for_execution"));
+        let execution_request = run_cli(vec![
+            "adapter".to_string(),
+            "execution-request".to_string(),
+            "--dispatch-plan".to_string(),
+            plans[0].dispatch_plan_id.clone(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record execution request");
+        assert!(execution_request.contains("status=waiting_on_explicit_provider_opt_in"));
+        let run_preflight = run_cli(vec![
+            "adapter".to_string(),
+            "run-preflight".to_string(),
+            "--dispatch-plan".to_string(),
+            plans[0].dispatch_plan_id.clone(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("run dispatch preflight");
+        assert!(run_preflight.contains("adapter_dispatch_run_preflight=true"));
+        assert!(run_preflight.contains("status=blocked_missing_explicit_provider_opt_in"));
+        assert!(run_preflight.contains("provider_cli_execution_allowed=false"));
+        assert!(run_preflight.contains("provider_cli_executed=false"));
+        assert!(run_preflight.contains("opt_in_env=CAPO_RUN_CODEX_LOCAL_DISPATCH"));
+        assert!(run_preflight.contains("CAPO_RUN_CODEX_LOCAL_DISPATCH=1_required"));
+        assert!(run_preflight.contains("raw_prompt_policy=not_rendered"));
+        assert!(!run_preflight.contains("Work on Workpad Dogfood Bridge"));
         let planned_workpad_task = state
             .workpad_task(&project_id(), "workpads:features:tasks.md#f2")
             .expect("planned workpad task query")

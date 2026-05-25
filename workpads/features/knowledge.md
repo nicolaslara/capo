@@ -1098,3 +1098,26 @@ Verification:
 Follow-up:
 
 - When concrete tunnels exist, revocation should call the connectivity adapter shutdown path and record adapter-specific cleanup evidence before projecting disabled health.
+
+## F1/AC21 - Real Dispatch Runner Preflight
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo adapter run-preflight` as the provider-free seam immediately before future real provider execution.
+- Compose four independent facts before any provider command can run: recorded dispatch plan, recorded execution request, recorded prompt materialization, and explicit provider opt-in env.
+- Keep inline CLI prompts blocked because Capo intentionally does not retain raw prompt text.
+- Workpad-derived prompts can pass prompt materialization, but still block on `CAPO_RUN_CODEX_LOCAL_DISPATCH=1` or the adapter-specific equivalent until the user explicitly opts in.
+- Do not call `LocalProcessRunner` or provider CLIs in this slice. The command reports readiness only.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Follow-up:
+
+- The future real runner command should consume this preflight result and refuse execution unless status is `ready_to_execute_provider_cli`.
+- The future runner must use `LocalProcessRunner`, record bounded/redacted runtime artifacts, scan artifacts before any passed report, and persist execution outcomes without raw prompt/provider text.

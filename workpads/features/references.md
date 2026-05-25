@@ -485,3 +485,12 @@ Observed 2026-05-26.
 - Connectivity exposure revocation event kind and projection fields reused from state layer: `../../crates/capo-state/src/lib.rs`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR7.
+
+## F1/AC21 Real Dispatch Runner Preflight
+
+Observed 2026-05-26.
+
+- CLI `adapter run-preflight` command, preflight composition, and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Dispatch plan, execution request, and prompt materialization read models consumed through shared query surface: `../../crates/capo-query/src/lib.rs`, `../../crates/capo-state/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC21.
