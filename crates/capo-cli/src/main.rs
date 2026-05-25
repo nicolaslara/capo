@@ -44,6 +44,7 @@ Usage:
   capo agent list [--state PATH]
   capo adapter readiness [--record] [--state PATH]
   capo adapter plan-launch --adapter codex|claude --agent NAME --goal GOAL [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
+  capo adapter dispatch-gate --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
   capo adapter dogfood-gate [--state PATH]
   capo adapter smoke-report scan --artifact-root PATH [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
@@ -114,6 +115,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "adapter" && command == "plan-launch" => {
             plan_adapter_launch(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "adapter" && command == "dispatch-gate" => {
+            adapter_dispatch_gate(&parsed, rest)
         }
         [area, command] if area == "adapter" && command == "dogfood-gate" => {
             adapter_dogfood_gate(&parsed)
@@ -894,6 +898,80 @@ fn adapter_dogfood_gate(parsed: &ParsedArgs) -> Result<String, String> {
     let dashboard =
         project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
     Ok(render_adapter_dogfood_gate(&dashboard.adapter_dogfood_gate))
+}
+
+fn adapter_dispatch_gate(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let dispatch_plan_id = required_arg(args, "--dispatch-plan")?;
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan"))
+    {
+        return Err(format!("unknown adapter dispatch-gate option: {unknown}"));
+    }
+    let state = state(parsed)?;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    let plan = dashboard
+        .adapter_dispatch_plans
+        .iter()
+        .find(|plan| plan.dispatch_plan_id == dispatch_plan_id)
+        .ok_or_else(|| format!("unknown adapter dispatch plan: {dispatch_plan_id}"))?;
+    Ok(render_adapter_dispatch_gate(
+        plan,
+        &dashboard.adapter_dogfood_gate,
+    ))
+}
+
+fn render_adapter_dispatch_gate(
+    plan: &AdapterDispatchPlanProjection,
+    dogfood_gate: &AdapterDogfoodGate,
+) -> String {
+    let adapter_proven = dogfood_gate
+        .proven_adapters
+        .iter()
+        .any(|adapter| adapter == &plan.adapter_kind);
+    let execution_allowed = dogfood_gate.ready
+        && adapter_proven
+        && plan.status == "planned"
+        && plan.runtime_prompt_policy == "not_rendered"
+        && !plan.provider_cli_executed;
+    let mut reasons = Vec::new();
+    if !dogfood_gate.ready {
+        reasons.extend(dogfood_gate.reasons.iter().cloned());
+    }
+    if dogfood_gate.ready && !adapter_proven {
+        reasons.push(format!(
+            "{}:real_subscription_smoke_not_recorded",
+            plan.adapter_kind
+        ));
+    }
+    if plan.status != "planned" {
+        reasons.push(format!("dispatch_plan_status:{}", plan.status));
+    }
+    if plan.runtime_prompt_policy != "not_rendered" {
+        reasons.push("runtime_prompt_policy_not_redacted".to_string());
+    }
+    if plan.provider_cli_executed {
+        reasons.push("provider_cli_already_executed".to_string());
+    }
+    if reasons.is_empty() {
+        reasons.push("required_real_smoke_evidence_recorded".to_string());
+    }
+    format!(
+        "adapter_dispatch_gate=true\ndispatch_plan={}\nadapter={}\nprovider_cli_execution_allowed={}\nstatus={}\nrequired_dogfood_gate={}\nprovider_cli_executed={}\nruntime_prompt_policy={}\nreasons={}\n",
+        plan.dispatch_plan_id,
+        plan.adapter_kind,
+        execution_allowed,
+        if execution_allowed {
+            "ready_for_execution"
+        } else {
+            "blocked"
+        },
+        dogfood_gate.status,
+        plan.provider_cli_executed,
+        plan.runtime_prompt_policy,
+        comma_or_none(&reasons)
+    )
 }
 
 fn render_adapter_dogfood_gate(gate: &AdapterDogfoodGate) -> String {
@@ -3634,6 +3712,7 @@ mod tests {
         assert!(HELP.contains("does not read provider credentials"));
         assert!(HELP.contains("adapter readiness"));
         assert!(HELP.contains("adapter plan-launch"));
+        assert!(HELP.contains("adapter dispatch-gate"));
         assert!(HELP.contains("adapter dogfood-gate"));
         assert!(HELP.contains("workpad index"));
         assert!(HELP.contains("workpad next"));
@@ -3769,6 +3848,95 @@ mod tests {
                 .expect("agent lookup after failed plan")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn adapter_dispatch_gate_blocks_until_real_smoke_evidence_is_recorded() {
+        let state_root = temp_root("adapter-dispatch-gate-state");
+        let workspace = temp_root("adapter-dispatch-gate-workspace");
+        let artifacts = temp_root("adapter-dispatch-gate-artifacts");
+        run_cli(vec![
+            "adapter".to_string(),
+            "plan-launch".to_string(),
+            "--adapter".to_string(),
+            "codex".to_string(),
+            "--agent".to_string(),
+            "codex-worker".to_string(),
+            "--goal".to_string(),
+            "Do not render this dispatch prompt.".to_string(),
+            "--workspace".to_string(),
+            workspace.display().to_string(),
+            "--artifacts".to_string(),
+            artifacts.display().to_string(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record dispatch plan");
+        let plans = SqliteStateStore::open(&state_root)
+            .expect("state")
+            .adapter_dispatch_plans(&project_id())
+            .expect("dispatch plans");
+        let dispatch_plan_id = plans[0].dispatch_plan_id.clone();
+
+        let blocked = run_cli(vec![
+            "adapter".to_string(),
+            "dispatch-gate".to_string(),
+            "--dispatch-plan".to_string(),
+            dispatch_plan_id.clone(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("blocked dispatch gate");
+        assert!(blocked.contains("adapter_dispatch_gate=true"));
+        assert!(blocked.contains("provider_cli_execution_allowed=false"));
+        assert!(blocked.contains("status=blocked"));
+        assert!(blocked.contains("required_dogfood_gate=blocked_pending_real_smoke"));
+        assert!(blocked.contains("provider_cli_executed=false"));
+        assert!(blocked.contains("runtime_prompt_policy=not_rendered"));
+        assert!(blocked.contains("codex_exec:real_subscription_smoke_not_recorded"));
+        assert!(!blocked.contains("Do not render this dispatch prompt"));
+        assert!(!workspace.exists());
+        assert!(!artifacts.exists());
+
+        let artifact_root = temp_root("adapter-dispatch-gate-smoke-artifacts");
+        fs::create_dir_all(&artifact_root).expect("artifact dir");
+        fs::write(artifact_root.join("stdout.txt"), "CAPO_CODEX_SMOKE_OK\n").expect("artifact");
+        run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "record".to_string(),
+            "--adapter".to_string(),
+            "codex".to_string(),
+            "--status".to_string(),
+            "passed".to_string(),
+            "--credential-scan".to_string(),
+            "clean".to_string(),
+            "--marker-found".to_string(),
+            "--artifact-root".to_string(),
+            artifact_root.display().to_string(),
+            "--reason".to_string(),
+            "operator recorded clean opt-in smoke".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record passed smoke");
+
+        let ready = run_cli(vec![
+            "adapter".to_string(),
+            "dispatch-gate".to_string(),
+            "--dispatch-plan".to_string(),
+            dispatch_plan_id,
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("ready dispatch gate");
+        assert!(ready.contains("provider_cli_execution_allowed=true"));
+        assert!(ready.contains("status=ready_for_execution"));
+        assert!(ready.contains("required_dogfood_gate=ready_for_first_real_agent_dogfood"));
+        assert!(ready.contains("reasons=required_real_smoke_evidence_recorded"));
+        assert!(!workspace.exists());
+        assert!(!artifacts.exists());
     }
 
     #[test]

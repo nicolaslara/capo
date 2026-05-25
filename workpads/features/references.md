@@ -130,6 +130,16 @@ Observed 2026-05-25.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC12.
 
+## F1/AC13 Dispatch Execution Gate
+
+Observed 2026-05-25.
+
+- CLI `adapter dispatch-gate` command and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared real-agent dogfood gate reused for dispatch gating: `../../crates/capo-query/src/lib.rs`
+- Recorded dispatch plans consumed by the gate: `../../crates/capo-state/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC13.
+
 ## F3/DS1 Query Surface Extraction
 
 Observed 2026-05-25.

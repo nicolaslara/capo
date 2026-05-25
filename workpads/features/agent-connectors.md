@@ -314,3 +314,25 @@ Decision:
 - Add `workpad plan-next` as the dogfood bridge from Capo's markdown task queue into real-adapter dispatch planning.
 - Reuse the same dispatch-plan projection and prompt-redaction rules as `adapter plan-launch --record`.
 - Planning the next workpad task records adapter intent only. `workpad import`, `workpad start-next`, and future real adapter execution remain separate explicit mutation surfaces.
+
+### AC13 - Dispatch Execution Gate
+
+Status: completed
+
+Acceptance:
+
+- Add a read-only execution gate for recorded adapter dispatch plans.
+- Block provider CLI execution until the shared real-agent dogfood gate is cleared by recorded Codex smoke evidence.
+- Require the selected dispatch plan to remain planned, prompt-redacted, and not already executed.
+- Do not execute provider CLIs, create runtime artifact directories, or claim that the real smoke has run.
+
+Evidence:
+
+- CLI `capo adapter dispatch-gate --dispatch-plan DISPATCH_PLAN_ID` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Keep real execution behind an explicit read-only gate before adding any command that can invoke a subscription-backed provider CLI.
+- Reuse the shared `AdapterDogfoodGate` from `capo-query` so dashboard, dogfood checks, and dispatch gating agree on the same recorded-evidence rule.
+- A recorded dispatch plan becomes execution-eligible only when Codex real-smoke evidence is recorded as passed, clean, marker-confirmed, and `real_agent_connector_proven`; otherwise the command reports blocked reasons without mutating state.

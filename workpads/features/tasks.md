@@ -65,6 +65,7 @@ Progress:
 - AC10 controller dispatch planning is completed. `capo adapter plan-launch` resolves agent intent into a safe, prompt-redacted local adapter runtime contract without executing provider CLIs.
 - AC11 durable dispatch plan read model is completed. `capo adapter plan-launch --record` persists prompt-redacted dispatch plans and the dashboard renders them through the shared query surface.
 - AC12 workpad next adapter plan is completed. `capo workpad plan-next` composes markdown next-task selection with prompt-redacted Codex/Claude dispatch planning without importing or starting the task.
+- AC13 dispatch execution gate is completed. `capo adapter dispatch-gate` checks recorded dispatch plans against the shared real-agent dogfood gate and fails closed before any provider CLI execution.
 
 Evidence:
 
@@ -93,6 +94,7 @@ Evidence:
 - `cargo test -p capo-state adapter_dispatch_plan -- --nocapture`
 - `cargo test -p capo-query adapter_dispatch -- --nocapture`
 - `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`
 - Focused F1 connector safety review: no blocking findings; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge

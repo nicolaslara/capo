@@ -314,6 +314,25 @@ Follow-up:
 
 - After real Codex smoke evidence clears AC1, `workpad plan-next` can become the preview step before an explicit real-adapter `workpad start-next` variant.
 
+## F1/AC13 - Dispatch Execution Gate
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo adapter dispatch-gate --dispatch-plan DISPATCH_PLAN_ID` as the read-only gate between recorded dispatch intent and any future provider CLI execution command.
+- Reuse the shared `AdapterDogfoodGate` from `capo-query`. A Codex dispatch plan is execution-eligible only after recorded smoke evidence proves `smoke_status=passed`, `credential_scan_status=clean`, marker present, and `dogfood_readiness_effect=real_agent_connector_proven`.
+- Keep the gate fail-closed on plan-level invariants: dispatch plan status must still be `planned`, prompt policy must remain `not_rendered`, and `provider_cli_executed` must be false.
+- Do not launch provider CLIs, create runtime artifact directories, or mutate dispatch-plan state in this slice. AC13 only reports whether execution would be allowed.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Follow-up:
+
+- A future execution command should call this gate before invoking `LocalProcessRunner`, then record a separate runtime-start/adapter-stream lifecycle rather than reusing the planned projection as execution evidence.
+
 ## F3/DS1 - Query Surface Extraction
 
 Status: completed on 2026-05-25.
