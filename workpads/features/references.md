@@ -128,3 +128,13 @@ Observed 2026-05-25.
 - Runtime execution architecture source: `../architecture/runtime-tunnel.md`
 - Capability and permission source: `../architecture/capability-permissions.md`
 - Permissions/tools source workpad: `permissions-tools.md`
+
+## F5/ME1 Memory Record Read Models
+
+Observed 2026-05-25.
+
+- Memory record/source projections, replayable packet eligibility query, projection replay encoding/decoding, event kinds, and regression tests: `../../crates/capo-state/src/lib.rs`
+- Memory architecture source for record/source fields and packet provenance rules: `../architecture/memory-architecture.md`
+- Memory/evaluation source workpad: `memory-eval.md`
+- Existing source-linked packet builder retained as packet artifact evidence path: `../../crates/capo-memory/src/lib.rs`
+- No new third-party dependencies were added for ME1.

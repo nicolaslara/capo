@@ -140,7 +140,7 @@ Evidence:
 
 ## F4 - Capability And Tool Hardening
 
-Status: in_progress
+Status: completed
 
 Source workpad: `permissions-tools.md`
 
@@ -186,6 +186,21 @@ Acceptance:
 - Promote source-linked memory records beyond packet-only evidence.
 - Add outcome/performance reports for completed agent work.
 - Keep provenance and review state visible in read models.
+
+Progress:
+
+- ME1 memory record read models are completed.
+- ME2 task outcome reports are pending.
+- ME3 review feedback loop is pending.
+
+Evidence:
+
+- `crates/capo-state/src/lib.rs`
+- `cargo test -p capo-state memory_record`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+- Focused ME1 memory read-model review: replayable-source filtering and fail-closed projection decode blockers found and fixed.
 
 ## F6 - Voice Control Integration
 

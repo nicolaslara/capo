@@ -19,13 +19,22 @@ Evolve prototype memory packets and local evidence into source-linked memory rec
 
 ### ME1 - Memory Record Read Models
 
-Status: in_progress
+Status: completed
 
 Acceptance:
 
 - Promote memory candidates/records into typed read models beyond packet artifacts.
 - Track source hash, source anchor, review state, sensitivity, and invalidation.
 - Keep packet building replayable from selected records.
+
+Evidence:
+
+- `crates/capo-state/src/lib.rs`
+- `cargo test -p capo-state memory_record`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+- Focused memory read-model review: replayable-source filtering and fail-closed projection decode blockers found and fixed.
 
 ### ME2 - Task Outcome Report
 

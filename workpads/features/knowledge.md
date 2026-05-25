@@ -214,6 +214,34 @@ Follow-up:
 - If `--status` becomes confusing during dogfood, split it into explicit `--agent-status`, `--session-status`, and `--run-status` filters.
 - Future web/TUI work should consume `capo-query` structs directly rather than adding state reads in a UI crate.
 
+## F5/ME1 - Memory Record Read Models
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Promote memory beyond packet-only evidence with SQLite projections for `MemoryRecordProjection` and `MemorySourceProjection`.
+- Keep operational truth in the event/projection log. Memory records are derived read models with provenance, review state, sensitivity, redaction, validity, supersession, and invalidation fields.
+- Store replayable source provenance separately from the record body. Sources track source kind, event/artifact/path refs, anchor, content hash, source sequence, quote artifact, and observed timestamp.
+- Add `packet_eligible_memory_records` as the first selected-record read path for packet building. It only returns reviewed, non-invalidated, non-expired, non-sensitive records with a packet item ref and at least one replayable source hash plus anchor/event/artifact locator.
+- Fail closed when rebuilding incomplete memory record projection payloads. Missing subject, predicate, object, body, confidence, or redaction state now stops projection rebuild instead of defaulting to safe-looking values.
+
+Verification:
+
+- `cargo test -p capo-state memory_record`: passed.
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Review:
+
+- Focused memory read-model review found two blockers: packet eligibility could select records without replayable sources, and projection replay defaulted required payload fields. Both were fixed with regression tests before completion.
+
+Follow-up:
+
+- ME2 should derive task outcome reports from events, tool calls, evidence, and memory refs rather than free-form summaries.
+- Future packet builder integration should consume `packet_eligible_memory_records` with `memory_sources_for_record` rather than reading packet artifacts as the memory authority.
+
 ## F4/PT1 - Static Policy Variant
 
 Status: completed on 2026-05-25.

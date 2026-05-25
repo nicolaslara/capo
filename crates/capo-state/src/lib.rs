@@ -13,7 +13,7 @@ use capo_core::{
     SessionId, TaskId, ToolCallId,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// Name of the first durable local state backend.
 pub const PROTOTYPE_STATE_BACKEND: &str = "sqlite";
@@ -811,6 +811,150 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn memory_records_for_project(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<MemoryRecordProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT memory_record_id, project_id, scope, scope_owner_ref, subject_ref,
+                    sensitivity_classification, record_kind, subject, predicate, object,
+                    body, confidence, review_state, source_count, valid_from, valid_until,
+                    supersedes_memory_record_id, revoked_by_memory_record_id, redaction_state,
+                    invalidated_at, invalidation_reason, packet_item_ref, updated_sequence
+             FROM memory_records
+             WHERE project_id = ?1
+             ORDER BY updated_sequence ASC, memory_record_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(MemoryRecordProjection {
+                memory_record_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                scope: row.get(2)?,
+                scope_owner_ref: row.get(3)?,
+                subject_ref: row.get(4)?,
+                sensitivity_classification: row.get(5)?,
+                record_kind: row.get(6)?,
+                subject: row.get(7)?,
+                predicate: row.get(8)?,
+                object: row.get(9)?,
+                body: row.get(10)?,
+                confidence: row.get(11)?,
+                review_state: row.get(12)?,
+                source_count: row.get(13)?,
+                valid_from: row.get(14)?,
+                valid_until: row.get(15)?,
+                supersedes_memory_record_id: row.get(16)?,
+                revoked_by_memory_record_id: row.get(17)?,
+                redaction_state: row.get(18)?,
+                invalidated_at: row.get(19)?,
+                invalidation_reason: row.get(20)?,
+                packet_item_ref: row.get(21)?,
+                updated_sequence: row.get(22)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    pub fn packet_eligible_memory_records(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<MemoryRecordProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT memory_record_id, project_id, scope, scope_owner_ref, subject_ref,
+                    sensitivity_classification, record_kind, subject, predicate, object,
+                    body, confidence, review_state, source_count, valid_from, valid_until,
+                    supersedes_memory_record_id, revoked_by_memory_record_id, redaction_state,
+                    invalidated_at, invalidation_reason, packet_item_ref, updated_sequence
+             FROM memory_records
+             WHERE project_id = ?1
+                AND review_state = 'reviewed'
+                AND source_count > 0
+                AND valid_until IS NULL
+                AND revoked_by_memory_record_id IS NULL
+                AND invalidated_at IS NULL
+                AND packet_item_ref IS NOT NULL
+                AND sensitivity_classification != 'secret_derived'
+                AND redaction_state NOT IN ('unknown', 'contains_sensitive')
+                AND EXISTS (
+                    SELECT 1
+                    FROM memory_sources
+                    WHERE memory_sources.memory_record_id = memory_records.memory_record_id
+                      AND memory_sources.source_content_hash IS NOT NULL
+                      AND (
+                        memory_sources.source_anchor IS NOT NULL
+                        OR memory_sources.source_event_id IS NOT NULL
+                        OR memory_sources.source_artifact_id IS NOT NULL
+                      )
+                )
+             ORDER BY updated_sequence ASC, memory_record_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(MemoryRecordProjection {
+                memory_record_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                scope: row.get(2)?,
+                scope_owner_ref: row.get(3)?,
+                subject_ref: row.get(4)?,
+                sensitivity_classification: row.get(5)?,
+                record_kind: row.get(6)?,
+                subject: row.get(7)?,
+                predicate: row.get(8)?,
+                object: row.get(9)?,
+                body: row.get(10)?,
+                confidence: row.get(11)?,
+                review_state: row.get(12)?,
+                source_count: row.get(13)?,
+                valid_from: row.get(14)?,
+                valid_until: row.get(15)?,
+                supersedes_memory_record_id: row.get(16)?,
+                revoked_by_memory_record_id: row.get(17)?,
+                redaction_state: row.get(18)?,
+                invalidated_at: row.get(19)?,
+                invalidation_reason: row.get(20)?,
+                packet_item_ref: row.get(21)?,
+                updated_sequence: row.get(22)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    pub fn memory_sources_for_record(
+        &self,
+        memory_record_id: &str,
+    ) -> StateResult<Vec<MemorySourceProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT memory_source_id, memory_record_id, source_kind, source_event_id,
+                    source_artifact_id, source_path, source_anchor, source_content_hash,
+                    source_sequence, quote_artifact_id, observed_at, updated_sequence
+             FROM memory_sources
+             WHERE memory_record_id = ?1
+             ORDER BY source_sequence ASC, memory_source_id ASC",
+        )?;
+        let rows = statement.query_map(params![memory_record_id], |row| {
+            Ok(MemorySourceProjection {
+                memory_source_id: row.get(0)?,
+                memory_record_id: row.get(1)?,
+                source_kind: row.get(2)?,
+                source_event_id: row.get(3)?,
+                source_artifact_id: row.get(4)?,
+                source_path: row.get(5)?,
+                source_anchor: row.get(6)?,
+                source_content_hash: row.get(7)?,
+                source_sequence: row.get(8)?,
+                quote_artifact_id: row.get(9)?,
+                observed_at: row.get(10)?,
+                updated_sequence: row.get(11)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn tool_calls_for_session(
         &self,
         session_id: &SessionId,
@@ -1008,6 +1152,8 @@ pub enum EventKind {
     ToolCallCompleted,
     ToolResultDelivered,
     MemoryPacketBuilt,
+    MemoryRecordIngested,
+    MemoryRecordInvalidated,
     EvidenceRecorded,
     WorkpadIndexed,
     WorkpadTaskImported,
@@ -1041,6 +1187,8 @@ impl EventKind {
             Self::ToolCallCompleted => "tool.call_completed",
             Self::ToolResultDelivered => "tool.result_delivered",
             Self::MemoryPacketBuilt => "memory.packet_built",
+            Self::MemoryRecordIngested => "memory.record_ingested",
+            Self::MemoryRecordInvalidated => "memory.record_invalidated",
             Self::EvidenceRecorded => "evidence.recorded",
             Self::WorkpadIndexed => "workpad.indexed",
             Self::WorkpadTaskImported => "workpad.task_imported",
@@ -1124,6 +1272,8 @@ pub enum ProjectionRecord {
     PermissionApproval(PermissionApprovalProjection),
     ToolCall(ToolCallProjection),
     MemoryPacketRef(MemoryPacketProjection),
+    MemoryRecord(Box<MemoryRecordProjection>),
+    MemorySource(MemorySourceProjection),
     Evidence(EvidenceProjection),
     WorkpadIndexReset(WorkpadIndexResetProjection),
     WorkpadFile(WorkpadFileProjection),
@@ -1238,6 +1388,61 @@ pub struct MemoryPacketProjection {
     pub turn_id: Option<String>,
     pub packet_artifact_id: Option<String>,
     pub purpose: String,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryRecordProjection {
+    pub memory_record_id: String,
+    pub project_id: ProjectId,
+    pub scope: String,
+    pub scope_owner_ref: String,
+    pub subject_ref: Option<String>,
+    pub sensitivity_classification: String,
+    pub record_kind: String,
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub body: String,
+    pub confidence: String,
+    pub review_state: String,
+    pub source_count: i64,
+    pub valid_from: Option<String>,
+    pub valid_until: Option<String>,
+    pub supersedes_memory_record_id: Option<String>,
+    pub revoked_by_memory_record_id: Option<String>,
+    pub redaction_state: String,
+    pub invalidated_at: Option<String>,
+    pub invalidation_reason: Option<String>,
+    pub packet_item_ref: Option<String>,
+    pub updated_sequence: i64,
+}
+
+impl MemoryRecordProjection {
+    pub fn is_packet_eligible(&self) -> bool {
+        self.review_state == "reviewed"
+            && self.invalidated_at.is_none()
+            && self.valid_until.is_none()
+            && self.revoked_by_memory_record_id.is_none()
+            && self.redaction_state != RedactionState::ContainsSensitive.as_str()
+            && self.redaction_state != RedactionState::Unknown.as_str()
+            && self.sensitivity_classification != "secret_derived"
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemorySourceProjection {
+    pub memory_source_id: String,
+    pub memory_record_id: String,
+    pub source_kind: String,
+    pub source_event_id: Option<String>,
+    pub source_artifact_id: Option<String>,
+    pub source_path: Option<String>,
+    pub source_anchor: Option<String>,
+    pub source_content_hash: Option<String>,
+    pub source_sequence: Option<i64>,
+    pub quote_artifact_id: Option<String>,
+    pub observed_at: Option<String>,
     pub updated_sequence: i64,
 }
 
@@ -1474,6 +1679,45 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             purpose TEXT NOT NULL,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS memory_records (
+            memory_record_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            scope_owner_ref TEXT NOT NULL,
+            subject_ref TEXT,
+            sensitivity_classification TEXT NOT NULL,
+            record_kind TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            predicate TEXT NOT NULL,
+            object TEXT NOT NULL,
+            body TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            review_state TEXT NOT NULL,
+            source_count INTEGER NOT NULL,
+            valid_from TEXT,
+            valid_until TEXT,
+            supersedes_memory_record_id TEXT,
+            revoked_by_memory_record_id TEXT,
+            redaction_state TEXT NOT NULL,
+            invalidated_at TEXT,
+            invalidation_reason TEXT,
+            packet_item_ref TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS memory_sources (
+            memory_source_id TEXT PRIMARY KEY,
+            memory_record_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_event_id TEXT,
+            source_artifact_id TEXT,
+            source_path TEXT,
+            source_anchor TEXT,
+            source_content_hash TEXT,
+            source_sequence INTEGER,
+            quote_artifact_id TEXT,
+            observed_at TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS evidence (
             evidence_id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -1565,6 +1809,8 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "permission_approvals",
         "tool_calls",
         "memory_packet_refs",
+        "memory_records",
+        "memory_sources",
         "evidence",
         "workpad_files",
         "workpad_tasks",
@@ -1864,6 +2110,97 @@ fn apply_projection_record(
                 sequence,
             ],
         )?,
+        ProjectionRecord::MemoryRecord(memory_record) => transaction.execute(
+            "INSERT INTO memory_records(
+                memory_record_id, project_id, scope, scope_owner_ref, subject_ref,
+                sensitivity_classification, record_kind, subject, predicate, object, body,
+                confidence, review_state, source_count, valid_from, valid_until,
+                supersedes_memory_record_id, revoked_by_memory_record_id, redaction_state,
+                invalidated_at, invalidation_reason, packet_item_ref, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+             ON CONFLICT(memory_record_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                scope = excluded.scope,
+                scope_owner_ref = excluded.scope_owner_ref,
+                subject_ref = excluded.subject_ref,
+                sensitivity_classification = excluded.sensitivity_classification,
+                record_kind = excluded.record_kind,
+                subject = excluded.subject,
+                predicate = excluded.predicate,
+                object = excluded.object,
+                body = excluded.body,
+                confidence = excluded.confidence,
+                review_state = excluded.review_state,
+                source_count = excluded.source_count,
+                valid_from = excluded.valid_from,
+                valid_until = excluded.valid_until,
+                supersedes_memory_record_id = excluded.supersedes_memory_record_id,
+                revoked_by_memory_record_id = excluded.revoked_by_memory_record_id,
+                redaction_state = excluded.redaction_state,
+                invalidated_at = excluded.invalidated_at,
+                invalidation_reason = excluded.invalidation_reason,
+                packet_item_ref = excluded.packet_item_ref,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                memory_record.memory_record_id,
+                memory_record.project_id.as_str(),
+                memory_record.scope,
+                memory_record.scope_owner_ref,
+                memory_record.subject_ref,
+                memory_record.sensitivity_classification,
+                memory_record.record_kind,
+                memory_record.subject,
+                memory_record.predicate,
+                memory_record.object,
+                memory_record.body,
+                memory_record.confidence,
+                memory_record.review_state,
+                memory_record.source_count,
+                memory_record.valid_from,
+                memory_record.valid_until,
+                memory_record.supersedes_memory_record_id,
+                memory_record.revoked_by_memory_record_id,
+                memory_record.redaction_state,
+                memory_record.invalidated_at,
+                memory_record.invalidation_reason,
+                memory_record.packet_item_ref,
+                sequence,
+            ],
+        )?,
+        ProjectionRecord::MemorySource(source) => transaction.execute(
+            "INSERT INTO memory_sources(
+                memory_source_id, memory_record_id, source_kind, source_event_id,
+                source_artifact_id, source_path, source_anchor, source_content_hash,
+                source_sequence, quote_artifact_id, observed_at, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(memory_source_id) DO UPDATE SET
+                memory_record_id = excluded.memory_record_id,
+                source_kind = excluded.source_kind,
+                source_event_id = excluded.source_event_id,
+                source_artifact_id = excluded.source_artifact_id,
+                source_path = excluded.source_path,
+                source_anchor = excluded.source_anchor,
+                source_content_hash = excluded.source_content_hash,
+                source_sequence = excluded.source_sequence,
+                quote_artifact_id = excluded.quote_artifact_id,
+                observed_at = excluded.observed_at,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                source.memory_source_id,
+                source.memory_record_id,
+                source.source_kind,
+                source.source_event_id,
+                source.source_artifact_id,
+                source.source_path,
+                source.source_anchor,
+                source.source_content_hash,
+                source.source_sequence,
+                source.quote_artifact_id,
+                source.observed_at,
+                sequence,
+            ],
+        )?,
         ProjectionRecord::Evidence(evidence) => transaction.execute(
             "INSERT INTO evidence(
                 evidence_id, project_id, task_id, session_id, run_id, kind,
@@ -2089,6 +2426,51 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
             g: packet.packet_artifact_id.clone(),
             h: Some(packet.purpose.clone()),
             payload_json: "{}".to_string(),
+        },
+        ProjectionRecord::MemoryRecord(memory_record) => ProjectionRecordRow {
+            kind: "memory_record",
+            record_id: memory_record.memory_record_id.clone(),
+            a: Some(memory_record.project_id.to_string()),
+            b: Some(memory_record.scope.clone()),
+            c: Some(memory_record.scope_owner_ref.clone()),
+            d: memory_record.subject_ref.clone(),
+            e: Some(memory_record.sensitivity_classification.clone()),
+            f: Some(memory_record.record_kind.clone()),
+            g: Some(memory_record.review_state.clone()),
+            h: Some(memory_record.source_count.to_string()),
+            payload_json: json!({
+                "subject": memory_record.subject,
+                "predicate": memory_record.predicate,
+                "object": memory_record.object,
+                "body": memory_record.body,
+                "confidence": memory_record.confidence,
+                "valid_from": memory_record.valid_from,
+                "valid_until": memory_record.valid_until,
+                "supersedes_memory_record_id": memory_record.supersedes_memory_record_id,
+                "revoked_by_memory_record_id": memory_record.revoked_by_memory_record_id,
+                "redaction_state": memory_record.redaction_state,
+                "invalidated_at": memory_record.invalidated_at,
+                "invalidation_reason": memory_record.invalidation_reason,
+                "packet_item_ref": memory_record.packet_item_ref,
+            })
+            .to_string(),
+        },
+        ProjectionRecord::MemorySource(source) => ProjectionRecordRow {
+            kind: "memory_source",
+            record_id: source.memory_source_id.clone(),
+            a: Some(source.memory_record_id.clone()),
+            b: Some(source.source_kind.clone()),
+            c: source.source_event_id.clone(),
+            d: source.source_artifact_id.clone(),
+            e: source.source_path.clone(),
+            f: source.source_anchor.clone(),
+            g: source.source_content_hash.clone(),
+            h: source.source_sequence.map(|value| value.to_string()),
+            payload_json: json!({
+                "quote_artifact_id": source.quote_artifact_id,
+                "observed_at": source.observed_at,
+            })
+            .to_string(),
         },
         ProjectionRecord::Evidence(evidence) => ProjectionRecordRow {
             kind: "evidence",
@@ -2318,6 +2700,129 @@ fn projection_record_from_row(
             purpose: required_field(&projection_kind, "memory_packet", h, "purpose")?,
             updated_sequence: 0,
         })),
+        "memory_record" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::MemoryRecord(Box::new(
+                MemoryRecordProjection {
+                    memory_record_id: record_id,
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "memory_record",
+                        a,
+                        "project_id",
+                    )?),
+                    scope: required_field(&projection_kind, "memory_record", b, "scope")?,
+                    scope_owner_ref: required_field(
+                        &projection_kind,
+                        "memory_record",
+                        c,
+                        "scope_owner_ref",
+                    )?,
+                    subject_ref: d,
+                    sensitivity_classification: required_field(
+                        &projection_kind,
+                        "memory_record",
+                        e,
+                        "sensitivity_classification",
+                    )?,
+                    record_kind: required_field(
+                        &projection_kind,
+                        "memory_record",
+                        f,
+                        "record_kind",
+                    )?,
+                    review_state: required_field(
+                        &projection_kind,
+                        "memory_record",
+                        g,
+                        "review_state",
+                    )?,
+                    source_count: required_i64(
+                        &projection_kind,
+                        "memory_record",
+                        h,
+                        "source_count",
+                    )?,
+                    subject: required_payload_string(
+                        &projection_kind,
+                        "memory_record",
+                        &payload,
+                        "subject",
+                    )?,
+                    predicate: required_payload_string(
+                        &projection_kind,
+                        "memory_record",
+                        &payload,
+                        "predicate",
+                    )?,
+                    object: required_payload_string(
+                        &projection_kind,
+                        "memory_record",
+                        &payload,
+                        "object",
+                    )?,
+                    body: required_payload_string(
+                        &projection_kind,
+                        "memory_record",
+                        &payload,
+                        "body",
+                    )?,
+                    confidence: required_payload_string(
+                        &projection_kind,
+                        "memory_record",
+                        &payload,
+                        "confidence",
+                    )?,
+                    valid_from: payload_optional_string(&payload, "valid_from"),
+                    valid_until: payload_optional_string(&payload, "valid_until"),
+                    supersedes_memory_record_id: payload_optional_string(
+                        &payload,
+                        "supersedes_memory_record_id",
+                    ),
+                    revoked_by_memory_record_id: payload_optional_string(
+                        &payload,
+                        "revoked_by_memory_record_id",
+                    ),
+                    redaction_state: required_payload_string(
+                        &projection_kind,
+                        "memory_record",
+                        &payload,
+                        "redaction_state",
+                    )?,
+                    invalidated_at: payload_optional_string(&payload, "invalidated_at"),
+                    invalidation_reason: payload_optional_string(&payload, "invalidation_reason"),
+                    packet_item_ref: payload_optional_string(&payload, "packet_item_ref"),
+                    updated_sequence: 0,
+                },
+            )))
+        }
+        "memory_source" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::MemorySource(MemorySourceProjection {
+                memory_source_id: record_id,
+                memory_record_id: required_field(
+                    &projection_kind,
+                    "memory_source",
+                    a,
+                    "memory_record_id",
+                )?,
+                source_kind: required_field(&projection_kind, "memory_source", b, "source_kind")?,
+                source_event_id: c,
+                source_artifact_id: d,
+                source_path: e,
+                source_anchor: f,
+                source_content_hash: g,
+                source_sequence: optional_i64(
+                    &projection_kind,
+                    "memory_source",
+                    h,
+                    "source_sequence",
+                )?,
+                quote_artifact_id: payload_optional_string(&payload, "quote_artifact_id"),
+                observed_at: payload_optional_string(&payload, "observed_at"),
+                updated_sequence: 0,
+            }))
+        }
         "evidence" => Ok(ProjectionRecord::Evidence(EvidenceProjection {
             evidence_id: EvidenceId::new(record_id),
             project_id: ProjectId::new(required_field(
@@ -2417,9 +2922,25 @@ fn parse_projection_payload(
 
 fn payload_string(payload: &Value, key: &str) -> Option<String> {
     match payload.get(key)? {
+        Value::Null => None,
         Value::String(value) => Some(value.clone()),
         value => Some(value.to_string()),
     }
+}
+
+fn payload_optional_string(payload: &Value, key: &str) -> Option<String> {
+    payload_string(payload, key)
+}
+
+fn required_payload_string(
+    projection_kind: &str,
+    record_id: &str,
+    payload: &Value,
+    key: &str,
+) -> Result<String, ProjectionDecodeError> {
+    payload_string(payload, key).ok_or_else(|| {
+        ProjectionDecodeError(format!("{projection_kind}.{record_id} missing {key}"))
+    })
 }
 
 fn validate_projection_json(
@@ -2856,6 +3377,261 @@ mod tests {
     }
 
     #[test]
+    fn memory_records_and_sources_are_persisted_rebuilt_and_packet_filterable() {
+        let store = temp_store("memory-record-rebuild");
+        let project_id = ProjectId::new("project-capo");
+        let record_id = "memory-record-architecture-static-dispatch";
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-memory-record-ingested".to_string(),
+                    kind: EventKind::MemoryRecordIngested,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some(record_id.to_string()),
+                    payload_json: "{\"kind\":\"memory.record_ingested\"}".to_string(),
+                    idempotency_key: Some("memory:record:static-dispatch".to_string()),
+                    redaction_state: RedactionState::Safe,
+                },
+                &[
+                    ProjectionRecord::MemoryRecord(Box::new(MemoryRecordProjection {
+                        memory_record_id: record_id.to_string(),
+                        project_id: project_id.clone(),
+                        scope: "project".to_string(),
+                        scope_owner_ref: "project-capo".to_string(),
+                        subject_ref: Some("workpads/architecture/boundaries.md".to_string()),
+                        sensitivity_classification: "internal".to_string(),
+                        record_kind: "repo_convention".to_string(),
+                        subject: "architecture boundaries".to_string(),
+                        predicate: "prefer".to_string(),
+                        object: "static dispatch for known prototype boundaries".to_string(),
+                        body: "Use static dispatch for known Capo boundaries while keeping adapter swaps explicit.".to_string(),
+                        confidence: "high".to_string(),
+                        review_state: "reviewed".to_string(),
+                        source_count: 1,
+                        valid_from: Some("2026-05-25T00:00:00Z".to_string()),
+                        valid_until: None,
+                        supersedes_memory_record_id: None,
+                        revoked_by_memory_record_id: None,
+                        redaction_state: RedactionState::Safe.as_str().to_string(),
+                        invalidated_at: None,
+                        invalidation_reason: None,
+                        packet_item_ref: Some("memory-record:architecture-static-dispatch".to_string()),
+                        updated_sequence: 0,
+                    })),
+                    ProjectionRecord::MemorySource(MemorySourceProjection {
+                        memory_source_id: "memory-source-boundaries-static-dispatch".to_string(),
+                        memory_record_id: record_id.to_string(),
+                        source_kind: "markdown".to_string(),
+                        source_event_id: None,
+                        source_artifact_id: None,
+                        source_path: Some("workpads/architecture/boundaries.md".to_string()),
+                        source_anchor: Some("Static Dispatch Shape".to_string()),
+                        source_content_hash: Some("sha256:boundaries".to_string()),
+                        source_sequence: Some(1),
+                        quote_artifact_id: Some("artifact-quote-static-dispatch".to_string()),
+                        observed_at: Some("2026-05-25T00:00:00Z".to_string()),
+                        updated_sequence: 0,
+                    }),
+                ],
+            )
+            .expect("append memory record");
+
+        let records = store
+            .memory_records_for_project(&project_id)
+            .expect("memory records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].review_state, "reviewed");
+        assert_eq!(records[0].sensitivity_classification, "internal");
+        assert_eq!(
+            records[0].packet_item_ref.as_deref(),
+            Some("memory-record:architecture-static-dispatch")
+        );
+        assert!(records[0].is_packet_eligible());
+
+        let sources = store
+            .memory_sources_for_record(record_id)
+            .expect("memory sources");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            sources[0].source_path.as_deref(),
+            Some("workpads/architecture/boundaries.md")
+        );
+        assert_eq!(
+            sources[0].source_anchor.as_deref(),
+            Some("Static Dispatch Shape")
+        );
+        assert_eq!(
+            sources[0].source_content_hash.as_deref(),
+            Some("sha256:boundaries")
+        );
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-memory-record-invalidated".to_string(),
+                    kind: EventKind::MemoryRecordInvalidated,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some(record_id.to_string()),
+                    payload_json: "{\"kind\":\"memory.record_invalidated\"}".to_string(),
+                    idempotency_key: Some("memory:record:static-dispatch:invalidated".to_string()),
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::MemoryRecord(Box::new(MemoryRecordProjection {
+                    memory_record_id: record_id.to_string(),
+                    project_id: project_id.clone(),
+                    scope: "project".to_string(),
+                    scope_owner_ref: "project-capo".to_string(),
+                    subject_ref: Some("workpads/architecture/boundaries.md".to_string()),
+                    sensitivity_classification: "internal".to_string(),
+                    record_kind: "repo_convention".to_string(),
+                    subject: "architecture boundaries".to_string(),
+                    predicate: "prefer".to_string(),
+                    object: "static dispatch for known prototype boundaries".to_string(),
+                    body: "Use static dispatch for known Capo boundaries while keeping adapter swaps explicit.".to_string(),
+                    confidence: "high".to_string(),
+                    review_state: "superseded".to_string(),
+                    source_count: 1,
+                    valid_from: Some("2026-05-25T00:00:00Z".to_string()),
+                    valid_until: Some("2026-05-25T01:00:00Z".to_string()),
+                    supersedes_memory_record_id: None,
+                    revoked_by_memory_record_id: Some("memory-record-new-convention".to_string()),
+                    redaction_state: RedactionState::Safe.as_str().to_string(),
+                    invalidated_at: Some("2026-05-25T01:00:00Z".to_string()),
+                    invalidation_reason: Some("superseded by clearer boundary note".to_string()),
+                    packet_item_ref: Some("memory-record:architecture-static-dispatch".to_string()),
+                    updated_sequence: 0,
+                }))],
+            )
+            .expect("append invalidation");
+
+        assert!(
+            store
+                .packet_eligible_memory_records(&project_id)
+                .expect("packet eligible records")
+                .is_empty()
+        );
+
+        store.rebuild_projections().expect("rebuild projections");
+        let rebuilt = store
+            .memory_records_for_project(&project_id)
+            .expect("rebuilt memory records");
+        assert_eq!(rebuilt.len(), 1);
+        assert_eq!(rebuilt[0].review_state, "superseded");
+        assert_eq!(
+            rebuilt[0].invalidation_reason.as_deref(),
+            Some("superseded by clearer boundary note")
+        );
+        assert_eq!(
+            store
+                .memory_sources_for_record(record_id)
+                .expect("rebuilt memory sources")[0]
+                .source_content_hash
+                .as_deref(),
+            Some("sha256:boundaries")
+        );
+    }
+
+    #[test]
+    fn packet_eligible_memory_records_require_replayable_sources() {
+        let store = temp_store("memory-record-packet-eligibility");
+        let project_id = ProjectId::new("project-capo");
+        let complete_record = reviewed_memory_record(&project_id, "memory-record-complete", 1);
+        let no_source_count_record =
+            reviewed_memory_record(&project_id, "memory-record-no-source-count", 0);
+        let missing_hash_record = reviewed_memory_record(&project_id, "memory-record-no-hash", 1);
+
+        store
+            .append_event(
+                NewEvent::new(
+                    "event-memory-packet-eligibility",
+                    EventKind::MemoryRecordIngested,
+                    "test",
+                ),
+                &[
+                    ProjectionRecord::MemoryRecord(Box::new(complete_record)),
+                    ProjectionRecord::MemorySource(MemorySourceProjection {
+                        memory_source_id: "memory-source-complete".to_string(),
+                        memory_record_id: "memory-record-complete".to_string(),
+                        source_kind: "markdown".to_string(),
+                        source_event_id: None,
+                        source_artifact_id: None,
+                        source_path: Some("workpads/prototype/knowledge.md".to_string()),
+                        source_anchor: Some("Prototype Gate".to_string()),
+                        source_content_hash: Some("sha256:complete".to_string()),
+                        source_sequence: Some(1),
+                        quote_artifact_id: None,
+                        observed_at: None,
+                        updated_sequence: 0,
+                    }),
+                    ProjectionRecord::MemoryRecord(Box::new(no_source_count_record)),
+                    ProjectionRecord::MemoryRecord(Box::new(missing_hash_record)),
+                    ProjectionRecord::MemorySource(MemorySourceProjection {
+                        memory_source_id: "memory-source-missing-hash".to_string(),
+                        memory_record_id: "memory-record-no-hash".to_string(),
+                        source_kind: "markdown".to_string(),
+                        source_event_id: None,
+                        source_artifact_id: None,
+                        source_path: Some("workpads/prototype/knowledge.md".to_string()),
+                        source_anchor: Some("Prototype Gate".to_string()),
+                        source_content_hash: None,
+                        source_sequence: Some(2),
+                        quote_artifact_id: None,
+                        observed_at: None,
+                        updated_sequence: 0,
+                    }),
+                ],
+            )
+            .expect("append memory eligibility records");
+
+        let eligible = store
+            .packet_eligible_memory_records(&project_id)
+            .expect("eligible records");
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].memory_record_id, "memory-record-complete");
+    }
+
+    #[test]
+    fn rebuild_fails_closed_on_incomplete_memory_record_payloads() {
+        let store = temp_store("memory-record-malformed-projection");
+        store
+            .append_event(
+                NewEvent::new(
+                    "event-malformed-memory-source",
+                    EventKind::MemoryRecordIngested,
+                    "test",
+                ),
+                &[],
+            )
+            .unwrap();
+
+        let connection = Connection::open(store.db_path()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO projection_records (
+                    sequence, projection_kind, record_id, a, b, c, d, e, f, g, h, payload_json
+                 ) VALUES (1, 'memory_record', 'memory-record-bad', 'project-capo',
+                    'project', 'project-capo', NULL, 'internal', 'fact', 'reviewed', '1', '{}')",
+                [],
+            )
+            .unwrap();
+
+        assert!(store.rebuild_projections().is_err());
+    }
+
+    #[test]
     fn permission_approval_projection_is_persisted_and_rebuilt() {
         let store = temp_store("permission-approval-rebuild");
         let project_id = ProjectId::new("project-capo");
@@ -3128,5 +3904,37 @@ mod tests {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("capo-state-{name}-{nanos}"));
         SqliteStateStore::open(root).expect("open temp store")
+    }
+
+    fn reviewed_memory_record(
+        project_id: &ProjectId,
+        memory_record_id: &str,
+        source_count: i64,
+    ) -> MemoryRecordProjection {
+        MemoryRecordProjection {
+            memory_record_id: memory_record_id.to_string(),
+            project_id: project_id.clone(),
+            scope: "project".to_string(),
+            scope_owner_ref: project_id.to_string(),
+            subject_ref: Some("workpads/prototype/knowledge.md".to_string()),
+            sensitivity_classification: "internal".to_string(),
+            record_kind: "fact".to_string(),
+            subject: "prototype gate".to_string(),
+            predicate: "requires".to_string(),
+            object: "source-linked memory".to_string(),
+            body: "Prototype memory must stay source linked.".to_string(),
+            confidence: "high".to_string(),
+            review_state: "reviewed".to_string(),
+            source_count,
+            valid_from: None,
+            valid_until: None,
+            supersedes_memory_record_id: None,
+            revoked_by_memory_record_id: None,
+            redaction_state: RedactionState::Safe.as_str().to_string(),
+            invalidated_at: None,
+            invalidation_reason: None,
+            packet_item_ref: Some(format!("memory-record:{memory_record_id}")),
+            updated_sequence: 0,
+        }
     }
 }
