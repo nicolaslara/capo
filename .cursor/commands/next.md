@@ -22,10 +22,11 @@ Read these files first:
 14. `workpads/architecture/protocol-provider.md` - when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A5 is complete
 15. `workpads/architecture/tool-exposure.md` - when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A5a is complete
 16. `workpads/architecture/memory-architecture.md` - when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A6 is complete
-17. `workpads/prototype/spec.md` - when active workpad is `prototype` or `dogfood`
-18. `workpads/research/knowledge.md` - when active workpad is `architecture`
-19. `workpads/architecture/knowledge.md` - when active workpad is `prototype`
-20. `workpads/prototype/knowledge.md` - when active workpad is `features` or `dogfood`
+17. `workpads/architecture/prototype-plan.md` - when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A7 is complete
+18. `workpads/prototype/spec.md` - when active workpad is `prototype` or `dogfood`
+19. `workpads/research/knowledge.md` - when active workpad is `architecture`
+20. `workpads/architecture/knowledge.md` - when active workpad is `prototype`
+21. `workpads/prototype/knowledge.md` - when active workpad is `features` or `dogfood`
 
 ## Step 2: Resolve Active Workpad
 

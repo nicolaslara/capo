@@ -356,6 +356,51 @@ Residual risks:
 - Exact v1 retrieval backend remains undecided until real dogfood traces show whether FTS, embeddings, or temporal graph queries are needed.
 - Generated-memory review UX is deferred, so prototype memory promotion should stay conservative.
 
+## A7 - Prototype Plan
+
+Status: completed on 2026-05-25.
+
+Decision:
+
+- Use `workpads/architecture/prototype-plan.md` as the implementation-facing plan that converts the architecture into prototype tasks.
+- Build the prototype as a Rust-first Cargo workspace with separate crates for CLI, core/controller, state, adapters, runtime, tools, memory, and evaluation.
+- Prove the architecture with static fake variants before relying on Codex, Claude Code, or ACP behavior.
+- Start with a CLI control surface because it is the shortest path to dogfoodable orchestration evidence. Dashboard/TUI and voice stay first-class but follow once read models and command envelopes are stable.
+- Use `FakeAdapter` for the first e2e loop, then Codex and Claude Code fixture parsers, then opt-in real local adapter smoke. ACP fixture replay belongs in the prototype before broad ACP integration claims.
+- Keep all-allowed trusted local permissions for the prototype, but require every tool/runtime/provider action to route through auditable `PermissionPolicy` decisions.
+- Treat workpad evidence export as part of the prototype, not a later feature, because dogfooding depends on markdown remaining the human-auditable fallback.
+
+Ordered implementation:
+
+- P0-P3 establish workspace, domain/boundary skeletons, SQLite event store/projections, and a fake boundary e2e loop.
+- P4-P7 add CLI, local runtime, Codex/Claude/ACP fixture parsing, and opt-in real local adapter smoke.
+- P8-P11 add tool instrumentation, memory packet provenance, restart/replay recovery, and workpad evidence export.
+- P12 and P15 run the prototype smoke and gate review. P13-P14 are post-smoke MVP/spike tasks unless A8 or the user makes them explicit dogfood prerequisites.
+- The prototype smoke must force two fake sessions, one redirect/steer action, one interrupt/stop action, at least one Capo tool request, one permission audit event, one adapter result-delivery event, and one replayable memory packet artifact.
+
+Dogfood prerequisites:
+
+- Multiple sessions and work items tracked concurrently.
+- Restart recovery without duplicate read-model/UI state.
+- Per-session active goal, status, blocker, confidence, recent events, latest summary, capabilities, memory refs, and evidence refs.
+- Reliable interrupt/redirect.
+- Deterministic workpad evidence export without corruption.
+- Audited permission decisions even under all-allowed local policy.
+- Local-only subscription connector handling for Codex and Claude Code with no credential persistence.
+
+Residual risks:
+
+- Real Codex/Claude adapter confidence remains medium until non-secret fixture captures and opt-in smoke prove exact stream fields.
+- ACP message-boundary dedupe remains medium confidence and must stay fixture-backed.
+- Dashboard/TUI timing is still a product choice; the architecture only requires that it read projections and submit command envelopes.
+- Voice remains a Capo conversational surface, but production capture is deferred until transcript retention/redaction is designed with real UX constraints.
+
+Review findings accepted:
+
+- Kept dashboard/TUI and conversational voice out of the prototype gate unless later made explicit prerequisites.
+- Made the smoke path deterministic for tools, permission audit, adapter result delivery, memory packet artifacts, concurrency, and redirect/steer behavior.
+- Updated `/next` routing surfaces so `prototype-plan.md` is loaded for the A8 architecture review after A7.
+
 ## Architecture Gate
 
 Status: not passed.
@@ -368,7 +413,7 @@ Required evidence:
 - Runtime/tunnel plan.
 - Protocol/provider plan.
 - Memory architecture.
-- Prototype task plan.
+- Prototype task plan: `workpads/architecture/prototype-plan.md` and `workpads/prototype/tasks.md`.
 
 ## Open Questions
 

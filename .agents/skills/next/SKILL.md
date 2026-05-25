@@ -30,6 +30,7 @@ Load these conditionally:
 - `workpads/architecture/protocol-provider.md` when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A5 is complete
 - `workpads/architecture/tool-exposure.md` when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A5a is complete
 - `workpads/architecture/memory-architecture.md` when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A6 is complete
+- `workpads/architecture/prototype-plan.md` when active workpad is `architecture`, `prototype`, `features`, or `dogfood` after A7 is complete
 - `workpads/prototype/spec.md` when active workpad is `prototype` or `dogfood`
 - `workpads/research/knowledge.md` when active workpad is `architecture`
 - `workpads/architecture/knowledge.md` when active workpad is `prototype`

@@ -38,16 +38,17 @@ Use this loop for `/next`, `$next`, and similar task execution. The concrete com
 9. After A5 is complete, also load `workpads/architecture/protocol-provider.md` for protocol, provider, adapter, prototype, features, or dogfood work.
 10. After A5a is complete, also load `workpads/architecture/tool-exposure.md` for tool, ACP client capability, MCP, runtime wrapper, prototype, features, or dogfood work.
 11. After A6 is complete, also load `workpads/architecture/memory-architecture.md` for memory, retrieval, prompt context, prototype, features, or dogfood work.
-12. For prototype or dogfood work, also load `workpads/prototype/spec.md`.
-13. Select a task by dependencies, risk, and testability.
-14. Mark the task `in_progress` before doing work.
-15. Complete acceptance criteria with the smallest correct change.
-16. Verify per the task's evidence standard.
-17. Record findings, decisions, and open questions in the workpad or project docs.
-18. Assess confidence and use review subagents per thresholds below.
-19. Incorporate review feedback, record rejections, or ask the user when product-sensitive.
-20. Mark `completed` only when acceptance criteria and review requirements are satisfied.
-21. Before another `/next` pass: explicit commit decision - commit, or record why not.
+12. After A7 is complete, also load `workpads/architecture/prototype-plan.md` for architecture, prototype, features, or dogfood work.
+13. For prototype or dogfood work, also load `workpads/prototype/spec.md`.
+14. Select a task by dependencies, risk, and testability.
+15. Mark the task `in_progress` before doing work.
+16. Complete acceptance criteria with the smallest correct change.
+17. Verify per the task's evidence standard.
+18. Record findings, decisions, and open questions in the workpad or project docs.
+19. Assess confidence and use review subagents per thresholds below.
+20. Incorporate review feedback, record rejections, or ask the user when product-sensitive.
+21. Mark `completed` only when acceptance criteria and review requirements are satisfied.
+22. Before another `/next` pass: explicit commit decision - commit, or record why not.
 
 ## Verification
 
@@ -125,14 +126,15 @@ Prefer clear names. Comment non-obvious invariants: permission boundaries, recov
 | `workpads/architecture/protocol-provider.md` | Adapter and provider connector model |
 | `workpads/architecture/tool-exposure.md` | Tool registry, wrappers, instrumentation, ACP/MCP tool mapping |
 | `workpads/architecture/memory-architecture.md` | Memory records, provenance, indexes, packets, and external adapter path |
+| `workpads/architecture/prototype-plan.md` | Ordered prototype sequence, e2e smoke path, and dogfood prerequisites |
 
 ## Phase Focus
 
 | Phase | Workpad | `/next` reads |
 | --- | --- | --- |
 | Complete | `research` | `research/tasks.md`, `knowledge.md`, `references.md` |
-| Now | `architecture` | `architecture/tasks.md`, `knowledge.md`, `references.md`, `boundaries.md`, `state-model.md`, `acp-replay-dedupe.md`, `capability-permissions.md`, `runtime-tunnel.md`, `protocol-provider.md`, `tool-exposure.md`, `memory-architecture.md` |
-| Next | `prototype` | `prototype/spec.md`, `tasks.md`, `knowledge.md`, `references.md`, architecture artifacts |
+| Now | `architecture` | `architecture/tasks.md`, `knowledge.md`, `references.md`, `boundaries.md`, `state-model.md`, `acp-replay-dedupe.md`, `capability-permissions.md`, `runtime-tunnel.md`, `protocol-provider.md`, `tool-exposure.md`, `memory-architecture.md`, `prototype-plan.md` |
+| Next | `prototype` | `prototype/spec.md`, `tasks.md`, `knowledge.md`, `references.md`, architecture artifacts including `prototype-plan.md` |
 | Later | `features` | Feature-specific tasks after prototype |
 | Later | `dogfood` | Migration of Capo project execution into Capo |
 

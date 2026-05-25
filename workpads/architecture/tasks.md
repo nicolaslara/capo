@@ -165,13 +165,20 @@ Evidence:
 
 ## A7 - Prototype Plan
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Convert architecture into ordered prototype tasks.
 - Define e2e smoke test.
 - Define dogfood gate prerequisites.
+
+Evidence:
+
+- `workpads/architecture/prototype-plan.md`
+- `workpads/prototype/tasks.md`
+- `workpads/architecture/knowledge.md` A7 section
+- Routing docs updated to load `prototype-plan.md` after A7
 
 ## A8 - Architecture Gate Review
 

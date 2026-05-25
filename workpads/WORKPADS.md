@@ -65,6 +65,7 @@ workpads/architecture/runtime-tunnel.md
 workpads/architecture/protocol-provider.md
 workpads/architecture/tool-exposure.md
 workpads/architecture/memory-architecture.md
+workpads/architecture/prototype-plan.md
 workpads/research/knowledge.md
 ```
 
@@ -78,6 +79,7 @@ workpads/research/knowledge.md
 - `protocol-provider.md` Codex, Claude Code, ACP adapter shape, provider connectors, credential scopes, and subscription policy
 - `tool-exposure.md` Capo tool registry, wrapper tools, instrumentation, ACP/MCP tool mapping, and observed-only native tools
 - `memory-architecture.md` memory records, provenance, indexing, memory packets, and external adapter path
+- `prototype-plan.md` ordered implementation sequence, e2e smoke path, and dogfood prerequisites
 - `tasks.md` A0-A8: event model, capability model, runtime, security, prototype plan
 - `knowledge.md` Architecture gate section
 
@@ -111,13 +113,14 @@ workpads/architecture/runtime-tunnel.md
 workpads/architecture/protocol-provider.md
 workpads/architecture/tool-exposure.md
 workpads/architecture/memory-architecture.md
+workpads/architecture/prototype-plan.md
 workpads/architecture/knowledge.md
 ```
 
 **Quick nav:**
 
 - `spec.md` Prototype minimum and MVP v0
-- `tasks.md` P0-P8 scaffold through dogfood readiness
+- `tasks.md` P0-P15 scaffold through dogfood readiness
 - `knowledge.md` Prototype gate section
 
 **Rules:**
@@ -149,6 +152,7 @@ workpads/architecture/runtime-tunnel.md
 workpads/architecture/protocol-provider.md
 workpads/architecture/tool-exposure.md
 workpads/architecture/memory-architecture.md
+workpads/architecture/prototype-plan.md
 workpads/prototype/knowledge.md
 ```
 
@@ -182,6 +186,7 @@ workpads/architecture/runtime-tunnel.md
 workpads/architecture/protocol-provider.md
 workpads/architecture/tool-exposure.md
 workpads/architecture/memory-architecture.md
+workpads/architecture/prototype-plan.md
 ```
 
 **Rules:**
