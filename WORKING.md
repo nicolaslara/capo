@@ -25,7 +25,7 @@ Do not silently ship workarounds or leave them undocumented.
 
 ## Core Loop
 
-Use this loop for `/next` and similar task execution. The concrete command prompt lives in `.cursor/commands/next.md` and `.opencode/commands/next.md`.
+Use this loop for `/next`, `$next`, and similar task execution. The concrete command prompt lives in `.cursor/commands/next.md` and `.opencode/commands/next.md`; the Codex skill lives in `.agents/skills/next/SKILL.md`.
 
 1. Read `TASKS.md` and resolve the active workpad.
 2. Load `AGENTS.md`, `project.md`, `WORKING.md`, and `workpads/WORKPADS.md`.

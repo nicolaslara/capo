@@ -32,14 +32,19 @@ Each boundary should be replaceable without forcing unrelated parts to change. A
 
 Captures user intent and renders Capo state.
 
-Examples: CLI, TUI, web dashboard, mobile app, voice command processor.
+Examples: CLI, TUI, web dashboard, mobile app, voice conversation with Capo.
 
 Initial contract ideas:
 
 - Submit command/message
 - Subscribe to session/task updates
+- Query agent/task status and summaries
 - Approve or deny capability requests
 - Interrupt/pause/resume an agent
+
+Voice-specific note:
+
+- Voice talks to Capo, not directly to every subagent. Capo answers from controller read models and translates steering decisions into explicit command envelopes.
 
 ### Capo Controller
 
@@ -59,7 +64,7 @@ Responsibilities:
 
 Normalizes communication with agents.
 
-Examples: ACP adapter, CLI adapter, browser/subscription adapter, custom JSON-RPC adapter.
+Examples: ACP adapter, Claude Code adapter, Codex adapter, CLI adapter, browser/subscription adapter, custom JSON-RPC adapter.
 
 Responsibilities:
 
@@ -68,6 +73,17 @@ Responsibilities:
 - Tool/capability negotiation
 - Progress/event stream normalization
 - Error mapping
+- Stream/replay deduplication between external protocol events and Capo's event log
+
+Initial target adapters:
+
+- Claude Code
+- Codex
+- ACP-compatible agents where they help Capo interoperate without replacing Capo's controller model
+
+Deferred:
+
+- Capo exposing itself as an ACP agent/editor backend. Capo should remain the user entrypoint for the prototype.
 
 ### Agent Runtime
 
@@ -128,6 +144,31 @@ Initial fields:
 - Grant source
 - Expiry/revocation
 - Audit events
+
+Initial policy:
+
+- The local prototype may start with an all-allowed policy for trusted local dogfooding.
+- Even with all allowed, permission decisions must flow through a modular policy boundary so the decision source can later be static policy, user approval, or a fast security-review agent.
+- ACP permission outcomes such as `allow_once`, `allow_always`, `reject_once`, and `reject_always` should map into Capo policy decisions, but the first policy can choose `allow_once`/allow for all low-risk local operations.
+
+### Tool Exposure Layer
+
+Defines tools Capo exposes to agents and how Capo instruments tool use.
+
+Examples: workpad lookup, task status, memory search, evidence recording, capability request, controlled shell/git/filesystem wrappers.
+
+Responsibilities:
+
+- Expose a small initial tool set to agents.
+- Wrap existing agent/runtime tools where possible instead of bypassing them.
+- Track tool calls, inputs, outputs, errors, latency, and redaction state.
+- Emit Capo events for every tool call and result.
+- Feed future evaluation, memory, and permission policy.
+
+Non-responsibilities:
+
+- Reimplement every provider-native tool immediately.
+- Hide vendor/provider tool behavior from the audit trail.
 
 ### State Store
 

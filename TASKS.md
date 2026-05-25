@@ -6,11 +6,11 @@ Read top to bottom. The **first unchecked** item is the active workpad unless No
 
 ## Active Now
 
-`research` -> establish prior art, ACP surface, stack choice, and architecture inputs.
+`architecture` -> turn research into system boundaries, contracts, state model, and prototype plan.
 
 ## Workpad Queue
 
-- [ ] **research** - ACP, prior art, subscriptions, local models, memory systems, voice, tunnel/connectivity, and language stack
+- [x] **research** - ACP, prior art, subscriptions, local models, memory systems, voice, tunnel/connectivity, and language stack (gate passed 2026-05-25)
 - [ ] **architecture** - System boundaries, module contracts, data model, security model, and technical plan
 - [ ] **prototype** - Minimal e2e Capo that can spawn, track, and interact with at least one coding agent
 - [ ] **features** - Product feature workpads derived from the architecture and prototype
@@ -19,6 +19,7 @@ Read top to bottom. The **first unchecked** item is the active workpad unless No
 ## Notes
 
 - The source-of-truth product prompt is captured in `project.md` and `workpads/prototype/spec.md`.
+- Research gate passed 2026-05-25. Use `workpads/research/knowledge.md` and `workpads/research/findings/` as architecture inputs.
 - Research and architecture may run in parallel only when task boundaries are independent and findings are recorded before implementation decisions.
 - Favor Rust for durable controller/core work unless research shows Python ecosystem leverage is materially better for a specific subsystem.
 - Python is acceptable for adapters, experiments, local-model integrations, voice pipelines, or memory-system prototypes.

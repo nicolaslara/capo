@@ -6,15 +6,15 @@
 
 | Workpad | Status | Description |
 | --- | --- | --- |
-| **research** | **Active** | ACP, prior art, stack, memory, subscription, tunnel, local-model, and voice research |
-| **architecture** | Planned | Boundary definitions, data model, contracts, security model, and prototype plan |
+| **research** | Complete | Gate passed 2026-05-25 — ACP, prior art, stack, memory, subscription, tunnel, local-model, and voice research |
+| **architecture** | **Active** | Boundary definitions, data model, contracts, security model, and prototype plan |
 | **prototype** | Planned | Minimal e2e Capo controller and agent harness |
 | **features** | Planned | Feature-specific workpads after architecture/prototype |
 | **dogfood** | Planned | Move Capo project execution into Capo |
 
 ## research
 
-**Status:** Active. Use first unless `TASKS.md` Notes override.
+**Status:** Complete. Gate passed 2026-05-25. Use as architecture input unless `TASKS.md` reopens research.
 
 **Objective:** Turn the Capo product prompt into sourced recommendations for ACP, prior art, stack, subscription connectors, local models, memory, runtime/tunnel, and input surfaces.
 
@@ -44,7 +44,7 @@ workpads/research/references.md
 
 ## architecture
 
-**Prerequisites:** Research gate passed, unless doing architecture discovery in parallel under `TASKS.md` Notes.
+**Prerequisites:** Research gate passed 2026-05-25.
 
 **Objective:** Convert research into durable boundaries, state/event contracts, capability model, runtime/tunnel plan, protocol/provider plan, memory architecture, and prototype plan.
 

@@ -16,6 +16,7 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 | `workpads/{workpad}/references.md` | External research |
 | `workpads/architecture/boundaries.md` | System boundaries and adapter contracts |
 | `.cursor/commands/next.md` / `.opencode/commands/next.md` | `/next` task-execution command |
+| `.agents/skills/next/SKILL.md` | Codex `$next` task-execution skill |
 
 ## Resolve Active Workpad
 

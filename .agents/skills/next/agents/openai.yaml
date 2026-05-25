@@ -1,0 +1,7 @@
+interface:
+  display_name: "Capo Next"
+  short_description: "Run the next Capo workpad task"
+  default_prompt: "Use $next to select, execute, verify, and record the next Capo workpad task."
+
+policy:
+  allow_implicit_invocation: true

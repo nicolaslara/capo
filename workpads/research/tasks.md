@@ -22,7 +22,7 @@ Evidence:
 
 ## R1 - Agent Client Protocol
 
-Status: pending
+Status: completed
 
 Questions:
 
@@ -37,9 +37,15 @@ Acceptance:
 - Links and SDK/version notes in `references.md`.
 - Recommendation: direct ACP implementation, adapter, or deferred compatibility.
 
+Evidence:
+
+- `workpads/research/findings/R1-acp.md`
+- `workpads/research/knowledge.md` R1 section
+- `workpads/research/references.md` ACP section
+
 ## R2 - Prior Art: Agent Orchestration
 
-Status: pending
+Status: completed
 
 Scope:
 
@@ -53,9 +59,36 @@ Acceptance:
 - Record architecture lessons, license notes, and failure modes.
 - Recommend which ideas Capo should adopt or reject.
 
+Evidence:
+
+- `workpads/research/findings/R2-prior-art.md` compares 9 projects.
+- `workpads/research/knowledge.md` R2 section
+- `workpads/research/references.md` Prior Art section
+
+## R2a - Prior Art Code Architecture Follow-Up
+
+Status: completed
+
+Context:
+
+- Initial R2 used primary docs and repo metadata.
+- We also need to inspect actual source architecture for the closest products.
+- Capo should not introduce its own user-facing modes; modes belong to subagents/adapters when present.
+
+Acceptance:
+
+- Inspect code architecture for OpenAI Codex, Cline, OpenHands, OpenCode, and Aider where feasible.
+- Record module boundaries, event/session/state model, runtime/process handling, tool/permission handling, adapters/providers, UI/controller split, and persistence/checkpointing.
+- Record what Capo should adopt or reject.
+- Include source paths, commit/hash/date observed, and license notes.
+
+Evidence:
+
+- `workpads/research/findings/R2-code-architecture.md`
+
 ## R3 - Subscription-Backed Agent Connectors
 
-Status: pending
+Status: completed
 
 Questions:
 
@@ -70,9 +103,15 @@ Acceptance:
 - Security boundary proposal.
 - Explicit unknowns and product/legal caveats.
 
+Evidence:
+
+- `workpads/research/findings/R3-subscriptions.md`
+- `workpads/research/knowledge.md` R3 section
+- `workpads/research/references.md` Subscription Connectors section
+
 ## R4 - Stack Choice: Rust, Python, Or Hybrid
 
-Status: pending
+Status: completed
 
 Questions:
 
@@ -86,9 +125,15 @@ Acceptance:
 - Dependency candidates and license notes.
 - Build/test implications recorded.
 
+Evidence:
+
+- `workpads/research/findings/R4-R6-stack-runtime.md`
+- `workpads/research/knowledge.md` R4 section
+- `workpads/research/references.md` Stack, Runtime, Tunnel, Sandboxing section
+
 ## R5 - Memory Systems
 
-Status: pending
+Status: completed
 
 Scope:
 
@@ -102,9 +147,15 @@ Acceptance:
 - Data ownership and export story.
 - Recommendation for layered/fractional memory direction.
 
+Evidence:
+
+- `workpads/research/findings/R5-memory.md`
+- `workpads/research/knowledge.md` R5 section
+- `workpads/research/references.md` Memory section
+
 ## R6 - Runtime And Tunnel Options
 
-Status: pending
+Status: completed
 
 Scope:
 
@@ -118,9 +169,15 @@ Acceptance:
 - Runtime/tunnel matrix with security and operational tradeoffs.
 - Recommendation for prototype and near-term v1.
 
+Evidence:
+
+- `workpads/research/findings/R4-R6-stack-runtime.md`
+- `workpads/research/knowledge.md` R6 section
+- `workpads/research/references.md` Stack, Runtime, Tunnel, Sandboxing section
+
 ## R7 - Input Surfaces: CLI, Dashboard, Mobile, Voice
 
-Status: pending
+Status: completed
 
 Questions:
 
@@ -134,12 +191,24 @@ Acceptance:
 - Voice pipeline options and privacy notes.
 - Dashboard minimum state list.
 
+Evidence:
+
+- `workpads/research/findings/R7-input-surfaces.md`
+- `workpads/research/knowledge.md` R7 section
+- `workpads/research/references.md` Input Surfaces section
+
 ## R8 - Research Gate Review
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - `knowledge.md` contains research gate decision.
 - Open questions are listed with owners or defer decisions.
 - Architecture workpad has enough evidence to start.
+
+Evidence:
+
+- Research gate passed in `workpads/research/knowledge.md`.
+- Architecture inputs and open questions recorded in `workpads/research/knowledge.md`.
+- `TASKS.md` active queue advanced to `architecture`.
