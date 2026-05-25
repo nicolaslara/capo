@@ -115,6 +115,34 @@ Implementation implications:
 - UI and voice must depend on read models and command envelopes, not live process state.
 - Review pass added fake/static variants for each scaffold boundary, an explicit adapter tool-call loop, and a runtime/tunnel separation where Tailscale and SSH stay in connectivity instead of runtime execution.
 
+## A2 - State Model And Event Log
+
+Status: completed on 2026-05-25.
+
+Decision:
+
+- Use `workpads/architecture/state-model.md` as the implementation-facing state architecture artifact.
+- SQLite is the prototype source of truth for operational state: projects, agents, sessions, runs, turns, items, tool calls, permissions, evidence, evaluations, checkpoints, commands, projections, raw-event indexes, and recovery attempts.
+- Markdown workpads remain the human-readable planning source. Capo stores workpad paths and observed status snapshots, but its own scheduling state is `capo_execution_status`.
+- Large raw streams, logs, prompts, tool inputs/outputs, diffs, reviews, checkpoints, and summaries are file artifacts referenced by SQLite rows.
+- Read models are rebuildable from events and artifacts; UI/dashboard/mobile/voice surfaces use read models and Capo event sequence IDs, not adapter IDs, for dedupe.
+
+Restart and replay direction:
+
+- Startup recovery replays unprojected events, scans live-looking sessions/runs, probes runtime and adapter health, emits recovery events, and only then serves input surfaces.
+- Recovery is append-only. It emits new `run.recovered`, `run.orphaned`, `run.exited`, `recovery.started`, and `recovery.completed` events instead of editing history.
+- Pending permission requests survive restart and remain visible through `PermissionQueue`.
+- Generic streaming dedupe is defined conservatively; ACP-specific `session/load` replay and partial-stream identity rules remain A2a.
+
+Review findings accepted:
+
+- Added `tool.result_delivered` so the fake-agent e2e flow can prove tool-result delivery back into adapters.
+- Added concrete prototype tables for evidence, evaluations, memory refs, permission requests, and recovery attempts.
+- Replaced the undefined recovery epoch idea with explicit recovery attempt records and idempotency keys.
+- Split observed workpad status from Capo execution status to preserve markdown authority.
+- Added interrupt and stop event families needed by the prototype minimum.
+- Updated routing docs so future agents load `state-model.md` after A2.
+
 ## Architecture Gate
 
 Status: not passed.

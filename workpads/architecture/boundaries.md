@@ -554,6 +554,8 @@ The prototype e2e flow should be explicit:
 
 Persists operational truth.
 
+Detailed entity, event, read-model, SQLite, artifact, and restart-recovery design lives in `state-model.md`.
+
 Prototype store:
 
 - SQLite event log

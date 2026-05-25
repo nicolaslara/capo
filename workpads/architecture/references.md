@@ -39,6 +39,10 @@ To research:
 
 ## State And Memory
 
+Local architecture artifacts:
+
+- State model: `state-model.md` (created 2026-05-25)
+
 To research:
 
 - SQLite event sourcing patterns

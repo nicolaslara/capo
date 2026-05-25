@@ -58,12 +58,14 @@ workpads/architecture/tasks.md
 workpads/architecture/knowledge.md
 workpads/architecture/references.md
 workpads/architecture/boundaries.md
+workpads/architecture/state-model.md
 workpads/research/knowledge.md
 ```
 
 **Quick nav:**
 
 - `boundaries.md` system boundary map and initial contracts
+- `state-model.md` operational entities, event log, read models, SQLite/files layout, and restart recovery
 - `tasks.md` A0-A8: event model, capability model, runtime, security, prototype plan
 - `knowledge.md` Architecture gate section
 
@@ -90,6 +92,7 @@ workpads/prototype/tasks.md
 workpads/prototype/knowledge.md
 workpads/prototype/references.md
 workpads/architecture/boundaries.md
+workpads/architecture/state-model.md
 workpads/architecture/knowledge.md
 ```
 
@@ -121,6 +124,7 @@ workpads/features/tasks.md
 workpads/features/knowledge.md
 workpads/features/references.md
 workpads/architecture/boundaries.md
+workpads/architecture/state-model.md
 workpads/prototype/knowledge.md
 ```
 
@@ -147,6 +151,7 @@ workpads/dogfood/references.md
 workpads/prototype/spec.md
 workpads/prototype/knowledge.md
 workpads/architecture/boundaries.md
+workpads/architecture/state-model.md
 ```
 
 **Rules:**

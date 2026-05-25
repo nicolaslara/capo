@@ -1,0 +1,667 @@
+# Capo State Model And Event Log
+
+## Objective
+
+Define the prototype state model Capo will implement first: durable entities, event types, read models, restart recovery behavior, and SQLite/filesystem layout.
+
+This is the A2 architecture artifact. It refines the `StateStore` boundary from `boundaries.md` into an implementation-facing schema plan without locking exact SQL migrations yet.
+
+## Design Rules
+
+- SQLite is the prototype source of truth for operational state.
+- Markdown workpads remain the human-readable planning source; SQLite references them but does not silently rewrite them in v0.
+- Capo events are append-only. Corrections are new events.
+- Capo-owned IDs are authoritative. External adapter/runtime/provider IDs are stored as references.
+- Raw adapter/runtime/provider records are inputs and artifacts, not the projected product state.
+- Read models are rebuildable from events plus artifacts.
+- Projection code must tolerate duplicate raw inputs by using idempotency keys and external references.
+- A2 defines the generic model; ACP-specific replay and partial-streaming details remain in A2a.
+
+## Storage Authority
+
+| Fact type | Authority | Notes |
+| --- | --- | --- |
+| Project registration | SQLite | Points at repo/workpad paths. |
+| Workpad task text/status | Markdown files | Capo stores path, heading anchor, and observed workpad status snapshots. |
+| Agent configuration | SQLite | Includes adapter/runtime/provider/capability profile IDs. |
+| Session/run/turn lifecycle | SQLite events | Read models are projections. |
+| Streaming messages/items/tool calls | SQLite events | Raw chunks may also be artifact records. |
+| Runtime stdout/stderr/PTY logs | File artifacts plus event pointers | Avoid unbounded blobs in event rows. |
+| Raw adapter events | File artifacts or raw-event table | Used for replay/debug/dedupe, not UI truth. |
+| Capability grants and permission decisions | SQLite events | A3 will expand exact scopes. |
+| Human decisions and review/evidence | SQLite events plus artifacts | Links back to workpad evidence where applicable. |
+| Derived memory | Memory layer | Must reference event/file provenance. |
+| Recovery attempts | SQLite events plus recovery metadata | Used only to make restart reconciliation idempotent. |
+
+## Core Entities
+
+### Project
+
+Represents a repository/workspace under Capo control.
+
+Fields:
+
+- `project_id`
+- `name`
+- `workspace_root`
+- `workpad_root?`
+- `default_branch?`
+- `created_at`
+- `status`
+
+Prototype status values: `active`, `archived`.
+
+### Task
+
+Represents a user-visible work item, often mirrored from a workpad heading.
+
+Fields:
+
+- `task_id`
+- `project_id`
+- `source_kind`: `workpad`, `manual`, `external`
+- `source_ref?`: markdown path plus heading or external tracker reference
+- `title`
+- `capo_execution_status`
+- `workpad_status_observed?`
+- `active_session_id?`
+- `created_at`
+- `updated_at`
+
+Prototype `capo_execution_status` values: `pending`, `active`, `blocked`, `reviewing`, `completed`, `canceled`.
+
+Prototype `workpad_status_observed` values mirror the markdown source text when the source is a workpad. Capo does not treat an observed workpad status as permission to rewrite the markdown file.
+
+### Agent
+
+Represents a configured worker identity Capo can start and inspect.
+
+Fields:
+
+- `agent_id`
+- `project_id?`
+- `name`
+- `adapter_id`
+- `runtime_target_id`
+- `provider_id`
+- `capability_profile_id`
+- `metadata`
+- `status`
+
+Prototype status values: `available`, `running`, `paused`, `unhealthy`, `disabled`.
+
+### Session
+
+Durable conversation/execution context between Capo and one agent.
+
+Fields:
+
+- `session_id`
+- `project_id`
+- `task_id?`
+- `agent_id`
+- `title`
+- `status`
+- `external_session_ref?`
+- `created_at`
+- `updated_at`
+- `last_sequence`
+
+Prototype status values: `starting`, `active`, `waiting_for_input`, `waiting_for_permission`, `canceling`, `completed`, `failed`, `canceled`, `recovering`.
+
+### Run
+
+One execution attempt inside a session. A session can have multiple runs after restart, retry, provider switch, or adapter relaunch.
+
+Fields:
+
+- `run_id`
+- `session_id`
+- `runtime_process_ref?`
+- `adapter_instance_ref?`
+- `started_at`
+- `ended_at?`
+- `exit_status?`
+- `status`
+- `recovery_of_run_id?`
+
+Prototype status values: `starting`, `running`, `stopping`, `exited`, `failed`, `orphaned`, `recovered`.
+
+### Turn
+
+One controller/user instruction and the resulting agent activity.
+
+Fields:
+
+- `turn_id`
+- `session_id`
+- `run_id?`
+- `origin_command_id?`
+- `role`: `user`, `capo`, `agent`, `system`
+- `status`
+- `created_at`
+- `completed_at?`
+
+Prototype status values: `open`, `streaming`, `waiting_for_tool`, `waiting_for_permission`, `completed`, `failed`, `canceled`.
+
+### Item
+
+Streamable content inside a turn.
+
+Fields:
+
+- `item_id`
+- `turn_id`
+- `kind`
+- `status`
+- `ordinal`
+- `summary?`
+- `artifact_id?`
+- `external_item_ref?`
+
+Prototype kinds:
+
+- `message`
+- `reasoning`
+- `plan`
+- `tool_call`
+- `tool_result`
+- `command_output`
+- `file_change`
+- `diff`
+- `checkpoint`
+- `summary`
+- `error`
+
+Prototype status values: `started`, `streaming`, `completed`, `failed`, `redacted`, `superseded`.
+
+### ToolCall
+
+Tracks Capo-exposed, adapter-native, or runtime tool use.
+
+Fields:
+
+- `tool_call_id`
+- `session_id`
+- `turn_id?`
+- `item_id?`
+- `tool_name`
+- `tool_origin`: `capo`, `adapter_native`, `runtime`, `provider_native`
+- `permission_decision_id?`
+- `status`
+- `started_at?`
+- `completed_at?`
+- `latency_ms?`
+- `input_artifact_id?`
+- `output_artifact_id?`
+- `external_tool_ref?`
+
+Prototype status values: `requested`, `approved`, `started`, `output`, `completed`, `failed`, `denied`, `observed_only`.
+
+### PermissionDecision
+
+Durable record of a policy decision, even when the prototype allows everything.
+
+Fields:
+
+- `permission_decision_id`
+- `request_id`
+- `session_id?`
+- `run_id?`
+- `tool_call_id?`
+- `capability_profile_id`
+- `decision`: `allow`, `reject`
+- `persistence`: `once`, `always`, `until_revoked`, `until_session_end`
+- `source`: `allow_all_local`, `static_policy`, `user`, `security_agent`
+- `scope`
+- `expires_at?`
+- `revoked_at?`
+
+A3 owns the full scope vocabulary and ACP option mapping.
+
+### PermissionRequest
+
+Durable pending approval or policy-decision input.
+
+Fields:
+
+- `permission_request_id`
+- `session_id?`
+- `run_id?`
+- `tool_call_id?`
+- `capability_profile_id`
+- `scope`
+- `risk`
+- `source`: `capo`, `adapter`, `runtime`, `tool`
+- `adapter_options?`: provider/protocol-native options such as ACP approval choices
+- `status`: `pending`, `decided`, `stale`, `canceled`
+- `created_at`
+- `decided_at?`
+
+### Artifact
+
+Pointer to content that should not live directly in event payloads.
+
+Fields:
+
+- `artifact_id`
+- `project_id`
+- `session_id?`
+- `run_id?`
+- `kind`
+- `uri`
+- `content_hash`
+- `size_bytes`
+- `redaction_state`
+- `created_at`
+
+Prototype kinds: `raw_adapter_event`, `runtime_log`, `prompt`, `tool_input`, `tool_output`, `diff`, `review`, `evidence`, `checkpoint`, `summary`.
+
+### Evidence
+
+Human or automated proof attached to a task, session, run, or evaluation.
+
+Fields:
+
+- `evidence_id`
+- `project_id`
+- `task_id?`
+- `session_id?`
+- `run_id?`
+- `kind`: `test`, `smoke`, `review`, `manual_note`, `artifact`, `external_link`
+- `artifact_id?`
+- `source_ref?`
+- `confidence`
+- `created_at`
+
+### EvaluationRecord
+
+Assessment of whether work met criteria and how an agent performed.
+
+Fields:
+
+- `evaluation_id`
+- `project_id`
+- `task_id?`
+- `session_id?`
+- `run_id?`
+- `status`
+- `criteria`
+- `result`
+- `reviewer`
+- `evidence_id?`
+- `created_at`
+
+### RecoveryAttempt
+
+One startup reconciliation pass.
+
+Fields:
+
+- `recovery_attempt_id`
+- `started_at`
+- `completed_at?`
+- `status`
+- `emitted_sequence_start?`
+- `emitted_sequence_end?`
+- `notes`
+
+## Capo Event Envelope
+
+Every event row uses the cross-cutting envelope from `boundaries.md`:
+
+```text
+CapoEvent {
+  event_id,
+  sequence,
+  occurred_at,
+  actor,
+  project_id,
+  task_id?,
+  agent_id?,
+  session_id?,
+  run_id?,
+  turn_id?,
+  item_id?,
+  kind,
+  payload,
+  idempotency_key?,
+  external_ref?,
+  redaction_state,
+}
+```
+
+Additional storage fields:
+
+- `schema_version`
+- `causation_id?`: command/event that caused this event
+- `correlation_id?`: command/session/recovery flow this event belongs to
+- `payload_hash`
+- `recorded_at`
+
+Uniqueness rules:
+
+- `sequence` is globally monotonic per Capo database.
+- `event_id` is globally unique.
+- `(project_id, idempotency_key)` is unique when `idempotency_key` is present.
+- `(adapter_id, external_ref)` can be unique in adapter-specific raw-event indexes when the adapter provides stable refs.
+- `payload_hash` is not an identity by itself; it only supports diagnostics.
+
+## Prototype Event Types
+
+### Project And Task
+
+| Event kind | Payload summary | Projects to |
+| --- | --- | --- |
+| `project.registered` | Name, workspace root, workpad root | `projects` |
+| `project.archived` | Reason | `projects` |
+| `task.discovered` | Source kind/ref, title, initial execution status | `tasks` |
+| `task.execution_status_changed` | Old/new Capo execution status, reason | `tasks` |
+| `task.workpad_status_observed` | Source ref, observed markdown status text | `tasks` |
+| `task.evidence_recorded` | Evidence artifact/source refs | `tasks`, `evidence` |
+
+### Agent And Session
+
+| Event kind | Payload summary | Projects to |
+| --- | --- | --- |
+| `agent.registered` | Adapter/runtime/provider/capability IDs | `agents` |
+| `agent.status_changed` | Old/new status, health note | `agents` |
+| `session.started` | Agent, task, title, external session ref | `sessions` |
+| `session.status_changed` | Old/new status, reason | `sessions` |
+| `session.summary_updated` | Summary artifact or short text | `sessions` |
+| `session.completed` | Outcome, evidence refs | `sessions`, `tasks` |
+| `session.failed` | Error, recovery recommendation | `sessions` |
+
+### Run And Runtime
+
+| Event kind | Payload summary | Projects to |
+| --- | --- | --- |
+| `run.started` | Runtime target, command metadata, process ref | `runs`, `sessions` |
+| `run.output_observed` | Stream/channel, artifact ref, byte range | `runs`, `items` |
+| `run.health_changed` | Health/status details | `runs`, `agents` |
+| `run.interrupt_requested` | Actor, target, reason | `runs`, `sessions` |
+| `run.interrupt_sent` | Runtime process ref, result metadata | `runs` |
+| `run.interrupt_failed` | Error, retryability | `runs`, `sessions` |
+| `run.stop_requested` | Actor, target, reason, force flag | `runs`, `sessions` |
+| `run.terminate_sent` | Runtime process ref, escalation level | `runs` |
+| `run.terminate_failed` | Error, retryability | `runs`, `sessions` |
+| `run.exited` | Exit status, signal, reason | `runs`, `sessions` |
+| `run.orphaned` | Restart detected process without owner | `runs` |
+| `run.recovered` | New run mapped to previous state | `runs`, `sessions` |
+
+### Command, Turn, And Items
+
+| Event kind | Payload summary | Projects to |
+| --- | --- | --- |
+| `command.received` | Command envelope metadata | `commands` |
+| `command.accepted` | Target IDs, normalized intent | `commands` |
+| `command.rejected` | Reason and safe detail | `commands` |
+| `command.completed` | Result status and produced refs | `commands` |
+| `turn.started` | Role, prompt artifact, adapter turn ref | `turns` |
+| `item.started` | Kind, ordinal, external item ref | `items` |
+| `item.delta` | Append/update patch, content artifact ref | `items` |
+| `item.completed` | Final content/ref/status | `items` |
+| `item.failed` | Error payload | `items` |
+| `turn.completed` | Stop reason, summary refs | `turns`, `sessions` |
+| `turn.canceled` | Actor, reason | `turns`, `sessions` |
+
+### Tools And Permissions
+
+| Event kind | Payload summary | Projects to |
+| --- | --- | --- |
+| `permission.requested` | Scope/risk/source request | `permission_requests`, `permission_queue` |
+| `permission.decided` | Decision, persistence, source, expiry | `permission_decisions` |
+| `permission.revoked` | Grant/decision ID, reason | `permission_decisions` |
+| `tool.call_requested` | Tool name, origin, input artifact/ref | `tool_calls`, `items` |
+| `tool.call_started` | Execution metadata | `tool_calls` |
+| `tool.output_observed` | Output artifact/ref | `tool_calls`, `items` |
+| `tool.call_completed` | Result metadata, output artifact/ref | `tool_calls`, `items` |
+| `tool.call_failed` | Error and retryability | `tool_calls`, `items` |
+| `tool.result_delivered` | Adapter delivery status for a tool result | `tool_calls`, `items` |
+
+### Memory, Evaluation, And Checkpoints
+
+| Event kind | Payload summary | Projects to |
+| --- | --- | --- |
+| `memory.record_ingested` | Source refs, provenance | `memory_refs` |
+| `memory.record_invalidated` | Record ID, reason | `memory_refs` |
+| `evaluation.requested` | Criteria and target | `evaluations` |
+| `evaluation.recorded` | Result, reviewer, evidence refs | `evaluations` |
+| `evidence.recorded` | Evidence kind, artifact/source refs, confidence | `evidence` |
+| `checkpoint.created` | Kind, artifact refs, recovery instructions | `checkpoints` |
+| `checkpoint.restored` | Checkpoint ID, actor, result | `checkpoints`, `sessions` |
+| `recovery.started` | Startup recovery attempt and scan inputs | `recovery_attempts` |
+| `recovery.completed` | Recovery outcome and emitted event range | `recovery_attempts` |
+
+## Read Models
+
+Read models are query surfaces for CLI/dashboard/mobile/voice. They are not independent truth.
+
+### ProjectReadModel
+
+Includes:
+
+- Project metadata.
+- Active task counts by status.
+- Active sessions and agent counts.
+- Latest evidence/review status.
+- Workpad path health.
+
+### TaskReadModel
+
+Includes:
+
+- Title, source ref, status.
+- Acceptance/evidence refs when known.
+- Active session/run/agent.
+- Latest summary.
+- Pending permissions.
+- Review state.
+
+### AgentReadModel
+
+Includes:
+
+- Agent name, adapter, runtime target, provider.
+- Health/status.
+- Capability profile summary.
+- Current session/run/turn.
+- Recent tool calls.
+- Known adapter/provider limitations.
+
+### SessionReadModel
+
+Includes:
+
+- Session title/status/task/agent.
+- Run status and restart/recovery markers.
+- Current turn status.
+- Ordered items with final or streaming state.
+- Latest summary, blockers, pending permissions, recent tool calls.
+- External refs visible for debugging but not used as display identity.
+
+### PermissionQueue
+
+Includes:
+
+- Pending permission requests.
+- Scope/risk/source.
+- Affected session/run/tool.
+- Staleness/restart markers.
+- Decision history.
+
+### EventStream
+
+Includes:
+
+- Ordered events after a sequence.
+- Optional filters: project/task/session/run/agent/kind.
+- Projection watermark so clients can detect whether read models have caught up.
+
+## SQLite Prototype Layout
+
+Database root:
+
+```text
+.capo/
+  capo.sqlite
+  artifacts/
+    raw/
+    logs/
+    prompts/
+    tools/
+    diffs/
+    reviews/
+    checkpoints/
+  exports/
+```
+
+The default local path is project-local `.capo/` for dogfooding. A later server mode can move the same layout under a user or server data directory.
+
+Minimum tables:
+
+```text
+schema_migrations(version, applied_at)
+events(sequence, event_id, schema_version, occurred_at, recorded_at, actor, project_id, task_id, agent_id, session_id, run_id, turn_id, item_id, kind, payload_json, payload_hash, idempotency_key, external_ref_json, redaction_state, causation_id, correlation_id)
+raw_events(raw_event_id, source, adapter_id, provider_id, runtime_id, external_ref_json, event_id, artifact_id, observed_at, payload_hash)
+artifacts(artifact_id, project_id, session_id, run_id, kind, uri, content_hash, size_bytes, redaction_state, created_at)
+projections(name, last_sequence, updated_at, status, error)
+projects(project_id, name, workspace_root, workpad_root, status, updated_at)
+tasks(task_id, project_id, source_kind, source_ref_json, title, capo_execution_status, workpad_status_observed, active_session_id, updated_at)
+agents(agent_id, project_id, name, adapter_id, runtime_target_id, provider_id, capability_profile_id, status, metadata_json, updated_at)
+sessions(session_id, project_id, task_id, agent_id, title, status, external_session_ref_json, latest_summary, last_sequence, updated_at)
+runs(run_id, session_id, runtime_process_ref_json, adapter_instance_ref_json, status, started_at, ended_at, exit_status_json, recovery_of_run_id, updated_at)
+turns(turn_id, session_id, run_id, origin_command_id, role, status, created_at, completed_at)
+items(item_id, turn_id, kind, status, ordinal, summary, artifact_id, external_item_ref_json, updated_at)
+tool_calls(tool_call_id, session_id, turn_id, item_id, tool_name, tool_origin, permission_decision_id, status, started_at, completed_at, latency_ms, input_artifact_id, output_artifact_id, external_tool_ref_json)
+permission_decisions(permission_decision_id, request_id, session_id, run_id, tool_call_id, capability_profile_id, decision, persistence, source, scope_json, expires_at, revoked_at, created_at)
+permission_requests(permission_request_id, session_id, run_id, tool_call_id, capability_profile_id, scope_json, risk, source, adapter_options_json, status, created_at, decided_at)
+checkpoints(checkpoint_id, project_id, session_id, run_id, kind, artifact_id, created_at, restored_at)
+commands(command_id, project_id, actor_id, origin, target_json, intent, status, idempotency_key, received_at, completed_at)
+evidence(evidence_id, project_id, task_id, session_id, run_id, kind, artifact_id, source_ref_json, confidence, created_at)
+evaluations(evaluation_id, project_id, task_id, session_id, run_id, status, criteria_json, result_json, reviewer, evidence_id, created_at)
+memory_refs(memory_ref_id, project_id, source_event_id, source_artifact_id, memory_record_id, status, provenance_json, created_at)
+recovery_attempts(recovery_attempt_id, started_at, completed_at, status, emitted_sequence_start, emitted_sequence_end, notes_json)
+```
+
+Minimum indexes:
+
+- `events(sequence)`
+- `events(project_id, sequence)`
+- `events(session_id, sequence)`
+- `events(kind, sequence)`
+- `events(project_id, idempotency_key)` unique where idempotency key is not null
+- `raw_events(source, payload_hash)`
+- `raw_events(adapter_id, external_ref_json)` where stable external refs exist
+- `items(turn_id, ordinal)`
+- `tool_calls(session_id, status)`
+- `permission_requests(status, created_at)`
+- `permission_decisions(session_id, revoked_at)`
+- `evidence(task_id, created_at)`
+- `recovery_attempts(started_at)`
+
+## Artifact Rules
+
+- Event payloads should stay small and structured.
+- Large text, logs, raw JSONL, diffs, binary data, and long transcripts become artifacts.
+- Artifact paths are relative to `.capo/artifacts/` unless explicitly external.
+- Every artifact records a content hash.
+- Artifacts that may contain secrets must carry `redaction_state`: `unknown`, `redacted`, `contains_sensitive`, or `safe`.
+- Raw voice transcripts are not retained by default; if retained for a reviewed feature, they must be explicit artifacts with sensitive redaction state.
+
+## Projection Rules
+
+- Event append and projection watermark update happen in one transaction when synchronous projection is used.
+- If projection fails, the event stays committed and `projections.status` records the failure.
+- On startup, Capo checks every projection watermark and replays events after `last_sequence`.
+- Rebuild is supported by clearing read-model tables and replaying events from sequence `1`.
+- UI clients subscribe from a sequence and use read models for snapshots.
+- UI state dedupe keys are Capo `sequence` and `event_id`, not adapter IDs.
+- `PermissionQueue` is a read model over `permission_requests` joined to decisions and affected sessions/tools.
+
+## Workpad Status Boundary
+
+Capo separates planning status from execution status:
+
+- Markdown owns workpad task text and the workpad's visible `Status:` line until an explicit export/update feature is implemented.
+- SQLite owns `capo_execution_status`, which answers whether Capo is actively working, blocked, reviewing, or done with its own execution attempt.
+- `task.workpad_status_observed` records what Capo last read from markdown.
+- `task.execution_status_changed` records Capo's operational status for scheduling, dashboard, and voice answers.
+- When a future feature writes back to markdown, it must emit an explicit export event rather than silently treating the projection table as the workpad source of truth.
+
+## Restart Recovery
+
+Startup recovery follows this order:
+
+1. Open SQLite and acquire the single-writer lock.
+2. Run migrations.
+3. Insert `recovery.started` with a new `recovery_attempt_id`.
+4. Load projection watermarks and replay unprojected events.
+5. Load sessions/runs with statuses that imply live work: `starting`, `active`, `waiting_for_input`, `waiting_for_permission`, `canceling`, `recovering`, `running`, `stopping`.
+6. Ask `RuntimeRunner.health(...)` for known runtime process refs.
+7. Ask each relevant `AgentAdapter` for attach/load capability and external session health when supported.
+8. For every live-looking run:
+   - If the process is alive and adapter can attach, emit `run.recovered` and keep the session active.
+   - If the process is alive but adapter cannot attach, emit `run.orphaned` and mark the session `recovering` or `failed` depending on policy.
+   - If the process is gone and no terminal event exists, emit `run.exited` with unknown exit detail and mark the session `failed` or `waiting_for_input`.
+   - If the session was waiting for permission, keep the permission queue pending but mark stale decisions as stale in the read model.
+9. Write `checkpoint.created` for recovery snapshots when enough state exists to resume safely.
+10. Emit `recovery.completed` with the emitted event sequence range.
+11. Start serving input surfaces only after projections and recovery events have reached a consistent sequence.
+
+Recovery invariants:
+
+- No adapter raw replay mutates read models directly.
+- Recovery emits new Capo events instead of editing old rows.
+- A repeated restart must not create a second run recovery event for the same `(run_id, recovery_attempt_id, observed_runtime_state_hash)` idempotency key.
+- Pending human approvals must survive restart.
+- A session can be inspectable even when it is not resumable.
+
+## Streaming And Dedupe Baseline
+
+A2 uses a conservative baseline that A2a will refine for ACP:
+
+- Each adapter event should produce a stable `idempotency_key` when possible.
+- Streaming chunks append to an `item_id` chosen by Capo when the adapter cannot provide stable item IDs.
+- Finalization uses `item.completed`; repeated finalization with the same idempotency key is ignored.
+- Raw stream chunks may be artifacted for debugging, but UI projections render item state from Capo events.
+- Adapter replays are treated as input streams and run through the same idempotency path as live streams.
+- If the adapter cannot provide stable IDs, Capo uses `(session_id, turn_id, item ordinal, chunk ordinal, payload_hash)` as a best-effort key and records confidence as low in the raw event metadata.
+
+Known gap:
+
+- ACP `session/load` and `session/update` semantics need deeper research before this baseline becomes a final protocol-specific replay design. That is A2a.
+
+## Prototype E2E State Flow
+
+The first fake-agent e2e test should prove this flow:
+
+1. Register a project and fake agent.
+2. Start a session for a task.
+3. Append `command.received` and `command.accepted`.
+4. Start a run and turn.
+5. Emit item streaming events.
+6. Emit a fake tool call, permission decision, tool result, and `tool.result_delivered`.
+7. Complete the turn and session.
+8. Restart the controller using the same SQLite database.
+9. Rebuild read models from events.
+10. Assert the session, items, tool call, permission decision, and evidence remain inspectable without duplicate UI items.
+
+## Open Questions For Later Tasks
+
+- A2a: exact ACP replay and partial-stream identity rules.
+- A3: complete capability scope vocabulary and approval persistence semantics.
+- A5/A5a: exact Codex/Claude event mapping and native tool observability limits.
+- A6: exact derived-memory schema and invalidation rules.
+- Prototype: whether `.capo/` is always project-local or can be configured through `CAPO_HOME` from the first scaffold.
+
+## A2 Gate Evidence
+
+A2 is complete when:
+
+- Prototype entities are named and scoped.
+- Prototype event kinds cover project/task/agent/session/run/turn/item/tool/permission/evaluation/checkpoint flows.
+- Prototype read models are specified.
+- SQLite and artifact layout are specified.
+- Restart recovery behavior is specified.
+- ACP-specific replay unknowns are explicitly deferred to A2a.

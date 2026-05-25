@@ -15,6 +15,7 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 | `workpads/{workpad}/knowledge.md` | Decisions and lessons |
 | `workpads/{workpad}/references.md` | External research |
 | `workpads/architecture/boundaries.md` | System boundaries and adapter contracts |
+| `workpads/architecture/state-model.md` | State entities, event log, read models, and restart recovery |
 | `.cursor/commands/next.md` / `.opencode/commands/next.md` | `/next` task-execution command |
 | `.agents/skills/next/SKILL.md` | Codex `$next` task-execution skill |
 
@@ -37,13 +38,14 @@ Before task work:
 1. `TASKS.md` -> active workpad
 2. `project.md`, `WORKING.md`, `workpads/WORKPADS.md`
 3. Active workpad `tasks.md`, `knowledge.md`, `references.md`
-4. `workpads/architecture/boundaries.md` for architecture, prototype, and feature work
-5. `workpads/prototype/spec.md` for prototype and dogfood work
-6. Pick a pending task and mark it `in_progress`
-7. Complete the acceptance criteria with the smallest correct change
-8. Record findings in `knowledge.md` and source links in `references.md`
-9. Review per `WORKING.md`
-10. Mark complete only after evidence is recorded
+4. `workpads/architecture/boundaries.md` for architecture, prototype, features, and dogfood work
+5. `workpads/architecture/state-model.md` for architecture, prototype, features, and dogfood work once A2 is complete
+6. `workpads/prototype/spec.md` for prototype and dogfood work
+7. Pick a pending task and mark it `in_progress`
+8. Complete the acceptance criteria with the smallest correct change
+9. Record findings in `knowledge.md` and source links in `references.md`
+10. Review per `WORKING.md`
+11. Mark complete only after evidence is recorded
 
 ## Git Rules
 

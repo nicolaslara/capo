@@ -31,16 +31,17 @@ Use this loop for `/next`, `$next`, and similar task execution. The concrete com
 2. Load `AGENTS.md`, `project.md`, `WORKING.md`, and `workpads/WORKPADS.md`.
 3. Load the active workpad's `tasks.md`, `knowledge.md`, and `references.md`.
 4. For architecture, prototype, features, or dogfood work, also load `workpads/architecture/boundaries.md`.
-5. For prototype or dogfood work, also load `workpads/prototype/spec.md`.
-6. Select a task by dependencies, risk, and testability.
-7. Mark the task `in_progress` before doing work.
-8. Complete acceptance criteria with the smallest correct change.
-9. Verify per the task's evidence standard.
-10. Record findings, decisions, and open questions in the workpad or project docs.
-11. Assess confidence and use review subagents per thresholds below.
-12. Incorporate review feedback, record rejections, or ask the user when product-sensitive.
-13. Mark `completed` only when acceptance criteria and review requirements are satisfied.
-14. Before another `/next` pass: explicit commit decision - commit, or record why not.
+5. After A2 is complete, also load `workpads/architecture/state-model.md` for architecture, prototype, features, or dogfood work.
+6. For prototype or dogfood work, also load `workpads/prototype/spec.md`.
+7. Select a task by dependencies, risk, and testability.
+8. Mark the task `in_progress` before doing work.
+9. Complete acceptance criteria with the smallest correct change.
+10. Verify per the task's evidence standard.
+11. Record findings, decisions, and open questions in the workpad or project docs.
+12. Assess confidence and use review subagents per thresholds below.
+13. Incorporate review feedback, record rejections, or ask the user when product-sensitive.
+14. Mark `completed` only when acceptance criteria and review requirements are satisfied.
+15. Before another `/next` pass: explicit commit decision - commit, or record why not.
 
 ## Verification
 
@@ -111,14 +112,15 @@ Prefer clear names. Comment non-obvious invariants: permission boundaries, recov
 | `WORKING.md` | This file |
 | `workpads/*/knowledge.md` | Workpad-specific decisions |
 | `workpads/architecture/boundaries.md` | Boundary contracts and architecture map |
+| `workpads/architecture/state-model.md` | State entities, event log, read models, and restart recovery |
 
 ## Phase Focus
 
 | Phase | Workpad | `/next` reads |
 | --- | --- | --- |
-| Now | `research` | `research/tasks.md`, `knowledge.md`, `references.md` |
-| Next | `architecture` | `architecture/tasks.md`, `knowledge.md`, `references.md`, `boundaries.md` |
-| Then | `prototype` | `prototype/spec.md`, `tasks.md`, `knowledge.md`, `references.md` |
+| Complete | `research` | `research/tasks.md`, `knowledge.md`, `references.md` |
+| Now | `architecture` | `architecture/tasks.md`, `knowledge.md`, `references.md`, `boundaries.md`, `state-model.md` |
+| Next | `prototype` | `prototype/spec.md`, `tasks.md`, `knowledge.md`, `references.md`, architecture artifacts |
 | Later | `features` | Feature-specific tasks after prototype |
 | Later | `dogfood` | Migration of Capo project execution into Capo |
 

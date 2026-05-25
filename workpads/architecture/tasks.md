@@ -36,13 +36,18 @@ Evidence:
 
 ## A2 - State Model And Event Log
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Define entities, event types, and read models for prototype.
 - Specify restart recovery behavior.
 - Choose SQLite/files layout for prototype.
+
+Evidence:
+
+- `workpads/architecture/state-model.md`
+- `workpads/architecture/knowledge.md` A2 section
 
 ## A2a - ACP Streaming Replay And Dedupe Research
 
