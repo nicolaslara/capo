@@ -494,6 +494,36 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn memory_packets_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> StateResult<Vec<MemoryPacketProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT memory_packet_id, project_id, task_id, agent_id, session_id, run_id,
+                    turn_id, packet_artifact_id, purpose, updated_sequence
+             FROM memory_packet_refs
+             WHERE session_id = ?1
+             ORDER BY updated_sequence ASC, memory_packet_id ASC",
+        )?;
+        let rows = statement.query_map(params![session_id.as_str()], |row| {
+            Ok(MemoryPacketProjection {
+                memory_packet_id: MemoryPacketId::new(row.get::<_, String>(0)?),
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                task_id: optional_id(row.get::<_, Option<String>>(2)?),
+                agent_id: optional_id(row.get::<_, Option<String>>(3)?),
+                session_id: optional_id(row.get::<_, Option<String>>(4)?),
+                run_id: optional_id(row.get::<_, Option<String>>(5)?),
+                turn_id: row.get(6)?,
+                packet_artifact_id: row.get(7)?,
+                purpose: row.get(8)?,
+                updated_sequence: row.get(9)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn recent_events_for_session(
         &self,
         session_id: &SessionId,

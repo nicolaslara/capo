@@ -215,13 +215,22 @@ Evidence:
 
 ## P9 - Memory Packet And Context Provenance
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Build a source-linked memory packet from local events and markdown/workpad pointers.
 - Store a replayable packet artifact and attach it to a run/turn.
 - Inspect packet inclusion/exclusion reasons through read models.
+
+Evidence:
+
+- `crates/capo-memory/src/lib.rs`
+- `crates/capo-controller/src/lib.rs`
+- `crates/capo-state/src/lib.rs`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
 
 ## P10 - Restart Recovery And Replay
 

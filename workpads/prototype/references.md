@@ -128,3 +128,14 @@ Observed 2026-05-25.
 - Tool architecture source: `../architecture/tool-exposure.md`
 - Capability and permission architecture source: `../architecture/capability-permissions.md`
 - No new third-party dependencies were added for P8.
+
+## P9 Memory Packet And Context Provenance
+
+Observed 2026-05-25.
+
+- Source-linked memory packet builder and tests: `../../crates/capo-memory/src/lib.rs`
+- Fake controller packet attachment path: `../../crates/capo-controller/src/lib.rs`
+- SQLite memory packet read-model query: `../../crates/capo-state/src/lib.rs`
+- Memory architecture source: `../architecture/memory-architecture.md`
+- Tool/audit provenance source: `../architecture/tool-exposure.md`
+- No new third-party dependencies were added for P9.

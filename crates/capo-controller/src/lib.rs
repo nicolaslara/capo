@@ -13,7 +13,10 @@ use capo_core::{
     AgentId, CommandEnvelope, CommandIntent, EvidenceId, MemoryPacketId, ProjectId, RunId,
     SessionId, TaskId, ToolCallId, TurnId,
 };
-use capo_memory::{FakeMemoryPacketRequest, MemoryBackend};
+use capo_memory::{
+    MemoryBackend, MemoryCandidate, MemoryReviewState, MemorySensitivity, MemorySourceKind,
+    MemorySourceRef, SourceLinkedMemoryPacketRequest,
+};
 use capo_runtime::{FakeRuntimeStartRequest, RuntimeRunner};
 use capo_state::{
     AgentProjection, ArtifactRecord, EventKind, EventRecord, NewEvent, ProjectProjection,
@@ -217,12 +220,74 @@ impl FakeBoundaryController {
             tool_name: adapter_output.tool_name.clone(),
             input_summary: adapter_output.summary.clone(),
         });
-        let memory_packet = self.memory.build_packet(FakeMemoryPacketRequest {
-            memory_packet_id: memory_packet_id.clone(),
-            session_id: session_id.clone(),
-            goal_slug: slug(goal),
-            summary: adapter_output.summary.clone(),
-        });
+        let memory_packet = self.memory.build_source_linked_packet(
+            SourceLinkedMemoryPacketRequest {
+                memory_packet_id: memory_packet_id.clone(),
+                session_id: session_id.clone(),
+                run_id: run_id.to_string(),
+                turn_id: turn_id.to_string(),
+                purpose: "turn_context".to_string(),
+                budget_tokens: 256,
+                candidates: vec![
+                    MemoryCandidate {
+                        title: "Active task goal".to_string(),
+                        body: goal.to_string(),
+                        source: MemorySourceRef {
+                            source_kind: MemorySourceKind::Event,
+                            source_ref: format!("event-task-started-{}", session_id),
+                            anchor: Some("goal".to_string()),
+                            content_hash: stable_hash(goal.as_bytes()),
+                        },
+                        review_state: MemoryReviewState::Reviewed,
+                        sensitivity: MemorySensitivity::Internal,
+                        estimated_tokens: 32,
+                        inclusion_reason: "current task goal for this turn".to_string(),
+                    },
+                    MemoryCandidate {
+                        title: "Adapter summary".to_string(),
+                        body: adapter_output.summary.clone(),
+                        source: MemorySourceRef {
+                            source_kind: MemorySourceKind::Artifact,
+                            source_ref: tool_result.output_artifact_id.clone(),
+                            anchor: Some("summary".to_string()),
+                            content_hash: stable_hash(adapter_output.summary.as_bytes()),
+                        },
+                        review_state: MemoryReviewState::Reviewed,
+                        sensitivity: MemorySensitivity::Internal,
+                        estimated_tokens: 48,
+                        inclusion_reason: "latest session summary from tool output".to_string(),
+                    },
+                    MemoryCandidate {
+                        title: "Prototype workpad authority".to_string(),
+                        body: "Prototype task status and evidence live in workpads/prototype/tasks.md and knowledge.md.".to_string(),
+                        source: MemorySourceRef {
+                            source_kind: MemorySourceKind::Markdown,
+                            source_ref: "workpads/prototype/tasks.md".to_string(),
+                            anchor: Some("P9".to_string()),
+                            content_hash: stable_hash(b"workpads/prototype/tasks.md#P9"),
+                        },
+                        review_state: MemoryReviewState::Reviewed,
+                        sensitivity: MemorySensitivity::Internal,
+                        estimated_tokens: 36,
+                        inclusion_reason: "current workpad is the planning authority".to_string(),
+                    },
+                    MemoryCandidate {
+                        title: "Generated scratch note".to_string(),
+                        body: "Generated notes require review before packet inclusion.".to_string(),
+                        source: MemorySourceRef {
+                            source_kind: MemorySourceKind::Artifact,
+                            source_ref: format!("artifact-scratch-{}", session_id),
+                            anchor: None,
+                            content_hash: stable_hash(b"generated scratch note"),
+                        },
+                        review_state: MemoryReviewState::Generated,
+                        sensitivity: MemorySensitivity::Internal,
+                        estimated_tokens: 16,
+                        inclusion_reason: "should be excluded until reviewed".to_string(),
+                    },
+                ],
+            },
+        );
 
         self.state.record_artifact(ArtifactRecord {
             artifact_id: tool_result.output_artifact_id.clone(),
@@ -236,14 +301,25 @@ impl FakeBoundaryController {
             redaction_state: RedactionState::Safe,
         })?;
         self.state.record_artifact(ArtifactRecord {
-            artifact_id: memory_packet.artifact_id.clone(),
+            artifact_id: memory_packet.packet_artifact_id.clone(),
             project_id: Some(self.project_id.clone()),
             session_id: Some(session_id.clone()),
             run_id: Some(run_id.clone()),
             kind: "memory-packet".to_string(),
             uri: format!("artifacts/{}/memory-packet.md", session_id),
-            content_hash: "fake-memory-packet-hash".to_string(),
-            size_bytes: memory_packet.source_summary.len() as i64,
+            content_hash: stable_hash(memory_packet.packet_markdown.as_bytes()),
+            size_bytes: memory_packet.packet_markdown.len() as i64,
+            redaction_state: RedactionState::Safe,
+        })?;
+        self.state.record_artifact(ArtifactRecord {
+            artifact_id: memory_packet.explanation_artifact_id.clone(),
+            project_id: Some(self.project_id.clone()),
+            session_id: Some(session_id.clone()),
+            run_id: Some(run_id.clone()),
+            kind: "memory-explanation".to_string(),
+            uri: format!("artifacts/{}/memory-explanation.md", session_id),
+            content_hash: stable_hash(memory_packet.explanation_markdown.as_bytes()),
+            size_bytes: memory_packet.explanation_markdown.len() as i64,
             redaction_state: RedactionState::Safe,
         })?;
 
@@ -525,8 +601,11 @@ impl FakeBoundaryController {
             )
             .with_turn(turn_id.to_string())
             .with_payload(format!(
-                "{{\"packet_artifact_id\":\"{}\"}}",
-                memory_packet.artifact_id
+                "{{\"packet_artifact_id\":\"{}\",\"explanation_artifact_id\":\"{}\",\"included_count\":{},\"excluded_count\":{}}}",
+                memory_packet.packet_artifact_id,
+                memory_packet.explanation_artifact_id,
+                memory_packet.included.len(),
+                memory_packet.excluded.len()
             )),
             &[ProjectionRecord::MemoryPacketRef(
                 capo_state::MemoryPacketProjection {
@@ -537,7 +616,7 @@ impl FakeBoundaryController {
                     session_id: Some(session_id.clone()),
                     run_id: Some(run_id.clone()),
                     turn_id: Some(turn_id.to_string()),
-                    packet_artifact_id: Some(memory_packet.artifact_id),
+                    packet_artifact_id: Some(memory_packet.packet_artifact_id),
                     purpose: memory_packet.purpose,
                     updated_sequence: 0,
                 },
@@ -959,6 +1038,15 @@ fn escape_json(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+fn stable_hash(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1010,6 +1098,29 @@ mod tests {
                 "{expected_kind}"
             );
         }
+        let packets = controller
+            .state()
+            .memory_packets_for_session(&refs.session_id)
+            .expect("memory packet projection");
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].turn_id.as_deref(), Some("turn-fake-codex"));
+        assert_eq!(packets[0].run_id.as_ref(), Some(&refs.run_id));
+        assert_eq!(
+            packets[0].packet_artifact_id.as_deref(),
+            Some("artifact-memory-packet-packet-fake-codex")
+        );
+        let memory_event = observation
+            .recent_events
+            .iter()
+            .find(|event| event.kind == "memory.packet_built")
+            .expect("memory packet event");
+        assert!(memory_event.payload_json.contains("\"included_count\":3"));
+        assert!(memory_event.payload_json.contains("\"excluded_count\":1"));
+        assert!(
+            memory_event
+                .payload_json
+                .contains("explanation_artifact_id")
+        );
 
         let interrupted = controller
             .interrupt(&registration, &refs, "P3 smoke interrupt")

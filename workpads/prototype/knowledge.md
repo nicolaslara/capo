@@ -281,6 +281,33 @@ Follow-up:
 - Later P8/P10 hardening should add typed `tool_invocations`, `tool_definitions`, and `tool_observations` read models instead of carrying the extra lifecycle only as event rows.
 - P9 should use the tool/evidence outputs as memory packet provenance inputs.
 
+## P9 - Memory Packet And Context Provenance
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add source-linked packet building to `MemoryBackend::Fake` rather than adding a second memory backend before local provenance is proven.
+- Memory packet candidates carry title, body, source kind/ref/anchor/hash, review state, sensitivity, estimated tokens, and inclusion reason.
+- Packet selection includes reviewed non-secret candidates within budget and excludes generated, rejected/superseded/invalidated, secret, and over-budget candidates with explicit reasons.
+- Packet artifacts and explanation artifacts are rendered as markdown strings. The packet artifact is replayable prompt-input evidence; the explanation artifact records why candidates were included or excluded.
+- Fake controller task execution now builds a source-linked packet from current goal, tool output summary, and prototype workpad pointer, while excluding an unreviewed generated scratch note.
+- The controller records both packet and explanation artifact metadata and attaches the packet to the run/turn through the existing memory packet projection.
+- Add `memory_packets_for_session` to SQLite state so the attached packet can be inspected from read models.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+- Memory tests cover reviewed source inclusion, source refs and inclusion reasons, generated/secret/over-budget exclusion reasons, and no secret content in packet markdown.
+- Controller/state tests cover attached memory packet projection, run/turn refs, packet artifact ID, explanation artifact ID in the memory event, and included/excluded counts.
+
+Follow-up:
+
+- P10 should make memory packet attachment replay/idempotency robust across restart.
+- Future memory work should add typed memory record/source/read models rather than relying only on packet projection plus artifact metadata.
+
 ## Prototype Gate
 
 Status: not passed.
