@@ -19,6 +19,7 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 | `workpads/architecture/acp-replay-dedupe.md` | ACP streaming replay, `session/load`, and dedupe design |
 | `workpads/architecture/capability-permissions.md` | Capability profiles, scopes, grants, permissions, and ACP option mapping |
 | `workpads/architecture/runtime-tunnel.md` | Runtime runners, process lifecycle, tunnels, connectivity, and exposure policy |
+| `workpads/architecture/protocol-provider.md` | Codex, Claude Code, ACP adapter shape, provider connectors, and subscription policy |
 | `.cursor/commands/next.md` / `.opencode/commands/next.md` | `/next` task-execution command |
 | `.agents/skills/next/SKILL.md` | Codex `$next` task-execution skill |
 
@@ -46,12 +47,13 @@ Before task work:
 6. `workpads/architecture/acp-replay-dedupe.md` for ACP/protocol, state, prototype, features, and dogfood work once A2a is complete
 7. `workpads/architecture/capability-permissions.md` for permission, runtime, tool, protocol, prototype, features, and dogfood work once A3 is complete
 8. `workpads/architecture/runtime-tunnel.md` for runtime, tunnel, protocol, provider, prototype, features, and dogfood work once A4 is complete
-9. `workpads/prototype/spec.md` for prototype and dogfood work
-10. Pick a pending task and mark it `in_progress`
-11. Complete the acceptance criteria with the smallest correct change
-12. Record findings in `knowledge.md` and source links in `references.md`
-13. Review per `WORKING.md`
-14. Mark complete only after evidence is recorded
+9. `workpads/architecture/protocol-provider.md` for protocol, provider, adapter, prototype, features, and dogfood work once A5 is complete
+10. `workpads/prototype/spec.md` for prototype and dogfood work
+11. Pick a pending task and mark it `in_progress`
+12. Complete the acceptance criteria with the smallest correct change
+13. Record findings in `knowledge.md` and source links in `references.md`
+14. Review per `WORKING.md`
+15. Mark complete only after evidence is recorded
 
 ## Git Rules
 

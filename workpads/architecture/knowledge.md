@@ -231,6 +231,46 @@ Review findings accepted:
 - Replaced undefined environment profiles with `env_policy_json` for the prototype.
 - Changed runtime launch vocabulary from command/args to program/argv plus launch mode.
 
+## A5 - Protocol And Provider Plan
+
+Status: completed on 2026-05-25.
+
+Decision:
+
+- Use `workpads/architecture/protocol-provider.md` as the implementation-facing adapter/provider model.
+- First concrete adapters are `CodexExecAdapter` and `ClaudeCodeAdapter`; `FakeAdapter` remains the first e2e test adapter.
+- ACP remains an adapter boundary where Capo is the ACP client. Capo does not expose itself as an ACP agent/editor backend for the prototype.
+- Provider connectors store non-secret auth/provider/usage metadata and revocation instructions; they do not execute turns directly in v0.
+- Subscription-backed Codex and Claude Code connectors are local-only user-owned integrations. Hosted/shared Capo must use API, WIF, enterprise access-token, or vendor-approved organization flows.
+
+Adapter choices:
+
+- Codex prototype path uses `codex exec --json` through `LocalProcessRunner`, with Codex JSONL treated as adapter input and Capo's event log as truth.
+- Claude prototype path uses `claude -p --output-format stream-json` through `LocalProcessRunner`; `--bare` is reserved for deterministic API-key/scripted mode, not subscription OAuth, unless docs and smoke tests prove otherwise.
+- ACP prototype support uses stdio JSON-RPC and maps initialize/session/prompt/update/permission/cancel flows into Capo events, with A2a replay/dedupe and A3 permission mapping.
+
+Safety and productization:
+
+- Capo must not read, copy, persist, log, or sync vendor OAuth tokens, browser cookies, keychain entries, `.credentials.json`, ChatGPT browser storage, or Playwright storage state.
+- `credential_scope = user_local_subscription` implies `productization_allowed = local_only`.
+- User-local subscription connectors use `auth_ref_kind = vendor_cli_default_login` with empty `auth_ref`; secret handles are reserved for API/WIF/enterprise connectors.
+- `authorize_connector_use(...)` rejects local-only subscription connectors in hosted/shared deployment before any runtime request is created.
+- Browser automation and reverse-engineered private endpoints remain out of scope.
+
+Review-sensitive residual risks:
+
+- Exact Codex JSONL and Claude stream JSON field mapping needs fixture captures before implementation claims high confidence.
+- Native tool-call observability may be incomplete in both first adapters; A5a must define observed-only versus instrumented tool states.
+
+Review findings accepted:
+
+- Split adapter launch into `build_runtime_request(...)` and `attach_started_process(...)` so the controller/runtime own process start ordering.
+- Made `Agent` the owner of runtime/provider/capability binding; `AdapterConfig` is a reusable integration template.
+- Typed `auth_ref` so subscription connectors cannot point to vendor credential files or keychain records.
+- Added an explicit connector-use authorization gate and denial event before runtime launch.
+- Split ACP client calls from ACP client handlers.
+- Marked local absolute CLI paths as diagnostic observations only.
+
 ## Architecture Gate
 
 Status: not passed.

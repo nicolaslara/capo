@@ -24,6 +24,8 @@ This is the A2 architecture artifact. It refines the `StateStore` boundary from 
 | Project registration | SQLite | Points at repo/workpad paths. |
 | Workpad task text/status | Markdown files | Capo stores path, heading anchor, and observed workpad status snapshots. |
 | Agent configuration | SQLite | Includes adapter/runtime/provider/capability profile IDs. |
+| Adapter configuration and external session refs | SQLite events and read models | Detailed protocol/provider model lives in `protocol-provider.md`. |
+| Provider connector metadata | SQLite events and read models | Stores non-secret auth/provider metadata and revocation instructions, not raw credentials. |
 | Runtime targets and process refs | SQLite events and read models | Detailed runtime/tunnel model lives in `runtime-tunnel.md`. |
 | Connectivity endpoints | SQLite events and read models | Stores endpoint/tunnel metadata and redacted auth references, not raw secrets. |
 | Session/run/turn lifecycle | SQLite events | Read models are projections. |
@@ -85,14 +87,81 @@ Fields:
 - `agent_id`
 - `project_id?`
 - `name`
-- `adapter_id`
+- `adapter_config_id`
 - `runtime_target_id`
-- `provider_id`
+- `provider_connector_id`
 - `capability_profile_id`
 - `metadata`
 - `status`
 
 Prototype status values: `available`, `running`, `paused`, `unhealthy`, `disabled`.
+
+### AdapterConfig
+
+Configured concrete agent/protocol integration.
+
+Fields:
+
+- `adapter_config_id`
+- `project_id?`
+- `name`
+- `adapter_kind`: `codex_exec`, `claude_code`, `acp`, `fake`
+- `command_template`
+- `default_args`
+- `stdin_mode`
+- `stdout_format`
+- `stderr_policy`
+- `adapter_capabilities`
+- `version_observed?`
+- `status`
+- `created_at`
+- `updated_at`
+
+`AdapterConfig` is a reusable integration template. `Agent` owns runtime, provider connector, and capability binding for launch decisions.
+
+### ProviderConnector
+
+Non-secret provider/auth/usage metadata behind an adapter.
+
+Fields:
+
+- `provider_connector_id`
+- `project_id?`
+- `provider_kind`: `codex_subscription`, `claude_subscription`, `openai_api`, `anthropic_api`, `local_model`, `unknown`, `fake`
+- `credential_scope`: `user_local_subscription`, `api_key`, `wif`, `enterprise_access_token`, `local_model`, `none`
+- `productization_allowed`: `local_only`, `hosted_allowed`, `enterprise_only`, `experimental_only`
+- `auth_ref_kind`: `none`, `vendor_cli_default_login`, `secret_handle`, `wif_identity`, `enterprise_token_handle`, `local_endpoint`
+- `auth_ref?`
+- `account_label?`
+- `workspace_label?`
+- `usage_capability`
+- `revocation_instructions`
+- `redaction_policy`
+- `status`
+- `created_at`
+- `updated_at`
+
+Raw API keys, OAuth tokens, browser cookies, and vendor credential files are never stored in this table. User-local subscription connectors must use `auth_ref_kind = vendor_cli_default_login` with an empty `auth_ref`, not a filesystem or keychain reference.
+
+### AdapterSessionRef
+
+External session identity and adapter lifecycle metadata.
+
+Fields:
+
+- `adapter_session_ref_id`
+- `session_id`
+- `adapter_config_id`
+- `external_session_ref`
+- `external_turn_ref?`
+- `protocol_version?`
+- `adapter_state`
+- `raw_event_cursor?`
+- `attach_supported`
+- `resume_supported`
+- `load_supported`
+- `created_at`
+- `updated_at`
 
 ### Session
 
@@ -484,7 +553,7 @@ Uniqueness rules:
 - `sequence` is globally monotonic per Capo database.
 - `event_id` is globally unique.
 - `(project_id, idempotency_key)` is unique when `idempotency_key` is present.
-- `(adapter_id, external_ref)` can be unique in adapter-specific raw-event indexes when the adapter provides stable refs.
+- `(adapter_config_id, external_ref)` can be unique in adapter-specific raw-event indexes when the adapter provides stable refs.
 - `payload_hash` is not an identity by itself; it only supports diagnostics.
 
 ## Prototype Event Types
@@ -504,8 +573,22 @@ Uniqueness rules:
 
 | Event kind | Payload summary | Projects to |
 | --- | --- | --- |
-| `agent.registered` | Adapter/runtime/provider/capability IDs | `agents` |
+| `agent.registered` | Adapter/runtime/provider connector/capability IDs | `agents` |
 | `agent.status_changed` | Old/new status, health note | `agents` |
+| `adapter.config_registered` | Adapter kind, command template, IO formats | `adapter_configs` |
+| `adapter.config_updated` | Adapter config/status change | `adapter_configs` |
+| `adapter.capabilities_observed` | Version, capability snapshot, limitations | `adapter_capability_snapshots` |
+| `adapter.session_started` | External session ref and adapter state | `adapter_session_refs`, `sessions` |
+| `adapter.session_attached` | Attach/resume/load metadata | `adapter_session_refs`, `sessions` |
+| `adapter.session_detached` | Detached external session and reason | `adapter_session_refs`, `sessions` |
+| `adapter.session_closed` | External session close result | `adapter_session_refs`, `sessions` |
+| `provider.connector_registered` | Provider kind, credential scope, productization policy | `provider_connectors` |
+| `provider.connector_updated` | Provider connector status/config change | `provider_connectors` |
+| `provider.auth_status_observed` | Non-secret auth/account status metadata | `provider_connectors` |
+| `provider.usage_observed` | Usage/cost/credit metadata when available | `provider_connectors`, `evaluations` |
+| `provider.revocation_requested` | Revocation action/instructions | `provider_connectors` |
+| `provider.connector_use_denied` | Connector blocked by deployment/auth/runtime policy before launch | `provider_connectors` |
+| `provider.connector_disabled` | Connector disabled and reason | `provider_connectors` |
 | `runtime.target_registered` | Runtime target config and runner kind | `runtime_targets` |
 | `runtime.target_updated` | Runtime target change and reason | `runtime_targets` |
 | `connectivity.endpoint_registered` | Endpoint/tunnel config and exposure | `connectivity_endpoints` |
@@ -557,6 +640,10 @@ Uniqueness rules:
 | --- | --- | --- |
 | `adapter.replay_started` | Replay/import source, external session, batch ID | `adapter_replay_batches`, `sessions` |
 | `adapter.raw_update_observed` | Raw update artifact/hash/index | `adapter_raw_updates` |
+| `adapter.raw_event_observed` | Raw non-ACP adapter event artifact/hash/index | `raw_events` |
+| `adapter.event_normalized` | Raw adapter event mapped to Capo event refs | `raw_events`, `items`, `tool_calls` |
+| `adapter.auth_required` | Adapter requested user/provider authentication | `adapter_session_refs`, `provider_connectors` |
+| `adapter.auth_failed` | Adapter auth failure without secret material | `adapter_session_refs`, `provider_connectors` |
 | `adapter.replay_duplicate_detected` | Existing item/tool matched by timeline key or content hash | `adapter_replay_batches`, `items` |
 | `adapter.replay_ambiguous` | Low-confidence replay match requiring caution/review | `adapter_replay_batches`, `items` |
 | `adapter.replay_completed` | Imported/duplicate/ambiguous counts and event range | `adapter_replay_batches`, `sessions` |
@@ -645,7 +732,7 @@ Includes:
 
 Includes:
 
-- Agent name, adapter, runtime target, provider.
+- Agent name, adapter, runtime target, provider connector.
 - Health/status.
 - Capability profile summary.
 - Current session/run/turn.
@@ -706,12 +793,16 @@ Minimum tables:
 ```text
 schema_migrations(version, applied_at)
 events(sequence, event_id, schema_version, occurred_at, recorded_at, actor, project_id, task_id, agent_id, session_id, run_id, turn_id, item_id, kind, payload_json, payload_hash, idempotency_key, external_ref_json, redaction_state, causation_id, correlation_id)
-raw_events(raw_event_id, source, adapter_id, provider_id, runtime_id, external_ref_json, event_id, artifact_id, observed_at, payload_hash)
+raw_events(raw_event_id, source, adapter_config_id, provider_connector_id, runtime_target_id, external_ref_json, event_id, artifact_id, observed_at, payload_hash)
 artifacts(artifact_id, project_id, session_id, run_id, kind, uri, content_hash, size_bytes, redaction_state, created_at)
 projections(name, last_sequence, updated_at, status, error)
 projects(project_id, name, workspace_root, workpad_root, status, updated_at)
 tasks(task_id, project_id, source_kind, source_ref_json, title, capo_execution_status, workpad_status_observed, active_session_id, updated_at)
-agents(agent_id, project_id, name, adapter_id, runtime_target_id, provider_id, capability_profile_id, status, metadata_json, updated_at)
+agents(agent_id, project_id, name, adapter_config_id, runtime_target_id, provider_connector_id, capability_profile_id, status, metadata_json, updated_at)
+adapter_configs(adapter_config_id, project_id, name, adapter_kind, command_template_json, default_args_json, stdin_mode, stdout_format, stderr_policy, adapter_capabilities_json, version_observed, status, created_at, updated_at)
+adapter_session_refs(adapter_session_ref_id, session_id, adapter_config_id, external_session_ref_json, external_turn_ref_json, protocol_version, adapter_state, raw_event_cursor, attach_supported, resume_supported, load_supported, created_at, updated_at)
+provider_connectors(provider_connector_id, project_id, provider_kind, credential_scope, productization_allowed, auth_ref_kind, auth_ref, account_label, workspace_label, usage_capability, revocation_instructions, redaction_policy_json, status, created_at, updated_at)
+adapter_capability_snapshots(adapter_capability_snapshot_id, adapter_config_id, provider_connector_id, observed_at, adapter_version, provider_version, auth_mode_observed, supports_streaming, supports_interrupt, supports_resume, supports_permission_prompts, supports_structured_tool_results, supports_usage_metadata, native_tools_json, limitations_json)
 runtime_targets(runtime_target_id, project_id, name, runner_kind, workspace_root, artifact_root, default_cwd, env_policy_json, capability_profile_id, connectivity_endpoint_id, status, created_at, updated_at)
 runtime_process_refs(runtime_process_ref_id, runtime_target_id, run_id, external_pid, process_group_ref_json, remote_process_ref_json, started_at, last_heartbeat_at, status, redaction_state)
 connectivity_endpoints(connectivity_endpoint_id, project_id, name, tunnel_kind, address_ref_json, identity_ref_json, auth_ref, exposure, allowed_channels_json, status, created_at, updated_at)
@@ -746,10 +837,14 @@ Minimum indexes:
 - `events(kind, sequence)`
 - `events(project_id, idempotency_key)` unique where idempotency key is not null
 - `raw_events(source, payload_hash)`
-- `raw_events(adapter_id, external_ref_json)` where stable external refs exist
+- `raw_events(adapter_config_id, external_ref_json)` where stable external refs exist
 - `items(turn_id, ordinal)`
 - `items(adapter_timeline_key_id)`
 - `tool_calls(session_id, status)`
+- `adapter_configs(project_id, adapter_kind, status)`
+- `adapter_session_refs(session_id, adapter_config_id)`
+- `provider_connectors(project_id, provider_kind, status)`
+- `adapter_capability_snapshots(adapter_config_id, observed_at)`
 - `runtime_targets(project_id, status)`
 - `runtime_process_refs(run_id)`
 - `runtime_process_refs(runtime_target_id, status)`
@@ -789,6 +884,8 @@ Minimum indexes:
 - Capability profile/grant read models are projections over capability and permission events.
 - Runtime and connectivity read models are projections over runtime/connectivity events; they do not poll live processes directly.
 - Runtime process start is request/event driven: `runtime.start_requested` is persisted before launch, then `runtime.process_started` or `runtime.process_start_failed` closes the attempt.
+- Adapter/provider read models are projections over adapter/provider events and store non-secret metadata only.
+- Provider connector use is gated before runtime launch; denied use emits `provider.connector_use_denied`.
 
 ## Workpad Status Boundary
 
@@ -848,6 +945,7 @@ ACP-specific rules:
 - ACP message chunks in stable v1 lack stable message IDs, so Capo finalizes content hashes and records boundary confidence.
 - See `acp-replay-dedupe.md` for the complete A2a design.
 - See `runtime-tunnel.md` for the complete A4 runtime and connectivity design.
+- See `protocol-provider.md` for the complete A5 adapter and provider design.
 
 ## Prototype E2E State Flow
 

@@ -110,7 +110,7 @@ Evidence:
 
 ## A5 - Protocol And Provider Plan
 
-Status: pending
+Status: completed
 
 Acceptance:
 
@@ -119,6 +119,13 @@ Acceptance:
 - Record subscription-backed connector policy and risks.
 - Treat Claude Code and Codex as the first concrete target adapters.
 - Defer Capo-as-ACP-agent/editor-backend mode; Capo remains the user entrypoint for the prototype.
+
+Evidence:
+
+- `workpads/architecture/protocol-provider.md`
+- `workpads/architecture/state-model.md` adapter/provider additions
+- `workpads/architecture/knowledge.md` A5 section
+- `workpads/architecture/references.md` Protocol section local CLI observations
 
 ## A5a - Capo Tool Exposure And Instrumentation
 

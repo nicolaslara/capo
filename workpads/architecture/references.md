@@ -39,6 +39,17 @@ Observed 2026-05-25. Local clones are gitignored under `workpads/references/repo
 - ACP permission requests and option mapping, observed 2026-05-25:
   - `workpads/references/repos/agent-client-protocol/docs/protocol/tool-calls.mdx`
   - `workpads/references/repos/agent-client-protocol/schema/schema.json`
+- Protocol/provider architecture artifact: `protocol-provider.md` (created 2026-05-25)
+- Official Codex/Claude docs refreshed for A5 on 2026-05-25:
+  - Codex non-interactive mode: https://developers.openai.com/codex/noninteractive
+  - Codex CLI: https://developers.openai.com/codex/cli
+  - Claude Code headless/programmatic usage: https://code.claude.com/docs/en/headless
+  - Claude Code authentication: https://code.claude.com/docs/en/authentication
+- Local CLI observations for A5, observed 2026-05-25:
+  - `codex --version`: `codex-cli 0.133.0`
+  - `codex exec --help`: supports `--json`, `--sandbox`, `--ephemeral`, `--ignore-user-config`, `--ignore-rules`, `--output-schema`, and `--cd`
+  - `claude --version`: `2.1.150 (Claude Code)`
+  - `claude -p --help`: supports `--output-format text|json|stream-json`, `--input-format text|stream-json`, `--permission-mode`, `--allowedTools`, `--disallowedTools`, `--tools`, `--mcp-config`, `--session-id`, `--resume`, `--continue`, `--no-session-persistence`, `--bare`, `--max-budget-usd`, and partial-message flags
 
 ## Runtime And Connectivity
 

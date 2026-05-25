@@ -205,6 +205,8 @@ decide_permission(PermissionRequest) -> PermissionDecision
 
 Normalizes concrete agents/protocols into Capo commands and events.
 
+Detailed Codex, Claude Code, ACP, provider connector, and subscription-backed connector design lives in `protocol-provider.md`.
+
 Initial variants:
 
 ```text
@@ -219,7 +221,8 @@ AgentAdapter =
 
 ```text
 initialize(AdapterConfig) -> AdapterInfo
-start_session(AdapterSessionConfig) -> ExternalSessionRef
+build_runtime_request(AdapterSessionConfig, AgentBinding, ProviderConnectorConfig) -> RuntimeRequest
+attach_started_process(RuntimeProcessRef, AdapterSessionConfig, AdapterConfig) -> ExternalSessionRef
 send_turn(ExternalSessionRef, AdapterPrompt) -> AdapterTurnRef
 deliver_tool_result(ExternalSessionRef, AdapterToolResult) -> DeliveryResult
 cancel(ExternalSessionRef, AdapterTurnRef?) -> CancelResult
@@ -229,7 +232,7 @@ shutdown(ExternalSessionRef) -> ShutdownResult
 
 ### Responsibilities
 
-- Launch or attach to the underlying agent surface through a runtime.
+- Build runtime requests and attach to runtime-started agent surfaces.
 - Translate Capo prompts/commands into adapter-specific messages.
 - Normalize adapter output into `AdapterEvent`.
 - Surface adapter-requested tool calls as events and accept Capo tool results back when the underlying adapter supports it.
@@ -382,16 +385,18 @@ exposure_report(ConnectivityEndpoint) -> ExposureReport
 
 Represents model/provider/subscription metadata behind adapters.
 
+Detailed provider records, credential scopes, auth metadata, usage observation, and subscription policy live in `protocol-provider.md`.
+
 Initial variants:
 
 ```text
 ProviderConnector =
-  CodexSubscription
-  | ClaudeSubscription
-  | OpenAiApi
-  | AnthropicApi
-  | LocalModelEndpoint
-  | UnknownProvider
+  CodexSubscriptionConnector
+  | ClaudeSubscriptionConnector
+  | OpenAiApiConnector
+  | AnthropicApiConnector
+  | LocalModelConnector
+  | UnknownProviderConnector
   | FakeProviderConnector
 ```
 
@@ -400,6 +405,7 @@ ProviderConnector =
 ```text
 describe_provider() -> ProviderInfo
 auth_status() -> AuthStatus
+authorize_connector_use(DeploymentContext, Actor, RuntimeTarget) -> ConnectorUseDecision
 usage_snapshot(SessionId?) -> UsageSnapshot?
 redaction_rules() -> RedactionPolicy
 revocation_instructions() -> RevocationPlan
@@ -408,6 +414,7 @@ revocation_instructions() -> RevocationPlan
 ### Responsibilities
 
 - Report non-secret provider/auth metadata.
+- Reject disallowed connector use before runtime launch.
 - Describe rate limits, cost fields, and capability hints when available.
 - Provide revocation instructions.
 - Keep credentials in vendor/OS/secret-manager storage.
@@ -731,10 +738,10 @@ summarize_performance(ProjectId | AgentId | TaskId) -> PerformanceSummary
 Use static dispatch for known in-tree boundaries in the first scaffold:
 
 ```text
-enum AgentAdapter { Codex(CodexExecAdapter), Claude(ClaudeCodeAdapter), Acp(AcpAdapter), Fake(FakeAdapter) }
+enum AgentAdapter { CodexExec(CodexExecAdapter), ClaudeCode(ClaudeCodeAdapter), Acp(AcpAdapter), Fake(FakeAdapter) }
 enum RuntimeRunner { LocalProcess(LocalProcessRunner), RemoteProcess(RemoteProcessRunner), Container(ContainerRunner), Fake(FakeRuntimeRunner) }
 enum ConnectivityTunnel { LocalLoopback(LocalLoopbackTunnel), Ssh(SshTunnel), Tailscale(TailscaleTunnel), Reverse(ReverseTunnel), Fake(FakeTunnel) }
-enum ProviderConnector { Codex(CodexSubscription), Claude(ClaudeSubscription), OpenAi(OpenAiApi), Anthropic(AnthropicApi), LocalModel(LocalModelEndpoint), Unknown(UnknownProvider), Fake(FakeProviderConnector) }
+enum ProviderConnector { CodexSubscription(CodexSubscriptionConnector), ClaudeSubscription(ClaudeSubscriptionConnector), OpenAiApi(OpenAiApiConnector), AnthropicApi(AnthropicApiConnector), LocalModel(LocalModelConnector), Unknown(UnknownProviderConnector), Fake(FakeProviderConnector) }
 enum PermissionPolicy { AllowTrustedLocalProfile(AllowTrustedLocalProfilePolicy), Static(StaticPolicy), UserApproval(UserApprovalPolicy), SecurityAgent(SecurityAgentPolicy), Fake(FakePermissionPolicy) }
 enum ToolExposure { Local(LocalToolExposure), Fake(FakeToolExposure) }
 enum StateStore { Sqlite(SqliteStateStore), InMemory(InMemoryStateStore), Fake(FakeStateStore) }

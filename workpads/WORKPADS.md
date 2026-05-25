@@ -62,6 +62,7 @@ workpads/architecture/state-model.md
 workpads/architecture/acp-replay-dedupe.md
 workpads/architecture/capability-permissions.md
 workpads/architecture/runtime-tunnel.md
+workpads/architecture/protocol-provider.md
 workpads/research/knowledge.md
 ```
 
@@ -72,6 +73,7 @@ workpads/research/knowledge.md
 - `acp-replay-dedupe.md` ACP `session/load`, `session/resume`, streaming, and dedupe design
 - `capability-permissions.md` capability profiles, scopes, grants, permissions, revocation, and ACP option mapping
 - `runtime-tunnel.md` runtime runners, local process lifecycle, remote runtime abstraction, connectivity/tunnel boundary, and exposure policy
+- `protocol-provider.md` Codex, Claude Code, ACP adapter shape, provider connectors, credential scopes, and subscription policy
 - `tasks.md` A0-A8: event model, capability model, runtime, security, prototype plan
 - `knowledge.md` Architecture gate section
 
@@ -102,6 +104,7 @@ workpads/architecture/state-model.md
 workpads/architecture/acp-replay-dedupe.md
 workpads/architecture/capability-permissions.md
 workpads/architecture/runtime-tunnel.md
+workpads/architecture/protocol-provider.md
 workpads/architecture/knowledge.md
 ```
 
@@ -137,6 +140,7 @@ workpads/architecture/state-model.md
 workpads/architecture/acp-replay-dedupe.md
 workpads/architecture/capability-permissions.md
 workpads/architecture/runtime-tunnel.md
+workpads/architecture/protocol-provider.md
 workpads/prototype/knowledge.md
 ```
 
@@ -167,6 +171,7 @@ workpads/architecture/state-model.md
 workpads/architecture/acp-replay-dedupe.md
 workpads/architecture/capability-permissions.md
 workpads/architecture/runtime-tunnel.md
+workpads/architecture/protocol-provider.md
 ```
 
 **Rules:**
