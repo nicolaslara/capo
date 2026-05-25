@@ -59,6 +59,7 @@ Usage:
   capo permission decide --approval APPROVAL_ID --decision allow_once|allow_always|reject_once|reject_always [--state PATH]
   capo workpad index --root PATH [--state PATH]
   capo workpad next [--path PATH] [--state PATH]
+  capo workpad start-next --agent NAME [--path PATH] [--state PATH]
   capo workpad import --workpad-task WORKPAD_TASK_ID [--expected-hash HASH] [--task TASK_ID] [--state PATH]
   capo workpad propose --workpad-task WORKPAD_TASK_ID --out DIR [--expected-hash HASH] [--task TASK_ID] [--summary TEXT] [--state PATH]
   capo workpad apply --proposal PATH [--confirm] [--state PATH]
@@ -155,6 +156,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "workpad" && command == "next" => {
             next_workpad_task(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "workpad" && command == "start-next" => {
+            start_next_workpad_task(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "workpad" && command == "import" => {
             import_workpad_task(&parsed, rest)
@@ -1895,6 +1899,75 @@ fn default_workpad_task_id(workpad_task_id: &str) -> String {
 }
 
 fn next_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let path_filter = workpad_path_filter(args)?;
+    let state = state(parsed)?;
+    let candidates = next_workpad_candidates(&state, path_filter.as_deref())?;
+    Ok(render_next_workpad_task(
+        candidates.first(),
+        candidates.len(),
+        path_filter.as_deref(),
+    ))
+}
+
+fn start_next_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let agent = required_arg(args, "--agent")?;
+    let args_without_agent = remove_option(args, "--agent");
+    let path_filter = workpad_path_filter(&args_without_agent)?;
+    let state = state(parsed)?;
+    let candidates = next_workpad_candidates(&state, path_filter.as_deref())?;
+    let next = candidates
+        .first()
+        .ok_or_else(|| "no actionable observed-only workpad task found".to_string())?
+        .clone();
+    if state.agent_by_name(&agent).map_err(debug_error)?.is_none() {
+        return Err(format!("missing registered agent: {agent}"));
+    }
+    let task_id = default_workpad_task_id(&next.workpad_task_id);
+    import_workpad_task(
+        parsed,
+        &[
+            "--workpad-task".to_string(),
+            next.workpad_task_id.clone(),
+            "--task".to_string(),
+            task_id.clone(),
+        ],
+    )?;
+    let goal = format!(
+        "Work on {} from {}#{} (workpad_task_id={})",
+        next.title, next.path, next.source_anchor, next.workpad_task_id
+    );
+    let mut command = envelope(
+        "workpad-start-next",
+        CommandTarget::Agent(AgentId::new(format!("agent-{agent}"))),
+        CommandIntent::SendTask,
+        Some(goal),
+    );
+    command
+        .structured_args
+        .push(("agent".to_string(), agent.clone()));
+    command
+        .structured_args
+        .push(("scenario".to_string(), "workpad".to_string()));
+    command
+        .structured_args
+        .push(("task_id".to_string(), task_id.clone()));
+    let refs = controller(parsed)?
+        .send_task_command(&command)
+        .map_err(debug_error)?;
+    Ok(format!(
+        "workpad_next_started=true\nagent={agent}\nworkpad_task_id={}\ntask_id={}\nsession_id={}\nrun_id={}\nsource={}#{}\nobserved_status={}\ncapo_execution_status=active\ncommand_id={}\n",
+        next.workpad_task_id,
+        refs.task_id,
+        refs.session_id,
+        refs.run_id,
+        next.path,
+        next.source_anchor,
+        next.observed_status,
+        command.command_id
+    ))
+}
+
+fn workpad_path_filter(args: &[String]) -> Result<Option<String>, String> {
     let mut path_filter = None;
     let mut index = 0;
     while index < args.len() {
@@ -1910,7 +1983,13 @@ fn next_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, Str
             other => return Err(format!("unknown workpad next option: {other}")),
         }
     }
-    let state = state(parsed)?;
+    Ok(path_filter)
+}
+
+fn next_workpad_candidates(
+    state: &SqliteStateStore,
+    path_filter: Option<&str>,
+) -> Result<Vec<WorkpadTaskProjection>, String> {
     let mut candidates = state
         .workpad_tasks(&project_id())
         .map_err(debug_error)?
@@ -1931,15 +2010,23 @@ fn next_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, Str
             .then_with(|| left.source_anchor.cmp(&right.source_anchor))
             .then_with(|| left.workpad_task_id.cmp(&right.workpad_task_id))
     });
-    let Some(next) = candidates.first() else {
-        return Ok(format!(
+    Ok(candidates)
+}
+
+fn render_next_workpad_task(
+    next: Option<&WorkpadTaskProjection>,
+    candidate_count: usize,
+    path_filter: Option<&str>,
+) -> String {
+    let Some(next) = next else {
+        return format!(
             "workpad_next_found=false\ncandidate_count=0\npath_filter={}\n",
-            path_filter.as_deref().unwrap_or("none")
-        ));
+            path_filter.unwrap_or("none")
+        );
     };
-    Ok(format!(
+    format!(
         "workpad_next_found=true\ncandidate_count={}\nworkpad_task_id={}\ndefault_task_id={}\npath={}\nsource_anchor={}\nsource={}#{}\ntitle={}\nobserved_status={}\ncapo_execution_status={}\npath_filter={}\n",
-        candidates.len(),
+        candidate_count,
         next.workpad_task_id,
         default_workpad_task_id(&next.workpad_task_id),
         next.path,
@@ -1949,8 +2036,8 @@ fn next_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, Str
         next.title,
         next.observed_status,
         next.capo_execution_status,
-        path_filter.as_deref().unwrap_or("none")
-    ))
+        path_filter.unwrap_or("none")
+    )
 }
 
 fn actionable_workpad_status_rank(status: &str) -> Option<u8> {
@@ -1961,6 +2048,20 @@ fn actionable_workpad_status_rank(status: &str) -> Option<u8> {
         "waiting_on_opt_in" => Some(3),
         _ => None,
     }
+}
+
+fn remove_option(args: &[String], key: &str) -> Vec<String> {
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == key {
+            index += 2;
+        } else {
+            filtered.push(args[index].clone());
+            index += 1;
+        }
+    }
+    filtered
 }
 
 fn import_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
@@ -3159,6 +3260,7 @@ mod tests {
         assert!(HELP.contains("adapter dogfood-gate"));
         assert!(HELP.contains("workpad index"));
         assert!(HELP.contains("workpad next"));
+        assert!(HELP.contains("workpad start-next"));
         assert!(HELP.contains("workpad propose"));
         assert!(HELP.contains("workpad apply"));
     }
@@ -3584,6 +3686,67 @@ mod tests {
         assert!(next_after_import.contains("workpad_task_id=workpads:features:tasks.md#f1"));
         assert!(next_after_import.contains("observed_status=pending"));
         assert!(next_after_import.contains("capo_execution_status=observed_only"));
+        let missing_agent_start = run_cli(vec![
+            "workpad".to_string(),
+            "start-next".to_string(),
+            "--agent".to_string(),
+            "missing".to_string(),
+            "--path".to_string(),
+            "workpads/features/tasks.md".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("missing agent should fail before import");
+        assert!(missing_agent_start.contains("missing registered agent"));
+        let next_after_missing_agent = run_cli(vec![
+            "workpad".to_string(),
+            "next".to_string(),
+            "--path".to_string(),
+            "workpads/features/tasks.md".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("missing agent should not consume next task");
+        assert!(next_after_missing_agent.contains("workpad_task_id=workpads:features:tasks.md#f1"));
+        assert!(next_after_missing_agent.contains("capo_execution_status=observed_only"));
+        run_cli(vec![
+            "agent".to_string(),
+            "register".to_string(),
+            "--name".to_string(),
+            "dogfood".to_string(),
+            "--adapter".to_string(),
+            "fake".to_string(),
+            "--runtime".to_string(),
+            "fake".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("register dogfood agent");
+        let started = run_cli(vec![
+            "workpad".to_string(),
+            "start-next".to_string(),
+            "--agent".to_string(),
+            "dogfood".to_string(),
+            "--path".to_string(),
+            "workpads/features/tasks.md".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("start next workpad task");
+        assert!(started.contains("workpad_next_started=true"));
+        assert!(started.contains("workpad_task_id=workpads:features:tasks.md#f1"));
+        assert!(started.contains("task_id=task-workpad-workpads-features-tasks-md-f1"));
+        assert!(started.contains("capo_execution_status=active"));
+        let started_task = state
+            .task(&TaskId::new("task-workpad-workpads-features-tasks-md-f1"))
+            .expect("started task query")
+            .expect("started task");
+        assert_eq!(started_task.capo_execution_status, "active");
+        assert_eq!(
+            fs::read_to_string(project_root.join("workpads/features/tasks.md"))
+                .expect("read source after start-next"),
+            before
+        );
         let proposal_dir = temp_root("workpad-proposal");
         let proposal_output = run_cli(vec![
             "workpad".to_string(),

@@ -109,7 +109,11 @@ impl FakeBoundaryController {
             .text
             .as_deref()
             .ok_or_else(|| missing_read_model("command.text", &command.command_id))?;
-        self.send_task_to_agent_name(agent_name, goal)
+        if let Some(task_id) = optional_structured_arg(command, "task_id") {
+            self.send_task_to_agent_name_with_task_id(agent_name, TaskId::new(task_id), goal)
+        } else {
+            self.send_task_to_agent_name(agent_name, goal)
+        }
     }
 
     pub fn redirect_command(
@@ -426,6 +430,15 @@ impl FakeBoundaryController {
         goal: &str,
     ) -> StateResult<FakeRunRefs> {
         let task_id = TaskId::new(format!("task-{}", slug(goal)));
+        self.send_task_with_task_id(registration, task_id, goal)
+    }
+
+    pub fn send_task_with_task_id(
+        &self,
+        registration: &FakeAgentRegistration,
+        task_id: TaskId,
+        goal: &str,
+    ) -> StateResult<FakeRunRefs> {
         let session_id = SessionId::new(format!("session-{}", registration.agent_name));
         let run_id = RunId::new(format!("run-{}", registration.agent_name));
         let turn_id = TurnId::new(format!("turn-{}", registration.agent_name));
@@ -1101,6 +1114,16 @@ impl FakeBoundaryController {
         self.send_task(&registration, goal)
     }
 
+    pub fn send_task_to_agent_name_with_task_id(
+        &self,
+        agent_name: &str,
+        task_id: TaskId,
+        goal: &str,
+    ) -> StateResult<FakeRunRefs> {
+        let registration = self.registration_for_agent_name(agent_name)?;
+        self.send_task_with_task_id(&registration, task_id, goal)
+    }
+
     pub fn refs_for_agent_name(&self, agent_name: &str) -> StateResult<FakeRunRefs> {
         let agent = self
             .state
@@ -1571,11 +1594,15 @@ fn require_intent(command: &CommandEnvelope, expected: CommandIntent) {
 }
 
 fn required_structured_arg<'a>(command: &'a CommandEnvelope, key: &str) -> StateResult<&'a str> {
+    optional_structured_arg(command, key)
+        .ok_or_else(|| missing_read_model("command.structured_args", &key))
+}
+
+fn optional_structured_arg<'a>(command: &'a CommandEnvelope, key: &str) -> Option<&'a str> {
     command
         .structured_args
         .iter()
         .find_map(|(candidate, value)| (candidate == key).then_some(value.as_str()))
-        .ok_or_else(|| missing_read_model("command.structured_args", &key))
 }
 
 fn escape_json(value: &str) -> String {

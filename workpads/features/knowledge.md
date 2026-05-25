@@ -137,6 +137,25 @@ Follow-up:
 
 - A future dogfood command can compose `workpad next`, `workpad import`, and agent dispatch, but it should stay explicit until real connector proof is recorded.
 
+## F2/DB5 - Start Next Workpad Task
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo workpad start-next --agent NAME [--path PATH]` as the first explicit dogfood bridge from indexed markdown work into controller execution.
+- The command composes DB4 next selection, DB2 task import, and the existing controller send-task path. It does not edit source markdown.
+- Preserve the imported workpad task ID as the controller task ID by allowing `CommandIntent::SendTask` envelopes to carry an optional structured `task_id`. Existing `task send` calls still use goal-derived task IDs.
+- Keep dispatch fake/local for now. Real Codex/Claude dispatch remains blocked on explicit opt-in smoke evidence.
+
+Verification:
+
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+
+Follow-up:
+
+- After real connector proof, `start-next` can grow an adapter/runtime selector instead of assuming the registered fake agent path.
+
 ## F1/AC1-AC2 - Local Connector Preflight
 
 Status: in progress on 2026-05-25.

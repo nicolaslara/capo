@@ -135,3 +135,26 @@ Decision:
 - Selection prefers observed markdown `in_progress`, then `pending`, then `ready`, then `waiting_on_opt_in`.
 - Selection only considers `capo_execution_status=observed_only`; once a workpad task is imported, the Capo task record becomes the execution authority for that task.
 - The command returns the source workpad task ID, source anchor, observed markdown status, Capo execution status, and deterministic default Capo task ID so the operator can explicitly import or inspect the task next.
+
+### DB5 - Start Next Workpad Task
+
+Status: completed
+
+Acceptance:
+
+- Compose next-workpad selection, explicit import, and controller dispatch without editing markdown.
+- Dispatch the selected workpad task to a named registered agent through the existing controller command path.
+- Preserve the imported task ID as the Capo execution task ID instead of creating an unrelated goal-derived task.
+- Keep the command fake/local until real connector proof is recorded.
+
+Evidence:
+
+- `capo workpad start-next --agent NAME [--path PATH]` in `../../crates/capo-cli/src/main.rs`.
+- `FakeBoundaryController::send_task_command` can accept an explicit task ID while preserving existing goal-derived task behavior for ordinary `task send`.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+
+Decision:
+
+- `start-next` remains an explicit operator command. It does not change markdown status or automatically choose a real provider connector.
+- The command imports only `observed_only` workpad refs selected by DB4, then sends the selected goal through the existing controller/runtime/adapter/tool instrumentation path.
+- Existing `task send` behavior remains compatible; explicit task IDs are only used when provided in the command envelope.

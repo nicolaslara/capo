@@ -69,6 +69,15 @@ Observed 2026-05-25.
 - Dogfood bridge source workpad: `dogfood-bridge.md`
 - No new third-party dependencies were added for DB4.
 
+## F2/DB5 Start Next Workpad Task
+
+Observed 2026-05-25.
+
+- `workpad start-next` command, CLI regression coverage, and explicit task ID command envelope use: `../../crates/capo-cli/src/main.rs`
+- Optional explicit task ID support in fake-controller send-task handling: `../../crates/capo-controller/src/lib.rs`
+- Dogfood bridge source workpad: `dogfood-bridge.md`
+- No new third-party dependencies were added for DB5.
+
 ## F1/AC1-AC2 Local Connector Preflight
 
 Observed 2026-05-25.
