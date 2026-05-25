@@ -6,7 +6,7 @@ Record the architectural decisions that make Capo modular: each boundary should 
 
 ## Status
 
-Architecture gate not passed.
+Architecture gate passed on 2026-05-25.
 
 ## Initial Direction
 
@@ -403,7 +403,11 @@ Review findings accepted:
 
 ## Architecture Gate
 
-Status: not passed.
+Status: passed on 2026-05-25.
+
+Review artifact:
+
+- `workpads/architecture/gate-review.md`
 
 Required evidence:
 
@@ -415,10 +419,47 @@ Required evidence:
 - Memory architecture.
 - Prototype task plan: `workpads/architecture/prototype-plan.md` and `workpads/prototype/tasks.md`.
 
+Gate decision:
+
+- Architecture is ready to move into prototype P0.
+- The pass does not claim Capo is implemented. It means the contracts are concrete enough for the scaffold and e2e smoke tests to start.
+- Remaining uncertainty belongs in prototype fixtures and smoke tests, especially Codex/Claude stream mapping, ACP replay/dedupe, runtime process behavior, all-allowed permission audit coverage, and workpad export safety.
+
+User-sensitive decisions called out:
+
+- Capo remains the user entrypoint/controller for the prototype; Capo-as-ACP-agent/editor-backend is deferred.
+- Codex and Claude Code are first concrete adapter targets, but fake adapters come first for deterministic e2e tests.
+- Subscription-backed connectors are local-only user-owned integrations and must not read, persist, or sync credential material.
+- Initial local permissions may allow broadly, but every decision must route through `PermissionPolicy` and durable audit events.
+- Voice remains a future conversational Capo surface over command envelopes/read models; real voice capture is deferred.
+- Markdown workpads remain the human-auditable fallback while SQLite owns operational execution state.
+
+Follow-up placement:
+
+- Exact Codex/Claude stream mapping: prototype P6/P7.
+- ACP replay fixtures and restart dedupe: prototype P10.
+- Redirect/current-goal/confidence event and read-model state: fixed in `state-model.md` during A8 before gate pass.
+- Stable recovery observation idempotency key: fixed in `state-model.md` during A8 before gate pass.
+- Fail-closed artifact retention/redaction: fixed in `state-model.md` during A8 before gate pass.
+- Restrictive real-adapter launch defaults: prototype P7.
+- Canonical `trusted-local-dev` excluded critical scopes: fixed in `capability-permissions.md` during A8 before gate pass.
+- Tool permission audit and result delivery: prototype P8/P12.
+- Workpad evidence export safety: prototype P11/P12.
+- Dashboard/TUI timing: prototype P13.
+- Voice transcript policy spike: prototype P14.
+
+A8 review findings accepted:
+
+- Added `session.goal_updated`, `session.confidence_updated`, `session.redirect_requested`, and `session.redirect_delivered` events, plus session read-model fields for current goal and confidence.
+- Changed recovery idempotency guidance so stable recovery observation keys exclude per-startup `recovery_attempt_id`.
+- Added a fail-closed artifact privacy contract: raw provider/runtime/tool/ACP artifacts must be classified as `safe` or `redacted` for normal persistence; unknown or sensitive raw streams are quarantined or rejected and excluded from read models/evidence.
+- Added restrictive real Codex/Claude smoke defaults: isolated temp workspace, no MCP configs, no browser tools, no provider-native write/network tools unless scoped, Codex read-only sandbox by default, and restricted Claude tool/permission mode.
+- Replaced vague `trusted-local-dev` "all local scopes" language with canonical included local scopes and explicit critical exclusions.
+
 ## Open Questions
 
-- Should the core process be a long-running server from day one, or a CLI that later grows a daemon?
-- Should the first UI be TUI, web dashboard, or both?
-- How should low-confidence ACP message-boundary matches be surfaced in dashboard/review UX without creating noisy false alarms?
-- What is the exact vocabulary for `project`, `agent`, `adapter`, `runtime`, `session`, `run`, `turn`, `task`, `event`, `item`, `tool_call`, `artifact`, and `checkpoint`?
-- Which data belongs only in SQLite, which belongs in markdown workpads, and which is mirrored between them?
+- Post-gate: whether the CLI should grow a daemon in P0/P4 or wait until dashboard/remote control needs it.
+- Post-gate: whether the first UI after CLI should be TUI, web dashboard, or both.
+- Post-gate: how low-confidence ACP message-boundary matches should be surfaced in dashboard/review UX without noisy false alarms.
+- Post-gate: whether prototype terminology needs a generated Rust glossary/module doc after P1 implements typed records.
+- Post-gate: which workpad fields are safe for automated updates after P11 implements markdown evidence export.

@@ -87,6 +87,8 @@ Acceptance:
 - Run a harmless opt-in Codex local adapter smoke after fixture parsing and redaction pass.
 - Add Claude Code opt-in smoke when its non-interactive path is equally safe.
 - Subscription-backed connector code remains local-only and never reads vendor credential material.
+- Use restrictive adapter launch defaults: isolated temp workspace, no MCP configs, no browser tools, no provider-native write/network tools unless explicitly scoped, Codex read-only sandbox by default, and Claude restricted `--allowedTools` / permission mode.
+- Fail the smoke if persistent artifacts are unclassified or contain credentials, cookies, tokens, raw sensitive transcripts, or unredacted provider/session material.
 
 ## P8 - Capo Tools And Permission Audit
 

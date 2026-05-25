@@ -79,6 +79,7 @@ Keep static dispatch readable by making each boundary enum small and local to it
 8. Add first real local adapter smoke.
    - Prefer Codex first if it can run a harmless fixture task without leaking secrets; add Claude Code next when its non-interactive path is equally safe.
    - Keep subscription connectors local-only and do not inspect vendor credential storage.
+   - Use restrictive launch defaults: isolated temporary workspace, no MCP configs, no browser tools, no provider-native write/network tools unless explicitly scoped, Codex read-only sandbox by default, Claude restricted `--allowedTools` / permission mode, and no workspace-write smoke until fixture/redaction proof exists.
 
 9. Add Capo tool exposure and instrumentation loop.
    - Implement `capo.task_status`, `capo.agent_status`, `capo.session_summary`, `capo.workpad_read`, `capo.evidence_record`, and `capo.capability_request`.
@@ -131,6 +132,7 @@ The smoke passes only when it proves all of these:
 - Memory context is attached as a replayable packet artifact with source refs.
 - Evidence export writes markdown without modifying unrelated workpads.
 - Logs and artifacts contain no provider credentials, subscription tokens, cookies, or raw sensitive transcripts.
+- Persistent raw provider/runtime artifacts are classified as `safe` or `redacted`; unclassified or sensitive raw streams are rejected or quarantined outside read models/evidence.
 
 Real Codex/Claude smoke tests should be separate opt-in tests until fixture parsing and secret redaction are proven.
 

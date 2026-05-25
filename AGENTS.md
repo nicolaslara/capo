@@ -23,6 +23,7 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 | `workpads/architecture/tool-exposure.md` | Capo tool registry, wrapper tools, instrumentation, ACP/MCP tool mapping |
 | `workpads/architecture/memory-architecture.md` | Memory records, provenance, indexes, packets, and external adapter path |
 | `workpads/architecture/prototype-plan.md` | Ordered prototype implementation sequence, e2e smoke path, and dogfood prerequisites |
+| `workpads/architecture/gate-review.md` | Architecture gate decision, user-sensitive decisions, and prototype residual risks |
 | `.cursor/commands/next.md` / `.opencode/commands/next.md` | `/next` task-execution command |
 | `.agents/skills/next/SKILL.md` | Codex `$next` task-execution skill |
 
@@ -36,7 +37,7 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 
 ## Current Phase
 
-**Research** and **architecture** first. The first durable implementation target is an end-to-end prototype that can spawn, track, and interact with at least one coding agent through a boundary compatible with Agent Client Protocol (ACP). After that prototype is stable enough, Capo should dogfood itself and move project execution into Capo.
+**Prototype** is active after research and architecture gates passed on 2026-05-25. The first durable implementation target is an end-to-end prototype that can spawn, track, and interact with at least one coding agent through a boundary compatible with Agent Client Protocol (ACP). After that prototype is stable enough, Capo should dogfood itself and move project execution into Capo.
 
 ## Mandatory Workflow
 

@@ -8,12 +8,15 @@ Record what the prototype proves, what it fails to prove, and whether it is reli
 
 Prototype gate not passed.
 
+Architecture gate passed 2026-05-25. Prototype P0 is ready to start.
+
 ## Initial Direction
 
 - Build the smallest e2e loop that can actually orchestrate one coding agent.
 - Persist state before adding many input surfaces.
 - Keep workpads as the fallback human-readable state until dogfooding is proven.
 - Follow `../architecture/prototype-plan.md`: fake boundary e2e first, then CLI, local runtime, Codex/Claude fixture adapters, opt-in real local adapter smoke, tools, memory packet, recovery, and evidence export.
+- Use `../architecture/gate-review.md` for residual risks that prototype tasks must prove rather than reopen during scaffold setup.
 
 ## Prototype Gate
 

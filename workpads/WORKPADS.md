@@ -7,8 +7,8 @@
 | Workpad | Status | Description |
 | --- | --- | --- |
 | **research** | Complete | Gate passed 2026-05-25 — ACP, prior art, stack, memory, subscription, tunnel, local-model, and voice research |
-| **architecture** | **Active** | Boundary definitions, data model, contracts, security model, and prototype plan |
-| **prototype** | Planned | Minimal e2e Capo controller and agent harness |
+| **architecture** | Complete | Gate passed 2026-05-25 — boundary definitions, data model, contracts, security model, and prototype plan |
+| **prototype** | **Active** | Minimal e2e Capo controller and agent harness |
 | **features** | Planned | Feature-specific workpads after architecture/prototype |
 | **dogfood** | Planned | Move Capo project execution into Capo |
 
@@ -43,6 +43,8 @@ workpads/research/references.md
 - No broad implementation unless task explicitly authorizes a spike.
 
 ## architecture
+
+**Status:** Complete. Architecture gate passed 2026-05-25.
 
 **Prerequisites:** Research gate passed 2026-05-25.
 
@@ -80,6 +82,7 @@ workpads/research/knowledge.md
 - `tool-exposure.md` Capo tool registry, wrapper tools, instrumentation, ACP/MCP tool mapping, and observed-only native tools
 - `memory-architecture.md` memory records, provenance, indexing, memory packets, and external adapter path
 - `prototype-plan.md` ordered implementation sequence, e2e smoke path, and dogfood prerequisites
+- `gate-review.md` architecture gate result, user-sensitive decisions, and residual prototype risks
 - `tasks.md` A0-A8: event model, capability model, runtime, security, prototype plan
 - `knowledge.md` Architecture gate section
 
@@ -91,7 +94,9 @@ workpads/research/knowledge.md
 
 ## prototype
 
-**Prerequisites:** Architecture gate passed unless authorized as a spike.
+**Status:** Active.
+
+**Prerequisites:** Architecture gate passed 2026-05-25 unless explicitly reopened.
 
 **Objective:** Build the smallest e2e Capo that can spawn or register an agent, send work, inspect progress, interrupt execution, persist state, and record evidence.
 

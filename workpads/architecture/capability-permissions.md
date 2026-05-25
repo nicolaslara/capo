@@ -69,10 +69,17 @@ Fields:
 
 Prototype profiles:
 
-- `trusted-local-dev`: all local scopes allowed, audit-only.
+- `trusted-local-dev`: broad local project scopes allowed, audit-only.
 - `read-only-local`: read filesystem, git status/diff, workpad reads, no writes or shell execution.
 - `reviewer`: read filesystem/workpads/events, no writes, no shell except configured test readers.
 - `voice-control`: can read state summaries and submit steering commands, cannot access raw transcripts/secrets.
+
+Canonical `trusted-local-dev` v0 profile:
+
+- Includes local project filesystem read/write under configured workspace roots.
+- Includes local shell execution, git operations, Capo state reads, Capo-owned tool invocation, local runtime process control, local adapter execution, local artifact reads after redaction classification, and local memory packet build/search.
+- Excludes credential-material read/write, vendor OAuth/session/cookie/keychain access, raw voice transcript read, public tunnel exposure, remote runtime execution, external memory sync/export, browser automation with persisted session state, and hosted/shared subscription connector use.
+- Tests must prove excluded critical scopes are denied unless a separate reviewed critical profile explicitly includes them.
 
 ### CapabilityScope
 
@@ -437,6 +444,7 @@ Prototype tests should prove:
 6. Revocation prevents future grant use but does not alter old event history.
 7. Voice can query summaries and submit steering commands without raw transcript retention.
 8. Attempted credential-material reads are rejected outside explicit, reviewed connector flows.
+9. `trusted-local-dev` denies credential-material reads, raw transcript reads, public exposure, remote runtime execution, external memory sync/export, and hosted/shared subscription connector use unless a separate reviewed critical profile is selected.
 
 ## Recommendation
 

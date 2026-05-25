@@ -182,10 +182,17 @@ Evidence:
 
 ## A8 - Architecture Gate Review
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Review recorded in `knowledge.md`.
 - User-sensitive decisions called out.
 - Prototype workpad is ready to start.
+
+Evidence:
+
+- `workpads/architecture/gate-review.md`
+- `workpads/architecture/knowledge.md` Architecture Gate section
+- `TASKS.md` switched to prototype
+- `workpads/WORKPADS.md` switched to prototype active

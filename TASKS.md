@@ -6,12 +6,12 @@ Read top to bottom. The **first unchecked** item is the active workpad unless No
 
 ## Active Now
 
-`architecture` -> turn research into system boundaries, contracts, state model, and prototype plan.
+`prototype` -> build the minimal e2e Capo scaffold, starting with workspace/toolchain setup.
 
 ## Workpad Queue
 
 - [x] **research** - ACP, prior art, subscriptions, local models, memory systems, voice, tunnel/connectivity, and language stack (gate passed 2026-05-25)
-- [ ] **architecture** - System boundaries, module contracts, data model, security model, and technical plan
+- [x] **architecture** - System boundaries, module contracts, data model, security model, and technical plan (gate passed 2026-05-25)
 - [ ] **prototype** - Minimal e2e Capo that can spawn, track, and interact with at least one coding agent
 - [ ] **features** - Product feature workpads derived from the architecture and prototype
 - [ ] **dogfood** - Move Capo project execution into Capo itself once stable enough
@@ -24,3 +24,4 @@ Read top to bottom. The **first unchecked** item is the active workpad unless No
 - Favor Rust for durable controller/core work unless research shows Python ecosystem leverage is materially better for a specific subsystem.
 - Python is acceptable for adapters, experiments, local-model integrations, voice pipelines, or memory-system prototypes.
 - Do not start dogfooding until the prototype can persist state, show active agent state, and recover from a restart without losing the task ledger.
+- Architecture gate passed 2026-05-25. Use `workpads/architecture/gate-review.md` and `workpads/architecture/prototype-plan.md` as prototype inputs.

@@ -15,6 +15,7 @@ To fill during architecture/prototype.
 Observed 2026-05-25.
 
 - Prototype plan: `../architecture/prototype-plan.md`
+- Architecture gate review: `../architecture/gate-review.md`
 - Boundary contracts: `../architecture/boundaries.md`
 - State/event model: `../architecture/state-model.md`
 - ACP replay/dedupe model: `../architecture/acp-replay-dedupe.md`

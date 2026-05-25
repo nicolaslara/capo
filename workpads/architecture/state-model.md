@@ -176,6 +176,9 @@ Fields:
 - `agent_id`
 - `title`
 - `status`
+- `current_goal`
+- `current_goal_artifact_id?`
+- `latest_confidence?`
 - `external_session_ref?`
 - `created_at`
 - `updated_at`
@@ -830,6 +833,10 @@ Uniqueness rules:
 | `command.accepted` | Target IDs, normalized intent | `commands` |
 | `command.rejected` | Reason and safe detail | `commands` |
 | `command.completed` | Result status and produced refs | `commands` |
+| `session.goal_updated` | Current goal text/artifact, source command, reason | `sessions`, `tasks` |
+| `session.confidence_updated` | Confidence value, source item/evaluation, explanation artifact | `sessions`, `tasks` |
+| `session.redirect_requested` | Steering command, previous goal ref, new goal ref | `sessions`, `commands` |
+| `session.redirect_delivered` | Adapter/runtime delivery status for steering command | `sessions`, `turns` |
 | `turn.started` | Role, prompt artifact, adapter turn ref | `turns` |
 | `item.started` | Kind, ordinal, external item ref | `items` |
 | `item.delta` | Append/update patch, content artifact ref | `items` |
@@ -930,6 +937,7 @@ Includes:
 Includes:
 
 - Session title/status/task/agent.
+- Current goal, latest confidence, and source refs for both.
 - Run status and restart/recovery markers.
 - Current turn status.
 - Ordered items with final or streaming state.
@@ -1018,7 +1026,7 @@ runtime_targets(runtime_target_id, project_id, name, runner_kind, workspace_root
 runtime_process_refs(runtime_process_ref_id, runtime_target_id, run_id, external_pid, process_group_ref_json, remote_process_ref_json, started_at, last_heartbeat_at, status, redaction_state)
 connectivity_endpoints(connectivity_endpoint_id, project_id, name, tunnel_kind, address_ref_json, identity_ref_json, auth_ref, exposure, allowed_channels_json, status, created_at, updated_at)
 resolved_endpoints(resolved_endpoint_id, connectivity_endpoint_id, owner_kind, owner_id, channel_kind, resolved_uri, identity_fingerprint, expires_at, redaction_state, created_at)
-sessions(session_id, project_id, task_id, agent_id, title, status, external_session_ref_json, latest_summary, last_sequence, updated_at)
+sessions(session_id, project_id, task_id, agent_id, title, status, current_goal, current_goal_artifact_id, latest_confidence, external_session_ref_json, latest_summary, last_sequence, updated_at)
 runs(run_id, session_id, runtime_process_ref_json, adapter_instance_ref_json, status, started_at, ended_at, exit_status_json, recovery_of_run_id, updated_at)
 turns(turn_id, session_id, run_id, origin_command_id, role, status, created_at, completed_at)
 items(item_id, turn_id, kind, status, stream_state, ordinal, summary, artifact_id, external_item_ref_json, content_hash, chunk_count, message_boundary_confidence, adapter_timeline_key_id, import_confidence, updated_at)
@@ -1110,6 +1118,14 @@ Minimum indexes:
 - Raw voice transcripts are not retained by default; if retained for a reviewed feature, they must be explicit artifacts with sensitive redaction state.
 - Generated memory artifacts live under `.capo/artifacts/memory/` and remain derived from source events/files.
 
+Artifact privacy contract:
+
+- Raw provider, adapter, runtime, tool, and ACP replay artifacts are local-only by default and must have bounded retention metadata before they are written under `.capo/artifacts/`.
+- Normal persistence requires `redaction_state = safe` or `redacted`. Artifacts with `unknown` or `contains_sensitive` cannot be attached to read models, memory packets, evidence exports, or durable provider-smoke results.
+- If a raw artifact cannot be classified before write, it must be written only to a quarantine path under `.capo/artifacts/quarantine/` with a short local retention window and must be excluded from projection-visible state until classified.
+- Provider smoke tests must fail when persistent artifacts contain credential material, OAuth tokens, API keys, browser cookies, subscription session material, raw sensitive transcripts, or unclassified raw streams.
+- Redaction failures are fail-closed: the controller records a safe error event and drops or quarantines the raw payload instead of persisting it as a normal artifact.
+
 ## Projection Rules
 
 - Event append and projection watermark update happen in one transaction when synchronous projection is used.
@@ -1160,7 +1176,7 @@ Recovery invariants:
 
 - No adapter raw replay mutates read models directly.
 - Recovery emits new Capo events instead of editing old rows.
-- A repeated restart must not create a second run recovery event for the same `(run_id, recovery_attempt_id, observed_runtime_state_hash)` idempotency key.
+- A repeated restart must not create a second run recovery event for the same stable recovery observation. Recovery event idempotency keys use `(run_id, recovery_observation_kind, observed_runtime_state_hash)` and intentionally exclude `recovery_attempt_id`; the attempt ID remains payload/correlation metadata.
 - Pending human approvals must survive restart.
 - A session can be inspectable even when it is not resumable.
 

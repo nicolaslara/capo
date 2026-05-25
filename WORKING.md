@@ -133,8 +133,8 @@ Prefer clear names. Comment non-obvious invariants: permission boundaries, recov
 | Phase | Workpad | `/next` reads |
 | --- | --- | --- |
 | Complete | `research` | `research/tasks.md`, `knowledge.md`, `references.md` |
-| Now | `architecture` | `architecture/tasks.md`, `knowledge.md`, `references.md`, `boundaries.md`, `state-model.md`, `acp-replay-dedupe.md`, `capability-permissions.md`, `runtime-tunnel.md`, `protocol-provider.md`, `tool-exposure.md`, `memory-architecture.md`, `prototype-plan.md` |
-| Next | `prototype` | `prototype/spec.md`, `tasks.md`, `knowledge.md`, `references.md`, architecture artifacts including `prototype-plan.md` |
+| Complete | `architecture` | `architecture/tasks.md`, `knowledge.md`, `references.md`, `boundaries.md`, `state-model.md`, `acp-replay-dedupe.md`, `capability-permissions.md`, `runtime-tunnel.md`, `protocol-provider.md`, `tool-exposure.md`, `memory-architecture.md`, `prototype-plan.md`, `gate-review.md` |
+| Now | `prototype` | `prototype/spec.md`, `tasks.md`, `knowledge.md`, `references.md`, architecture artifacts including `prototype-plan.md` and `gate-review.md` |
 | Later | `features` | Feature-specific tasks after prototype |
 | Later | `dogfood` | Migration of Capo project execution into Capo |
 

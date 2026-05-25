@@ -83,6 +83,7 @@ Local architecture artifacts:
 - State model: `state-model.md` (created 2026-05-25)
 - Memory architecture: `memory-architecture.md` (created 2026-05-25)
 - Prototype plan: `prototype-plan.md` (created 2026-05-25)
+- Architecture gate review: `gate-review.md` (created 2026-05-25)
 - Memory research finding: `../research/findings/R5-memory.md`
 - Memory primary sources observed during research on 2026-05-25:
   - SQLite overview: https://www.sqlite.org/about.html
