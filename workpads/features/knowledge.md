@@ -117,6 +117,26 @@ Follow-up:
 - Future source writeback should validate source hash at apply time, generate a patch/diff artifact first, and keep a rollback artifact before modifying markdown.
 - Dashboard/query work should expose proposal artifact/evidence refs directly instead of making users parse CLI output.
 
+## F2/DB4 - Next Workpad Selection
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo workpad next [--path PATH]` as a read-only dogfood operator command over indexed workpad task read models.
+- Prefer observed markdown `in_progress` before `pending`, `ready`, and `waiting_on_opt_in`, preserving markdown as the source of task state.
+- Select only `capo_execution_status=observed_only` workpad refs. Imported workpad tasks are already represented as Capo task read models and should not be re-selected as import candidates.
+- Return the deterministic default Capo task ID for the selected workpad task, but do not import it automatically. Import remains an explicit operator action.
+- Allow path scoping so Capo can answer "what is next in this workpad?" without changing global phase routing.
+
+Verification:
+
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+
+Follow-up:
+
+- A future dogfood command can compose `workpad next`, `workpad import`, and agent dispatch, but it should stay explicit until real connector proof is recorded.
+
 ## F1/AC1-AC2 - Local Connector Preflight
 
 Status: in progress on 2026-05-25.

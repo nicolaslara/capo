@@ -111,3 +111,27 @@ Decision:
 Review:
 
 - Focused review found one blocker: repeated proposal writes with different bodies could overwrite an artifact while the event no-opped. Proposal identity and overwrite guards were fixed before completion.
+
+### DB4 - Next Workpad Selection
+
+Status: completed
+
+Acceptance:
+
+- Select the next actionable indexed workpad task from Capo read models without mutating markdown.
+- Prefer `in_progress` source tasks before `pending`, `ready`, or opt-in-blocked tasks.
+- Do not return workpad tasks already imported into Capo execution state.
+- Allow scoping to a specific workpad path.
+- Return the source anchor, observed markdown status, Capo execution status, and default Capo task ID for import.
+
+Evidence:
+
+- `capo workpad next [--path PATH]` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+
+Decision:
+
+- Add a read-only operator command for selecting the next actionable indexed workpad task. It does not import tasks, edit markdown, or write proposal artifacts.
+- Selection prefers observed markdown `in_progress`, then `pending`, then `ready`, then `waiting_on_opt_in`.
+- Selection only considers `capo_execution_status=observed_only`; once a workpad task is imported, the Capo task record becomes the execution authority for that task.
+- The command returns the source workpad task ID, source anchor, observed markdown status, Capo execution status, and deterministic default Capo task ID so the operator can explicitly import or inspect the task next.

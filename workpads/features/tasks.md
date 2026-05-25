@@ -102,6 +102,7 @@ Progress:
 - DB1 workpad index is completed.
 - DB2 task import is completed.
 - DB3 reviewed artifacts are completed.
+- DB4 next workpad selection is completed with a read-only `capo workpad next` command.
 
 Evidence:
 
@@ -121,6 +122,8 @@ Evidence:
 - `capo workpad apply --proposal PATH --confirm`
 - Manual DB3 smoke: `workpad index`, `workpad import`, `workpad propose`
 - Focused DB3 review subagent: proposal overwrite/idempotency blocker found and fixed
+- `capo workpad next [--path PATH]`
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`
 
 ## F3 - Query Surface And Dashboard Upgrade
 

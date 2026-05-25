@@ -60,6 +60,15 @@ Observed 2026-05-25.
 - Dogfood bridge source workpad: `dogfood-bridge.md`
 - No new third-party dependencies were added for DB3.
 
+## F2/DB4 Next Workpad Selection
+
+Observed 2026-05-25.
+
+- Read-only next workpad selection command and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Workpad task read model query used by selection: `../../crates/capo-state/src/lib.rs`
+- Dogfood bridge source workpad: `dogfood-bridge.md`
+- No new third-party dependencies were added for DB4.
+
 ## F1/AC1-AC2 Local Connector Preflight
 
 Observed 2026-05-25.
