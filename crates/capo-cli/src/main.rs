@@ -15,12 +15,12 @@ use capo_core::{
 use capo_eval::TaskOutcomeReport;
 use capo_query::{AdapterDogfoodGate, ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 use capo_state::{
-    AdapterReadinessProjection, AdapterSmokeReportProjection, ArtifactRecord,
-    CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection, MemoryPacketProjection,
-    MemoryRecordProjection, MemorySourceProjection, NewEvent, PermissionApprovalProjection,
-    ProjectionRecord, RedactionState, ReviewFindingProjection, RunProjection, SessionProjection,
-    SqliteStateStore, ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection,
-    WorkpadTaskProjection,
+    AdapterDispatchPlanProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
+    ArtifactRecord, CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection,
+    MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection, NewEvent,
+    PermissionApprovalProjection, ProjectionRecord, RedactionState, ReviewFindingProjection,
+    RunProjection, SessionProjection, SqliteStateStore, ToolCallProjection, WorkpadFileProjection,
+    WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
 use capo_voice::{
     MemoryIngestionPolicy, TranscriptRetentionPolicy, VOICE_TRANSCRIPT_RETENTION_DEFAULT,
@@ -43,7 +43,7 @@ Usage:
   capo agent spawn --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent list [--state PATH]
   capo adapter readiness [--record] [--state PATH]
-  capo adapter plan-launch --adapter codex|claude --agent NAME --goal GOAL [--workspace PATH] [--artifacts PATH] [--state PATH]
+  capo adapter plan-launch --adapter codex|claude --agent NAME --goal GOAL [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
   capo adapter dogfood-gate [--state PATH]
   capo adapter smoke-report scan --artifact-root PATH [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
@@ -476,6 +476,7 @@ fn plan_adapter_launch(parsed: &ParsedArgs, args: &[String]) -> Result<String, S
     validate_local_launch_adapter(&adapter)?;
     let agent = required_arg(args, "--agent")?;
     let goal = required_arg(args, "--goal")?;
+    let record = has_flag(args, "--record");
     let state_root = parsed.state_root.clone();
     let workspace = optional_arg(args, "--workspace")
         .map(PathBuf::from)
@@ -487,7 +488,7 @@ fn plan_adapter_launch(parsed: &ParsedArgs, args: &[String]) -> Result<String, S
         arg.starts_with("--")
             && !matches!(
                 arg.as_str(),
-                "--adapter" | "--agent" | "--goal" | "--workspace" | "--artifacts"
+                "--adapter" | "--agent" | "--goal" | "--workspace" | "--artifacts" | "--record"
             )
     }) {
         return Err(format!("unknown adapter plan-launch option: {unknown}"));
@@ -501,8 +502,51 @@ fn plan_adapter_launch(parsed: &ParsedArgs, args: &[String]) -> Result<String, S
         .plan_local_adapter_dispatch(&adapter, &agent, &goal, workspace, artifacts)
         .map_err(|error| format!("adapter launch planning failed: {error}"))?;
     let safe_prompt_arg_count = plan.runtime_arg_count.saturating_sub(1);
+    let goal_hash = stable_cli_hash(&goal);
+    let projection = adapter_dispatch_plan_projection(&plan, &goal_hash);
+    let recorded_sequence = if record {
+        let event = NewEvent {
+            event_id: format!(
+                "event-adapter-dispatch-plan-{}",
+                stable_cli_hash(&projection.dispatch_plan_id)
+            ),
+            kind: EventKind::AdapterDispatchPlanned,
+            actor: "local-cli".to_string(),
+            project_id: Some(project_id()),
+            task_id: None,
+            agent_id: Some(projection.agent_id.clone()),
+            session_id: Some(projection.session_id.clone()),
+            run_id: Some(projection.run_id.clone()),
+            turn_id: None,
+            item_id: None,
+            payload_json: format!(
+                "{{\"adapter\":\"{}\",\"agent\":\"{}\",\"runtime_prompt_policy\":\"not_rendered\",\"provider_cli_executed\":false}}",
+                projection.adapter_kind,
+                escape_json(&projection.agent_name)
+            ),
+            idempotency_key: Some(format!(
+                "adapter-dispatch-plan:{}:{}:{}:{}:{}",
+                projection.project_id,
+                projection.adapter_kind,
+                projection.agent_id,
+                goal_hash,
+                stable_cli_hash(&format!(
+                    "{}:{}:{}",
+                    projection.runtime_cwd, projection.artifact_root, projection.runtime_arg_count
+                ))
+            )),
+            redaction_state: RedactionState::Safe,
+        };
+        Some(
+            state(parsed)?
+                .append_event(event, &[ProjectionRecord::AdapterDispatchPlan(projection)])
+                .map_err(debug_error)?,
+        )
+    } else {
+        None
+    };
     Ok(format!(
-        "adapter_launch_planned=true\nadapter={}\nprovider_kind={}\ncredential_scope={}\nagent={}\nagent_id={}\nsession_id={}\nrun_id={}\nruntime_program={}\nruntime_arg_count={}\nruntime_prompt_policy=not_rendered\nruntime_safe_arg_count={}\nruntime_cwd={}\nartifact_root={}\nrequest_env_count={}\nenv_allowlist={}\nredaction_rules={}\nstdout_format={}\nstderr_policy={}\nsubscription_safe=true\nprovider_cli_executed=false\n",
+        "adapter_launch_planned=true\nadapter={}\nprovider_kind={}\ncredential_scope={}\nagent={}\nagent_id={}\nsession_id={}\nrun_id={}\nruntime_program={}\nruntime_arg_count={}\nruntime_prompt_policy=not_rendered\nruntime_safe_arg_count={}\nruntime_cwd={}\nartifact_root={}\nrequest_env_count={}\nenv_allowlist={}\nredaction_rules={}\nstdout_format={}\nstderr_policy={}\nsubscription_safe=true\nprovider_cli_executed=false\nrecorded={}\nrecorded_sequence={}\n",
         plan.launch_plan.adapter_kind.as_str(),
         plan.launch_plan.provider_kind,
         plan.launch_plan.credential_scope,
@@ -520,12 +564,57 @@ fn plan_adapter_launch(parsed: &ParsedArgs, args: &[String]) -> Result<String, S
         plan.launch_plan.redaction_rules.len(),
         plan.launch_plan.stdout_format,
         plan.launch_plan.stderr_policy,
+        record,
+        recorded_sequence
+            .map(|sequence| sequence.to_string())
+            .unwrap_or_else(|| "none".to_string()),
     ))
+}
+
+fn adapter_dispatch_plan_projection(
+    plan: &capo_controller::LocalAdapterDispatchPlan,
+    goal_hash: &str,
+) -> AdapterDispatchPlanProjection {
+    AdapterDispatchPlanProjection {
+        dispatch_plan_id: format!(
+            "adapter-dispatch-plan-{}-{}-{}",
+            plan.launch_plan.adapter_kind.as_str(),
+            goal_hash,
+            stable_cli_hash(&format!(
+                "{}:{}:{}:{}",
+                plan.agent_id,
+                plan.session_id,
+                plan.runtime_cwd.display(),
+                plan.launch_plan.artifact_root.display()
+            ))
+        ),
+        project_id: plan.project_id.clone(),
+        adapter_kind: plan.launch_plan.adapter_kind.as_str().to_string(),
+        provider_kind: plan.launch_plan.provider_kind.clone(),
+        credential_scope: plan.launch_plan.credential_scope.clone(),
+        agent_id: plan.agent_id.clone(),
+        agent_name: plan.agent_name.clone(),
+        session_id: plan.session_id.clone(),
+        run_id: plan.run_id.clone(),
+        runtime_program: plan.runtime_program.clone(),
+        runtime_arg_count: plan.runtime_arg_count as i64,
+        runtime_prompt_policy: "not_rendered".to_string(),
+        runtime_cwd: plan.runtime_cwd.display().to_string(),
+        artifact_root: plan.launch_plan.artifact_root.display().to_string(),
+        request_env_count: plan.request_env_count as i64,
+        env_allowlist_count: plan.launch_plan.env_allowlist.len() as i64,
+        redaction_rule_count: plan.launch_plan.redaction_rules.len() as i64,
+        stdout_format: plan.launch_plan.stdout_format.clone(),
+        stderr_policy: plan.launch_plan.stderr_policy.clone(),
+        provider_cli_executed: false,
+        status: "planned".to_string(),
+        updated_sequence: 0,
+    }
 }
 
 fn validate_local_launch_adapter(adapter: &str) -> Result<(), String> {
     match adapter {
-        "codex" | "codex_exec" | "claude" | "claude_code" => Ok(()),
+        "codex" | "codex-exec" | "codex_exec" | "claude" | "claude-code" | "claude_code" => Ok(()),
         other => Err(format!(
             "unsupported local adapter dispatch plan: {other}; expected codex or claude"
         )),
@@ -963,6 +1052,29 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
             report.dogfood_readiness_effect,
             report.artifact_root.as_deref().unwrap_or("none"),
             report.reason
+        ));
+    }
+    output.push_str(&format!(
+        "adapter_dispatch_plans={}\n",
+        dashboard.adapter_dispatch_plans.len()
+    ));
+    for plan in &dashboard.adapter_dispatch_plans {
+        output.push_str(&format!(
+            "adapter_dispatch_plan={} adapter={} provider_kind={} credential_scope={} agent={} session={} run={} runtime_program={} runtime_arg_count={} runtime_prompt_policy={} runtime_cwd={} artifact_root={} provider_cli_executed={} status={}\n",
+            plan.dispatch_plan_id,
+            plan.adapter_kind,
+            plan.provider_kind,
+            plan.credential_scope,
+            plan.agent_name,
+            plan.session_id,
+            plan.run_id,
+            plan.runtime_program,
+            plan.runtime_arg_count,
+            plan.runtime_prompt_policy,
+            plan.runtime_cwd,
+            plan.artifact_root,
+            plan.provider_cli_executed,
+            plan.status
         ));
     }
     output.push_str(&render_adapter_dogfood_gate(
@@ -3374,6 +3486,7 @@ mod tests {
             workspace.display().to_string(),
             "--artifacts".to_string(),
             artifacts.display().to_string(),
+            "--record".to_string(),
             "--state".to_string(),
             state_root.display().to_string(),
         ])
@@ -3388,11 +3501,72 @@ mod tests {
         assert!(output.contains("request_env_count=0"));
         assert!(output.contains("subscription_safe=true"));
         assert!(output.contains("provider_cli_executed=false"));
+        assert!(output.contains("recorded=true"));
         assert!(output.contains(&format!("runtime_cwd={}", workspace.display())));
         assert!(output.contains(&format!("artifact_root={}", artifacts.display())));
         assert!(!output.contains("Summarize this workpad"));
         assert!(!workspace.exists());
         assert!(!artifacts.exists());
+        let plans = SqliteStateStore::open(&state_root)
+            .expect("state")
+            .adapter_dispatch_plans(&project_id())
+            .expect("dispatch plans");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].adapter_kind, "codex_exec");
+        assert_eq!(plans[0].runtime_prompt_policy, "not_rendered");
+        assert!(!plans[0].provider_cli_executed);
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard");
+        assert!(dashboard.contains("adapter_dispatch_plans=1"));
+        assert!(dashboard.contains("adapter_dispatch_plan=adapter-dispatch-plan-codex_exec"));
+        assert!(!dashboard.contains("Summarize this workpad"));
+    }
+
+    #[test]
+    fn adapter_plan_launch_records_distinct_prompt_identities_without_prompt_text() {
+        let state_root = temp_root("adapter-plan-launch-distinct-state");
+        let workspace = temp_root("adapter-plan-launch-distinct-workspace");
+        let artifacts = temp_root("adapter-plan-launch-distinct-artifacts");
+        for goal in ["First sensitive-ish prompt", "Second sensitive-ish prompt"] {
+            run_cli(vec![
+                "adapter".to_string(),
+                "plan-launch".to_string(),
+                "--adapter".to_string(),
+                "codex".to_string(),
+                "--agent".to_string(),
+                "codex-worker".to_string(),
+                "--goal".to_string(),
+                goal.to_string(),
+                "--workspace".to_string(),
+                workspace.display().to_string(),
+                "--artifacts".to_string(),
+                artifacts.display().to_string(),
+                "--record".to_string(),
+                "--state".to_string(),
+                state_root.display().to_string(),
+            ])
+            .expect("record dispatch plan");
+        }
+
+        let plans = SqliteStateStore::open(&state_root)
+            .expect("state")
+            .adapter_dispatch_plans(&project_id())
+            .expect("dispatch plans");
+        assert_eq!(plans.len(), 2);
+        assert_ne!(plans[0].dispatch_plan_id, plans[1].dispatch_plan_id);
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard");
+        assert!(dashboard.contains("adapter_dispatch_plans=2"));
+        assert!(!dashboard.contains("First sensitive-ish prompt"));
+        assert!(!dashboard.contains("Second sensitive-ish prompt"));
     }
 
     #[test]

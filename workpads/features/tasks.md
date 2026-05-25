@@ -63,6 +63,7 @@ Progress:
 - AC8 smoke artifact scan enforcement is completed. Passed smoke reports now require an artifact root that Capo scans for unredacted credential/session markers before recording the report.
 - AC9 local adapter launch contract is completed. Codex and Claude Code now share reusable launch-plan builders that produce runtime configs/requests without launching provider CLIs.
 - AC10 controller dispatch planning is completed. `capo adapter plan-launch` resolves agent intent into a safe, prompt-redacted local adapter runtime contract without executing provider CLIs.
+- AC11 durable dispatch plan read model is completed. `capo adapter plan-launch --record` persists prompt-redacted dispatch plans and the dashboard renders them through the shared query surface.
 
 Evidence:
 
@@ -88,6 +89,8 @@ Evidence:
 - `cargo test -p capo-adapters launch_plan -- --nocapture`
 - `cargo test -p capo-controller local_adapter_dispatch -- --nocapture`
 - `cargo test -p capo-cli adapter_plan_launch -- --nocapture`
+- `cargo test -p capo-state adapter_dispatch_plan -- --nocapture`
+- `cargo test -p capo-query adapter_dispatch -- --nocapture`
 - Focused F1 connector safety review: no blocking findings; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge

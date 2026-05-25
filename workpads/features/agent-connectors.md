@@ -266,3 +266,29 @@ Decision:
 - The command auto-registers the named agent if needed so operators can inspect a launch contract before real connector proof.
 - The prompt is intentionally not rendered in command output. The output reports counts, policy, paths, and provider/runtime metadata only.
 - AC10 still does not clear AC1 or AC3. Real local adapter execution remains blocked on explicit opt-in smoke evidence.
+
+### AC11 - Durable Dispatch Plan Read Model
+
+Status: completed
+
+Acceptance:
+
+- Persist adapter dispatch plans as Capo-owned events/projections when explicitly requested.
+- Rebuild dispatch-plan read models from projection records.
+- Expose recorded dispatch plans through the shared dashboard/query surface.
+- Keep recorded plans prompt-redacted and honest that no provider CLI executed.
+
+Evidence:
+
+- `AdapterDispatchPlanProjection`, `EventKind::AdapterDispatchPlanned`, SQLite table, rebuild codec, and read query in `../../crates/capo-state/src/lib.rs`.
+- `ProjectDashboard.adapter_dispatch_plans` in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo adapter plan-launch ... --record` and dashboard rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-state adapter_dispatch_plan -- --nocapture`: passed.
+- `cargo test -p capo-query adapter_dispatch -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_plan_launch -- --nocapture`: passed.
+
+Decision:
+
+- Make `plan-launch` non-mutating by default except for the existing safe agent registration behavior; require `--record` to persist the dispatch-plan projection.
+- Store runtime metadata, provider kind, credential scope, redaction/env counts, and `provider_cli_executed=false`, but do not store or render the raw prompt.
+- AC11 improves inspectability and restart/rebuild behavior for planned real-agent dispatch. It still does not satisfy AC1 or AC3 because no subscription-backed provider process is run.

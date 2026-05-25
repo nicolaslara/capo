@@ -852,6 +852,52 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn adapter_dispatch_plans(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<AdapterDispatchPlanProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT dispatch_plan_id, project_id, adapter_kind, provider_kind,
+                    credential_scope, agent_id, agent_name, session_id, run_id,
+                    runtime_program, runtime_arg_count, runtime_prompt_policy,
+                    runtime_cwd, artifact_root, request_env_count, env_allowlist_count,
+                    redaction_rule_count, stdout_format, stderr_policy,
+                    provider_cli_executed, status, updated_sequence
+             FROM adapter_dispatch_plans
+             WHERE project_id = ?1
+             ORDER BY updated_sequence ASC, dispatch_plan_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(AdapterDispatchPlanProjection {
+                dispatch_plan_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                adapter_kind: row.get(2)?,
+                provider_kind: row.get(3)?,
+                credential_scope: row.get(4)?,
+                agent_id: AgentId::new(row.get::<_, String>(5)?),
+                agent_name: row.get(6)?,
+                session_id: SessionId::new(row.get::<_, String>(7)?),
+                run_id: RunId::new(row.get::<_, String>(8)?),
+                runtime_program: row.get(9)?,
+                runtime_arg_count: row.get(10)?,
+                runtime_prompt_policy: row.get(11)?,
+                runtime_cwd: row.get(12)?,
+                artifact_root: row.get(13)?,
+                request_env_count: row.get(14)?,
+                env_allowlist_count: row.get(15)?,
+                redaction_rule_count: row.get(16)?,
+                stdout_format: row.get(17)?,
+                stderr_policy: row.get(18)?,
+                provider_cli_executed: row.get::<_, i64>(19)? != 0,
+                status: row.get(20)?,
+                updated_sequence: row.get(21)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn evidence_for_session(
         &self,
         session_id: &SessionId,
@@ -1328,6 +1374,7 @@ pub enum EventKind {
     ConnectivityHealthChanged,
     AdapterReadinessChecked,
     AdapterSmokeRecorded,
+    AdapterDispatchPlanned,
     ToolCallRequested,
     ToolInvocationStarted,
     ToolOutputArtifactRecorded,
@@ -1371,6 +1418,7 @@ impl EventKind {
             Self::ConnectivityHealthChanged => "connectivity.health_changed",
             Self::AdapterReadinessChecked => "adapter.readiness_checked",
             Self::AdapterSmokeRecorded => "adapter.smoke_recorded",
+            Self::AdapterDispatchPlanned => "adapter.dispatch_planned",
             Self::ToolCallRequested => "tool.call_requested",
             Self::ToolInvocationStarted => "tool.invocation_started",
             Self::ToolOutputArtifactRecorded => "tool.output_artifact_recorded",
@@ -1466,6 +1514,7 @@ pub enum ProjectionRecord {
     ConnectivityExposure(ConnectivityExposureProjection),
     AdapterReadiness(AdapterReadinessProjection),
     AdapterSmokeReport(AdapterSmokeReportProjection),
+    AdapterDispatchPlan(AdapterDispatchPlanProjection),
     ToolCall(ToolCallProjection),
     MemoryPacketRef(MemoryPacketProjection),
     MemoryRecord(Box<MemoryRecordProjection>),
@@ -1608,6 +1657,32 @@ pub struct AdapterSmokeReportProjection {
     pub artifact_root: Option<String>,
     pub reason: String,
     pub dogfood_readiness_effect: String,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterDispatchPlanProjection {
+    pub dispatch_plan_id: String,
+    pub project_id: ProjectId,
+    pub adapter_kind: String,
+    pub provider_kind: String,
+    pub credential_scope: String,
+    pub agent_id: AgentId,
+    pub agent_name: String,
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    pub runtime_program: String,
+    pub runtime_arg_count: i64,
+    pub runtime_prompt_policy: String,
+    pub runtime_cwd: String,
+    pub artifact_root: String,
+    pub request_env_count: i64,
+    pub env_allowlist_count: i64,
+    pub redaction_rule_count: i64,
+    pub stdout_format: String,
+    pub stderr_policy: String,
+    pub provider_cli_executed: bool,
+    pub status: String,
     pub updated_sequence: i64,
 }
 
@@ -1988,6 +2063,30 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             dogfood_readiness_effect TEXT NOT NULL,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS adapter_dispatch_plans (
+            dispatch_plan_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            adapter_kind TEXT NOT NULL,
+            provider_kind TEXT NOT NULL,
+            credential_scope TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            runtime_program TEXT NOT NULL,
+            runtime_arg_count INTEGER NOT NULL,
+            runtime_prompt_policy TEXT NOT NULL,
+            runtime_cwd TEXT NOT NULL,
+            artifact_root TEXT NOT NULL,
+            request_env_count INTEGER NOT NULL,
+            env_allowlist_count INTEGER NOT NULL,
+            redaction_rule_count INTEGER NOT NULL,
+            stdout_format TEXT NOT NULL,
+            stderr_policy TEXT NOT NULL,
+            provider_cli_executed INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS tool_calls (
             tool_call_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
@@ -2179,6 +2278,7 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "connectivity_exposures",
         "adapter_readiness",
         "adapter_smoke_reports",
+        "adapter_dispatch_plans",
         "tool_calls",
         "memory_packet_refs",
         "memory_records",
@@ -2527,6 +2627,61 @@ fn apply_projection_record(
                 report.artifact_root,
                 report.reason,
                 report.dogfood_readiness_effect,
+                sequence,
+            ],
+        )?,
+        ProjectionRecord::AdapterDispatchPlan(plan) => transaction.execute(
+            "INSERT INTO adapter_dispatch_plans(
+                dispatch_plan_id, project_id, adapter_kind, provider_kind,
+                credential_scope, agent_id, agent_name, session_id, run_id,
+                runtime_program, runtime_arg_count, runtime_prompt_policy, runtime_cwd,
+                artifact_root, request_env_count, env_allowlist_count, redaction_rule_count,
+                stdout_format, stderr_policy, provider_cli_executed, status, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+             ON CONFLICT(dispatch_plan_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                adapter_kind = excluded.adapter_kind,
+                provider_kind = excluded.provider_kind,
+                credential_scope = excluded.credential_scope,
+                agent_id = excluded.agent_id,
+                agent_name = excluded.agent_name,
+                session_id = excluded.session_id,
+                run_id = excluded.run_id,
+                runtime_program = excluded.runtime_program,
+                runtime_arg_count = excluded.runtime_arg_count,
+                runtime_prompt_policy = excluded.runtime_prompt_policy,
+                runtime_cwd = excluded.runtime_cwd,
+                artifact_root = excluded.artifact_root,
+                request_env_count = excluded.request_env_count,
+                env_allowlist_count = excluded.env_allowlist_count,
+                redaction_rule_count = excluded.redaction_rule_count,
+                stdout_format = excluded.stdout_format,
+                stderr_policy = excluded.stderr_policy,
+                provider_cli_executed = excluded.provider_cli_executed,
+                status = excluded.status,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                plan.dispatch_plan_id,
+                plan.project_id.as_str(),
+                plan.adapter_kind,
+                plan.provider_kind,
+                plan.credential_scope,
+                plan.agent_id.as_str(),
+                plan.agent_name,
+                plan.session_id.as_str(),
+                plan.run_id.as_str(),
+                plan.runtime_program,
+                plan.runtime_arg_count,
+                plan.runtime_prompt_policy,
+                plan.runtime_cwd,
+                plan.artifact_root,
+                plan.request_env_count,
+                plan.env_allowlist_count,
+                plan.redaction_rule_count,
+                plan.stdout_format,
+                plan.stderr_policy,
+                if plan.provider_cli_executed { 1 } else { 0 },
+                plan.status,
                 sequence,
             ],
         )?,
@@ -3011,6 +3166,33 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
             h: None,
             payload_json: json!({
                 "reason": report.reason,
+            })
+            .to_string(),
+        },
+        ProjectionRecord::AdapterDispatchPlan(plan) => ProjectionRecordRow {
+            kind: "adapter_dispatch_plan",
+            record_id: plan.dispatch_plan_id.clone(),
+            a: Some(plan.project_id.to_string()),
+            b: Some(plan.adapter_kind.clone()),
+            c: Some(plan.agent_id.to_string()),
+            d: Some(plan.session_id.to_string()),
+            e: Some(plan.run_id.to_string()),
+            f: Some(plan.status.clone()),
+            g: Some(plan.provider_cli_executed.to_string()),
+            h: Some(plan.runtime_prompt_policy.clone()),
+            payload_json: json!({
+                "provider_kind": plan.provider_kind,
+                "credential_scope": plan.credential_scope,
+                "agent_name": plan.agent_name,
+                "runtime_program": plan.runtime_program,
+                "runtime_arg_count": plan.runtime_arg_count,
+                "runtime_cwd": plan.runtime_cwd,
+                "artifact_root": plan.artifact_root,
+                "request_env_count": plan.request_env_count,
+                "env_allowlist_count": plan.env_allowlist_count,
+                "redaction_rule_count": plan.redaction_rule_count,
+                "stdout_format": plan.stdout_format,
+                "stderr_policy": plan.stderr_policy,
             })
             .to_string(),
         },
@@ -3515,6 +3697,136 @@ fn projection_record_from_row(
                         g,
                         "dogfood_readiness_effect",
                     )?,
+                    updated_sequence: 0,
+                },
+            ))
+        }
+        "adapter_dispatch_plan" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::AdapterDispatchPlan(
+                AdapterDispatchPlanProjection {
+                    dispatch_plan_id: record_id,
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        a,
+                        "project_id",
+                    )?),
+                    adapter_kind: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        b,
+                        "adapter_kind",
+                    )?,
+                    provider_kind: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        &payload,
+                        "provider_kind",
+                    )?,
+                    credential_scope: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        &payload,
+                        "credential_scope",
+                    )?,
+                    agent_id: AgentId::new(required_field(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        c,
+                        "agent_id",
+                    )?),
+                    agent_name: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        &payload,
+                        "agent_name",
+                    )?,
+                    session_id: SessionId::new(required_field(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        d,
+                        "session_id",
+                    )?),
+                    run_id: RunId::new(required_field(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        e,
+                        "run_id",
+                    )?),
+                    runtime_program: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        &payload,
+                        "runtime_program",
+                    )?,
+                    runtime_arg_count: required_payload_i64(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        &payload,
+                        "runtime_arg_count",
+                    )?,
+                    runtime_prompt_policy: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        h,
+                        "runtime_prompt_policy",
+                    )?,
+                    runtime_cwd: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        &payload,
+                        "runtime_cwd",
+                    )?,
+                    artifact_root: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        &payload,
+                        "artifact_root",
+                    )?,
+                    request_env_count: required_payload_i64(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        &payload,
+                        "request_env_count",
+                    )?,
+                    env_allowlist_count: required_payload_i64(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        &payload,
+                        "env_allowlist_count",
+                    )?,
+                    redaction_rule_count: required_payload_i64(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        &payload,
+                        "redaction_rule_count",
+                    )?,
+                    stdout_format: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        &payload,
+                        "stdout_format",
+                    )?,
+                    stderr_policy: required_payload_string(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        &payload,
+                        "stderr_policy",
+                    )?,
+                    provider_cli_executed: required_field(
+                        &projection_kind,
+                        "adapter_dispatch_plan",
+                        g,
+                        "provider_cli_executed",
+                    )?
+                    .parse::<bool>()
+                    .map_err(|error| {
+                        ProjectionDecodeError(format!(
+                            "invalid bool for adapter_dispatch_plan provider_cli_executed: {error}"
+                        ))
+                    })?,
+                    status: required_field(&projection_kind, "adapter_dispatch_plan", f, "status")?,
                     updated_sequence: 0,
                 },
             ))
@@ -5189,6 +5501,71 @@ mod tests {
             reports[0].dogfood_readiness_effect,
             "real_subscription_smoke_not_recorded"
         );
+    }
+
+    #[test]
+    fn adapter_dispatch_plan_is_persisted_and_rebuilt() {
+        let store = temp_store("adapter-dispatch-plan-rebuild");
+        let project_id = ProjectId::new("project-capo");
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-adapter-dispatch-plan".to_string(),
+                    kind: EventKind::AdapterDispatchPlanned,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: Some(AgentId::new("agent-codex")),
+                    session_id: Some(SessionId::new("session-codex")),
+                    run_id: Some(RunId::new("run-codex")),
+                    turn_id: None,
+                    item_id: Some("adapter-dispatch-plan-codex".to_string()),
+                    payload_json:
+                        "{\"runtime_prompt_policy\":\"not_rendered\",\"provider_cli_executed\":false}"
+                            .to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::AdapterDispatchPlan(
+                    AdapterDispatchPlanProjection {
+                        dispatch_plan_id: "adapter-dispatch-plan-codex".to_string(),
+                        project_id: project_id.clone(),
+                        adapter_kind: "codex_exec".to_string(),
+                        provider_kind: "codex_subscription".to_string(),
+                        credential_scope: "user_local_subscription".to_string(),
+                        agent_id: AgentId::new("agent-codex"),
+                        agent_name: "codex".to_string(),
+                        session_id: SessionId::new("session-codex"),
+                        run_id: RunId::new("run-codex"),
+                        runtime_program: "codex".to_string(),
+                        runtime_arg_count: 9,
+                        runtime_prompt_policy: "not_rendered".to_string(),
+                        runtime_cwd: "/tmp/capo-workspace".to_string(),
+                        artifact_root: "/tmp/capo-artifacts".to_string(),
+                        request_env_count: 0,
+                        env_allowlist_count: 7,
+                        redaction_rule_count: 6,
+                        stdout_format: "jsonl".to_string(),
+                        stderr_policy: "logs_redacted".to_string(),
+                        provider_cli_executed: false,
+                        status: "planned".to_string(),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append adapter dispatch plan");
+
+        store.rebuild_projections().expect("rebuild projections");
+        let plans = store
+            .adapter_dispatch_plans(&project_id)
+            .expect("adapter dispatch plans");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].adapter_kind, "codex_exec");
+        assert_eq!(plans[0].credential_scope, "user_local_subscription");
+        assert_eq!(plans[0].runtime_prompt_policy, "not_rendered");
+        assert!(!plans[0].provider_cli_executed);
+        assert_eq!(plans[0].status, "planned");
     }
 
     #[test]

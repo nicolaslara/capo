@@ -110,6 +110,16 @@ Observed 2026-05-25.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC10.
 
+## F1/AC11 Durable Dispatch Plan Read Model
+
+Observed 2026-05-25.
+
+- Adapter dispatch plan projection, event kind, SQLite table, rebuild codec, and read query: `../../crates/capo-state/src/lib.rs`
+- Shared dashboard dispatch-plan query surface: `../../crates/capo-query/src/lib.rs`
+- CLI `adapter plan-launch --record` and dashboard rendering: `../../crates/capo-cli/src/main.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC11.
+
 ## F3/DS1 Query Surface Extraction
 
 Observed 2026-05-25.

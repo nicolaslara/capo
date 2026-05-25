@@ -6,10 +6,10 @@
 
 use capo_core::{ProjectId, SessionId};
 use capo_state::{
-    AdapterReadinessProjection, AdapterSmokeReportProjection, AgentProjection,
-    ConnectivityExposureProjection, EventRecord, EvidenceProjection, MemoryPacketProjection,
-    RunProjection, SessionProjection, SqliteStateStore, StateResult, ToolCallProjection,
-    WorkpadTaskProjection,
+    AdapterDispatchPlanProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
+    AgentProjection, ConnectivityExposureProjection, EventRecord, EvidenceProjection,
+    MemoryPacketProjection, RunProjection, SessionProjection, SqliteStateStore, StateResult,
+    ToolCallProjection, WorkpadTaskProjection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,6 +19,7 @@ pub struct ProjectDashboard {
     pub connectivity_exposures: Vec<ConnectivityExposureProjection>,
     pub adapter_readiness: Vec<AdapterReadinessProjection>,
     pub adapter_smoke_reports: Vec<AdapterSmokeReportProjection>,
+    pub adapter_dispatch_plans: Vec<AdapterDispatchPlanProjection>,
     pub adapter_dogfood_gate: AdapterDogfoodGate,
     pub workpad_tasks: Vec<WorkpadTaskProjection>,
 }
@@ -130,6 +131,7 @@ pub fn project_dashboard(
     let connectivity_exposures = state.connectivity_exposures(&query.project_id)?;
     let adapter_readiness = state.adapter_readiness(&query.project_id)?;
     let adapter_smoke_reports = state.adapter_smoke_reports(&query.project_id)?;
+    let adapter_dispatch_plans = state.adapter_dispatch_plans(&query.project_id)?;
     let adapter_dogfood_gate = adapter_dogfood_gate(&adapter_smoke_reports);
     let workpad_tasks = state
         .workpad_tasks(&query.project_id)?
@@ -157,6 +159,7 @@ pub fn project_dashboard(
         connectivity_exposures,
         adapter_readiness,
         adapter_smoke_reports,
+        adapter_dispatch_plans,
         adapter_dogfood_gate,
         workpad_tasks,
     })
@@ -443,6 +446,27 @@ mod tests {
             ready.adapter_dogfood_gate.proven_adapters,
             vec!["codex_exec"]
         );
+    }
+
+    #[test]
+    fn project_dashboard_includes_adapter_dispatch_plans() {
+        let root = temp_root("query-dashboard-adapter-dispatch");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        append_agent(&state, &project_id, "agent-idle", None);
+        append_adapter_dispatch_plan(&state, &project_id);
+
+        let dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+
+        assert_eq!(dashboard.adapter_dispatch_plans.len(), 1);
+        let plan = &dashboard.adapter_dispatch_plans[0];
+        assert_eq!(plan.dispatch_plan_id, "adapter-dispatch-plan-codex");
+        assert_eq!(plan.adapter_kind, "codex_exec");
+        assert_eq!(plan.credential_scope, "user_local_subscription");
+        assert_eq!(plan.runtime_prompt_policy, "not_rendered");
+        assert!(!plan.provider_cli_executed);
+        assert_eq!(plan.status, "planned");
     }
 
     #[test]
@@ -859,6 +883,54 @@ mod tests {
                 )],
             )
             .expect("append adapter smoke report");
+    }
+
+    fn append_adapter_dispatch_plan(state: &SqliteStateStore, project_id: &ProjectId) {
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-adapter-dispatch-plan-codex".to_string(),
+                    kind: EventKind::AdapterDispatchPlanned,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: Some(AgentId::new("agent-codex")),
+                    session_id: Some(SessionId::new("session-codex")),
+                    run_id: Some(RunId::new("run-codex")),
+                    turn_id: None,
+                    item_id: Some("adapter-dispatch-plan-codex".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::AdapterDispatchPlan(
+                    AdapterDispatchPlanProjection {
+                        dispatch_plan_id: "adapter-dispatch-plan-codex".to_string(),
+                        project_id: project_id.clone(),
+                        adapter_kind: "codex_exec".to_string(),
+                        provider_kind: "codex_subscription".to_string(),
+                        credential_scope: "user_local_subscription".to_string(),
+                        agent_id: AgentId::new("agent-codex"),
+                        agent_name: "codex".to_string(),
+                        session_id: SessionId::new("session-codex"),
+                        run_id: RunId::new("run-codex"),
+                        runtime_program: "codex".to_string(),
+                        runtime_arg_count: 9,
+                        runtime_prompt_policy: "not_rendered".to_string(),
+                        runtime_cwd: "/tmp/capo-workspace".to_string(),
+                        artifact_root: "/tmp/capo-artifacts".to_string(),
+                        request_env_count: 0,
+                        env_allowlist_count: 7,
+                        redaction_rule_count: 6,
+                        stdout_format: "jsonl".to_string(),
+                        stderr_policy: "logs_redacted".to_string(),
+                        provider_cli_executed: false,
+                        status: "planned".to_string(),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append adapter dispatch plan");
     }
 
     fn append_workpad_task(

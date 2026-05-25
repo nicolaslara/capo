@@ -273,6 +273,28 @@ Follow-up:
 
 - After AC1 has clean opt-in Codex smoke evidence, the next controller slice can convert the launch plan into an audited runtime start and adapter stream consumption path.
 
+## F1/AC11 - Durable Dispatch Plan Read Model
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `AdapterDispatchPlanProjection` as the durable, prompt-redacted record of planned real-adapter dispatch.
+- Add `capo adapter plan-launch --record` so operators can explicitly persist planned Codex/Claude launch metadata before any provider process runs.
+- Expose dispatch plans through `ProjectDashboard.adapter_dispatch_plans` and the text dashboard. This makes planned real-agent work visible beside readiness, smoke reports, agents, sessions, and workpad tasks.
+- Keep prompt text out of projection records and dashboard output. The projection stores `runtime_prompt_policy=not_rendered` and counts/policies instead.
+- Keep `provider_cli_executed=false` in the projection so recorded plans cannot be mistaken for real adapter execution evidence.
+
+Verification:
+
+- `cargo test -p capo-state adapter_dispatch_plan -- --nocapture`: passed.
+- `cargo test -p capo-query adapter_dispatch -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_plan_launch -- --nocapture`: passed.
+
+Follow-up:
+
+- A future real-dispatch slice should transition a recorded plan from `planned` into runtime start events only after AC1 records clean opt-in Codex smoke evidence.
+
 ## F3/DS1 - Query Surface Extraction
 
 Status: completed on 2026-05-25.

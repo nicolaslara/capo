@@ -259,10 +259,10 @@ impl FakeBoundaryController {
         let session_id = SessionId::new(format!("session-{}", registration.agent_name));
         let run_id = RunId::new(format!("run-{}", registration.agent_name));
         let launch_plan = match adapter {
-            "codex" | "codex_exec" => {
+            "codex" | "codex-exec" | "codex_exec" => {
                 CodexExecAdapter::local_launch_plan(workspace_root, artifact_root, goal)
             }
-            "claude" | "claude_code" => {
+            "claude" | "claude-code" | "claude_code" => {
                 ClaudeCodeAdapter::local_launch_plan(workspace_root, artifact_root, goal)
             }
             other => {
