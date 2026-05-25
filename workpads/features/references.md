@@ -232,3 +232,13 @@ Observed 2026-05-25.
 - Capability permission scopes for private/public network exposure: `../architecture/capability-permissions.md`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR2.
+
+## F7/RR3 Explicit Exposure Policy
+
+Observed 2026-05-25.
+
+- Connectivity exposure projection, event kinds, migration, rebuild codec, read query, and regression test: `../../crates/capo-state/src/lib.rs`
+- Runtime/tunnel exposure event model architecture: `../architecture/runtime-tunnel.md`
+- Durable grant/revocation architecture: `../architecture/capability-permissions.md`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR3.

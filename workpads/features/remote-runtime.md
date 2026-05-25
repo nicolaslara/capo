@@ -55,9 +55,16 @@ Evidence:
 
 ### RR3 - Explicit Exposure Policy
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Require durable permission events before public or remote-control exposure.
 - Make revocation and health visible in read models.
+
+Evidence:
+
+- `ConnectivityExposureProjection`, `EventKind::ConnectivityExposureRequested`, `EventKind::ConnectivityExposureChanged`, `EventKind::ConnectivityExposureRevoked`, and `EventKind::ConnectivityHealthChanged` in `../../crates/capo-state/src/lib.rs`.
+- Exposure read models include endpoint ID, owner, channel, exposure scope, permission scope, status, linked capability grant, health status, reachability, and revocation timestamp.
+- Regression test proves remote-control exposure starts as `blocked_pending_permission`, becomes `active` only after a durable `capability.grant_created` event/projection, then rebuilds as `revoked` with disabled health.
+- `cargo test -p capo-state connectivity_exposure -- --nocapture`: passed.

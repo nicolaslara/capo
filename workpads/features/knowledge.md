@@ -564,3 +564,24 @@ Verification:
 Follow-up:
 
 - RR3 should wire explicit exposure policy into durable permission events/read models before public or remote-control exposure is treated as available.
+
+## F7/RR3 - Explicit Exposure Policy
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `ConnectivityExposureProjection` to the state layer instead of storing exposure state inside runtime process refs. This keeps endpoint reachability and public/private exposure separate from agent process ownership.
+- Add durable connectivity event kinds for requested, changed, revoked, and health-changed exposure facts.
+- Link active exposure to a `CapabilityGrantProjection`; the regression path leaves private remote-control exposure `blocked_pending_permission` until a durable `capability.grant_created` event/projection exists.
+- Keep revocation visible in the same read model with `status=revoked`, `reachable=false`, disabled health, and `revoked_at`.
+- This is still not production remote execution. RR3 proves durable exposure policy state; real remote operation still depends on the F1 real-agent connector proof and later concrete SSH/Tailscale/worker adapters.
+
+Verification:
+
+- `cargo test -p capo-state connectivity_exposure -- --nocapture`: passed.
+
+Follow-up:
+
+- A future CLI/API surface should render connectivity exposure rows and drive approval decisions using the existing permission approval queue.
+- Concrete SSH/Tailscale adapters must attach real identity/auth refs and health checks to this projection before any dogfood remote-control path.

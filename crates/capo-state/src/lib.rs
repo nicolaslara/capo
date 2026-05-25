@@ -752,6 +752,41 @@ impl SqliteStateStore {
             .find(|approval| approval.approval_id == approval_id))
     }
 
+    pub fn connectivity_exposures(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<ConnectivityExposureProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT exposure_id, project_id, connectivity_endpoint_id, owner_kind, owner_id,
+                    channel_kind, exposure, permission_scope, status, capability_grant_id,
+                    health_status, reachable, revoked_at, updated_sequence
+             FROM connectivity_exposures
+             WHERE project_id = ?1
+             ORDER BY updated_sequence ASC, exposure_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(ConnectivityExposureProjection {
+                exposure_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                connectivity_endpoint_id: row.get(2)?,
+                owner_kind: row.get(3)?,
+                owner_id: row.get(4)?,
+                channel_kind: row.get(5)?,
+                exposure: row.get(6)?,
+                permission_scope: row.get(7)?,
+                status: row.get(8)?,
+                capability_grant_id: row.get(9)?,
+                health_status: row.get(10)?,
+                reachable: row.get::<_, i64>(11)? != 0,
+                revoked_at: row.get(12)?,
+                updated_sequence: row.get(13)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn evidence_for_session(
         &self,
         session_id: &SessionId,
@@ -1222,6 +1257,10 @@ pub enum EventKind {
     PermissionApprovalQueued,
     CapabilityGrantCreated,
     CapabilityGrantUsed,
+    ConnectivityExposureRequested,
+    ConnectivityExposureChanged,
+    ConnectivityExposureRevoked,
+    ConnectivityHealthChanged,
     ToolCallRequested,
     ToolInvocationStarted,
     ToolOutputArtifactRecorded,
@@ -1259,6 +1298,10 @@ impl EventKind {
             Self::PermissionApprovalQueued => "permission.approval_queued",
             Self::CapabilityGrantCreated => "capability.grant_created",
             Self::CapabilityGrantUsed => "capability.grant_used",
+            Self::ConnectivityExposureRequested => "connectivity.exposure_requested",
+            Self::ConnectivityExposureChanged => "connectivity.exposure_changed",
+            Self::ConnectivityExposureRevoked => "connectivity.exposure_revoked",
+            Self::ConnectivityHealthChanged => "connectivity.health_changed",
             Self::ToolCallRequested => "tool.call_requested",
             Self::ToolInvocationStarted => "tool.invocation_started",
             Self::ToolOutputArtifactRecorded => "tool.output_artifact_recorded",
@@ -1351,6 +1394,7 @@ pub enum ProjectionRecord {
     Run(RunProjection),
     CapabilityGrant(CapabilityGrantProjection),
     PermissionApproval(PermissionApprovalProjection),
+    ConnectivityExposure(ConnectivityExposureProjection),
     ToolCall(ToolCallProjection),
     MemoryPacketRef(MemoryPacketProjection),
     MemoryRecord(Box<MemoryRecordProjection>),
@@ -1444,6 +1488,24 @@ pub struct PermissionApprovalProjection {
     pub reason: String,
     pub decision: Option<String>,
     pub capability_grant_id: Option<String>,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectivityExposureProjection {
+    pub exposure_id: String,
+    pub project_id: ProjectId,
+    pub connectivity_endpoint_id: String,
+    pub owner_kind: String,
+    pub owner_id: String,
+    pub channel_kind: String,
+    pub exposure: String,
+    pub permission_scope: String,
+    pub status: String,
+    pub capability_grant_id: Option<String>,
+    pub health_status: String,
+    pub reachable: bool,
+    pub revoked_at: Option<String>,
     pub updated_sequence: i64,
 }
 
@@ -1780,6 +1842,22 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             capability_grant_id TEXT,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS connectivity_exposures (
+            exposure_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            connectivity_endpoint_id TEXT NOT NULL,
+            owner_kind TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            channel_kind TEXT NOT NULL,
+            exposure TEXT NOT NULL,
+            permission_scope TEXT NOT NULL,
+            status TEXT NOT NULL,
+            capability_grant_id TEXT,
+            health_status TEXT NOT NULL,
+            reachable INTEGER NOT NULL,
+            revoked_at TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS tool_calls (
             tool_call_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
@@ -1968,6 +2046,7 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "runs",
         "capability_grants",
         "permission_approvals",
+        "connectivity_exposures",
         "tool_calls",
         "memory_packet_refs",
         "memory_records",
@@ -2219,6 +2298,43 @@ fn apply_projection_record(
             ],
             )?
         }
+        ProjectionRecord::ConnectivityExposure(exposure) => transaction.execute(
+            "INSERT INTO connectivity_exposures(
+                exposure_id, project_id, connectivity_endpoint_id, owner_kind, owner_id,
+                channel_kind, exposure, permission_scope, status, capability_grant_id,
+                health_status, reachable, revoked_at, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             ON CONFLICT(exposure_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                connectivity_endpoint_id = excluded.connectivity_endpoint_id,
+                owner_kind = excluded.owner_kind,
+                owner_id = excluded.owner_id,
+                channel_kind = excluded.channel_kind,
+                exposure = excluded.exposure,
+                permission_scope = excluded.permission_scope,
+                status = excluded.status,
+                capability_grant_id = excluded.capability_grant_id,
+                health_status = excluded.health_status,
+                reachable = excluded.reachable,
+                revoked_at = excluded.revoked_at,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                exposure.exposure_id,
+                exposure.project_id.as_str(),
+                exposure.connectivity_endpoint_id,
+                exposure.owner_kind,
+                exposure.owner_id,
+                exposure.channel_kind,
+                exposure.exposure,
+                exposure.permission_scope,
+                exposure.status,
+                exposure.capability_grant_id,
+                exposure.health_status,
+                if exposure.reachable { 1 } else { 0 },
+                exposure.revoked_at,
+                sequence,
+            ],
+        )?,
         ProjectionRecord::ToolCall(tool_call) => transaction.execute(
             "INSERT INTO tool_calls(
                 tool_call_id, session_id, turn_id, tool_name, tool_origin, status,
@@ -2650,6 +2766,25 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
                 escape_json(&approval.reason)
             ),
         },
+        ProjectionRecord::ConnectivityExposure(exposure) => ProjectionRecordRow {
+            kind: "connectivity_exposure",
+            record_id: exposure.exposure_id.clone(),
+            a: Some(exposure.project_id.to_string()),
+            b: Some(exposure.connectivity_endpoint_id.clone()),
+            c: Some(exposure.status.clone()),
+            d: exposure.capability_grant_id.clone(),
+            e: Some(exposure.health_status.clone()),
+            f: Some(exposure.reachable.to_string()),
+            g: exposure.revoked_at.clone(),
+            h: Some(exposure.permission_scope.clone()),
+            payload_json: json!({
+                "owner_kind": exposure.owner_kind,
+                "owner_id": exposure.owner_id,
+                "channel_kind": exposure.channel_kind,
+                "exposure": exposure.exposure,
+            })
+            .to_string(),
+        },
         ProjectionRecord::ToolCall(tool_call) => ProjectionRecordRow {
             kind: "tool_call",
             record_id: tool_call.tool_call_id.to_string(),
@@ -2955,6 +3090,78 @@ fn projection_record_from_row(
                     reason: payload_string(&payload, "reason").unwrap_or_default(),
                     decision: f,
                     capability_grant_id: g,
+                    updated_sequence: 0,
+                },
+            ))
+        }
+        "connectivity_exposure" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::ConnectivityExposure(
+                ConnectivityExposureProjection {
+                    exposure_id: record_id.clone(),
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "connectivity_exposure",
+                        a,
+                        "project_id",
+                    )?),
+                    connectivity_endpoint_id: required_field(
+                        &projection_kind,
+                        "connectivity_exposure",
+                        b,
+                        "connectivity_endpoint_id",
+                    )?,
+                    owner_kind: required_payload_string(
+                        &projection_kind,
+                        "connectivity_exposure",
+                        &payload,
+                        "owner_kind",
+                    )?,
+                    owner_id: required_payload_string(
+                        &projection_kind,
+                        "connectivity_exposure",
+                        &payload,
+                        "owner_id",
+                    )?,
+                    channel_kind: required_payload_string(
+                        &projection_kind,
+                        "connectivity_exposure",
+                        &payload,
+                        "channel_kind",
+                    )?,
+                    exposure: required_payload_string(
+                        &projection_kind,
+                        "connectivity_exposure",
+                        &payload,
+                        "exposure",
+                    )?,
+                    permission_scope: required_field(
+                        &projection_kind,
+                        "connectivity_exposure",
+                        h,
+                        "permission_scope",
+                    )?,
+                    status: required_field(&projection_kind, "connectivity_exposure", c, "status")?,
+                    capability_grant_id: d,
+                    health_status: required_field(
+                        &projection_kind,
+                        "connectivity_exposure",
+                        e,
+                        "health_status",
+                    )?,
+                    reachable: required_field(
+                        &projection_kind,
+                        "connectivity_exposure",
+                        f,
+                        "reachable",
+                    )?
+                    .parse::<bool>()
+                    .map_err(|error| {
+                        ProjectionDecodeError(format!(
+                            "invalid bool for connectivity_exposure {record_id} reachable: {error}"
+                        ))
+                    })?,
+                    revoked_at: g,
                     updated_sequence: 0,
                 },
             ))
@@ -4337,6 +4544,190 @@ mod tests {
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].effect, "deny");
         assert_eq!(grants[0].persistence, "until_revoked");
+    }
+
+    #[test]
+    fn connectivity_exposure_requires_grant_and_projects_revocation_and_health() {
+        let store = temp_store("connectivity-exposure-policy");
+        let project_id = ProjectId::new("project-capo");
+        let exposure_id = "exposure-private-control";
+        let grant_id = "grant-private-tunnel";
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-connectivity-exposure-requested".to_string(),
+                    kind: EventKind::ConnectivityExposureRequested,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some(exposure_id.to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::ConnectivityExposure(
+                    ConnectivityExposureProjection {
+                        exposure_id: exposure_id.to_string(),
+                        project_id: project_id.clone(),
+                        connectivity_endpoint_id: "endpoint-private-1".to_string(),
+                        owner_kind: "runtime_target".to_string(),
+                        owner_id: "remote-target-1".to_string(),
+                        channel_kind: "control".to_string(),
+                        exposure: "private".to_string(),
+                        permission_scope: "network:connect:private_tunnel".to_string(),
+                        status: "blocked_pending_permission".to_string(),
+                        capability_grant_id: None,
+                        health_status: "unknown".to_string(),
+                        reachable: false,
+                        revoked_at: None,
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append requested exposure");
+
+        assert_eq!(
+            store
+                .connectivity_exposures(&project_id)
+                .expect("exposures")[0]
+                .status,
+            "blocked_pending_permission"
+        );
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-connectivity-exposure-grant".to_string(),
+                    kind: EventKind::CapabilityGrantCreated,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some(exposure_id.to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::CapabilityGrant(CapabilityGrantProjection {
+                    capability_grant_id: grant_id.to_string(),
+                    capability_profile_id: "remote-control-reviewed".to_string(),
+                    scope_json: "[\"network:connect:private_tunnel\"]".to_string(),
+                    effect: "allow".to_string(),
+                    subject_json:
+                        "{\"endpoint_id\":\"endpoint-private-1\",\"owner_id\":\"remote-target-1\"}"
+                            .to_string(),
+                    decision_source: "user".to_string(),
+                    persistence: "until_revoked".to_string(),
+                    explanation: "operator allowed private remote-control exposure".to_string(),
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append exposure grant");
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-connectivity-exposure-changed".to_string(),
+                    kind: EventKind::ConnectivityExposureChanged,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some(exposure_id.to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::ConnectivityExposure(
+                    ConnectivityExposureProjection {
+                        exposure_id: exposure_id.to_string(),
+                        project_id: project_id.clone(),
+                        connectivity_endpoint_id: "endpoint-private-1".to_string(),
+                        owner_kind: "runtime_target".to_string(),
+                        owner_id: "remote-target-1".to_string(),
+                        channel_kind: "control".to_string(),
+                        exposure: "private".to_string(),
+                        permission_scope: "network:connect:private_tunnel".to_string(),
+                        status: "active".to_string(),
+                        capability_grant_id: Some(grant_id.to_string()),
+                        health_status: "available".to_string(),
+                        reachable: true,
+                        revoked_at: None,
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append granted exposure");
+
+        let active = store
+            .connectivity_exposures(&project_id)
+            .expect("active exposure")
+            .pop()
+            .expect("exposure row");
+        assert_eq!(active.status, "active");
+        assert_eq!(active.capability_grant_id.as_deref(), Some(grant_id));
+        assert_eq!(active.health_status, "available");
+        assert!(active.reachable);
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-connectivity-exposure-revoked".to_string(),
+                    kind: EventKind::ConnectivityExposureRevoked,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some(exposure_id.to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::ConnectivityExposure(
+                    ConnectivityExposureProjection {
+                        status: "revoked".to_string(),
+                        reachable: false,
+                        health_status: "disabled".to_string(),
+                        revoked_at: Some("2026-05-25T00:00:00Z".to_string()),
+                        capability_grant_id: Some(grant_id.to_string()),
+                        exposure_id: exposure_id.to_string(),
+                        project_id: project_id.clone(),
+                        connectivity_endpoint_id: "endpoint-private-1".to_string(),
+                        owner_kind: "runtime_target".to_string(),
+                        owner_id: "remote-target-1".to_string(),
+                        channel_kind: "control".to_string(),
+                        exposure: "private".to_string(),
+                        permission_scope: "network:connect:private_tunnel".to_string(),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append revoked exposure");
+
+        store.rebuild_projections().expect("rebuild projections");
+        let revoked = store
+            .connectivity_exposures(&project_id)
+            .expect("rebuilt exposure")
+            .pop()
+            .expect("exposure row");
+        assert_eq!(revoked.status, "revoked");
+        assert_eq!(revoked.health_status, "disabled");
+        assert!(!revoked.reachable);
+        assert_eq!(revoked.revoked_at.as_deref(), Some("2026-05-25T00:00:00Z"));
     }
 
     #[test]
