@@ -49,6 +49,7 @@ Usage:
   capo adapter smoke-report scan --artifact-root PATH [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
   capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR] [--state PATH]
+  capo adapter replay-dispatch --dispatch-plan DISPATCH_PLAN_ID --fixture PATH [--out DIR] [--state PATH]
   capo task send --agent NAME --goal GOAL [--scenario NAME] [--state PATH]
   capo session status --agent NAME [--state PATH]
   capo session redirect --agent NAME --goal GOAL [--state PATH]
@@ -109,6 +110,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         [area, command] if area == "agent" && command == "list" => list_agents(&parsed),
         [area, command, rest @ ..] if area == "adapter" && command == "replay-fixture" => {
             replay_adapter_fixture(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "adapter" && command == "replay-dispatch" => {
+            replay_adapter_dispatch_fixture(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "adapter" && command == "readiness" => {
             adapter_readiness(&parsed, rest)
@@ -334,6 +338,86 @@ fn replay_adapter_fixture(parsed: &ParsedArgs, args: &[String]) -> Result<String
         adapter_label(&adapter),
         fixture_path.display(),
         agent,
+        refs.session_id,
+        refs.run_id,
+        report.input_event_count,
+        report.appended_event_count,
+        report.tool_event_count,
+        report.summary_event_count,
+        report.completed_turn_count
+    );
+    if let Some(out) = optional_arg(args, "--out") {
+        output.push_str(&export_evidence(
+            parsed,
+            &[
+                "--session".to_string(),
+                refs.session_id.to_string(),
+                "--out".to_string(),
+                out,
+            ],
+        )?);
+    }
+    Ok(output)
+}
+
+fn replay_adapter_dispatch_fixture(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let dispatch_plan_id = required_arg(args, "--dispatch-plan")?;
+    let fixture_path = PathBuf::from(required_arg(args, "--fixture")?);
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan" | "--fixture" | "--out")
+    }) {
+        return Err(format!("unknown adapter replay-dispatch option: {unknown}"));
+    }
+    let state = state(parsed)?;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    let plan = dashboard
+        .adapter_dispatch_plans
+        .iter()
+        .find(|plan| plan.dispatch_plan_id == dispatch_plan_id)
+        .ok_or_else(|| format!("unknown adapter dispatch plan: {dispatch_plan_id}"))?;
+    let ready_gate = dashboard.adapter_dispatch_gates.iter().rev().find(|gate| {
+        gate.dispatch_plan_id == plan.dispatch_plan_id
+            && gate.provider_cli_execution_allowed
+            && gate.status == "ready_for_execution"
+            && !gate.provider_cli_executed
+            && gate.runtime_prompt_policy == "not_rendered"
+    });
+    let ready_gate = ready_gate.ok_or_else(|| {
+        format!(
+            "dispatch plan {} has no recorded ready dispatch gate; run adapter dispatch-gate --record after clean smoke evidence",
+            plan.dispatch_plan_id
+        )
+    })?;
+    let fixture = fs::read_to_string(&fixture_path).map_err(|error| error.to_string())?;
+    let adapter_events = parse_adapter_fixture(&plan.adapter_kind, &fixture)?;
+    let controller = controller(parsed)?;
+    let registration = controller
+        .registration_for_agent_name(&plan.agent_name)
+        .map_err(debug_error)?;
+    let replay_goal = format!(
+        "Replay fixture for dispatch plan {} without provider execution",
+        plan.dispatch_plan_id
+    );
+    let refs = controller
+        .send_task(&registration, &replay_goal)
+        .map_err(debug_error)?;
+    if refs.session_id != plan.session_id || refs.run_id != plan.run_id {
+        return Err(format!(
+            "dispatch replay ref mismatch for {}: expected session={} run={}, got session={} run={}",
+            plan.dispatch_plan_id, plan.session_id, plan.run_id, refs.session_id, refs.run_id
+        ));
+    }
+    let report = controller
+        .apply_normalized_adapter_events(&refs, &adapter_events)
+        .map_err(debug_error)?;
+    let mut output = format!(
+        "adapter_dispatch_replayed=true\ndispatch_plan={}\ndispatch_gate={}\nadapter={}\nfixture={}\nagent={}\nsession_id={}\nrun_id={}\nprovider_cli_executed=false\ninput_events={}\nappended_events={}\ntool_events={}\nsummary_events={}\ncompleted_turns={}\n",
+        plan.dispatch_plan_id,
+        ready_gate.dispatch_gate_id,
+        plan.adapter_kind,
+        fixture_path.display(),
+        plan.agent_name,
         refs.session_id,
         refs.run_id,
         report.input_event_count,
@@ -3801,6 +3885,7 @@ mod tests {
         assert!(HELP.contains("adapter readiness"));
         assert!(HELP.contains("adapter plan-launch"));
         assert!(HELP.contains("adapter dispatch-gate"));
+        assert!(HELP.contains("adapter replay-dispatch"));
         assert!(HELP.contains("adapter dogfood-gate"));
         assert!(HELP.contains("workpad index"));
         assert!(HELP.contains("workpad next"));
@@ -3987,6 +4072,22 @@ mod tests {
         assert!(!blocked.contains("Do not render this dispatch prompt"));
         assert!(!workspace.exists());
         assert!(!artifacts.exists());
+        let fixture = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../capo-adapters/fixtures/codex-exec.jsonl"
+        ));
+        let blocked_replay = run_cli(vec![
+            "adapter".to_string(),
+            "replay-dispatch".to_string(),
+            "--dispatch-plan".to_string(),
+            dispatch_plan_id.clone(),
+            "--fixture".to_string(),
+            fixture.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("replay should require a recorded ready gate");
+        assert!(blocked_replay.contains("has no recorded ready dispatch gate"));
 
         let artifact_root = temp_root("adapter-dispatch-gate-smoke-artifacts");
         fs::create_dir_all(&artifact_root).expect("artifact dir");
@@ -4045,6 +4146,35 @@ mod tests {
         assert!(dashboard.contains("adapter_dispatch_gates=1"));
         assert!(dashboard.contains("gate_status=ready_for_execution"));
         assert!(!dashboard.contains("Do not render this dispatch prompt"));
+        let evidence_dir = temp_root("adapter-dispatch-gate-replay-evidence");
+        let replay = run_cli(vec![
+            "adapter".to_string(),
+            "replay-dispatch".to_string(),
+            "--dispatch-plan".to_string(),
+            gates[0].dispatch_plan_id.clone(),
+            "--fixture".to_string(),
+            fixture.display().to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("replay dispatch fixture");
+        assert!(replay.contains("adapter_dispatch_replayed=true"));
+        assert!(replay.contains("adapter=codex_exec"));
+        assert!(replay.contains("provider_cli_executed=false"));
+        assert!(replay.contains("tool_events=2"));
+        assert!(replay.contains("summary_events=1"));
+        assert!(replay.contains("completed_turns=1"));
+        assert!(replay.contains("evidence_exported=true"));
+        assert!(!replay.contains("Do not render this dispatch prompt"));
+        assert!(!replay.contains("Codex fixture response."));
+        assert!(!replay.contains("cargo test"));
+        assert_text_absent_in_tree(&state_root, "Do not render this dispatch prompt");
+        assert_text_absent_in_tree(&state_root, "Codex fixture response.");
+        assert_text_absent_in_tree(&state_root, "cargo test");
+        assert_text_absent_in_tree(&evidence_dir, "Codex fixture response.");
+        assert_text_absent_in_tree(&evidence_dir, "cargo test");
         assert!(!workspace.exists());
         assert!(!artifacts.exists());
     }

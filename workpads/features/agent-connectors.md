@@ -362,3 +362,25 @@ Decision:
 - Treat gate checks as separate audit facts from dispatch plans. A dispatch plan records intent; a dispatch gate records whether execution would be allowed at a point in time.
 - Store only plan ID, adapter kind, gate status, reason codes, prompt policy, and `provider_cli_executed=false`. Do not store or render the raw prompt.
 - Recording a gate does not launch provider CLIs, create runtime artifact directories, or transition a dispatch plan into execution.
+
+### AC15 - Dispatch Fixture Replay
+
+Status: completed
+
+Acceptance:
+
+- Compose a recorded dispatch plan, a recorded ready dispatch gate, and deterministic adapter fixture replay.
+- Refuse replay when the selected dispatch plan has no recorded ready gate.
+- Route fixture events through controller/state/evidence without launching provider CLIs.
+- Keep raw prompt text and raw provider fixture text out of CLI output, state, and evidence exports.
+
+Evidence:
+
+- CLI `capo adapter replay-dispatch --dispatch-plan DISPATCH_PLAN_ID --fixture PATH [--out DIR]` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Add fixture-only dispatch replay as a deterministic pre-real-execution scaffold. It proves the shape from planned dispatch -> gate -> adapter events -> controller/state/evidence while preserving the opt-in boundary for real provider CLIs.
+- Require a recorded ready dispatch gate before replay so this path cannot bypass the same readiness contract that future provider execution will use.
+- Replay uses fixture parsing and fake controller session plumbing only. It records `provider_cli_executed=false` and does not create the planned runtime workspace or artifact root.

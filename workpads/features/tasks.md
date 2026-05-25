@@ -67,6 +67,7 @@ Progress:
 - AC12 workpad next adapter plan is completed. `capo workpad plan-next` composes markdown next-task selection with prompt-redacted Codex/Claude dispatch planning without importing or starting the task.
 - AC13 dispatch execution gate is completed. `capo adapter dispatch-gate` checks recorded dispatch plans against the shared real-agent dogfood gate and fails closed before any provider CLI execution.
 - AC14 dispatch gate audit trail is completed. `capo adapter dispatch-gate --record` persists prompt-redacted gate decisions and dashboard/query surfaces render them without claiming provider execution.
+- AC15 dispatch fixture replay is completed. `capo adapter replay-dispatch` links recorded dispatch plans and ready gates to deterministic fixture replay without launching provider CLIs or retaining raw prompt/provider text.
 
 Evidence:
 

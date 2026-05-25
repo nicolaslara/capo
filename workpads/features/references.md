@@ -150,6 +150,16 @@ Observed 2026-05-25.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC14.
 
+## F1/AC15 Dispatch Fixture Replay
+
+Observed 2026-05-25.
+
+- CLI `adapter replay-dispatch` command and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Controller normalized adapter event replay path reused by dispatch replay: `../../crates/capo-controller/src/lib.rs`
+- Fixture parser and test fixture inputs: `../../crates/capo-adapters/src/lib.rs`, `../../crates/capo-adapters/fixtures/codex-exec.jsonl`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC15.
+
 ## F3/DS1 Query Surface Extraction
 
 Observed 2026-05-25.

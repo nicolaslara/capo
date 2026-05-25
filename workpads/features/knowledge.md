@@ -354,6 +354,25 @@ Follow-up:
 
 - The future provider-running command should append a separate execution-start projection only after a recorded ready gate and should preserve blocked gate records as denial/audit evidence.
 
+## F1/AC15 - Dispatch Fixture Replay
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `capo adapter replay-dispatch --dispatch-plan DISPATCH_PLAN_ID --fixture PATH` as a fixture-only path from recorded dispatch intent to controller/state/evidence replay.
+- Require a recorded ready dispatch gate before replay. A dispatch plan with no ready gate fails before parsing the fixture or mutating controller state.
+- Reuse the selected dispatch plan's adapter kind and agent binding rather than accepting separate adapter/agent/goal arguments. The command never stores or renders the original raw dispatch prompt.
+- Keep this explicitly non-provider execution: `provider_cli_executed=false`, no planned runtime workspace/artifact directory creation, and raw provider fixture text is filtered into content hashes/evidence summaries only.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Follow-up:
+
+- The future real-provider execution command can reuse the same dispatch-plan and ready-gate lookup, but must append runtime start/process lifecycle records instead of fixture replay events.
+
 ## F3/DS1 - Query Surface Extraction
 
 Status: completed on 2026-05-25.
