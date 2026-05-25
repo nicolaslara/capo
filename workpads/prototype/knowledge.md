@@ -441,18 +441,59 @@ Follow-up:
 
 ## Prototype Gate
 
-Status: not passed.
+Status: passed with constraints on 2026-05-25.
 
-Required evidence:
+Decision:
 
-- Spawn/register an agent.
-- Send and interrupt work.
-- Inspect status, goal, events, latest summary, and blocker.
-- Persist and recover state.
-- Record evidence in workpad-like artifact.
+- The prototype gate passes for the local scaffold: Capo can start local state, register/spawn fake agents, send work, inspect read models, steer/interrupt/stop sessions, recover after restart, audit tool and permission events, attach memory packet refs, and export markdown evidence.
+- The gate does not mean Capo is ready to run the whole project unattended through real subscription-backed agents. Real Codex/Claude local connector smoke remains opt-in and unproven, and dogfood still needs a workpad import/update bridge.
+- P13 text dashboard is sufficient for first dogfood inspection. A richer TUI/web dashboard is useful but does not block the next phase.
+- P14 voice remains a contract spike and does not block first dogfood. Production voice capture/ASR is deferred.
+
+Gate matrix:
+
+| Requirement | Evidence | Result | Notes |
+| --- | --- | --- | --- |
+| Start Capo locally | `crates/capo-cli/src/main.rs` `prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence` initializes state with `init`; P12 verification | Pass | Automated CLI-path smoke exercises the same parser/controller/state code as the local command surface. |
+| Register or spawn at least one agent runtime | P12 smoke spawns `fake-codex` and registers `fake-reviewer`; P3/P4/P12 knowledge | Pass with scaffold constraint | Proven with fake runtime/adapter. Real Codex/Claude smoke remains opt-in feature work. |
+| Send an agent a task | P12 smoke sends two tasks and asserts session IDs; P3/P4/P12 knowledge | Pass | Commands flow through `CommandEnvelope` and fake controller boundary. |
+| Inspect current goal, status, recent events, latest summary | `session status` and `dashboard` assertions in P12/P13; `workpads/prototype/knowledge.md` P12-P13 | Pass | Goal, blocker, evidence refs, recent events, and dashboard rows come from SQLite read models. |
+| Interrupt or stop an agent | P12 smoke interrupts `fake-codex` and stops `fake-reviewer`; redirect is also proven | Pass | Durable `session.interrupted`, `session.stopped`, and `session.redirected` events update read models. |
+| Persist and recover after restart | P10 recovery tests and P12 smoke reopen SQLite, recover twice, and assert no duplicate recovery work | Pass | Active-looking interrupted run is marked `exited_unknown`; repeated recover has zero recovered runs. |
+| Record evidence in workpad-like artifact | P11 export tests and P12 smoke export both sessions to markdown | Pass | Exports carry Capo marker, state refs, evidence refs, tool calls, memory packets, and recent events. |
+| Multiple concurrent agents | P12 smoke tracks two fake agents and sessions | Pass | Meets MVP v0 concurrency at scaffold level. |
+| Dashboard/TUI | P13 text dashboard | Pass | Text dashboard is enough for first dogfood; richer UI moves to feature work. |
+| Capability profiles/permissions | P8 tool/permission audit path and P12 smoke assertions | Pass with permissive policy | Trusted-local allows broadly but still emits request/decision/grant/grant-use events. |
+| Memory references | P9 source-linked packets and P12 smoke memory packet assertion | Pass | External/vector memory deferred. |
+| ACP compatibility layer | P6 fixtures and P10 ACP replay/dedupe state test | Pass with fixture scope | Not a full ACP implementation. Message replay remains medium-confidence until broader fixtures. |
+| No secret/session leakage in evidence | P7 harness scanner and P12 smoke scans transcript, state tree, and evidence tree for credential markers | Pass for fake/prototype artifacts | Real subscription connector artifacts still require opt-in smoke before dogfood use. |
+
+Dogfood readiness gaps:
+
+- Real local agent execution through Codex and Claude Code is not yet proven. P7 built the harness, but the opt-in subscription-backed smoke did not run.
+- Capo can export evidence without corrupting workpads, but it cannot yet import/index the Capo workpad tree as first-class Capo tasks or write reviewed workpad updates.
+- Dashboard aggregation currently lives in `capo-cli`; a reusable controller/query surface should be extracted before adding web/mobile/voice clients.
+- Permission policy is correctly routed and audited, but the first policy is still trusted-local/all-allowed. Dogfood should keep this explicit and local-only.
+- ACP support is fixture-backed and useful for adapter design, not a broad ACP client/server claim.
+- Evaluation is still a local evidence stub; agent performance reports need their own feature slice.
+- Voice is contract-only; no real audio capture, ASR, or conversational loop exists.
+
+Feature split from gate findings:
+
+- `workpads/features/agent-connectors.md`: finish Codex first, then Claude Code, with restrictive local subscription connector smoke and artifact scanning.
+- `workpads/features/dogfood-bridge.md`: index/import project workpads, map them to Capo tasks, and write reviewed markdown evidence/update artifacts without corrupting source docs.
+- `workpads/features/dashboard.md`: move dashboard/read-model aggregation into a reusable query surface, then add richer TUI/web views.
+- `workpads/features/permissions-tools.md`: harden capability profiles, approval policy variants, tool wrappers, and provider-native observed-only instrumentation.
+- `workpads/features/memory-eval.md`: expand source-linked memory records and build performance/review reports.
+- `workpads/features/voice.md`: integrate the P14 contract with controller/query/permission flow before any real audio pipeline.
+- `workpads/features/remote-runtime.md`: add remote runtime and tunnel adapters only after local real-agent semantics are reliable.
+
+Recommended next phase:
+
+- Move to the feature workpad and start with real local connector proof (`agent-connectors`) or dogfood bridge work, depending on whether the next goal is real-agent execution or importing Capo's own workpads.
 
 ## Open Questions
 
-- Whether the first non-fake real adapter smoke should be Codex only or Codex and Claude Code in the same task.
-- Whether the first dashboard/TUI slice must precede dogfood or can follow the first file-workpad dogfood migration.
-- How much ACP implementation should ship in the prototype after fixture replay tests, versus remaining compatibility-only until a concrete ACP agent integration is needed.
+- Whether the next feature slice should run the opt-in Codex smoke immediately or first build the workpad import bridge so fake-agent dogfood can begin.
+- Whether Claude Code restricted permission arguments are stable enough for opt-in smoke without a separate CLI-compatibility research pass.
+- How much ACP implementation should ship before a concrete editor/client integration needs it.

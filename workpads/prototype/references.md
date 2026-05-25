@@ -196,3 +196,15 @@ Observed 2026-05-25.
 - Memory and transcript retention source: `../architecture/memory-architecture.md`
 - Boundary architecture source: `../architecture/boundaries.md`
 - No new third-party dependencies were added for P14.
+
+## P15 Prototype Gate Review
+
+Observed 2026-05-25.
+
+- Prototype gate matrix and decision: `knowledge.md`
+- Prototype gate task: `tasks.md`
+- Prototype minimum and dogfood criteria: `spec.md`
+- Prototype architecture plan and smoke requirements: `../architecture/prototype-plan.md`
+- P12/P13 smoke/dashboard test implementation: `../../crates/capo-cli/src/main.rs`
+- Feature split output: `../features/tasks.md`, `../features/agent-connectors.md`, `../features/dogfood-bridge.md`, `../features/dashboard.md`, `../features/permissions-tools.md`, `../features/memory-eval.md`, `../features/voice.md`, `../features/remote-runtime.md`
+- Dogfood constraints updated: `../dogfood/tasks.md`, `../dogfood/knowledge.md`

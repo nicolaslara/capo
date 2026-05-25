@@ -35,6 +35,7 @@ Load these conditionally:
 - `workpads/research/knowledge.md` when active workpad is `architecture`
 - `workpads/architecture/knowledge.md` when active workpad is `prototype`
 - `workpads/prototype/knowledge.md` when active workpad is `features` or `dogfood`
+- The feature source file named by the selected task in `workpads/features/tasks.md` when active workpad is `features`
 
 ## Resolve And Gate
 

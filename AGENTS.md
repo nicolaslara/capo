@@ -37,7 +37,7 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 
 ## Current Phase
 
-**Prototype** is active after research and architecture gates passed on 2026-05-25. The first durable implementation target is an end-to-end prototype that can spawn, track, and interact with at least one coding agent through a boundary compatible with Agent Client Protocol (ACP). After that prototype is stable enough, Capo should dogfood itself and move project execution into Capo.
+**Features** is active after the prototype gate passed with constraints on 2026-05-25. The local scaffold can spawn/track/steer fake agents, persist/recover state, show a text dashboard, plan voice commands, and export markdown evidence. The next durable targets are real local connector proof, workpad dogfood bridge, reusable query surfaces, permission/tool hardening, memory/evaluation reports, voice integration, and remote-runtime adapters.
 
 ## Mandatory Workflow
 
@@ -56,11 +56,12 @@ Before task work:
 11. `workpads/architecture/memory-architecture.md` for memory, retrieval, prompt context, prototype, features, and dogfood work once A6 is complete
 12. `workpads/architecture/prototype-plan.md` for architecture, prototype, features, and dogfood work once A7 is complete
 13. `workpads/prototype/spec.md` for prototype and dogfood work
-14. Pick a pending task and mark it `in_progress`
-15. Complete the acceptance criteria with the smallest correct change
-16. Record findings in `knowledge.md` and source links in `references.md`
-17. Review per `WORKING.md`
-18. Mark complete only after evidence is recorded
+14. For features work, load the feature source file named by the selected task in `workpads/features/tasks.md`
+15. Pick a pending task and mark it `in_progress`
+16. Complete the acceptance criteria with the smallest correct change
+17. Record findings in `knowledge.md` and source links in `references.md`
+18. Review per `WORKING.md`
+19. Mark complete only after evidence is recorded
 
 ## Git Rules
 

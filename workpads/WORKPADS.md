@@ -8,8 +8,8 @@
 | --- | --- | --- |
 | **research** | Complete | Gate passed 2026-05-25 — ACP, prior art, stack, memory, subscription, tunnel, local-model, and voice research |
 | **architecture** | Complete | Gate passed 2026-05-25 — boundary definitions, data model, contracts, security model, and prototype plan |
-| **prototype** | **Active** | Minimal e2e Capo controller and agent harness |
-| **features** | Planned | Feature-specific workpads after architecture/prototype |
+| **prototype** | Complete | Gate passed with constraints 2026-05-25 — local scaffold, fake-agent e2e, dashboard, voice contract, evidence export |
+| **features** | **Active** | Feature-specific workpads after architecture/prototype |
 | **dogfood** | Planned | Move Capo project execution into Capo |
 
 ## research
@@ -94,11 +94,13 @@ workpads/research/knowledge.md
 
 ## prototype
 
-**Status:** Active.
+**Status:** Complete. Gate passed with constraints 2026-05-25.
 
 **Prerequisites:** Architecture gate passed 2026-05-25 unless explicitly reopened.
 
 **Objective:** Build the smallest e2e Capo that can spawn or register an agent, send work, inspect progress, interrupt execution, persist state, and record evidence.
+
+**Gate result:** The local scaffold is proven with fake agents, SQLite state/recovery, text dashboard, voice contract, Capo tools, memory packet refs, and markdown evidence export. Real subscription-backed connector proof and workpad import/update safety move to feature/dogfood work.
 
 **Load:**
 
@@ -136,7 +138,7 @@ workpads/architecture/knowledge.md
 
 ## features
 
-**Prerequisites:** Prototype gate passed or specific feature spike authorized.
+**Prerequisites:** Prototype gate passed with constraints on 2026-05-25.
 
 **Objective:** Split post-prototype product work into independently executable feature workpads with dependencies, evidence standards, and review gates.
 
@@ -149,6 +151,13 @@ workpads/architecture/knowledge.md
 workpads/features/tasks.md
 workpads/features/knowledge.md
 workpads/features/references.md
+workpads/features/agent-connectors.md
+workpads/features/dogfood-bridge.md
+workpads/features/dashboard.md
+workpads/features/permissions-tools.md
+workpads/features/memory-eval.md
+workpads/features/voice.md
+workpads/features/remote-runtime.md
 workpads/architecture/boundaries.md
 workpads/architecture/state-model.md
 workpads/architecture/acp-replay-dedupe.md
@@ -165,6 +174,7 @@ workpads/prototype/knowledge.md
 
 - Split large features into separate workpads once architecture is stable.
 - Each feature needs acceptance criteria, evidence, and review requirements.
+- Start with real local agent connector proof or the dogfood bridge, depending on whether the next pass prioritizes actual agent execution or importing Capo's own workpads.
 
 ## dogfood
 

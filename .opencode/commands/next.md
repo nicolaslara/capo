@@ -27,6 +27,7 @@ Read these files first:
 19. `workpads/research/knowledge.md` - when active workpad is `architecture`
 20. `workpads/architecture/knowledge.md` - when active workpad is `prototype`
 21. `workpads/prototype/knowledge.md` - when active workpad is `features` or `dogfood`
+22. The feature source file named by the selected task in `workpads/features/tasks.md` - when active workpad is `features`
 
 ## Step 2: Resolve Active Workpad
 

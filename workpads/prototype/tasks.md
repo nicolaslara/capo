@@ -331,7 +331,7 @@ Evidence:
 
 ## P15 - Prototype Gate Review
 
-Status: pending
+Status: completed
 
 Acceptance:
 
@@ -339,6 +339,25 @@ Acceptance:
 - Gate result recorded in `knowledge.md`.
 - Dogfood readiness gaps listed.
 - Feature workpads split from findings.
+
+Evidence:
+
+- `workpads/prototype/knowledge.md` Prototype Gate section
+- `workpads/prototype/spec.md`
+- `workpads/architecture/prototype-plan.md`
+- `crates/capo-cli/src/main.rs`
+- `workpads/features/tasks.md`
+- `workpads/features/agent-connectors.md`
+- `workpads/features/dogfood-bridge.md`
+- `workpads/features/dashboard.md`
+- `workpads/features/permissions-tools.md`
+- `workpads/features/memory-eval.md`
+- `workpads/features/voice.md`
+- `workpads/features/remote-runtime.md`
+- Focused review subagent: prototype gate pass with constraints; targeted smoke passed
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
 
 Notes:
 

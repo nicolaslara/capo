@@ -40,15 +40,16 @@ Use this loop for `/next`, `$next`, and similar task execution. The concrete com
 11. After A6 is complete, also load `workpads/architecture/memory-architecture.md` for memory, retrieval, prompt context, prototype, features, or dogfood work.
 12. After A7 is complete, also load `workpads/architecture/prototype-plan.md` for architecture, prototype, features, or dogfood work.
 13. For prototype or dogfood work, also load `workpads/prototype/spec.md`.
-14. Select a task by dependencies, risk, and testability.
-15. Mark the task `in_progress` before doing work.
-16. Complete acceptance criteria with the smallest correct change.
-17. Verify per the task's evidence standard.
-18. Record findings, decisions, and open questions in the workpad or project docs.
-19. Assess confidence and use review subagents per thresholds below.
-20. Incorporate review feedback, record rejections, or ask the user when product-sensitive.
-21. Mark `completed` only when acceptance criteria and review requirements are satisfied.
-22. Before another `/next` pass: explicit commit decision - commit, or record why not.
+14. For features work, load the feature source file named by the selected task in `workpads/features/tasks.md`.
+15. Select a task by dependencies, risk, and testability.
+16. Mark the task `in_progress` before doing work.
+17. Complete acceptance criteria with the smallest correct change.
+18. Verify per the task's evidence standard.
+19. Record findings, decisions, and open questions in the workpad or project docs.
+20. Assess confidence and use review subagents per thresholds below.
+21. Incorporate review feedback, record rejections, or ask the user when product-sensitive.
+22. Mark `completed` only when acceptance criteria and review requirements are satisfied.
+23. Before another `/next` pass: explicit commit decision - commit, or record why not.
 
 ## Verification
 
@@ -134,8 +135,8 @@ Prefer clear names. Comment non-obvious invariants: permission boundaries, recov
 | --- | --- | --- |
 | Complete | `research` | `research/tasks.md`, `knowledge.md`, `references.md` |
 | Complete | `architecture` | `architecture/tasks.md`, `knowledge.md`, `references.md`, `boundaries.md`, `state-model.md`, `acp-replay-dedupe.md`, `capability-permissions.md`, `runtime-tunnel.md`, `protocol-provider.md`, `tool-exposure.md`, `memory-architecture.md`, `prototype-plan.md`, `gate-review.md` |
-| Now | `prototype` | `prototype/spec.md`, `tasks.md`, `knowledge.md`, `references.md`, architecture artifacts including `prototype-plan.md` and `gate-review.md` |
-| Later | `features` | Feature-specific tasks after prototype |
+| Complete | `prototype` | `prototype/spec.md`, `tasks.md`, `knowledge.md`, `references.md`, architecture artifacts including `prototype-plan.md` and `gate-review.md` |
+| Now | `features` | `features/tasks.md`, `knowledge.md`, `references.md`, selected feature source file, architecture artifacts, `prototype/knowledge.md` |
 | Later | `dogfood` | Migration of Capo project execution into Capo |
 
 ## Dependency Policy
