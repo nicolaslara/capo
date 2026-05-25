@@ -7,7 +7,10 @@ use capo_core::{
     AgentId, CommandEnvelope, CommandId, CommandIntent, CommandTarget, InputOrigin, ProjectId,
     SessionId,
 };
-use capo_state::{EventRecord, EvidenceProjection, SessionProjection, SqliteStateStore};
+use capo_state::{
+    EventRecord, EvidenceProjection, MemoryPacketProjection, RunProjection, SessionProjection,
+    SqliteStateStore, ToolCallProjection,
+};
 
 const DEFAULT_STATE_ROOT: &str = ".capo-dev";
 const DEFAULT_PROJECT_ID: &str = "project-capo";
@@ -314,10 +317,29 @@ fn export_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, Strin
     let events = state
         .recent_events_for_session(&session_id, 20)
         .map_err(debug_error)?;
+    let run = state
+        .run_for_session(&session_id)
+        .map_err(debug_error)?
+        .ok_or_else(|| format!("missing run read model for session: {session_id}"))?;
+    let tool_calls = state
+        .tool_calls_for_session(&session_id)
+        .map_err(debug_error)?;
+    let memory_packets = state
+        .memory_packets_for_session(&session_id)
+        .map_err(debug_error)?;
     fs::create_dir_all(&out).map_err(|error| error.to_string())?;
     let path = out.join(format!("{session_id}.md"));
-    fs::write(&path, render_evidence(&session, &evidence, &events))
-        .map_err(|error| error.to_string())?;
+    write_evidence_file(
+        &path,
+        &render_evidence(
+            &session,
+            &run,
+            &evidence,
+            &tool_calls,
+            &memory_packets,
+            &events,
+        ),
+    )?;
     Ok(format!(
         "evidence_exported=true\npath={}\ncommand_id={}\n",
         path.display(),
@@ -370,20 +392,33 @@ fn render_status(
 
 fn render_evidence(
     session: &SessionProjection,
+    run: &RunProjection,
     evidence: &[EvidenceProjection],
+    tool_calls: &[ToolCallProjection],
+    memory_packets: &[MemoryPacketProjection],
     events: &[EventRecord],
 ) -> String {
     let mut markdown = format!(
-        "# Capo Evidence - {}\n\n- Session: `{}`\n- Status: `{}`\n- Current goal: {}\n- Latest summary: {}\n- Confidence: `{}`\n\n## Evidence Refs\n\n",
+        "<!-- capo:evidence-export -->\n# Capo Evidence - {}\n\n## Objective\n\n{}\n\n## State Refs\n\n- Project: `{}`\n- Task: `{}`\n- Session: `{}`\n- Session status: `{}`\n- Run: `{}`\n- Run status: `{}`\n- Agent: `{}`\n- Latest summary: {}\n- Confidence: `{}`\n- Blocker: {}\n\n## Evidence Refs\n\n",
         session.title,
+        session.current_goal,
+        session.project_id,
+        session
+            .task_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "none".to_string()),
         session.session_id,
         session.status,
-        session.current_goal,
+        run.run_id,
+        run.status,
+        session.agent_id,
         session.latest_summary.as_deref().unwrap_or("none"),
         session
             .latest_confidence
             .map(|value| value.to_string())
-            .unwrap_or_else(|| "none".to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        session.latest_blocker.as_deref().unwrap_or("none")
     );
     if evidence.is_empty() {
         markdown.push_str("- none\n");
@@ -398,11 +433,65 @@ fn render_evidence(
             ));
         }
     }
+    markdown.push_str("\n## Tool Calls\n\n");
+    if tool_calls.is_empty() {
+        markdown.push_str("- none\n");
+    } else {
+        for tool_call in tool_calls {
+            markdown.push_str(&format!(
+                "- `{}` name=`{}` origin=`{}` status=`{}` input_artifact=`{}` output_artifact=`{}`\n",
+                tool_call.tool_call_id,
+                tool_call.tool_name,
+                tool_call.tool_origin,
+                tool_call.status,
+                tool_call.input_artifact_id.as_deref().unwrap_or("none"),
+                tool_call.output_artifact_id.as_deref().unwrap_or("none")
+            ));
+        }
+    }
+    markdown.push_str("\n## Memory Packets\n\n");
+    if memory_packets.is_empty() {
+        markdown.push_str("- none\n");
+    } else {
+        for packet in memory_packets {
+            markdown.push_str(&format!(
+                "- `{}` purpose=`{}` run=`{}` turn=`{}` artifact=`{}`\n",
+                packet.memory_packet_id,
+                packet.purpose,
+                packet
+                    .run_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "none".to_string()),
+                packet.turn_id.as_deref().unwrap_or("none"),
+                packet.packet_artifact_id.as_deref().unwrap_or("none")
+            ));
+        }
+    }
     markdown.push_str("\n## Recent Events\n\n");
     for event in events {
-        markdown.push_str(&format!("- `{}` `{}`\n", event.sequence, event.kind));
+        markdown.push_str(&format!(
+            "- `{}` `{}` id=`{}` turn=`{}` item=`{}`\n",
+            event.sequence,
+            event.kind,
+            event.event_id,
+            event.turn_id.as_deref().unwrap_or("none"),
+            event.item_id.as_deref().unwrap_or("none")
+        ));
     }
     markdown
+}
+
+fn write_evidence_file(path: &Path, markdown: &str) -> Result<(), String> {
+    if let Ok(existing) = fs::read_to_string(path)
+        && !existing.starts_with("<!-- capo:evidence-export -->")
+    {
+        return Err(format!(
+            "refusing to overwrite non-Capo evidence file: {}",
+            path.display()
+        ));
+    }
+    fs::write(path, markdown).map_err(|error| error.to_string())
 }
 
 fn controller(parsed: &ParsedArgs) -> Result<FakeBoundaryController, String> {
@@ -566,7 +655,96 @@ mod tests {
         ])
         .unwrap();
         assert!(export.contains("evidence_exported=true"));
-        assert!(evidence_dir.join("session-fake-codex.md").exists());
+        let evidence_path = evidence_dir.join("session-fake-codex.md");
+        let exported = fs::read_to_string(&evidence_path).expect("read evidence export");
+        assert!(exported.starts_with("<!-- capo:evidence-export -->"));
+        assert!(exported.contains("## State Refs"));
+        assert!(exported.contains("- Session status: `canceled`"));
+        assert!(exported.contains("- Run status: `exited_unknown`"));
+        assert!(exported.contains("- `evidence-fake-codex`"));
+        assert!(exported.contains("artifact=`artifact-tool-session-fake-codex`"));
+        assert!(exported.contains("## Tool Calls"));
+        assert!(exported.contains("origin=`capo` status=`completed`"));
+        assert!(exported.contains("## Memory Packets"));
+        assert!(exported.contains("artifact=`artifact-memory-packet-packet-fake-codex`"));
+        assert!(exported.contains("session.interrupted"));
+        assert!(!exported.contains("OPENAI_API_KEY"));
+        assert!(!exported.contains("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn evidence_export_handles_completed_runs_and_refuses_foreign_files() {
+        let state_root = temp_root("cli-completed-state");
+        let evidence_dir = temp_root("cli-completed-evidence");
+
+        run_cli(vec![
+            "agent".to_string(),
+            "register".to_string(),
+            "--name".to_string(),
+            "fake-reviewer".to_string(),
+            "--adapter".to_string(),
+            "fake".to_string(),
+            "--runtime".to_string(),
+            "fake".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap();
+        run_cli(vec![
+            "task".to_string(),
+            "send".to_string(),
+            "--agent".to_string(),
+            "fake-reviewer".to_string(),
+            "--goal".to_string(),
+            "Review the status summary for blockers".to_string(),
+            "--scenario".to_string(),
+            "summary-review".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap();
+        run_cli(vec![
+            "session".to_string(),
+            "stop".to_string(),
+            "--agent".to_string(),
+            "fake-reviewer".to_string(),
+            "--reason".to_string(),
+            "completed smoke".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap();
+
+        run_cli(vec![
+            "evidence".to_string(),
+            "export".to_string(),
+            "--session".to_string(),
+            "session-fake-reviewer".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap();
+        let evidence_path = evidence_dir.join("session-fake-reviewer.md");
+        let exported = fs::read_to_string(&evidence_path).expect("read completed evidence");
+        assert!(exported.contains("- Session status: `completed`"));
+        assert!(exported.contains("- Run status: `exited`"));
+        assert!(exported.contains("session.stopped"));
+
+        fs::write(&evidence_path, "# user-authored workpad\n").expect("replace with foreign file");
+        let error = run_cli(vec![
+            "evidence".to_string(),
+            "export".to_string(),
+            "--session".to_string(),
+            "session-fake-reviewer".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap_err();
+        assert!(error.contains("refusing to overwrite non-Capo evidence file"));
     }
 
     fn temp_root(name: &str) -> PathBuf {

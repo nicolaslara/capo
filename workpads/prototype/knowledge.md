@@ -335,6 +335,30 @@ Follow-up:
 - P11 can export evidence after interrupted or recovered runs now that exit-marked active runs survive restart as durable state.
 - Future ACP work should add raw update batch storage and explicit adapter replay start/completed events if Capo needs full `session/load` transcript replay rather than only normalized read-model dedupe.
 
+## P11 - Workpad Evidence Export
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Keep evidence export as a CLI/read-model operation for the prototype. It reads SQLite projections and writes markdown to the requested output directory instead of editing project workpads in place.
+- Render exported evidence as a workpad-like markdown artifact with sections for objective, state refs, evidence refs, tool calls, memory packets, and recent events.
+- Include stable refs back to Capo state rows and artifact IDs: project, task, session, run, agent, evidence, tool-call output artifacts, memory packet artifacts, event IDs, turns, and items.
+- Add a `<!-- capo:evidence-export -->` marker to Capo-owned exports. Re-export may overwrite a prior Capo export, but refuses to overwrite an unmarked file so user-authored workpads are not silently corrupted.
+- Exporting after recovery preserves the P10 truth: interrupted sessions can be `canceled` while their run is `exited_unknown` after restart recovery exit-marking.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+- CLI tests cover an interrupted/recovered export, a completed export, artifact/memory/tool/evidence refs in markdown, secret-marker absence for the fake scenario, and refusal to overwrite a non-Capo file.
+
+Follow-up:
+
+- P12 should run the full prototype smoke using the export path and inspect the generated markdown as part of the gate evidence.
+- Future evidence work should add richer artifact manifests and optionally copy selected safe artifact contents into the evidence bundle, while preserving the non-corruption guard.
+
 ## Prototype Gate
 
 Status: not passed.

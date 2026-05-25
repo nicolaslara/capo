@@ -151,3 +151,13 @@ Observed 2026-05-25.
 - ACP replay/dedupe architecture source: `../architecture/acp-replay-dedupe.md`
 - State model restart recovery source: `../architecture/state-model.md`
 - No new third-party dependencies were added for P10.
+
+## P11 Workpad Evidence Export
+
+Observed 2026-05-25.
+
+- CLI evidence export implementation and tests: `../../crates/capo-cli/src/main.rs`
+- SQLite read-model methods used by export: `../../crates/capo-state/src/lib.rs`
+- Prototype spec evidence requirement: `spec.md`
+- Prototype plan evidence export task and smoke path: `../architecture/prototype-plan.md`
+- No new third-party dependencies were added for P11.

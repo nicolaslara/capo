@@ -255,13 +255,21 @@ Evidence:
 
 ## P11 - Workpad Evidence Export
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Export workpad-like markdown evidence for completed and interrupted runs.
 - Preserve human-auditable fallback and avoid corrupting existing project workpads.
 - Include evidence refs back to state/artifact IDs.
+
+Evidence:
+
+- `crates/capo-cli/src/main.rs`
+- `crates/capo-state/src/lib.rs`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
 
 ## P12 - Prototype E2E Smoke
 
