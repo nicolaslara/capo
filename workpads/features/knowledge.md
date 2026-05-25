@@ -286,3 +286,36 @@ Review:
 Follow-up:
 
 - PT3 should reuse the approval queue when wrapper tools encounter a policy decision that needs user input instead of assuming all decisions are available synchronously.
+
+## F4/PT3 - Tool Wrapper Expansion
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `ToolExposure::Runtime(RuntimeToolWrappers)` as the first wrapper boundary for tools Capo executes directly.
+- Register wrapper tools for shell, git status, git diff, file read, file write, and workpad read.
+- Route shell/git wrappers through `LocalProcessRunner` so workspace checks, redaction rules, output limits, and runtime output artifacts stay behind the runtime boundary.
+- Keep `capo.workpad_read` narrower than general file reads: it accepts `TASKS.md`, `project.md`, and `workpads/*.md` paths only.
+- Record wrapper input/output artifacts with content hashes, sizes, URI, summaries, and redaction state.
+- Apply configured redaction rules to wrapper-owned input artifacts as well as runtime stdout/stderr.
+- Sanitize tool call IDs and run IDs before using them as artifact path components.
+- Bind split authorization to tool, session, run, tool call, profile, scope, and input/context hash before invocation. Capo-owned registry context hashing is length-prefixed to avoid newline-collision replay.
+
+Verification:
+
+- `cargo test -p capo-tools`: passed.
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Review:
+
+- Focused review found blockers in authorization replay, `workpad_read` arbitrary file reads, artifact path escaping, unredacted input artifacts, and misleading permission event status. All were fixed.
+- Re-review found same-tool replay and runtime run ID path blockers. Both were fixed.
+- Final re-review found ambiguous Capo registry context hashing. Length-prefix context hashing and regression coverage fixed it.
+
+Follow-up:
+
+- Controller integration should persist wrapper artifacts and lifecycle events through the existing state projections instead of leaving PT3 as a crate-level execution boundary.
+- PT3 does not make provider-native tools governed; native Codex/Claude tool observations remain observed-only unless routed through these wrappers or reported with structured lifecycle evidence.

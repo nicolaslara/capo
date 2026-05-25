@@ -115,3 +115,16 @@ Observed 2026-05-25.
 - Workspace lockfile: `../../Cargo.lock`
 - Permission lifecycle and ACP allow/reject mapping source: `../architecture/capability-permissions.md`
 - Permissions/tools source workpad: `permissions-tools.md`
+
+## F4/PT3 Tool Wrapper Expansion
+
+Observed 2026-05-25.
+
+- Runtime wrapper registry, execution boundary, permission binding, artifact metadata, and wrapper tests: `../../crates/capo-tools/src/lib.rs`
+- Runtime wrapper dependency: `../../crates/capo-tools/Cargo.toml`
+- Local process runner used by shell/git wrappers: `../../crates/capo-runtime/src/lib.rs`
+- Workspace lockfile: `../../Cargo.lock`
+- Tool exposure and wrapper architecture source: `../architecture/tool-exposure.md`
+- Runtime execution architecture source: `../architecture/runtime-tunnel.md`
+- Capability and permission source: `../architecture/capability-permissions.md`
+- Permissions/tools source workpad: `permissions-tools.md`

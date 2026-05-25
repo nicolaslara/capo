@@ -4,7 +4,15 @@
 //! lifecycle. Permission policy remains a separate boundary even when the
 //! trusted local prototype allows broadly.
 
-use capo_core::{BoundaryBinding, BoundaryKind, SessionId, ToolCallId};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use capo_core::{BoundaryBinding, BoundaryKind, RunId, SessionId, ToolCallId};
+use capo_runtime::{
+    LocalProcessConfig, LocalProcessRequest, LocalProcessRunner, RedactionRule, RuntimeError,
+    RuntimeOutputArtifact,
+};
 use serde_json::Value;
 
 /// First Capo-owned tools selected by the architecture.
@@ -17,9 +25,20 @@ pub const CAPO_OWNED_TOOLS: &[&str] = &[
     "capo.capability_request",
 ];
 
+/// First Capo-governed wrapper tools for local execution and workspace access.
+pub const CAPO_WRAPPER_TOOLS: &[&str] = &[
+    "capo.shell_run",
+    "capo.git_status",
+    "capo.git_diff",
+    "capo.file_read",
+    "capo.file_write",
+    "capo.workpad_read",
+];
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolExposure {
     Capo(CapoToolRegistry),
+    Runtime(RuntimeToolWrappers),
     Fake(FakeToolExposure),
 }
 
@@ -32,9 +51,14 @@ impl ToolExposure {
         Self::Fake(FakeToolExposure)
     }
 
+    pub fn runtime_wrappers(config: RuntimeToolConfig) -> Self {
+        Self::Runtime(RuntimeToolWrappers::new(config))
+    }
+
     pub fn binding(&self) -> BoundaryBinding {
         match self {
             Self::Capo(exposure) => exposure.binding(),
+            Self::Runtime(exposure) => exposure.binding(),
             Self::Fake(exposure) => exposure.binding(),
         }
     }
@@ -42,6 +66,7 @@ impl ToolExposure {
     pub fn invoke(&self, request: FakeToolRequest) -> FakeToolResult {
         match self {
             Self::Capo(_) => FakeToolExposure.invoke(request),
+            Self::Runtime(_) => FakeToolExposure.invoke(request),
             Self::Fake(exposure) => exposure.invoke(request),
         }
     }
@@ -171,6 +196,11 @@ impl CapoToolRegistry {
                 ToolAuditEvent::new("permission.decided", permission.effect.clone()),
             ],
             permission,
+            session_id: request.session_id.clone(),
+            run_id: RunId::new("capo-registry-no-run"),
+            tool_call_id: request.tool_call_id.clone(),
+            capability_profile_id: request.capability_profile_id.clone(),
+            input_hash: capo_tool_context_hash(&request.context),
         }
     }
 
@@ -179,6 +209,22 @@ impl CapoToolRegistry {
         request: CapoToolRequest,
         authorization: ToolAuthorization,
     ) -> CapoToolResult {
+        if let Err(error) = verify_capo_authorization_matches_request(&request, &authorization) {
+            let mut events = authorization.events;
+            events.push(ToolAuditEvent::new(
+                "tool.call_canceled",
+                "authorization_mismatch",
+            ));
+            return CapoToolResult {
+                tool_call_id: request.tool_call_id,
+                tool_id: request.tool_id,
+                output: error,
+                output_artifact_id: "none".to_string(),
+                mutates_state: authorization.definition.mutates_state,
+                permission_decision: authorization.permission,
+                events,
+            };
+        }
         if authorization.permission.effect != "allow" {
             let mut events = authorization.events;
             events.push(ToolAuditEvent::new(
@@ -272,6 +318,11 @@ pub struct ToolAuthorization {
     pub definition: ToolDefinition,
     pub permission: PermissionDecision,
     pub events: Vec<ToolAuditEvent>,
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    pub tool_call_id: ToolCallId,
+    pub capability_profile_id: String,
+    pub input_hash: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -283,6 +334,541 @@ pub struct CapoToolResult {
     pub mutates_state: bool,
     pub permission_decision: PermissionDecision,
     pub events: Vec<ToolAuditEvent>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeToolConfig {
+    pub workspace_root: PathBuf,
+    pub artifact_root: PathBuf,
+    pub env_allowlist: Vec<String>,
+    pub redaction_rules: Vec<RedactionRule>,
+    pub output_limit_bytes: usize,
+}
+
+impl RuntimeToolConfig {
+    pub fn local_workspace(workspace_root: PathBuf, artifact_root: PathBuf) -> Self {
+        Self {
+            workspace_root,
+            artifact_root,
+            env_allowlist: Vec::new(),
+            redaction_rules: Vec::new(),
+            output_limit_bytes: 64 * 1024,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeToolWrappers {
+    config: RuntimeToolConfig,
+}
+
+impl RuntimeToolWrappers {
+    pub fn new(config: RuntimeToolConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn binding(&self) -> BoundaryBinding {
+        BoundaryBinding {
+            kind: BoundaryKind::ToolExposure,
+            variant: "runtime-wrappers",
+            fake: false,
+        }
+    }
+
+    pub fn list_tools(&self) -> Vec<ToolDefinition> {
+        CAPO_WRAPPER_TOOLS
+            .iter()
+            .map(|tool_id| self.describe_tool(tool_id).expect("known wrapper tool"))
+            .collect()
+    }
+
+    pub fn describe_tool(&self, tool_id: &str) -> Option<ToolDefinition> {
+        let (display_name, mutates_state, risk, required_scopes, schema_json) = match tool_id {
+            "capo.shell_run" => (
+                "Shell Run",
+                false,
+                "high",
+                vec!["tool:invoke:capo.shell_run", "shell:execute:workspace"],
+                "{\"input\":{\"program\":\"string\",\"argv\":\"string[]\",\"cwd\":\"string?\"}}",
+            ),
+            "capo.git_status" => (
+                "Git Status",
+                false,
+                "low",
+                vec!["tool:invoke:capo.git_status", "git:status:workspace"],
+                "{\"input\":{\"path\":\"string?\"}}",
+            ),
+            "capo.git_diff" => (
+                "Git Diff",
+                false,
+                "low",
+                vec!["tool:invoke:capo.git_diff", "git:diff:workspace"],
+                "{\"input\":{\"path\":\"string?\"}}",
+            ),
+            "capo.file_read" => (
+                "File Read",
+                false,
+                "low",
+                vec!["tool:invoke:capo.file_read", "filesystem:read:workspace"],
+                "{\"input\":{\"path\":\"string\"}}",
+            ),
+            "capo.file_write" => (
+                "File Write",
+                true,
+                "medium",
+                vec!["tool:invoke:capo.file_write", "filesystem:write:workspace"],
+                "{\"input\":{\"path\":\"string\",\"content\":\"string\"}}",
+            ),
+            "capo.workpad_read" => (
+                "Workpad Read",
+                false,
+                "low",
+                vec![
+                    "tool:invoke:capo.workpad_read",
+                    "filesystem:read:workspace",
+                    "state:read:task",
+                ],
+                "{\"input\":{\"path\":\"string\"}}",
+            ),
+            _ => return None,
+        };
+
+        Some(ToolDefinition {
+            tool_id: tool_id.to_string(),
+            display_name: display_name.to_string(),
+            origin: "runtime".to_string(),
+            handler_kind: "runtime_wrapper".to_string(),
+            schema_json: schema_json.to_string(),
+            required_scopes_json: json_array(required_scopes),
+            risk: risk.to_string(),
+            exposure: "agent_visible".to_string(),
+            instrumentation_level: "full".to_string(),
+            status: "available".to_string(),
+            mutates_state,
+        })
+    }
+
+    pub fn authorize_tool_call(
+        &self,
+        request: &WrapperToolRequest,
+        policy: &PermissionPolicy,
+    ) -> ToolAuthorization {
+        let definition = self
+            .describe_tool(&request.tool_id)
+            .unwrap_or_else(|| unknown_tool_definition(&request.tool_id));
+        let permission = policy.decide(PermissionRequest {
+            session_id: request.session_id.clone(),
+            capability_profile_id: request.capability_profile_id.clone(),
+            scope_json: definition.required_scopes_json.clone(),
+        });
+        let permission_effect = permission.effect.clone();
+        ToolAuthorization {
+            definition,
+            permission,
+            events: vec![
+                ToolAuditEvent::new("tool.call_requested", "requested"),
+                ToolAuditEvent::new("permission.requested", "pending"),
+                ToolAuditEvent::new("permission.decided", permission_effect),
+            ],
+            session_id: request.session_id.clone(),
+            run_id: request.run_id.clone(),
+            tool_call_id: request.tool_call_id.clone(),
+            capability_profile_id: request.capability_profile_id.clone(),
+            input_hash: wrapper_input_hash(&request.input),
+        }
+    }
+
+    pub fn invoke_authorized(
+        &self,
+        request: WrapperToolRequest,
+        authorization: ToolAuthorization,
+    ) -> WrapperToolResult {
+        if let Err(error) = verify_authorization_matches_request(&request, &authorization) {
+            let mut events = authorization.events;
+            events.push(ToolAuditEvent::new(
+                "tool.call_canceled",
+                "authorization_mismatch",
+            ));
+            return WrapperToolResult {
+                tool_call_id: request.tool_call_id,
+                tool_id: request.tool_id,
+                status: "denied".to_string(),
+                summary: error,
+                input_artifact: None,
+                output_artifacts: Vec::new(),
+                permission_decision: authorization.permission,
+                events,
+            };
+        }
+        if authorization.permission.effect != "allow" {
+            let mut events = authorization.events;
+            events.push(ToolAuditEvent::new(
+                "tool.call_canceled",
+                "permission_denied",
+            ));
+            return WrapperToolResult::denied(
+                request,
+                authorization.definition,
+                authorization.permission,
+                events,
+            );
+        }
+
+        let mut events = authorization.events;
+        events.extend([
+            ToolAuditEvent::new("capability.grant_used", "used"),
+            ToolAuditEvent::new("tool.invocation_started", "running"),
+        ]);
+        let input_artifact = self.record_input_artifact(&request);
+        let execution = self.execute(&request);
+        match execution {
+            Ok(execution) => {
+                events.extend([
+                    ToolAuditEvent::new("tool.output_artifact_recorded", "safe"),
+                    ToolAuditEvent::new("tool.output_observed", execution.status.clone()),
+                    ToolAuditEvent::new("tool.call_completed", "completed"),
+                    ToolAuditEvent::new("tool.result_delivered", "delivered"),
+                ]);
+                WrapperToolResult {
+                    tool_call_id: request.tool_call_id,
+                    tool_id: request.tool_id,
+                    status: execution.status,
+                    summary: execution.summary,
+                    input_artifact: Some(input_artifact),
+                    output_artifacts: execution.output_artifacts,
+                    permission_decision: authorization.permission,
+                    events,
+                }
+            }
+            Err(error) => {
+                events.extend([
+                    ToolAuditEvent::new("tool.output_observed", "failed"),
+                    ToolAuditEvent::new("tool.call_failed", "failed"),
+                ]);
+                WrapperToolResult {
+                    tool_call_id: request.tool_call_id,
+                    tool_id: request.tool_id,
+                    status: "failed".to_string(),
+                    summary: error,
+                    input_artifact: Some(input_artifact),
+                    output_artifacts: Vec::new(),
+                    permission_decision: authorization.permission,
+                    events,
+                }
+            }
+        }
+    }
+
+    pub fn authorize_and_invoke(
+        &self,
+        request: WrapperToolRequest,
+        policy: &PermissionPolicy,
+    ) -> WrapperToolResult {
+        let authorization = self.authorize_tool_call(&request, policy);
+        self.invoke_authorized(request, authorization)
+    }
+
+    fn execute(&self, request: &WrapperToolRequest) -> Result<WrapperExecution, String> {
+        match request.tool_id.as_str() {
+            "capo.shell_run" => self.shell_run(request),
+            "capo.git_status" => self.git_command(request, "status", &["status", "--short"]),
+            "capo.git_diff" => self.git_command(request, "diff", &["diff", "--"]),
+            "capo.file_read" => self.file_read(request, "file_read"),
+            "capo.file_write" => self.file_write(request),
+            "capo.workpad_read" => self.workpad_read(request),
+            other => Err(format!("unsupported wrapper tool: {other}")),
+        }
+    }
+
+    fn shell_run(&self, request: &WrapperToolRequest) -> Result<WrapperExecution, String> {
+        let program = required_input(request, "program")?;
+        let argv = request
+            .input
+            .get("argv")
+            .map(json_string_array)
+            .transpose()?
+            .unwrap_or_default();
+        let cwd = request
+            .input
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(|path| self.resolve_workspace_path(path, true))
+            .transpose()?
+            .unwrap_or_else(|| self.config.workspace_root.clone());
+        let outcome = self
+            .runtime_runner()
+            .start_process(LocalProcessRequest {
+                run_id: sanitized_run_id(&request.run_id),
+                program,
+                argv,
+                cwd,
+                env: HashMap::new(),
+            })
+            .map_err(runtime_error)?;
+        Ok(WrapperExecution {
+            status: outcome.process.status,
+            summary: format!(
+                "shell exited with {}",
+                outcome
+                    .exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "signal".to_string())
+            ),
+            output_artifacts: vec![
+                wrapper_artifact("shell_stdout", outcome.stdout),
+                wrapper_artifact("shell_stderr", outcome.stderr),
+            ],
+        })
+    }
+
+    fn git_command(
+        &self,
+        request: &WrapperToolRequest,
+        label: &str,
+        base_args: &[&str],
+    ) -> Result<WrapperExecution, String> {
+        let mut argv = base_args
+            .iter()
+            .map(|item| item.to_string())
+            .collect::<Vec<_>>();
+        if let Some(path) = request.input.get("path").and_then(Value::as_str) {
+            let relative = workspace_relative_path(path)?;
+            argv.push(relative);
+        }
+        let outcome = self
+            .runtime_runner()
+            .start_process(LocalProcessRequest {
+                run_id: sanitized_run_id(&request.run_id),
+                program: "git".to_string(),
+                argv,
+                cwd: self.config.workspace_root.clone(),
+                env: HashMap::new(),
+            })
+            .map_err(runtime_error)?;
+        Ok(WrapperExecution {
+            status: outcome.process.status,
+            summary: format!("git {label} completed"),
+            output_artifacts: vec![
+                wrapper_artifact("git_stdout", outcome.stdout),
+                wrapper_artifact("git_stderr", outcome.stderr),
+            ],
+        })
+    }
+
+    fn file_read(
+        &self,
+        request: &WrapperToolRequest,
+        kind: &str,
+    ) -> Result<WrapperExecution, String> {
+        let path = self.resolve_workspace_path(&required_input(request, "path")?, false)?;
+        let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+        let artifact = self.write_tool_artifact(
+            request,
+            kind,
+            &format!("{} bytes read from {}", bytes.len(), path.display()),
+            &bytes,
+            "safe",
+        )?;
+        Ok(WrapperExecution {
+            status: "completed".to_string(),
+            summary: format!("{kind} read {}", path.display()),
+            output_artifacts: vec![artifact],
+        })
+    }
+
+    fn workpad_read(&self, request: &WrapperToolRequest) -> Result<WrapperExecution, String> {
+        let requested = required_input(request, "path")?;
+        if !is_workpad_path(&requested) {
+            return Err(format!(
+                "workpad_read only supports TASKS.md, project.md, or workpads/*.md paths: {requested}"
+            ));
+        }
+        self.file_read(request, "workpad_read")
+    }
+
+    fn file_write(&self, request: &WrapperToolRequest) -> Result<WrapperExecution, String> {
+        let path = self.resolve_workspace_path(&required_input(request, "path")?, true)?;
+        let content = required_input(request, "content")?;
+        let before = fs::read(&path).unwrap_or_default();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        fs::write(&path, content.as_bytes()).map_err(|error| error.to_string())?;
+        let after = fs::read(&path).map_err(|error| error.to_string())?;
+        let before_hash = content_hash(&before);
+        let after_hash = content_hash(&after);
+        let diff_summary = format!(
+            "file={} before={} after={}\n",
+            path.display(),
+            before_hash,
+            after_hash
+        );
+        let artifact = self.write_tool_artifact(
+            request,
+            "file_write_diff",
+            "before/after hash summary",
+            diff_summary.as_bytes(),
+            "safe",
+        )?;
+        Ok(WrapperExecution {
+            status: "completed".to_string(),
+            summary: format!("file_write wrote {}", path.display()),
+            output_artifacts: vec![artifact],
+        })
+    }
+
+    fn record_input_artifact(&self, request: &WrapperToolRequest) -> WrapperArtifact {
+        let payload = format!(
+            "{{\"tool_id\":\"{}\",\"input\":{}}}",
+            request.tool_id, request.input
+        );
+        let redacted = self.redact_bytes(payload.as_bytes());
+        let redaction_state = if redacted == payload.as_bytes() {
+            "safe"
+        } else {
+            "redacted"
+        };
+        self.write_tool_artifact(
+            request,
+            "input",
+            "wrapper input",
+            &redacted,
+            redaction_state,
+        )
+        .expect("write wrapper input artifact")
+    }
+
+    fn write_tool_artifact(
+        &self,
+        request: &WrapperToolRequest,
+        kind: &str,
+        summary: &str,
+        bytes: &[u8],
+        redaction_state: &str,
+    ) -> Result<WrapperArtifact, String> {
+        let dir = self
+            .config
+            .artifact_root
+            .join(sanitize_path_component(request.tool_call_id.as_str()));
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let path = dir.join(format!("{kind}.txt"));
+        fs::write(&path, bytes).map_err(|error| error.to_string())?;
+        Ok(WrapperArtifact {
+            artifact_id: format!("artifact-wrapper-{}-{kind}", request.tool_call_id),
+            kind: kind.to_string(),
+            uri: path.display().to_string(),
+            content_hash: content_hash(bytes),
+            size_bytes: bytes.len() as i64,
+            redaction_state: redaction_state.to_string(),
+            summary: summary.to_string(),
+        })
+    }
+
+    fn runtime_runner(&self) -> LocalProcessRunner {
+        let mut config = LocalProcessConfig::for_test(
+            self.config.workspace_root.clone(),
+            self.config.artifact_root.clone(),
+        );
+        config.env_allowlist = self.config.env_allowlist.clone();
+        config.redaction_rules = self.config.redaction_rules.clone();
+        config.output_limit_bytes = self.config.output_limit_bytes;
+        LocalProcessRunner::new(config)
+    }
+
+    fn redact_bytes(&self, bytes: &[u8]) -> Vec<u8> {
+        let mut text = String::from_utf8_lossy(bytes).to_string();
+        for rule in &self.config.redaction_rules {
+            if text.contains(&rule.pattern) {
+                text = text.replace(&rule.pattern, &rule.replacement);
+            }
+        }
+        text.into_bytes()
+    }
+
+    fn resolve_workspace_path(&self, path: &str, allow_missing: bool) -> Result<PathBuf, String> {
+        let candidate = workspace_path(&self.config.workspace_root, path);
+        if candidate.exists() {
+            let canonical = candidate
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            ensure_under_workspace(&canonical, &self.config.workspace_root)?;
+            return Ok(canonical);
+        }
+        if !allow_missing {
+            return Err(format!(
+                "workspace path does not exist: {}",
+                candidate.display()
+            ));
+        }
+        let ancestor = nearest_existing_ancestor(&candidate).ok_or_else(|| {
+            format!(
+                "workspace path has no existing ancestor: {}",
+                candidate.display()
+            )
+        })?;
+        let ancestor = ancestor.canonicalize().map_err(|error| error.to_string())?;
+        ensure_under_workspace(&ancestor, &self.config.workspace_root)?;
+        Ok(candidate)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WrapperToolRequest {
+    pub tool_call_id: ToolCallId,
+    pub session_id: SessionId,
+    pub run_id: capo_core::RunId,
+    pub tool_id: String,
+    pub capability_profile_id: String,
+    pub input: Value,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WrapperToolResult {
+    pub tool_call_id: ToolCallId,
+    pub tool_id: String,
+    pub status: String,
+    pub summary: String,
+    pub input_artifact: Option<WrapperArtifact>,
+    pub output_artifacts: Vec<WrapperArtifact>,
+    pub permission_decision: PermissionDecision,
+    pub events: Vec<ToolAuditEvent>,
+}
+
+impl WrapperToolResult {
+    fn denied(
+        request: WrapperToolRequest,
+        definition: ToolDefinition,
+        permission_decision: PermissionDecision,
+        events: Vec<ToolAuditEvent>,
+    ) -> Self {
+        Self {
+            tool_call_id: request.tool_call_id,
+            tool_id: definition.tool_id,
+            status: "denied".to_string(),
+            summary: permission_decision.explanation.clone(),
+            input_artifact: None,
+            output_artifacts: Vec::new(),
+            permission_decision,
+            events,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WrapperArtifact {
+    pub artifact_id: String,
+    pub kind: String,
+    pub uri: String,
+    pub content_hash: String,
+    pub size_bytes: i64,
+    pub redaction_state: String,
+    pub summary: String,
+}
+
+struct WrapperExecution {
+    status: String,
+    summary: String,
+    output_artifacts: Vec<WrapperArtifact>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -641,6 +1227,242 @@ fn scoped_grant_id(request: &PermissionRequest, effect: &str) -> String {
     )
 }
 
+fn verify_capo_authorization_matches_request(
+    request: &CapoToolRequest,
+    authorization: &ToolAuthorization,
+) -> Result<(), String> {
+    if authorization.definition.tool_id != request.tool_id {
+        return Err(format!(
+            "authorization tool mismatch: authorized {} but requested {}",
+            authorization.definition.tool_id, request.tool_id
+        ));
+    }
+    if authorization.session_id != request.session_id {
+        return Err("authorization session mismatch".to_string());
+    }
+    if authorization.run_id != RunId::new("capo-registry-no-run") {
+        return Err("authorization run mismatch".to_string());
+    }
+    if authorization.tool_call_id != request.tool_call_id {
+        return Err("authorization tool call mismatch".to_string());
+    }
+    if authorization.capability_profile_id != request.capability_profile_id {
+        return Err("authorization capability profile mismatch".to_string());
+    }
+    if authorization.permission.capability_profile_id != request.capability_profile_id {
+        return Err("permission decision profile mismatch".to_string());
+    }
+    if authorization.permission.scope_json != authorization.definition.required_scopes_json {
+        return Err("permission decision scope mismatch".to_string());
+    }
+    if authorization.input_hash != capo_tool_context_hash(&request.context) {
+        return Err("authorization input mismatch".to_string());
+    }
+    Ok(())
+}
+
+fn verify_authorization_matches_request(
+    request: &WrapperToolRequest,
+    authorization: &ToolAuthorization,
+) -> Result<(), String> {
+    if authorization.definition.tool_id != request.tool_id {
+        return Err(format!(
+            "authorization tool mismatch: authorized {} but requested {}",
+            authorization.definition.tool_id, request.tool_id
+        ));
+    }
+    if authorization.session_id != request.session_id {
+        return Err("authorization session mismatch".to_string());
+    }
+    if authorization.run_id != request.run_id {
+        return Err("authorization run mismatch".to_string());
+    }
+    if authorization.tool_call_id != request.tool_call_id {
+        return Err("authorization tool call mismatch".to_string());
+    }
+    if authorization.capability_profile_id != request.capability_profile_id {
+        return Err("authorization capability profile mismatch".to_string());
+    }
+    if authorization.input_hash != wrapper_input_hash(&request.input) {
+        return Err("authorization input mismatch".to_string());
+    }
+    if authorization.permission.capability_profile_id != request.capability_profile_id {
+        return Err("permission decision profile mismatch".to_string());
+    }
+    if authorization.permission.scope_json != authorization.definition.required_scopes_json {
+        return Err("permission decision scope mismatch".to_string());
+    }
+    Ok(())
+}
+
+fn capo_tool_context_hash(context: &CapoToolContext) -> String {
+    let fields = [
+        context.task_status.as_str(),
+        context.agent_status.as_str(),
+        context.session_summary.as_str(),
+        context.workpad_excerpt.as_str(),
+        context.evidence_note.as_str(),
+        context.capability_scope.as_str(),
+    ];
+    let mut encoded = Vec::new();
+    for field in fields {
+        encoded.extend_from_slice(field.len().to_string().as_bytes());
+        encoded.push(0);
+        encoded.extend_from_slice(field.as_bytes());
+    }
+    content_hash(&encoded)
+}
+
+fn wrapper_input_hash(input: &Value) -> String {
+    content_hash(input.to_string().as_bytes())
+}
+
+fn required_input(request: &WrapperToolRequest, key: &str) -> Result<String, String> {
+    request
+        .input
+        .get(key)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("{} input requires string field `{key}`", request.tool_id))
+}
+
+fn json_string_array(value: &Value) -> Result<Vec<String>, String> {
+    let Value::Array(items) = value else {
+        return Err("argv must be an array of strings".to_string());
+    };
+    items
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(ToString::to_string)
+                .ok_or_else(|| "argv must contain only strings".to_string())
+        })
+        .collect()
+}
+
+fn is_workpad_path(path: &str) -> bool {
+    let path = Path::new(path);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return false;
+    }
+    let normalized = path.display().to_string();
+    normalized == "TASKS.md"
+        || normalized == "project.md"
+        || (normalized.starts_with("workpads/")
+            && normalized.ends_with(".md")
+            && !normalized.contains("/research-clones/")
+            && !normalized.contains("/scratch/"))
+}
+
+fn workspace_path(workspace_root: &Path, path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_root.join(path)
+    }
+}
+
+fn workspace_relative_path(path: &str) -> Result<String, String> {
+    let path = Path::new(path);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(format!(
+            "git path must be workspace-relative: {}",
+            path.display()
+        ));
+    }
+    Ok(path.display().to_string())
+}
+
+fn sanitize_path_component(value: &str) -> String {
+    let mut sanitized = String::new();
+    let mut previous_dash = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            sanitized.push(ch);
+            previous_dash = false;
+        } else if !previous_dash {
+            sanitized.push('-');
+            previous_dash = true;
+        }
+    }
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "tool-call".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn sanitized_run_id(run_id: &RunId) -> RunId {
+    RunId::new(sanitize_path_component(run_id.as_str()))
+}
+
+fn ensure_under_workspace(path: &Path, workspace_root: &Path) -> Result<(), String> {
+    let workspace_root = workspace_root
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if path.starts_with(&workspace_root) {
+        Ok(())
+    } else {
+        Err(format!(
+            "path escapes workspace: {} not under {}",
+            path.display(),
+            workspace_root.display()
+        ))
+    }
+}
+
+fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut cursor = path.parent();
+    while let Some(parent) = cursor {
+        if parent.exists() {
+            return Some(parent.to_path_buf());
+        }
+        cursor = parent.parent();
+    }
+    None
+}
+
+fn wrapper_artifact(kind: &str, artifact: RuntimeOutputArtifact) -> WrapperArtifact {
+    WrapperArtifact {
+        artifact_id: artifact.artifact_id,
+        kind: kind.to_string(),
+        uri: artifact.path.display().to_string(),
+        content_hash: artifact.content_hash,
+        size_bytes: artifact.size_bytes,
+        redaction_state: artifact.redaction_state,
+        summary: format!("{kind} runtime artifact"),
+    }
+}
+
+fn runtime_error(error: RuntimeError) -> String {
+    format!("{error:?}")
+}
+
+fn content_hash(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
 fn stable_hash(value: &str) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in value.as_bytes() {
@@ -653,6 +1475,9 @@ fn stable_hash(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use capo_core::RunId;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn first_tool_set_supports_status_and_evidence() {
@@ -710,6 +1535,331 @@ mod tests {
                     .contains(&format!("tool:invoke:{tool_id}"))
             );
         }
+    }
+
+    #[test]
+    fn runtime_wrappers_define_shell_git_file_and_workpad_tools() {
+        let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+            PathBuf::from("/tmp/capo-workspace"),
+            PathBuf::from("/tmp/capo-artifacts"),
+        ));
+        let tools = wrappers.list_tools();
+
+        assert_eq!(tools.len(), 6);
+        for tool_id in CAPO_WRAPPER_TOOLS {
+            let definition = wrappers.describe_tool(tool_id).expect("wrapper definition");
+            assert_eq!(definition.origin, "runtime");
+            assert_eq!(definition.handler_kind, "runtime_wrapper");
+            assert_eq!(definition.instrumentation_level, "full");
+            assert!(
+                definition
+                    .required_scopes_json
+                    .contains(&format!("tool:invoke:{tool_id}"))
+            );
+        }
+        assert_eq!(
+            wrappers
+                .describe_tool("capo.shell_run")
+                .expect("shell tool")
+                .risk,
+            "high"
+        );
+        assert!(
+            wrappers
+                .describe_tool("capo.file_write")
+                .expect("file write tool")
+                .mutates_state
+        );
+    }
+
+    #[test]
+    fn file_wrappers_record_input_output_artifacts_and_reject_workspace_escape() {
+        let workspace = temp_root("tool-wrapper-workspace");
+        let artifacts = temp_root("tool-wrapper-artifacts");
+        fs::create_dir_all(&workspace).expect("workspace");
+        fs::write(workspace.join("note.md"), "hello").expect("write note");
+        let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+            workspace.clone(),
+            artifacts.clone(),
+        ));
+        let policy = PermissionPolicy::allow_trusted_local();
+
+        let read = wrappers.authorize_and_invoke(
+            wrapper_request(
+                "call-file-read",
+                "run-file-read",
+                "capo.file_read",
+                serde_json::json!({"path":"note.md"}),
+            ),
+            &policy,
+        );
+        assert_eq!(read.status, "completed");
+        assert!(read.input_artifact.is_some());
+        assert_eq!(read.output_artifacts.len(), 1);
+        assert_eq!(
+            fs::read_to_string(&read.output_artifacts[0].uri).expect("read artifact"),
+            "hello"
+        );
+        assert!(read.events.iter().any(|event| {
+            event.kind == "tool.output_artifact_recorded" && event.status == "safe"
+        }));
+
+        let write = wrappers.authorize_and_invoke(
+            wrapper_request(
+                "call-file-write",
+                "run-file-write",
+                "capo.file_write",
+                serde_json::json!({"path":"nested/out.txt","content":"new text"}),
+            ),
+            &policy,
+        );
+        assert_eq!(write.status, "completed");
+        assert_eq!(
+            fs::read_to_string(workspace.join("nested/out.txt")).expect("written file"),
+            "new text"
+        );
+        assert_eq!(write.output_artifacts[0].kind, "file_write_diff");
+        assert!(
+            fs::read_to_string(&write.output_artifacts[0].uri)
+                .expect("diff summary")
+                .contains("before=fnv1a64:")
+        );
+
+        let escaped = wrappers.authorize_and_invoke(
+            wrapper_request(
+                "call-file-escape",
+                "run-file-escape",
+                "capo.file_read",
+                serde_json::json!({"path":"../outside.txt"}),
+            ),
+            &policy,
+        );
+        assert_eq!(escaped.status, "failed");
+        assert!(escaped.summary.contains("workspace path does not exist"));
+
+        let workpad_escape = wrappers.authorize_and_invoke(
+            wrapper_request(
+                "call-workpad-escape",
+                "run-workpad-escape",
+                "capo.workpad_read",
+                serde_json::json!({"path":"note.md"}),
+            ),
+            &PermissionPolicy::static_read_only_local(),
+        );
+        assert_eq!(workpad_escape.status, "failed");
+        assert!(
+            workpad_escape
+                .summary
+                .contains("workpad_read only supports")
+        );
+
+        fs::create_dir_all(workspace.join("workpads/features")).expect("workpad dir");
+        fs::write(workspace.join("workpads/features/tasks.md"), "# Tasks\n").expect("workpad");
+        let workpad = wrappers.authorize_and_invoke(
+            wrapper_request(
+                "call-workpad-read",
+                "run-workpad-read",
+                "capo.workpad_read",
+                serde_json::json!({"path":"workpads/features/tasks.md"}),
+            ),
+            &PermissionPolicy::static_read_only_local(),
+        );
+        assert_eq!(workpad.status, "completed");
+        assert_eq!(workpad.output_artifacts[0].kind, "workpad_read");
+
+        let denied = wrappers.authorize_and_invoke(
+            wrapper_request(
+                "call-file-write-denied",
+                "run-file-write-denied",
+                "capo.file_write",
+                serde_json::json!({"path":"denied.txt","content":"nope"}),
+            ),
+            &PermissionPolicy::static_read_only_local(),
+        );
+        assert_eq!(denied.status, "denied");
+        assert!(denied.output_artifacts.is_empty());
+        assert!(denied.events.iter().any(|event| {
+            event.kind == "tool.call_canceled" && event.status == "permission_denied"
+        }));
+    }
+
+    #[test]
+    fn wrapper_split_authorization_cannot_be_replayed_for_another_tool() {
+        let workspace = temp_root("tool-wrapper-replay-workspace");
+        let artifacts = temp_root("tool-wrapper-replay-artifacts");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+            workspace.clone(),
+            artifacts,
+        ));
+        let authorization = wrappers.authorize_tool_call(
+            &wrapper_request(
+                "call-status-auth",
+                "run-status-auth",
+                "capo.git_status",
+                serde_json::json!({}),
+            ),
+            &PermissionPolicy::static_read_only_local(),
+        );
+
+        let replay = wrappers.invoke_authorized(
+            wrapper_request(
+                "call-shell-replay",
+                "run-shell-replay",
+                "capo.shell_run",
+                serde_json::json!({"program":"/bin/sh","argv":["-c","touch replayed"]}),
+            ),
+            authorization,
+        );
+
+        assert_eq!(replay.status, "denied");
+        assert!(replay.summary.contains("authorization tool mismatch"));
+        assert!(!workspace.join("replayed").exists());
+
+        let shell_authorization = wrappers.authorize_tool_call(
+            &wrapper_request(
+                "call-shell-auth",
+                "run-shell-auth",
+                "capo.shell_run",
+                serde_json::json!({"program":"/bin/sh","argv":["-c","true"]}),
+            ),
+            &PermissionPolicy::allow_trusted_local(),
+        );
+        let changed_input = wrappers.invoke_authorized(
+            wrapper_request(
+                "call-shell-auth",
+                "run-shell-auth",
+                "capo.shell_run",
+                serde_json::json!({"program":"/bin/sh","argv":["-c","touch replayed"]}),
+            ),
+            shell_authorization,
+        );
+        assert_eq!(changed_input.status, "denied");
+        assert!(
+            changed_input
+                .summary
+                .contains("authorization input mismatch")
+        );
+        assert!(!workspace.join("replayed").exists());
+    }
+
+    #[test]
+    fn shell_and_git_wrappers_execute_through_runtime_with_artifacts() {
+        let workspace = temp_root("tool-wrapper-git-workspace");
+        let artifacts = temp_root("tool-wrapper-git-artifacts");
+        fs::create_dir_all(&workspace).expect("workspace");
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&workspace)
+            .output()
+            .expect("git init");
+        fs::write(workspace.join("tracked.txt"), "tracked\n").expect("write tracked");
+
+        let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts);
+        config.redaction_rules.push(RedactionRule {
+            pattern: "SECRET".to_string(),
+            replacement: "[REDACTED]".to_string(),
+        });
+        let wrappers = RuntimeToolWrappers::new(config);
+        let policy = PermissionPolicy::allow_trusted_local();
+
+        let shell = wrappers.authorize_and_invoke(
+            wrapper_request(
+                "call-shell",
+                "run-shell",
+                "capo.shell_run",
+                serde_json::json!({
+                    "program":"/bin/sh",
+                    "argv":["-c","printf SECRET"],
+                    "cwd":"."
+                }),
+            ),
+            &policy,
+        );
+        assert_eq!(shell.status, "exited");
+        let shell_input = shell.input_artifact.as_ref().expect("shell input");
+        assert_eq!(shell_input.redaction_state, "redacted");
+        assert!(
+            fs::read_to_string(&shell_input.uri)
+                .expect("shell input artifact")
+                .contains("[REDACTED]")
+        );
+        assert_eq!(shell.output_artifacts.len(), 2);
+        assert!(
+            shell
+                .output_artifacts
+                .iter()
+                .any(|artifact| artifact.redaction_state == "redacted")
+        );
+        assert!(
+            shell
+                .events
+                .iter()
+                .any(|event| event.kind == "capability.grant_used")
+        );
+
+        let git_status = wrappers.authorize_and_invoke(
+            wrapper_request(
+                "call-git-status",
+                "run-git-status",
+                "capo.git_status",
+                serde_json::json!({}),
+            ),
+            &policy,
+        );
+        assert_eq!(git_status.status, "exited");
+        let stdout = git_status
+            .output_artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "git_stdout")
+            .expect("git stdout");
+        assert!(
+            fs::read_to_string(&stdout.uri)
+                .expect("git stdout artifact")
+                .contains("tracked.txt")
+        );
+
+        let denied_shell = wrappers.authorize_and_invoke(
+            wrapper_request(
+                "call-shell-denied",
+                "run-shell-denied",
+                "capo.shell_run",
+                serde_json::json!({"program":"/bin/sh","argv":["-c","true"]}),
+            ),
+            &PermissionPolicy::static_read_only_local(),
+        );
+        assert_eq!(denied_shell.status, "denied");
+        assert!(
+            !denied_shell
+                .events
+                .iter()
+                .any(|event| event.kind == "tool.invocation_started")
+        );
+
+        let escaped_artifact = wrappers.authorize_and_invoke(
+            wrapper_request(
+                "../call-shell-escape",
+                "../run-shell-escape",
+                "capo.shell_run",
+                serde_json::json!({"program":"/bin/sh","argv":["-c","true"]}),
+            ),
+            &policy,
+        );
+        assert_eq!(escaped_artifact.status, "exited");
+        assert!(
+            !workspace
+                .parent()
+                .expect("workspace parent")
+                .join("call-shell-escape")
+                .exists()
+        );
+        assert!(
+            !workspace
+                .parent()
+                .expect("workspace parent")
+                .join("run-shell-escape")
+                .exists()
+        );
     }
 
     #[test]
@@ -791,6 +1941,68 @@ mod tests {
             result.output_artifact_id,
             "artifact-call-session-summary-capo-session_summary"
         );
+    }
+
+    #[test]
+    fn capo_registry_split_authorization_cannot_be_replayed_with_changed_context() {
+        let registry = CapoToolRegistry;
+        let request = CapoToolRequest {
+            tool_call_id: ToolCallId::new("call-evidence"),
+            session_id: SessionId::new("session-tools"),
+            tool_id: "capo.evidence_record".to_string(),
+            capability_profile_id: "trusted-local-dev".to_string(),
+            context: tool_context(),
+        };
+        let authorization =
+            registry.authorize_tool_call(&request, &PermissionPolicy::allow_trusted_local());
+        let replay = registry.invoke_authorized(
+            CapoToolRequest {
+                context: CapoToolContext {
+                    evidence_note: "different evidence".to_string(),
+                    ..tool_context()
+                },
+                ..request
+            },
+            authorization,
+        );
+
+        assert_eq!(replay.output, "authorization input mismatch");
+        assert_eq!(replay.output_artifact_id, "none");
+        assert!(replay.events.iter().any(|event| {
+            event.kind == "tool.call_canceled" && event.status == "authorization_mismatch"
+        }));
+
+        let ambiguous = CapoToolRequest {
+            tool_call_id: ToolCallId::new("call-ambiguous"),
+            session_id: SessionId::new("session-tools"),
+            tool_id: "capo.evidence_record".to_string(),
+            capability_profile_id: "trusted-local-dev".to_string(),
+            context: CapoToolContext {
+                task_status: "a\nb".to_string(),
+                agent_status: "c".to_string(),
+                session_summary: "summary text".to_string(),
+                workpad_excerpt: "workpad section".to_string(),
+                evidence_note: "tests passed".to_string(),
+                capability_scope: "shell:execute:workspace".to_string(),
+            },
+        };
+        let ambiguous_authorization =
+            registry.authorize_tool_call(&ambiguous, &PermissionPolicy::allow_trusted_local());
+        let ambiguous_replay = registry.invoke_authorized(
+            CapoToolRequest {
+                context: CapoToolContext {
+                    task_status: "a".to_string(),
+                    agent_status: "b\nc".to_string(),
+                    session_summary: "summary text".to_string(),
+                    workpad_excerpt: "workpad section".to_string(),
+                    evidence_note: "tests passed".to_string(),
+                    capability_scope: "shell:execute:workspace".to_string(),
+                },
+                ..ambiguous
+            },
+            ambiguous_authorization,
+        );
+        assert_eq!(ambiguous_replay.output, "authorization input mismatch");
     }
 
     #[test]
@@ -932,5 +2144,29 @@ mod tests {
             evidence_note: "tests passed".to_string(),
             capability_scope: "shell:execute:workspace".to_string(),
         }
+    }
+
+    fn wrapper_request(
+        tool_call_id: &str,
+        run_id: &str,
+        tool_id: &str,
+        input: Value,
+    ) -> WrapperToolRequest {
+        WrapperToolRequest {
+            tool_call_id: ToolCallId::new(tool_call_id),
+            session_id: SessionId::new("session-wrapper"),
+            run_id: RunId::new(run_id),
+            tool_id: tool_id.to_string(),
+            capability_profile_id: "trusted-local-dev".to_string(),
+            input,
+        }
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("capo-tools-{name}-{nanos}"))
     }
 }

@@ -98,10 +98,38 @@ Review:
 
 ### PT3 - Tool Wrapper Expansion
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Add wrapper/instrumentation points for shell, git, file read/write, and workpad operations where Capo executes the tool.
 - Record input/output artifacts with safe/redacted classification.
 - Keep policy decisions auditable.
+
+Evidence:
+
+- `crates/capo-tools/src/lib.rs`
+- `crates/capo-tools/Cargo.toml`
+- `Cargo.lock`
+- `cargo test -p capo-tools`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+
+Decision:
+
+- Add `ToolExposure::Runtime(RuntimeToolWrappers)` as the first non-fake wrapper boundary.
+- Register wrapper definitions for `capo.shell_run`, `capo.git_status`, `capo.git_diff`, `capo.file_read`, `capo.file_write`, and wrapper-backed `capo.workpad_read`.
+- Route shell and git wrappers through `LocalProcessRunner` so process execution, output limits, redaction, and runtime output artifacts stay behind the runtime boundary.
+- Keep file and workpad wrappers workspace-bound. `workpad_read` is restricted to `TASKS.md`, `project.md`, and `workpads/*.md` paths rather than arbitrary workspace files.
+- Record wrapper input artifacts and output artifacts with stable hashes, sizes, redaction state, and summaries.
+- Apply configured redaction rules to wrapper-owned input artifacts, not just runtime stdout/stderr.
+- Sanitize tool-call and run IDs before using them as artifact path components.
+- Bind split authorizations to tool, session, run, tool call, profile, scope, and input/context hash before invocation so a prior allow decision cannot be replayed against a different request.
+- Denied static policy decisions cancel before invocation and do not create wrapper artifacts.
+
+Review:
+
+- Focused wrapper review found blockers in split authorization replay, `workpad_read` arbitrary file reads, unsanitized artifact path components, unredacted input artifacts, and misleading permission event status. All were fixed with regression tests.
+- Re-review found remaining blockers in same-tool authorization replay and unsanitized runtime run IDs. Both were fixed with regression tests.
+- Final re-review found one more Capo-owned registry replay issue: newline-concatenated context hashing was ambiguous. Context hashing now uses length-prefix encoding, with a regression test for ambiguous newline-bearing fields.
