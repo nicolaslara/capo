@@ -70,6 +70,8 @@ Usage:
   capo permission list [--state PATH]
   capo permission decide --approval APPROVAL_ID --decision allow_once|allow_always|reject_once|reject_always [--state PATH]
   capo connectivity expose-stub --endpoint ENDPOINT_ID --owner-kind runtime_target|capo_server --owner-id OWNER_ID --channel control|stdio|logs|dashboard|artifact --exposure loopback|private|public [--address REF] [--record] [--state PATH]
+  capo connectivity request-approval --exposure EXPOSURE_ID [--approval APPROVAL_ID] [--state PATH]
+  capo connectivity activate-exposure --exposure EXPOSURE_ID [--state PATH]
   capo workpad index --root PATH [--state PATH]
   capo workpad next [--path PATH] [--state PATH]
   capo workpad plan-next --agent NAME --adapter codex|claude [--path PATH] [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
@@ -185,6 +187,12 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "connectivity" && command == "expose-stub" => {
             expose_connectivity_stub(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "connectivity" && command == "request-approval" => {
+            request_connectivity_exposure_approval(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "connectivity" && command == "activate-exposure" => {
+            activate_connectivity_exposure(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "workpad" && command == "index" => {
             index_workpads(&parsed, rest)
@@ -3248,6 +3256,272 @@ fn expose_connectivity_stub(parsed: &ParsedArgs, args: &[String]) -> Result<Stri
     ))
 }
 
+fn request_connectivity_exposure_approval(
+    parsed: &ParsedArgs,
+    args: &[String],
+) -> Result<String, String> {
+    let exposure_id = required_arg(args, "--exposure")?;
+    let approval_id = optional_arg(args, "--approval").unwrap_or_else(|| {
+        format!(
+            "approval-connectivity-exposure-{}",
+            stable_cli_hash(&exposure_id)
+        )
+    });
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--exposure" | "--approval"))
+    {
+        return Err(format!(
+            "unknown connectivity request-approval option: {unknown}"
+        ));
+    }
+    let state = state(parsed)?;
+    let exposure = connectivity_exposure(&state, &exposure_id)?;
+    if exposure.status != "blocked_pending_permission" {
+        return Err(format!(
+            "connectivity exposure is not awaiting permission: {} status={}",
+            exposure.exposure_id, exposure.status
+        ));
+    }
+    if state
+        .permission_approval(&project_id(), &approval_id)
+        .map_err(debug_error)?
+        .is_some()
+    {
+        return Err(format!("approval already exists: {approval_id}"));
+    }
+    let scope_json = connectivity_exposure_scope_json(&exposure);
+    let subject_json = connectivity_exposure_subject_json(&exposure);
+    let approval = PermissionApprovalProjection {
+        approval_id: approval_id.clone(),
+        project_id: project_id(),
+        session_id: None,
+        tool_call_id: None,
+        capability_profile_id: "remote-control-reviewed".to_string(),
+        scope_json,
+        subject_json,
+        status: "pending".to_string(),
+        requested_by: "local-user".to_string(),
+        reason: format!("approve connectivity exposure {}", exposure.exposure_id),
+        decision: None,
+        capability_grant_id: None,
+        updated_sequence: 0,
+    };
+    let mut event = NewEvent::new(
+        format!(
+            "event-connectivity-exposure-approval-{}",
+            stable_cli_hash(&approval.approval_id)
+        ),
+        EventKind::PermissionApprovalQueued,
+        "capo-cli",
+    );
+    event.project_id = Some(project_id());
+    event.item_id = Some(exposure.exposure_id.clone());
+    event.payload_json = format!(
+        "{{\"approval_id\":\"{}\",\"exposure_id\":\"{}\",\"scope_json\":{},\"subject_json\":{},\"reason\":\"{}\"}}",
+        escape_json(&approval.approval_id),
+        escape_json(&exposure.exposure_id),
+        approval.scope_json,
+        approval.subject_json,
+        escape_json(&approval.reason)
+    );
+    event.idempotency_key = Some(format!(
+        "connectivity-exposure-approval:{}:{}:{}",
+        exposure.project_id, exposure.exposure_id, approval.approval_id
+    ));
+    event.redaction_state = RedactionState::Safe;
+    let sequence = state
+        .append_event(
+            event,
+            &[ProjectionRecord::PermissionApproval(approval.clone())],
+        )
+        .map_err(debug_error)?;
+    Ok(format!(
+        "connectivity_exposure_approval_requested=true\nexposure={}\napproval={}\nstatus=pending\npermission_scope={}\nsequence={sequence}\n",
+        exposure.exposure_id, approval.approval_id, exposure.permission_scope
+    ))
+}
+
+fn activate_connectivity_exposure(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let exposure_id = required_arg(args, "--exposure")?;
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--exposure"))
+    {
+        return Err(format!(
+            "unknown connectivity activate-exposure option: {unknown}"
+        ));
+    }
+    let state = state(parsed)?;
+    let exposure = connectivity_exposure(&state, &exposure_id)?;
+    if exposure.status == "revoked" {
+        return Err(format!("connectivity exposure is revoked: {exposure_id}"));
+    }
+    if exposure.status == "active" {
+        return Ok(render_connectivity_exposure_activation(
+            &exposure,
+            exposure.capability_grant_id.as_deref().unwrap_or("none"),
+            None,
+        ));
+    }
+    if exposure.status != "blocked_pending_permission" {
+        return Err(format!(
+            "connectivity exposure is not activatable: {} status={}",
+            exposure.exposure_id, exposure.status
+        ));
+    }
+    let grant = matching_connectivity_exposure_grant(&state, &exposure)?;
+    let active = ConnectivityExposureProjection {
+        status: "active".to_string(),
+        capability_grant_id: Some(grant.capability_grant_id.clone()),
+        health_status: if exposure.health_status == "unknown" {
+            "available".to_string()
+        } else {
+            exposure.health_status.clone()
+        },
+        reachable: exposure.reachable,
+        revoked_at: None,
+        updated_sequence: 0,
+        ..exposure.clone()
+    };
+    let mut event = NewEvent::new(
+        format!(
+            "event-connectivity-exposure-activated-{}",
+            stable_cli_hash(&format!(
+                "{}:{}",
+                active.exposure_id, grant.capability_grant_id
+            ))
+        ),
+        EventKind::ConnectivityExposureChanged,
+        "capo-cli",
+    );
+    event.project_id = Some(active.project_id.clone());
+    event.item_id = Some(active.exposure_id.clone());
+    event.payload_json = format!(
+        "{{\"exposure_id\":\"{}\",\"capability_grant_id\":\"{}\",\"status\":\"active\",\"permission_scope\":\"{}\"}}",
+        escape_json(&active.exposure_id),
+        escape_json(&grant.capability_grant_id),
+        escape_json(&active.permission_scope)
+    );
+    event.idempotency_key = Some(format!(
+        "connectivity-exposure-activate:{}:{}:{}",
+        active.project_id, active.exposure_id, grant.capability_grant_id
+    ));
+    event.redaction_state = RedactionState::Safe;
+    let sequence = state
+        .append_event(
+            event,
+            &[ProjectionRecord::ConnectivityExposure(active.clone())],
+        )
+        .map_err(debug_error)?;
+    Ok(render_connectivity_exposure_activation(
+        &active,
+        &grant.capability_grant_id,
+        Some(sequence),
+    ))
+}
+
+fn render_connectivity_exposure_activation(
+    exposure: &ConnectivityExposureProjection,
+    grant_id: &str,
+    sequence: Option<i64>,
+) -> String {
+    format!(
+        "connectivity_exposure_activated=true\nexposure={}\nendpoint={}\nowner={}:{}\nchannel={}\nexposure_scope={}\npermission_scope={}\nstatus={}\ngrant={}\nhealth={}\nreachable={}\nrecorded_sequence={}\n",
+        exposure.exposure_id,
+        exposure.connectivity_endpoint_id,
+        exposure.owner_kind,
+        exposure.owner_id,
+        exposure.channel_kind,
+        exposure.exposure,
+        exposure.permission_scope,
+        exposure.status,
+        grant_id,
+        exposure.health_status,
+        exposure.reachable,
+        sequence
+            .map(|sequence| sequence.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    )
+}
+
+fn connectivity_exposure(
+    state: &SqliteStateStore,
+    exposure_id: &str,
+) -> Result<ConnectivityExposureProjection, String> {
+    state
+        .connectivity_exposures(&project_id())
+        .map_err(debug_error)?
+        .into_iter()
+        .rev()
+        .find(|exposure| exposure.exposure_id == exposure_id)
+        .ok_or_else(|| format!("missing connectivity exposure: {exposure_id}"))
+}
+
+fn matching_connectivity_exposure_grant(
+    state: &SqliteStateStore,
+    exposure: &ConnectivityExposureProjection,
+) -> Result<CapabilityGrantProjection, String> {
+    let expected_subject = connectivity_exposure_subject_value(exposure);
+    state
+        .capability_grants()
+        .map_err(debug_error)?
+        .into_iter()
+        .rev()
+        .find(|grant| {
+            grant.effect == "allow"
+                && scope_values(&grant.scope_json)
+                    .map(|scopes| {
+                        scopes
+                            .iter()
+                            .any(|scope| scope == &exposure.permission_scope)
+                    })
+                    .unwrap_or(false)
+                && subject_contains(&grant.subject_json, &expected_subject)
+        })
+        .ok_or_else(|| {
+            format!(
+                "missing allow grant for connectivity exposure {} scope={}",
+                exposure.exposure_id, exposure.permission_scope
+            )
+        })
+}
+
+fn connectivity_exposure_scope_json(exposure: &ConnectivityExposureProjection) -> String {
+    format!("[\"{}\"]", escape_json(&exposure.permission_scope))
+}
+
+fn connectivity_exposure_subject_json(exposure: &ConnectivityExposureProjection) -> String {
+    connectivity_exposure_subject_value(exposure).to_string()
+}
+
+fn connectivity_exposure_subject_value(
+    exposure: &ConnectivityExposureProjection,
+) -> serde_json::Value {
+    serde_json::json!({
+        "exposure_id": exposure.exposure_id,
+        "endpoint_id": exposure.connectivity_endpoint_id,
+        "owner_kind": exposure.owner_kind,
+        "owner_id": exposure.owner_id,
+        "channel": exposure.channel_kind,
+        "exposure": exposure.exposure,
+    })
+}
+
+fn subject_contains(subject_json: &str, expected: &serde_json::Value) -> bool {
+    let Ok(serde_json::Value::Object(subject)) =
+        serde_json::from_str::<serde_json::Value>(subject_json)
+    else {
+        return false;
+    };
+    let Some(expected) = expected.as_object() else {
+        return false;
+    };
+    expected
+        .iter()
+        .all(|(key, value)| subject.get(key) == Some(value))
+}
+
 fn parse_channel_kind(value: &str) -> Result<ChannelKind, String> {
     match value {
         "control" => Ok(ChannelKind::Control),
@@ -4858,6 +5132,8 @@ mod tests {
         assert!(HELP.contains("adapter replay-dispatch"));
         assert!(HELP.contains("adapter dogfood-gate"));
         assert!(HELP.contains("connectivity expose-stub"));
+        assert!(HELP.contains("connectivity request-approval"));
+        assert!(HELP.contains("connectivity activate-exposure"));
         assert!(HELP.contains("workpad index"));
         assert!(HELP.contains("workpad next"));
         assert!(HELP.contains("workpad plan-next"));
@@ -6837,6 +7113,93 @@ mod tests {
     }
 
     #[test]
+    fn connectivity_exposure_approval_activates_only_with_matching_grant() {
+        let state_root = temp_root("cli-connectivity-exposure-approval");
+        let planned = run_cli(vec![
+            "connectivity".to_string(),
+            "expose-stub".to_string(),
+            "--endpoint".to_string(),
+            "endpoint-private-1".to_string(),
+            "--owner-kind".to_string(),
+            "runtime_target".to_string(),
+            "--owner-id".to_string(),
+            "remote-target-1".to_string(),
+            "--channel".to_string(),
+            "control".to_string(),
+            "--exposure".to_string(),
+            "private".to_string(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record private exposure");
+        let exposure_id = output_value(&planned, "exposure");
+
+        let blocked = run_cli(vec![
+            "connectivity".to_string(),
+            "activate-exposure".to_string(),
+            "--exposure".to_string(),
+            exposure_id.clone(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .unwrap_err();
+        assert!(blocked.contains("missing allow grant for connectivity exposure"));
+
+        let approval = run_cli(vec![
+            "connectivity".to_string(),
+            "request-approval".to_string(),
+            "--exposure".to_string(),
+            exposure_id.clone(),
+            "--approval".to_string(),
+            "approval-private-control".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("request connectivity approval");
+        assert!(approval.contains("connectivity_exposure_approval_requested=true"));
+        assert!(approval.contains("approval=approval-private-control"));
+        assert!(approval.contains("permission_scope=network:connect:private_tunnel"));
+
+        let decided = run_cli(vec![
+            "permission".to_string(),
+            "decide".to_string(),
+            "--approval".to_string(),
+            "approval-private-control".to_string(),
+            "--decision".to_string(),
+            "allow_once".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("allow connectivity approval");
+        assert!(decided.contains("permission_approval_decided=true"));
+        assert!(decided.contains("decision=allow_once"));
+
+        let activated = run_cli(vec![
+            "connectivity".to_string(),
+            "activate-exposure".to_string(),
+            "--exposure".to_string(),
+            exposure_id,
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("activate exposure");
+        assert!(activated.contains("connectivity_exposure_activated=true"));
+        assert!(activated.contains("status=active"));
+        assert!(activated.contains("grant=grant-approval-"));
+
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard");
+        assert!(dashboard.contains("connectivity_exposures=1"));
+        assert!(dashboard.contains("exposure_status=active"));
+        assert!(dashboard.contains("grant=grant-approval-"));
+    }
+
+    #[test]
     fn adapter_fixture_replay_cli_exports_evidence_without_raw_provider_text() {
         let state_root = temp_root("cli-adapter-replay-state");
         let evidence_dir = temp_root("cli-adapter-replay-evidence");
@@ -7693,5 +8056,14 @@ mod tests {
             .expect("clock")
             .as_nanos();
         std::env::temp_dir().join(format!("capo-{name}-{nanos}"))
+    }
+
+    fn output_value(output: &str, key: &str) -> String {
+        let prefix = format!("{key}=");
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("missing output key: {key}"))
+            .to_string()
     }
 }

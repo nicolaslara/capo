@@ -466,3 +466,13 @@ Observed 2026-05-26.
 - Connectivity exposure projection source: `../../crates/capo-state/src/lib.rs`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR5.
+
+## F7/RR6 Connectivity Exposure Approval Bridge
+
+Observed 2026-05-26.
+
+- CLI `connectivity request-approval` and `connectivity activate-exposure` commands plus blocked -> approval -> grant -> active regression test: `../../crates/capo-cli/src/main.rs`
+- Existing permission approval and capability grant projections reused by the bridge: `../../crates/capo-state/src/lib.rs`
+- Shared dashboard exposure rendering used to verify active state: `../../crates/capo-cli/src/main.rs`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR6.

@@ -109,3 +109,27 @@ Decision:
 
 - Treat this as an exposure-planning and audit surface, not actual remote networking. Concrete SSH/Tailscale/cloud adapters remain deferred until real local-agent semantics are proven.
 - The command records only endpoint/owner/channel/scope/status/health metadata. It does not create tunnels, run provider CLIs, inspect credentials, or mutate runtime process refs.
+
+### RR6 - Connectivity Exposure Approval Bridge
+
+Status: completed
+
+Acceptance:
+
+- Add an operator path that queues a permission approval from a blocked connectivity exposure row.
+- Activate a blocked exposure only after a matching durable allow grant exists.
+- Keep activation as metadata/read-model state only: no tunnel creation, runtime process launch, provider CLI execution, or credential inspection.
+- Cover the full blocked -> approval -> grant -> active dashboard path with a CLI regression test.
+
+Evidence:
+
+- CLI `capo connectivity request-approval --exposure EXPOSURE_ID [--approval APPROVAL_ID]` in `../../crates/capo-cli/src/main.rs`.
+- CLI `capo connectivity activate-exposure --exposure EXPOSURE_ID` in `../../crates/capo-cli/src/main.rs`.
+- Activation requires an allow grant whose scope includes the exposure permission scope and whose subject contains the exposure ID, endpoint, owner, channel, and exposure scope.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Decision:
+
+- Reuse the existing `permission request` / `permission decide` event and grant machinery instead of adding a connectivity-specific policy store.
+- Treat `activate-exposure` as an audited state transition from blocked to active. It does not prove real network reachability beyond the stub health metadata recorded by the endpoint adapter.

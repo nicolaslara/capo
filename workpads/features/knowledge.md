@@ -1056,3 +1056,25 @@ Follow-up:
 
 - A future slice should connect exposure approval decisions to this operator surface so a matching durable grant can transition a blocked exposure to active without hand-writing projections in tests.
 - Concrete SSH/Tailscale/cloud adapters remain deferred until local real-agent dispatch is proven.
+
+## F7/RR6 - Connectivity Exposure Approval Bridge
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo connectivity request-approval` to derive a scoped permission approval from a blocked connectivity exposure row.
+- Add `capo connectivity activate-exposure` to transition a blocked exposure to active only after a matching allow grant exists.
+- Match grants by scope and subject subset: the grant scope must include the exposure's permission scope, and the grant subject must include the exposure ID, endpoint, owner kind, owner ID, channel, and exposure scope. Extra permission metadata such as approval ID is allowed.
+- Reuse the existing permission approval and `CapabilityGrantProjection` machinery. Do not create a second connectivity-specific permission model.
+- Activation remains a metadata/read-model transition. It does not create a real tunnel, start a runtime process, launch provider CLIs, or inspect credentials.
+
+Verification:
+
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Follow-up:
+
+- Concrete tunnel adapters should replace stub health with real endpoint health before active exposure is interpreted as reachable in production.
+- A later revocation command should pair with this activation surface so operators can revoke exposure without hand-writing projection rows in tests.
