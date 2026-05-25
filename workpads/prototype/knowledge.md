@@ -385,6 +385,33 @@ Follow-up:
 - P13 can now build a dashboard/TUI against the same read models proven by the CLI smoke.
 - P15 should use P12 as the main prototype-gate evidence and decide whether dashboard/TUI or voice spike blocks dogfood.
 
+## P13 - Dashboard/TUI Slice
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add the smallest dashboard as a text CLI view: `capo dashboard`. This keeps the prototype dependency-free and uses the same input-surface command/parser path as the rest of the CLI.
+- The dashboard reads SQLite projections directly, matching the existing CLI inspection pattern. It does not call live adapter/runtime state.
+- The view lists agents, active sessions, run state, current goals, blockers, confidence, evidence refs, and recent events.
+- This satisfies the prototype need for a dashboard/TUI slice. A richer full-screen TUI or web dashboard can follow the first dogfood migration; it should not block dogfood if P15 confirms the CLI dashboard plus evidence export are sufficient for human-auditable operation.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+- The P12 CLI smoke now calls `capo dashboard` while two fake agents are active and again after redirect. It asserts agent/session rows, goals, blockers, evidence refs, and recent event kinds are rendered from read models.
+
+Skipped verification:
+
+- No browser screenshot was taken because P13 implemented a text dashboard/TUI slice, not a web UI.
+
+Follow-up:
+
+- P15 should decide whether this text dashboard is enough for first dogfood or whether a richer TUI/web view must be added before migration.
+- A future dashboard should probably move read-model aggregation out of `capo-cli` into a reusable controller/query surface before adding a web or full-screen TUI frontend.
+
 ## Prototype Gate
 
 Status: not passed.

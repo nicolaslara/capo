@@ -293,13 +293,20 @@ Evidence:
 
 ## P13 - Dashboard/TUI Slice
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Add the smallest dashboard or TUI that reads the same projections as the CLI.
 - Show active agents, sessions, current goals, blockers, recent events, and evidence refs.
 - Record whether this is required before dogfood or can follow the first dogfood migration.
+
+Evidence:
+
+- `crates/capo-cli/src/main.rs`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
 
 ## P14 - Conversational Voice Spike
 

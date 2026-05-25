@@ -22,6 +22,7 @@ Usage:
   capo --help
   capo version
   capo init [--state PATH]
+  capo dashboard [--state PATH]
   capo agent register --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent spawn --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent list [--state PATH]
@@ -62,6 +63,7 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             Ok(HELP.to_string())
         }
         [command] if command == "init" => init(&parsed),
+        [command] if command == "dashboard" => dashboard(&parsed),
         [area, command, rest @ ..] if area == "agent" && command == "register" => {
             register_agent(&parsed, rest)
         }
@@ -199,6 +201,82 @@ fn list_agents(parsed: &ParsedArgs) -> Result<String, String> {
                 .unwrap_or_else(|| "none".to_string())
         ));
     }
+    Ok(output)
+}
+
+fn dashboard(parsed: &ParsedArgs) -> Result<String, String> {
+    let command = envelope(
+        "dashboard",
+        CommandTarget::Project(project_id()),
+        CommandIntent::QueryStatus,
+        None,
+    );
+    let state = state(parsed)?;
+    let agents = state.agents().map_err(debug_error)?;
+    let mut active_session_count = 0usize;
+    let mut output = format!(
+        "command_id={}\nview=dashboard\nagents={}\n",
+        command.command_id,
+        agents.len()
+    );
+
+    for agent in agents {
+        output.push_str(&format!(
+            "agent={} agent_status={} current_session={}\n",
+            agent.name,
+            agent.status,
+            agent
+                .current_session_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "none".to_string())
+        ));
+
+        let Some(session_id) = agent.current_session_id else {
+            continue;
+        };
+        active_session_count += 1;
+        let session = state
+            .session(&session_id)
+            .map_err(debug_error)?
+            .ok_or_else(|| format!("missing session read model: {session_id}"))?;
+        let run = state.run_for_session(&session_id).map_err(debug_error)?;
+        let evidence = state
+            .evidence_for_session(&session_id)
+            .map_err(debug_error)?;
+        let events = state
+            .recent_events_for_session(&session_id, 5)
+            .map_err(debug_error)?;
+
+        output.push_str(&format!(
+            "session={} session_status={} run={} run_status={} goal={} blocker={} confidence={} evidence_refs={} recent_events={}\n",
+            session.session_id,
+            session.status,
+            run.as_ref()
+                .map(|item| item.run_id.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            run.as_ref()
+                .map(|item| item.status.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            session.current_goal,
+            session.latest_blocker.as_deref().unwrap_or("none"),
+            session
+                .latest_confidence
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            evidence
+                .iter()
+                .map(|item| item.evidence_id.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            events.len()
+        ));
+        for event in events {
+            output.push_str(&format!("event={} kind={}\n", event.sequence, event.kind));
+        }
+    }
+
+    output.push_str(&format!("active_sessions={active_session_count}\n"));
     Ok(output)
 }
 
@@ -850,6 +928,17 @@ mod tests {
         assert!(agents.contains("active_agents=2"));
         assert!(agents.contains("agent=fake-codex status=running"));
         assert!(agents.contains("agent=fake-reviewer status=running"));
+        let dashboard = run(vec!["dashboard"]);
+        assert!(dashboard.contains("view=dashboard"));
+        assert!(dashboard.contains("agents=2"));
+        assert!(dashboard.contains("active_sessions=2"));
+        assert!(dashboard.contains("agent=fake-codex agent_status=running"));
+        assert!(dashboard.contains("session=session-fake-codex session_status=active"));
+        assert!(dashboard.contains("goal=Inspect the project"));
+        assert!(dashboard.contains("blocker=none"));
+        assert!(dashboard.contains("evidence_refs=evidence-fake-codex"));
+        assert!(dashboard.contains("kind=tool.result_delivered"));
+        assert!(dashboard.contains("agent=fake-reviewer agent_status=running"));
 
         let codex_status = run(vec!["session", "status", "--agent", "fake-codex"]);
         assert!(codex_status.contains("current_goal=Inspect the project"));
@@ -882,6 +971,9 @@ mod tests {
         ]);
         assert!(second_redirect.contains("redirected=true"));
         assert!(second_redirect.contains("current_goal=Focus only on evidence export blockers"));
+        let redirected_dashboard = run(vec!["dashboard"]);
+        assert!(redirected_dashboard.contains("Focus only on evidence export blockers"));
+        assert!(redirected_dashboard.contains("kind=session.redirected"));
 
         let interrupted = run(vec![
             "session",

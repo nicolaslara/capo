@@ -172,3 +172,13 @@ Observed 2026-05-25.
 - Prototype smoke plan: `../architecture/prototype-plan.md`
 - Prototype minimum and dogfood gate criteria: `spec.md`
 - No new third-party dependencies were added for P12.
+
+## P13 Dashboard/TUI Slice
+
+Observed 2026-05-25.
+
+- Text dashboard command and test coverage: `../../crates/capo-cli/src/main.rs`
+- SQLite read models queried by dashboard: `../../crates/capo-state/src/lib.rs`
+- Prototype dashboard requirement: `spec.md`
+- Dogfood dashboard/read-model prerequisite source: `../architecture/prototype-plan.md`
+- No new third-party dependencies were added for P13.
