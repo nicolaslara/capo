@@ -13,6 +13,7 @@ use capo_core::{
     SessionId, TaskId, ToolCallId,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde_json::Value;
 
 /// Name of the first durable local state backend.
 pub const PROTOTYPE_STATE_BACKEND: &str = "sqlite";
@@ -24,7 +25,20 @@ pub enum StateError {
     Io(std::io::Error),
     Sql(rusqlite::Error),
     MissingRecoveryAttempt(String),
-    MissingReadModel { kind: &'static str, id: String },
+    MissingReadModel {
+        kind: &'static str,
+        id: String,
+    },
+    PermissionApprovalNotPending {
+        approval_id: String,
+        status: String,
+    },
+    InvalidProjectionJson {
+        kind: &'static str,
+        id: String,
+        field: &'static str,
+        error: String,
+    },
     UnsafeArtifactRedactionState(RedactionState),
 }
 
@@ -153,6 +167,102 @@ impl SqliteStateStore {
         update_watermark(&transaction, "default", sequence)?;
         transaction.commit()?;
         Ok(sequence)
+    }
+
+    pub fn decide_permission_approval(
+        &self,
+        approval_id: &str,
+        decided_event: NewEvent,
+        grant_event: Option<NewEvent>,
+        decided_approval: PermissionApprovalProjection,
+        grant: Option<CapabilityGrantProjection>,
+    ) -> StateResult<i64> {
+        let mut connection = Connection::open(&self.db_path)?;
+        let transaction = connection.transaction()?;
+        let guarded = transaction.execute(
+            "UPDATE permission_approvals
+             SET status = status
+             WHERE approval_id = ?1 AND project_id = ?2 AND status = 'pending'",
+            params![approval_id, decided_approval.project_id.as_str()],
+        )?;
+        if guarded == 0 {
+            let status = transaction
+                .query_row(
+                    "SELECT status FROM permission_approvals
+                     WHERE approval_id = ?1 AND project_id = ?2",
+                    params![approval_id, decided_approval.project_id.as_str()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or_else(|| StateError::MissingReadModel {
+                    kind: "permission_approval",
+                    id: approval_id.to_string(),
+                })?;
+            return Err(StateError::PermissionApprovalNotPending {
+                approval_id: approval_id.to_string(),
+                status,
+            });
+        }
+
+        transaction.execute(
+            "INSERT INTO events (
+                event_id, kind, actor, project_id, task_id, agent_id, session_id,
+                run_id, turn_id, item_id, payload_json, idempotency_key, redaction_state
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                decided_event.event_id,
+                decided_event.kind.as_str(),
+                decided_event.actor,
+                decided_event.project_id.as_ref().map(ProjectId::as_str),
+                decided_event.task_id.as_ref().map(TaskId::as_str),
+                decided_event.agent_id.as_ref().map(AgentId::as_str),
+                decided_event.session_id.as_ref().map(SessionId::as_str),
+                decided_event.run_id.as_ref().map(RunId::as_str),
+                decided_event.turn_id.as_deref(),
+                decided_event.item_id.as_deref(),
+                decided_event.payload_json,
+                decided_event.idempotency_key,
+                decided_event.redaction_state.as_str(),
+            ],
+        )?;
+        let sequence = transaction.last_insert_rowid();
+        let approval_record = ProjectionRecord::PermissionApproval(decided_approval);
+        insert_projection_record(&transaction, sequence, &approval_record)?;
+        apply_projection_record(&transaction, sequence, &approval_record)?;
+
+        let final_sequence = if let (Some(grant_event), Some(grant)) = (grant_event, grant) {
+            transaction.execute(
+                "INSERT INTO events (
+                    event_id, kind, actor, project_id, task_id, agent_id, session_id,
+                    run_id, turn_id, item_id, payload_json, idempotency_key, redaction_state
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    grant_event.event_id,
+                    grant_event.kind.as_str(),
+                    grant_event.actor,
+                    grant_event.project_id.as_ref().map(ProjectId::as_str),
+                    grant_event.task_id.as_ref().map(TaskId::as_str),
+                    grant_event.agent_id.as_ref().map(AgentId::as_str),
+                    grant_event.session_id.as_ref().map(SessionId::as_str),
+                    grant_event.run_id.as_ref().map(RunId::as_str),
+                    grant_event.turn_id.as_deref(),
+                    grant_event.item_id.as_deref(),
+                    grant_event.payload_json,
+                    grant_event.idempotency_key,
+                    grant_event.redaction_state.as_str(),
+                ],
+            )?;
+            let grant_sequence = transaction.last_insert_rowid();
+            let grant_record = ProjectionRecord::CapabilityGrant(grant);
+            insert_projection_record(&transaction, grant_sequence, &grant_record)?;
+            apply_projection_record(&transaction, grant_sequence, &grant_record)?;
+            grant_sequence
+        } else {
+            sequence
+        };
+        update_watermark(&transaction, "default", final_sequence)?;
+        transaction.commit()?;
+        Ok(final_sequence)
     }
 
     pub fn mark_active_runs_exited_unknown(
@@ -597,6 +707,51 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn permission_approvals(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<PermissionApprovalProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT approval_id, project_id, session_id, tool_call_id, capability_profile_id,
+                    scope_json, subject_json, status, requested_by, reason, decision,
+                    capability_grant_id, updated_sequence
+             FROM permission_approvals
+             WHERE project_id = ?1
+             ORDER BY updated_sequence ASC, approval_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(PermissionApprovalProjection {
+                approval_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                session_id: optional_id(row.get::<_, Option<String>>(2)?),
+                tool_call_id: optional_id(row.get::<_, Option<String>>(3)?),
+                capability_profile_id: row.get(4)?,
+                scope_json: row.get(5)?,
+                subject_json: row.get(6)?,
+                status: row.get(7)?,
+                requested_by: row.get(8)?,
+                reason: row.get(9)?,
+                decision: row.get(10)?,
+                capability_grant_id: row.get(11)?,
+                updated_sequence: row.get(12)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    pub fn permission_approval(
+        &self,
+        project_id: &ProjectId,
+        approval_id: &str,
+    ) -> StateResult<Option<PermissionApprovalProjection>> {
+        Ok(self
+            .permission_approvals(project_id)?
+            .into_iter()
+            .find(|approval| approval.approval_id == approval_id))
+    }
+
     pub fn evidence_for_session(
         &self,
         session_id: &SessionId,
@@ -843,6 +998,7 @@ pub enum EventKind {
     RunExited,
     PermissionRequested,
     PermissionDecided,
+    PermissionApprovalQueued,
     CapabilityGrantCreated,
     CapabilityGrantUsed,
     ToolCallRequested,
@@ -875,6 +1031,7 @@ impl EventKind {
             Self::RunExited => "run.exited",
             Self::PermissionRequested => "permission.requested",
             Self::PermissionDecided => "permission.decided",
+            Self::PermissionApprovalQueued => "permission.approval_queued",
             Self::CapabilityGrantCreated => "capability.grant_created",
             Self::CapabilityGrantUsed => "capability.grant_used",
             Self::ToolCallRequested => "tool.call_requested",
@@ -964,6 +1121,7 @@ pub enum ProjectionRecord {
     Session(SessionProjection),
     Run(RunProjection),
     CapabilityGrant(CapabilityGrantProjection),
+    PermissionApproval(PermissionApprovalProjection),
     ToolCall(ToolCallProjection),
     MemoryPacketRef(MemoryPacketProjection),
     Evidence(EvidenceProjection),
@@ -1036,6 +1194,23 @@ pub struct CapabilityGrantProjection {
     pub decision_source: String,
     pub persistence: String,
     pub explanation: String,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PermissionApprovalProjection {
+    pub approval_id: String,
+    pub project_id: ProjectId,
+    pub session_id: Option<SessionId>,
+    pub tool_call_id: Option<ToolCallId>,
+    pub capability_profile_id: String,
+    pub scope_json: String,
+    pub subject_json: String,
+    pub status: String,
+    pub requested_by: String,
+    pub reason: String,
+    pub decision: Option<String>,
+    pub capability_grant_id: Option<String>,
     pub updated_sequence: i64,
 }
 
@@ -1261,6 +1436,21 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             explanation TEXT NOT NULL DEFAULT '',
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS permission_approvals (
+            approval_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            session_id TEXT,
+            tool_call_id TEXT,
+            capability_profile_id TEXT NOT NULL,
+            scope_json TEXT NOT NULL,
+            subject_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            requested_by TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            decision TEXT,
+            capability_grant_id TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS tool_calls (
             tool_call_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
@@ -1372,6 +1562,7 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "sessions",
         "runs",
         "capability_grants",
+        "permission_approvals",
         "tool_calls",
         "memory_packet_refs",
         "evidence",
@@ -1530,8 +1721,21 @@ fn apply_projection_record(
                 sequence,
             ],
         )?,
-        ProjectionRecord::CapabilityGrant(grant) => transaction.execute(
-            "INSERT INTO capability_grants(
+        ProjectionRecord::CapabilityGrant(grant) => {
+            validate_projection_json(
+                "capability_grant",
+                &grant.capability_grant_id,
+                "scope_json",
+                &grant.scope_json,
+            )?;
+            validate_projection_json(
+                "capability_grant",
+                &grant.capability_grant_id,
+                "subject_json",
+                &grant.subject_json,
+            )?;
+            transaction.execute(
+                "INSERT INTO capability_grants(
                 capability_grant_id, capability_profile_id, scope_json, effect,
                 subject_json, decision_source, persistence, explanation, updated_sequence
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -1555,7 +1759,57 @@ fn apply_projection_record(
                 grant.explanation,
                 sequence,
             ],
-        )?,
+            )?
+        }
+        ProjectionRecord::PermissionApproval(approval) => {
+            validate_projection_json(
+                "permission_approval",
+                &approval.approval_id,
+                "scope_json",
+                &approval.scope_json,
+            )?;
+            validate_projection_json(
+                "permission_approval",
+                &approval.approval_id,
+                "subject_json",
+                &approval.subject_json,
+            )?;
+            transaction.execute(
+                "INSERT INTO permission_approvals(
+                approval_id, project_id, session_id, tool_call_id, capability_profile_id,
+                scope_json, subject_json, status, requested_by, reason, decision,
+                capability_grant_id, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(approval_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                session_id = excluded.session_id,
+                tool_call_id = excluded.tool_call_id,
+                capability_profile_id = excluded.capability_profile_id,
+                scope_json = excluded.scope_json,
+                subject_json = excluded.subject_json,
+                status = excluded.status,
+                requested_by = excluded.requested_by,
+                reason = excluded.reason,
+                decision = excluded.decision,
+                capability_grant_id = excluded.capability_grant_id,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                approval.approval_id,
+                approval.project_id.as_str(),
+                approval.session_id.as_ref().map(SessionId::as_str),
+                approval.tool_call_id.as_ref().map(ToolCallId::as_str),
+                approval.capability_profile_id,
+                approval.scope_json,
+                approval.subject_json,
+                approval.status,
+                approval.requested_by,
+                approval.reason,
+                approval.decision,
+                approval.capability_grant_id,
+                sequence,
+            ],
+            )?
+        }
         ProjectionRecord::ToolCall(tool_call) => transaction.execute(
             "INSERT INTO tool_calls(
                 tool_call_id, session_id, turn_id, tool_name, tool_origin, status,
@@ -1792,6 +2046,24 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
             h: None,
             payload_json: "{}".to_string(),
         },
+        ProjectionRecord::PermissionApproval(approval) => ProjectionRecordRow {
+            kind: "permission_approval",
+            record_id: approval.approval_id.clone(),
+            a: Some(approval.project_id.to_string()),
+            b: approval.session_id.as_ref().map(ToString::to_string),
+            c: approval.tool_call_id.as_ref().map(ToString::to_string),
+            d: Some(approval.capability_profile_id.clone()),
+            e: Some(approval.status.clone()),
+            f: approval.decision.clone(),
+            g: approval.capability_grant_id.clone(),
+            h: Some(approval.scope_json.clone()),
+            payload_json: format!(
+                "{{\"subject_json\":{},\"requested_by\":\"{}\",\"reason\":\"{}\"}}",
+                approval.subject_json,
+                escape_json(&approval.requested_by),
+                escape_json(&approval.reason)
+            ),
+        },
         ProjectionRecord::ToolCall(tool_call) => ProjectionRecordRow {
             kind: "tool_call",
             record_id: tool_call.tool_call_id.to_string(),
@@ -1896,7 +2168,7 @@ fn projection_record_from_row(
     f: Option<String>,
     g: Option<String>,
     h: Option<String>,
-    _payload_json: String,
+    payload_json: String,
 ) -> Result<ProjectionRecord, ProjectionDecodeError> {
     match projection_kind.as_str() {
         "project" => Ok(ProjectionRecord::Project(ProjectProjection {
@@ -1976,6 +2248,43 @@ fn projection_record_from_row(
                 updated_sequence: 0,
             },
         )),
+        "permission_approval" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::PermissionApproval(
+                PermissionApprovalProjection {
+                    approval_id: record_id,
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "permission_approval",
+                        a,
+                        "project_id",
+                    )?),
+                    session_id: optional_id(b),
+                    tool_call_id: optional_id(c),
+                    capability_profile_id: required_field(
+                        &projection_kind,
+                        "permission_approval",
+                        d,
+                        "capability_profile_id",
+                    )?,
+                    scope_json: required_field(
+                        &projection_kind,
+                        "permission_approval",
+                        h,
+                        "scope_json",
+                    )?,
+                    subject_json: payload_string(&payload, "subject_json")
+                        .unwrap_or_else(|| "{}".to_string()),
+                    status: required_field(&projection_kind, "permission_approval", e, "status")?,
+                    requested_by: payload_string(&payload, "requested_by")
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    reason: payload_string(&payload, "reason").unwrap_or_default(),
+                    decision: f,
+                    capability_grant_id: g,
+                    updated_sequence: 0,
+                },
+            ))
+        }
         "tool_call" => Ok(ProjectionRecord::ToolCall(ToolCallProjection {
             tool_call_id: ToolCallId::new(record_id),
             session_id: SessionId::new(required_field(
@@ -2092,6 +2401,41 @@ fn required_field(
     value.ok_or_else(|| {
         ProjectionDecodeError(format!("{projection_kind}.{record_id} missing {field}"))
     })
+}
+
+fn parse_projection_payload(
+    projection_kind: &str,
+    record_id: &str,
+    payload_json: &str,
+) -> Result<Value, ProjectionDecodeError> {
+    serde_json::from_str(payload_json).map_err(|error| {
+        ProjectionDecodeError(format!(
+            "{projection_kind}.{record_id} invalid payload_json: {error}"
+        ))
+    })
+}
+
+fn payload_string(payload: &Value, key: &str) -> Option<String> {
+    match payload.get(key)? {
+        Value::String(value) => Some(value.clone()),
+        value => Some(value.to_string()),
+    }
+}
+
+fn validate_projection_json(
+    kind: &'static str,
+    id: &str,
+    field: &'static str,
+    value: &str,
+) -> StateResult<()> {
+    serde_json::from_str::<Value>(value)
+        .map(|_| ())
+        .map_err(|error| StateError::InvalidProjectionJson {
+            kind,
+            id: id.to_string(),
+            field,
+            error: error.to_string(),
+        })
 }
 
 fn optional_i64(
@@ -2509,6 +2853,147 @@ mod tests {
         assert_eq!(grants[0].decision_source, "allow_trusted_local_profile");
         assert_eq!(grants[0].persistence, "until_session_end");
         assert_eq!(grants[0].explanation, "test grant");
+    }
+
+    #[test]
+    fn permission_approval_projection_is_persisted_and_rebuilt() {
+        let store = temp_store("permission-approval-rebuild");
+        let project_id = ProjectId::new("project-capo");
+        let session_id = SessionId::new("session-fake");
+        let approval_id = "approval-shell";
+        let grant_id = "grant-approval-shell";
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-approval-queued".to_string(),
+                    kind: EventKind::PermissionApprovalQueued,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: Some(session_id.clone()),
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some("tool-call-1".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::PermissionApproval(
+                    PermissionApprovalProjection {
+                        approval_id: approval_id.to_string(),
+                        project_id: project_id.clone(),
+                        session_id: Some(session_id.clone()),
+                        tool_call_id: Some(ToolCallId::new("tool-call-1")),
+                        capability_profile_id: "trusted-local-dev".to_string(),
+                        scope_json: "[\"tool:invoke:shell\"]".to_string(),
+                        subject_json: "{\"actor\":\"local-user\"}".to_string(),
+                        status: "pending".to_string(),
+                        requested_by: "local-user".to_string(),
+                        reason: "run shell".to_string(),
+                        decision: None,
+                        capability_grant_id: None,
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append queued approval");
+
+        store
+            .append_event(
+                NewEvent::new(
+                    "event-approval-decided",
+                    EventKind::PermissionDecided,
+                    "test",
+                ),
+                &[
+                    ProjectionRecord::PermissionApproval(PermissionApprovalProjection {
+                        approval_id: approval_id.to_string(),
+                        project_id: project_id.clone(),
+                        session_id: Some(session_id),
+                        tool_call_id: Some(ToolCallId::new("tool-call-1")),
+                        capability_profile_id: "trusted-local-dev".to_string(),
+                        scope_json: "[\"tool:invoke:shell\"]".to_string(),
+                        subject_json: "{\"actor\":\"local-user\"}".to_string(),
+                        status: "decided".to_string(),
+                        requested_by: "local-user".to_string(),
+                        reason: "run shell".to_string(),
+                        decision: Some("reject_always".to_string()),
+                        capability_grant_id: Some(grant_id.to_string()),
+                        updated_sequence: 0,
+                    }),
+                    ProjectionRecord::CapabilityGrant(CapabilityGrantProjection {
+                        capability_grant_id: grant_id.to_string(),
+                        capability_profile_id: "trusted-local-dev".to_string(),
+                        scope_json: "[\"tool:invoke:shell\"]".to_string(),
+                        effect: "deny".to_string(),
+                        subject_json: "{\"actor\":\"local-user\"}".to_string(),
+                        decision_source: "user".to_string(),
+                        persistence: "until_revoked".to_string(),
+                        explanation: "user approval decision reject_always for approval-shell"
+                            .to_string(),
+                        updated_sequence: 0,
+                    }),
+                ],
+            )
+            .expect("append decided approval");
+
+        store.rebuild_projections().expect("rebuild projections");
+        let approval = store
+            .permission_approval(&project_id, approval_id)
+            .expect("approval query")
+            .expect("approval");
+        assert_eq!(approval.status, "decided");
+        assert_eq!(approval.decision.as_deref(), Some("reject_always"));
+        assert_eq!(approval.capability_grant_id.as_deref(), Some(grant_id));
+        assert_eq!(approval.reason, "run shell");
+        let grants = store.capability_grants().expect("grant query");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].effect, "deny");
+        assert_eq!(grants[0].persistence, "until_revoked");
+    }
+
+    #[test]
+    fn permission_approval_projection_rejects_invalid_json_payloads() {
+        let store = temp_store("permission-approval-invalid-json");
+        let project_id = ProjectId::new("project-capo");
+
+        let error = store
+            .append_event(
+                NewEvent::new(
+                    "event-invalid-approval-json",
+                    EventKind::PermissionApprovalQueued,
+                    "test",
+                ),
+                &[ProjectionRecord::PermissionApproval(
+                    PermissionApprovalProjection {
+                        approval_id: "approval-invalid".to_string(),
+                        project_id,
+                        session_id: None,
+                        tool_call_id: None,
+                        capability_profile_id: "trusted-local-dev".to_string(),
+                        scope_json: "[\"tool:invoke:shell\"]".to_string(),
+                        subject_json: "{not-json".to_string(),
+                        status: "pending".to_string(),
+                        requested_by: "local-user".to_string(),
+                        reason: "invalid".to_string(),
+                        decision: None,
+                        capability_grant_id: None,
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect_err("invalid projection JSON should fail before commit");
+        assert!(matches!(
+            error,
+            StateError::InvalidProjectionJson {
+                kind: "permission_approval",
+                field: "subject_json",
+                ..
+            }
+        ));
+        assert_eq!(store.event_count().expect("event count"), 0);
     }
 
     #[test]

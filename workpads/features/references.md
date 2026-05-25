@@ -103,3 +103,15 @@ Observed 2026-05-25.
 - Workspace lockfile: `../../Cargo.lock`
 - Dependency check: `cargo info serde_json` reported version `1.0.150`, license `MIT OR Apache-2.0`, rust-version `1.71`, repository `https://github.com/serde-rs/json`.
 - Permissions/tools source workpad: `permissions-tools.md`
+
+## F4/PT2 User Approval Queue
+
+Observed 2026-05-25.
+
+- Approval queue read model, transactional pending-status decision guard, grant-created event persistence, and replay JSON validation: `../../crates/capo-state/src/lib.rs`
+- CLI approval commands and tests: `../../crates/capo-cli/src/main.rs`
+- Permission approval command intents: `../../crates/capo-core/src/lib.rs`
+- CLI/state manifests with `serde_json` for JSON validation: `../../crates/capo-cli/Cargo.toml`, `../../crates/capo-state/Cargo.toml`
+- Workspace lockfile: `../../Cargo.lock`
+- Permission lifecycle and ACP allow/reject mapping source: `../architecture/capability-permissions.md`
+- Permissions/tools source workpad: `permissions-tools.md`

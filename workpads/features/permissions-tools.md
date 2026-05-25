@@ -57,13 +57,44 @@ Review:
 
 ### PT2 - User Approval Queue
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Represent pending approval requests in read models.
 - Map allow-once/allow-always/reject-once/reject-always into durable scoped grants or denials.
 - Provide CLI approval commands before web/mobile approval surfaces.
+
+Evidence:
+
+- `crates/capo-state/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
+- `crates/capo-core/src/lib.rs`
+- `crates/capo-state/Cargo.toml`
+- `crates/capo-cli/Cargo.toml`
+- `Cargo.lock`
+- `cargo test -p capo-state permission_approval`
+- `cargo test -p capo-cli permission_approval_queue_maps_decisions_to_scoped_grants`
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+
+Decision:
+
+- Add `permission_approvals` as a read model with queued and decided states, session/tool-call refs, requested scope, subject, requested-by actor, reason, decision, and linked grant ID.
+- Add `capo permission request`, `capo permission list`, and `capo permission decide` as the first operator approval queue surface.
+- Map `allow_once` to a narrow `allow` grant with `persistence=once`; the grant subject is bound to approval ID and any session/tool-call refs.
+- Map `allow_always` to `allow` with `persistence=until_revoked`, but only for Capo-owned read/status scopes in this PT2 CLI path.
+- Map `reject_once` to a decided approval without a reusable deny grant.
+- Map `reject_always` to a scoped durable `deny` grant with `persistence=until_revoked`.
+- Move approval decision writes into the state-store transaction with a pending-status guard so concurrent/conflicting decisions cannot both commit.
+- Emit `capability.grant_created` when a decision creates a grant, preserving the audit lifecycle used by the controller path.
+- Validate projection JSON in the state layer so malformed non-CLI approval/grant projections fail before commit.
+
+Review:
+
+- First focused review found blockers in concurrent decisions, broad durable `allow_always`, once decisions becoming reusable grants, missing grant-created audit events, and CLI-only JSON validation.
+- Fixes were applied and re-reviewed. The second focused review found no blockers.
 
 ### PT3 - Tool Wrapper Expansion
 

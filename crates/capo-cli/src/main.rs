@@ -6,13 +6,14 @@ use std::path::{Path, PathBuf};
 use capo_controller::FakeBoundaryController;
 use capo_core::{
     AgentId, CommandEnvelope, CommandId, CommandIntent, CommandTarget, InputOrigin, ProjectId,
-    SessionId, TaskId,
+    SessionId, TaskId, ToolCallId,
 };
 use capo_query::{ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 use capo_state::{
-    ArtifactRecord, EventKind, EventRecord, EvidenceProjection, MemoryPacketProjection, NewEvent,
-    ProjectionRecord, RedactionState, RunProjection, SessionProjection, SqliteStateStore,
-    ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
+    ArtifactRecord, CapabilityGrantProjection, EventKind, EventRecord, EvidenceProjection,
+    MemoryPacketProjection, NewEvent, PermissionApprovalProjection, ProjectionRecord,
+    RedactionState, RunProjection, SessionProjection, SqliteStateStore, ToolCallProjection,
+    WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
 use capo_workpads::{WorkpadIndex, index_project_workpads};
 
@@ -36,6 +37,9 @@ Usage:
   capo session interrupt --agent NAME --reason REASON [--state PATH]
   capo session stop --agent NAME --reason REASON [--state PATH]
   capo recover [--state PATH]
+  capo permission request --approval APPROVAL_ID --scope-json JSON --reason REASON [--profile PROFILE] [--session SESSION_ID] [--tool-call TOOL_CALL_ID] [--subject-json JSON] [--requested-by ACTOR] [--state PATH]
+  capo permission list [--state PATH]
+  capo permission decide --approval APPROVAL_ID --decision allow_once|allow_always|reject_once|reject_always [--state PATH]
   capo workpad index --root PATH [--state PATH]
   capo workpad import --workpad-task WORKPAD_TASK_ID [--expected-hash HASH] [--task TASK_ID] [--state PATH]
   capo workpad propose --workpad-task WORKPAD_TASK_ID --out DIR [--expected-hash HASH] [--task TASK_ID] [--summary TEXT] [--state PATH]
@@ -95,6 +99,15 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             interrupt_session(&parsed, rest, "stop")
         }
         [command] if command == "recover" => recover(&parsed),
+        [area, command, rest @ ..] if area == "permission" && command == "request" => {
+            request_permission_approval(&parsed, rest)
+        }
+        [area, command] if area == "permission" && command == "list" => {
+            list_permission_approvals(&parsed)
+        }
+        [area, command, rest @ ..] if area == "permission" && command == "decide" => {
+            decide_permission_approval(&parsed, rest)
+        }
         [area, command, rest @ ..] if area == "workpad" && command == "index" => {
             index_workpads(&parsed, rest)
         }
@@ -479,6 +492,238 @@ fn recover(parsed: &ParsedArgs) -> Result<String, String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string()),
         report.recovered_run_count,
+        command.command_id
+    ))
+}
+
+fn request_permission_approval(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let approval_id = required_arg(args, "--approval")?;
+    let scope_json = required_arg(args, "--scope-json")?;
+    validate_scope_json(&scope_json)?;
+    let subject_json = optional_arg(args, "--subject-json")
+        .unwrap_or_else(|| "{\"actor\":\"local-user\"}".to_string());
+    validate_json_object("subject-json", &subject_json)?;
+    let reason = required_arg(args, "--reason")?;
+    let capability_profile_id =
+        optional_arg(args, "--profile").unwrap_or_else(|| "trusted-local-dev".to_string());
+    let requested_by =
+        optional_arg(args, "--requested-by").unwrap_or_else(|| "local-user".to_string());
+    let project_id = project_id();
+    let session_id = optional_arg(args, "--session").map(SessionId::new);
+    let tool_call_id = optional_arg(args, "--tool-call").map(ToolCallId::new);
+    let command = envelope(
+        "permission-request",
+        CommandTarget::Project(project_id.clone()),
+        CommandIntent::QueuePermissionApproval,
+        Some(reason.clone()),
+    );
+    let state = state(parsed)?;
+    if state
+        .permission_approval(&project_id, &approval_id)
+        .map_err(debug_error)?
+        .is_some()
+    {
+        return Err(format!("approval already exists: {approval_id}"));
+    }
+    let approval = PermissionApprovalProjection {
+        approval_id: approval_id.clone(),
+        project_id: project_id.clone(),
+        session_id,
+        tool_call_id,
+        capability_profile_id,
+        scope_json,
+        subject_json,
+        status: "pending".to_string(),
+        requested_by,
+        reason,
+        decision: None,
+        capability_grant_id: None,
+        updated_sequence: 0,
+    };
+    let mut event = NewEvent::new(
+        format!(
+            "event-permission-approval-queued-{}",
+            stable_cli_hash(&approval_id)
+        ),
+        EventKind::PermissionApprovalQueued,
+        "capo-cli",
+    );
+    event.project_id = Some(project_id.clone());
+    event.session_id = approval.session_id.clone();
+    event.item_id = approval.tool_call_id.as_ref().map(ToString::to_string);
+    event.payload_json = format!(
+        "{{\"approval_id\":\"{}\",\"capability_profile_id\":\"{}\",\"scope_json\":{},\"subject_json\":{},\"requested_by\":\"{}\",\"reason\":\"{}\"}}",
+        escape_json(&approval.approval_id),
+        escape_json(&approval.capability_profile_id),
+        approval.scope_json,
+        approval.subject_json,
+        escape_json(&approval.requested_by),
+        escape_json(&approval.reason)
+    );
+    event.idempotency_key = Some(format!("permission-approval-request:{approval_id}"));
+    event.redaction_state = RedactionState::Safe;
+    let sequence = state
+        .append_event(
+            event,
+            &[ProjectionRecord::PermissionApproval(approval.clone())],
+        )
+        .map_err(debug_error)?;
+    Ok(format!(
+        "permission_approval_queued=true\napproval_id={}\nstatus=pending\nprofile={}\nsequence={sequence}\ncommand_id={}\n",
+        approval.approval_id, approval.capability_profile_id, command.command_id
+    ))
+}
+
+fn list_permission_approvals(parsed: &ParsedArgs) -> Result<String, String> {
+    let command = envelope(
+        "permission-list",
+        CommandTarget::Project(project_id()),
+        CommandIntent::QueryStatus,
+        None,
+    );
+    let approvals = state(parsed)?
+        .permission_approvals(&project_id())
+        .map_err(debug_error)?;
+    let mut output = format!(
+        "command_id={}\npermission_approvals={}\n",
+        command.command_id,
+        approvals.len()
+    );
+    for approval in approvals {
+        output.push_str(&format!(
+            "approval={} status={} profile={} session={} tool_call={} decision={} grant={} requested_by={} reason={}\n",
+            approval.approval_id,
+            approval.status,
+            approval.capability_profile_id,
+            approval
+                .session_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "none".to_string()),
+            approval
+                .tool_call_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "none".to_string()),
+            approval.decision.as_deref().unwrap_or("none"),
+            approval.capability_grant_id.as_deref().unwrap_or("none"),
+            approval.requested_by,
+            approval.reason
+        ));
+    }
+    Ok(output)
+}
+
+fn decide_permission_approval(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let approval_id = required_arg(args, "--approval")?;
+    let decision = required_arg(args, "--decision")?;
+    let (effect, persistence) = approval_decision_effect(&decision)?;
+    let project_id = project_id();
+    let command = envelope(
+        "permission-decide",
+        CommandTarget::Project(project_id.clone()),
+        CommandIntent::DecidePermissionApproval,
+        Some(decision.clone()),
+    );
+    let state = state(parsed)?;
+    let approval = state
+        .permission_approval(&project_id, &approval_id)
+        .map_err(debug_error)?
+        .ok_or_else(|| format!("missing approval: {approval_id}"))?;
+    if approval.status != "pending" {
+        return Err(format!(
+            "approval is not pending: {approval_id} status={}",
+            approval.status
+        ));
+    }
+    validate_decision_scope(&decision, &approval)?;
+    let subject_json = approval_subject_json(&approval)?;
+    let grant_id = format!(
+        "grant-approval-{}",
+        stable_cli_hash(&format!(
+            "{}:{}:{}:{}:{}",
+            approval.approval_id,
+            approval.capability_profile_id,
+            approval.scope_json,
+            subject_json,
+            decision
+        ))
+    );
+    let grant = (decision != "reject_once").then(|| CapabilityGrantProjection {
+        capability_grant_id: grant_id.clone(),
+        capability_profile_id: approval.capability_profile_id.clone(),
+        scope_json: approval.scope_json.clone(),
+        effect: effect.to_string(),
+        subject_json: subject_json.clone(),
+        decision_source: "user".to_string(),
+        persistence: persistence.to_string(),
+        explanation: format!("user approval decision {decision} for {approval_id}"),
+        updated_sequence: 0,
+    });
+    let decided_approval = PermissionApprovalProjection {
+        status: "decided".to_string(),
+        decision: Some(decision.clone()),
+        capability_grant_id: grant
+            .as_ref()
+            .map(|grant| grant.capability_grant_id.clone()),
+        updated_sequence: 0,
+        ..approval.clone()
+    };
+    let mut event = NewEvent::new(
+        format!(
+            "event-permission-decided-{}",
+            stable_cli_hash(&format!("{approval_id}:{decision}:{grant_id}"))
+        ),
+        EventKind::PermissionDecided,
+        "capo-cli",
+    );
+    event.project_id = Some(project_id.clone());
+    event.session_id = approval.session_id.clone();
+    event.item_id = approval.tool_call_id.as_ref().map(ToString::to_string);
+    event.payload_json = format!(
+        "{{\"approval_id\":\"{}\",\"decision\":\"{}\",\"capability_grant_id\":\"{}\",\"effect\":\"{}\",\"persistence\":\"{}\"}}",
+        escape_json(&approval_id),
+        escape_json(&decision),
+        escape_json(&grant_id),
+        effect,
+        persistence
+    );
+    event.idempotency_key = None;
+    event.redaction_state = RedactionState::Safe;
+    let grant_event = grant.as_ref().map(|grant| {
+        let mut event = NewEvent::new(
+            format!(
+                "event-capability-grant-{}",
+                stable_cli_hash(&format!("{approval_id}:{decision}:{grant_id}"))
+            ),
+            EventKind::CapabilityGrantCreated,
+            "capo-cli",
+        );
+        event.project_id = Some(project_id.clone());
+        event.session_id = approval.session_id.clone();
+        event.item_id = approval.tool_call_id.as_ref().map(ToString::to_string);
+        event.payload_json = format!(
+            "{{\"approval_id\":\"{}\",\"capability_grant_id\":\"{}\",\"effect\":\"{}\",\"decision_source\":\"{}\",\"persistence\":\"{}\"}}",
+            escape_json(&approval_id),
+            escape_json(&grant.capability_grant_id),
+            escape_json(&grant.effect),
+            escape_json(&grant.decision_source),
+            escape_json(&grant.persistence)
+        );
+        event.idempotency_key = None;
+        event.redaction_state = RedactionState::Safe;
+        event
+    });
+    let sequence = state
+        .decide_permission_approval(&approval_id, event, grant_event, decided_approval, grant)
+        .map_err(debug_error)?;
+    Ok(format!(
+        "permission_approval_decided=true\napproval_id={approval_id}\ndecision={decision}\neffect={effect}\npersistence={persistence}\ncapability_grant_id={}\nsequence={sequence}\ncommand_id={}\n",
+        if decision == "reject_once" {
+            "none"
+        } else {
+            &grant_id
+        },
         command.command_id
     ))
 }
@@ -1182,6 +1427,110 @@ fn require_fake_arg(args: &[String], key: &str) -> Result<(), String> {
     }
 }
 
+fn validate_scope_json(scope_json: &str) -> Result<(), String> {
+    match serde_json::from_str::<serde_json::Value>(scope_json) {
+        Ok(serde_json::Value::Array(values))
+            if values.iter().all(|value| value.as_str().is_some()) =>
+        {
+            Ok(())
+        }
+        Ok(_) => Err("--scope-json must be a JSON array of strings".to_string()),
+        Err(error) => Err(format!("--scope-json is not valid JSON: {error}")),
+    }
+}
+
+fn validate_json_object(label: &str, json: &str) -> Result<(), String> {
+    match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(serde_json::Value::Object(_)) => Ok(()),
+        Ok(_) => Err(format!("--{label} must be a JSON object")),
+        Err(error) => Err(format!("--{label} is not valid JSON: {error}")),
+    }
+}
+
+fn approval_decision_effect(decision: &str) -> Result<(&'static str, &'static str), String> {
+    match decision {
+        "allow_once" => Ok(("allow", "once")),
+        "allow_always" => Ok(("allow", "until_revoked")),
+        "reject_once" => Ok(("deny", "once")),
+        "reject_always" => Ok(("deny", "until_revoked")),
+        other => Err(format!(
+            "unknown approval decision: {other}; expected allow_once, allow_always, reject_once, or reject_always"
+        )),
+    }
+}
+
+fn validate_decision_scope(
+    decision: &str,
+    approval: &PermissionApprovalProjection,
+) -> Result<(), String> {
+    if decision != "allow_always" {
+        return Ok(());
+    }
+    let scopes = scope_values(&approval.scope_json)?;
+    let durable_allowed = scopes.iter().all(|scope| {
+        matches!(
+            scope.as_str(),
+            "tool:invoke:capo.task_status"
+                | "tool:invoke:capo.agent_status"
+                | "tool:invoke:capo.session_summary"
+                | "tool:invoke:capo.workpad_read"
+        ) || scope.starts_with("state:read:")
+    });
+    if durable_allowed {
+        Ok(())
+    } else {
+        Err(
+            "allow_always is restricted to Capo-owned read/status scopes in the PT2 CLI path"
+                .to_string(),
+        )
+    }
+}
+
+fn approval_subject_json(approval: &PermissionApprovalProjection) -> Result<String, String> {
+    let mut subject = match serde_json::from_str::<serde_json::Value>(&approval.subject_json) {
+        Ok(serde_json::Value::Object(subject)) => subject,
+        Ok(_) => return Err("approval subject_json must be a JSON object".to_string()),
+        Err(error) => return Err(format!("approval subject_json is not valid JSON: {error}")),
+    };
+    subject.insert(
+        "approval_id".to_string(),
+        serde_json::Value::String(approval.approval_id.clone()),
+    );
+    subject.insert(
+        "persistence_scope".to_string(),
+        serde_json::Value::String("permission_approval".to_string()),
+    );
+    if let Some(session_id) = &approval.session_id {
+        subject.insert(
+            "session_id".to_string(),
+            serde_json::Value::String(session_id.to_string()),
+        );
+    }
+    if let Some(tool_call_id) = &approval.tool_call_id {
+        subject.insert(
+            "tool_call_id".to_string(),
+            serde_json::Value::String(tool_call_id.to_string()),
+        );
+    }
+    Ok(serde_json::Value::Object(subject).to_string())
+}
+
+fn scope_values(scope_json: &str) -> Result<Vec<String>, String> {
+    match serde_json::from_str::<serde_json::Value>(scope_json) {
+        Ok(serde_json::Value::Array(values)) => values
+            .into_iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(ToString::to_string)
+                    .ok_or_else(|| "scope_json must contain only strings".to_string())
+            })
+            .collect(),
+        Ok(_) => Err("scope_json must be a JSON array of strings".to_string()),
+        Err(error) => Err(format!("scope_json is not valid JSON: {error}")),
+    }
+}
+
 fn debug_error(error: impl std::fmt::Debug) -> String {
     format!("{error:?}")
 }
@@ -1582,6 +1931,226 @@ mod tests {
                 .any(|task| task.workpad_task_id == "workpads:features:tasks.md#f2"),
             "restored source task should reappear after A-B-A fingerprint recurrence"
         );
+    }
+
+    #[test]
+    fn permission_approval_queue_maps_decisions_to_scoped_grants() {
+        let state_root = temp_root("permission-approval-state");
+
+        let request_output = run_cli(vec![
+            "permission".to_string(),
+            "request".to_string(),
+            "--approval".to_string(),
+            "approval-evidence-record".to_string(),
+            "--profile".to_string(),
+            "trusted-local-dev".to_string(),
+            "--session".to_string(),
+            "session-test".to_string(),
+            "--tool-call".to_string(),
+            "tool-call-evidence".to_string(),
+            "--scope-json".to_string(),
+            "[\"tool:invoke:capo.evidence_record\",\"state:write:evidence\"]".to_string(),
+            "--subject-json".to_string(),
+            "{\"actor\":\"local-user\",\"agent\":\"codex\"}".to_string(),
+            "--reason".to_string(),
+            "record evidence".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("request approval");
+        assert!(request_output.contains("permission_approval_queued=true"));
+        assert!(request_output.contains("status=pending"));
+
+        let pending = run_cli(vec![
+            "permission".to_string(),
+            "list".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("list pending approvals");
+        assert!(pending.contains("permission_approvals=1"));
+        assert!(pending.contains("approval=approval-evidence-record status=pending"));
+
+        let decide_output = run_cli(vec![
+            "permission".to_string(),
+            "decide".to_string(),
+            "--approval".to_string(),
+            "approval-evidence-record".to_string(),
+            "--decision".to_string(),
+            "allow_once".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("decide approval");
+        assert!(decide_output.contains("permission_approval_decided=true"));
+        assert!(decide_output.contains("effect=allow"));
+        assert!(decide_output.contains("persistence=once"));
+        let grant_id = decide_output
+            .lines()
+            .find_map(|line| line.strip_prefix("capability_grant_id="))
+            .expect("grant id")
+            .to_string();
+
+        let decided = run_cli(vec![
+            "permission".to_string(),
+            "list".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("list decided approvals");
+        assert!(decided.contains("approval=approval-evidence-record status=decided"));
+        assert!(decided.contains("decision=allow_once"));
+        assert!(decided.contains(&format!("grant={grant_id}")));
+
+        let second_decision = run_cli(vec![
+            "permission".to_string(),
+            "decide".to_string(),
+            "--approval".to_string(),
+            "approval-evidence-record".to_string(),
+            "--decision".to_string(),
+            "reject_once".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("decided approval cannot be decided again");
+        assert!(second_decision.contains("approval is not pending"));
+
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        state
+            .rebuild_projections()
+            .expect("rebuild approval projections");
+        let approval = state
+            .permission_approval(&project_id(), "approval-evidence-record")
+            .expect("approval query")
+            .expect("approval read model");
+        assert_eq!(approval.status, "decided");
+        assert_eq!(approval.decision.as_deref(), Some("allow_once"));
+        assert_eq!(
+            approval.capability_grant_id.as_deref(),
+            Some(grant_id.as_str())
+        );
+        let grant = state
+            .capability_grants()
+            .expect("grant query")
+            .into_iter()
+            .find(|grant| grant.capability_grant_id == grant_id)
+            .expect("grant");
+        assert_eq!(grant.effect, "allow");
+        assert_eq!(grant.persistence, "once");
+        assert_eq!(grant.decision_source, "user");
+
+        run_cli(vec![
+            "permission".to_string(),
+            "request".to_string(),
+            "--approval".to_string(),
+            "approval-shell".to_string(),
+            "--scope-json".to_string(),
+            "[\"tool:invoke:shell\"]".to_string(),
+            "--reason".to_string(),
+            "run shell".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("request second approval");
+        run_cli(vec![
+            "permission".to_string(),
+            "decide".to_string(),
+            "--approval".to_string(),
+            "approval-shell".to_string(),
+            "--decision".to_string(),
+            "reject_always".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("reject second approval");
+        let denied = state
+            .capability_grants()
+            .expect("grant query")
+            .into_iter()
+            .find(|grant| {
+                grant
+                    .explanation
+                    .contains("reject_always for approval-shell")
+            })
+            .expect("deny grant");
+        assert_eq!(denied.effect, "deny");
+        assert_eq!(denied.persistence, "until_revoked");
+
+        run_cli(vec![
+            "permission".to_string(),
+            "request".to_string(),
+            "--approval".to_string(),
+            "approval-reject-once".to_string(),
+            "--scope-json".to_string(),
+            "[\"tool:invoke:shell\"]".to_string(),
+            "--reason".to_string(),
+            "reject one shell request".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("request reject-once approval");
+        let reject_once = run_cli(vec![
+            "permission".to_string(),
+            "decide".to_string(),
+            "--approval".to_string(),
+            "approval-reject-once".to_string(),
+            "--decision".to_string(),
+            "reject_once".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("reject once");
+        assert!(reject_once.contains("capability_grant_id=none"));
+        let reject_once_approval = state
+            .permission_approval(&project_id(), "approval-reject-once")
+            .expect("reject-once approval query")
+            .expect("reject-once approval");
+        assert_eq!(
+            reject_once_approval.decision.as_deref(),
+            Some("reject_once")
+        );
+        assert!(reject_once_approval.capability_grant_id.is_none());
+
+        run_cli(vec![
+            "permission".to_string(),
+            "request".to_string(),
+            "--approval".to_string(),
+            "approval-broad-always".to_string(),
+            "--scope-json".to_string(),
+            "[\"tool:invoke:shell\"]".to_string(),
+            "--reason".to_string(),
+            "broad remembered allow".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("request broad allow-always approval");
+        let broad_always = run_cli(vec![
+            "permission".to_string(),
+            "decide".to_string(),
+            "--approval".to_string(),
+            "approval-broad-always".to_string(),
+            "--decision".to_string(),
+            "allow_always".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("broad remembered allow is rejected");
+        assert!(broad_always.contains("allow_always is restricted"));
+
+        let bad_scope = run_cli(vec![
+            "permission".to_string(),
+            "request".to_string(),
+            "--approval".to_string(),
+            "approval-bad".to_string(),
+            "--scope-json".to_string(),
+            "{\"scope\":\"tool:invoke:shell\"}".to_string(),
+            "--reason".to_string(),
+            "bad scope".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("object scope is rejected");
+        assert!(bad_scope.contains("JSON array of strings"));
     }
 
     #[test]

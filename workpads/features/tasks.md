@@ -152,7 +152,9 @@ Acceptance:
 
 Progress:
 
-- PT1 static policy variant is completed. PT2 approval queue and PT3 wrapper expansion remain pending.
+- PT1 static policy variant is completed.
+- PT2 user approval queue is completed with CLI request/list/decide commands and guarded durable grant/denial mapping.
+- PT3 wrapper expansion remains pending.
 
 Evidence:
 
@@ -165,6 +167,11 @@ Evidence:
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`
 - Focused PT1 permission reviews: scope parsing, grant scoping, decision durability, denied controller execution, and permission event IDs blockers found and fixed
+- `crates/capo-cli/src/main.rs`
+- `crates/capo-core/src/lib.rs`
+- `cargo test -p capo-state permission_approval`
+- `cargo test -p capo-cli permission_approval_queue_maps_decisions_to_scoped_grants`
+- Focused PT2 permission reviews: concurrent decisions, durable `allow_always`, once-grant reuse, missing grant-created audit events, and state-layer JSON validation blockers found and fixed; re-review found no blockers
 
 ## F5 - Memory And Evaluation Reports
 

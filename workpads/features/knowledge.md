@@ -248,3 +248,41 @@ Follow-up:
 
 - PT2 should build the pending approval queue on the same `PermissionDecision` and grant metadata instead of introducing a separate approval vocabulary.
 - PT3 should route wrapper tools through the same deny-before-invoke controller behavior.
+
+## F4/PT2 - User Approval Queue
+
+Status: completed on 2026-05-25.
+
+Decisions:
+
+- Add `permission_approvals` as the first durable approval queue read model. It tracks pending/decided status, requested scope, subject, requested-by actor, reason, session/tool-call refs, selected decision, and linked grant ID.
+- Add CLI-first approval operations:
+  - `capo permission request --approval APPROVAL_ID --scope-json JSON --reason REASON`
+  - `capo permission list`
+  - `capo permission decide --approval APPROVAL_ID --decision allow_once|allow_always|reject_once|reject_always`
+- Keep decisions on the same capability-grant projection used by PT1 instead of adding a parallel permission vocabulary.
+- Map `allow_once` to `effect=allow`, `persistence=once`, and a grant subject scoped by approval ID plus session/tool-call refs when present.
+- Map `allow_always` to `effect=allow`, `persistence=until_revoked`, but restrict it in the PT2 CLI path to Capo-owned read/status scopes.
+- Map `reject_once` to a decided approval without a reusable deny grant.
+- Map `reject_always` to `effect=deny`, `persistence=until_revoked`, and a scoped durable denial grant.
+- Move approval decisions into a state-store transaction with a pending-status guard. This prevents two concurrent deciders from both committing conflicting decisions.
+- Emit `capability.grant_created` for decisions that create a grant, keeping the audit stream aligned with the controller permission lifecycle.
+- Validate permission approval/grant JSON in the state layer before commit so non-CLI projection producers cannot create rows that later break replay.
+
+Verification:
+
+- `cargo test -p capo-state permission_approval`: passed.
+- `cargo test -p capo-cli permission_approval_queue_maps_decisions_to_scoped_grants`: passed.
+- `cargo fmt --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Review:
+
+- First focused review found two blockers: duplicate/conflicting decisions could race, and `allow_always` could mint broad durable grants. Both were fixed.
+- A second focused review found two additional blockers and two medium audit/replay issues: one-shot decisions could become reusable grants, decision races were only sequentially tested, grant creation lacked a `capability.grant_created` event, and state-layer JSON safety depended on CLI validation. All were fixed.
+- Final focused re-review found no blockers.
+
+Follow-up:
+
+- PT3 should reuse the approval queue when wrapper tools encounter a policy decision that needs user input instead of assuming all decisions are available synchronously.

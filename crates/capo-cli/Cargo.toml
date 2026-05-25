@@ -21,3 +21,4 @@ capo-runtime.workspace = true
 capo-state.workspace = true
 capo-tools.workspace = true
 capo-workpads.workspace = true
+serde_json = "1.0.150"

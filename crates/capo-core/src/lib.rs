@@ -97,6 +97,8 @@ pub enum CommandIntent {
     ImportWorkpadTask,
     WriteWorkpadProposal,
     ApplyWorkpadProposal,
+    QueuePermissionApproval,
+    DecidePermissionApproval,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

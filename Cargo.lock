@@ -38,6 +38,7 @@ dependencies = [
  "capo-state",
  "capo-tools",
  "capo-workpads",
+ "serde_json",
 ]
 
 [[package]]
@@ -91,6 +92,7 @@ version = "0.1.0"
 dependencies = [
  "capo-core",
  "rusqlite",
+ "serde_json",
 ]
 
 [[package]]
