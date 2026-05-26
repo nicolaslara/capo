@@ -792,3 +792,26 @@ Decision:
 - Treat adapter smoke report status as shared query/read-model behavior so CLI, dashboard, voice, web, and mobile surfaces can answer connector readiness questions from the same selector.
 - Keep exact ID lookup and latest lookup separate. Adapter filtering is only valid for latest lookup.
 - Render metadata only: status, credential scan status, marker flag, artifact-root reference, dogfood readiness effect, reason, and no-side-effect markers.
+
+### AC32 - Latest Adapter Smoke Evidence Export
+
+Status: completed
+
+Acceptance:
+
+- Add a provider-free latest-selector path for adapter smoke-report evidence export.
+- Support the same optional adapter filter as latest smoke-report status.
+- Reuse the Capo-marked adapter smoke evidence artifact format and guarded writer.
+- Do not launch provider CLIs, inspect credentials, materialize prompts, open tunnels, request approvals, activate grants, render smoke stdout/stderr content, or mutate connector state beyond recording the evidence artifact.
+
+Evidence:
+
+- CLI `capo adapter smoke-report evidence --latest [--adapter codex|claude] --out DIR` in `../../crates/capo-cli/src/main.rs`.
+- Latest export reuses `ProjectDashboard::latest_adapter_smoke_report(...)` and the existing Capo-marked smoke evidence renderer/writer.
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`: passed.
+
+Decision:
+
+- Treat latest smoke evidence export as operator ergonomics over the shared adapter smoke selector. It selects the latest matching smoke report, then writes the same Capo-owned connector-readiness evidence artifact as exact export.
+- Keep exact `--smoke-report` and latest `--latest` mutually exclusive; `--adapter` is only valid with `--latest`.
+- Keep the export read-model-derived and provider-free. It records a project evidence row, but does not launch provider CLIs, inspect credentials, materialize prompts, open tunnels, approvals, grants, raw prompt/output rendering, or connector-state mutation.

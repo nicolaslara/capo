@@ -178,6 +178,15 @@ Observed 2026-05-25.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC11.
 
+## F1/AC32 Latest Adapter Smoke Evidence Export
+
+Observed 2026-05-26.
+
+- CLI latest smoke evidence selector and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared latest smoke-report selector reused by the export: `../../crates/capo-query/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC32.
+
 ## F1/AC12 Workpad Next Adapter Plan
 
 Observed 2026-05-25.

@@ -76,6 +76,7 @@ Usage:
   capo adapter smoke-report status --smoke-report SMOKE_REPORT_ID [--state PATH]
   capo adapter smoke-report status --latest [--adapter codex|claude] [--state PATH]
   capo adapter smoke-report evidence --smoke-report SMOKE_REPORT_ID --out DIR [--state PATH]
+  capo adapter smoke-report evidence --latest [--adapter codex|claude] --out DIR [--state PATH]
   capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR] [--state PATH]
   capo adapter replay-dispatch --dispatch-plan DISPATCH_PLAN_ID --fixture PATH [--out DIR] [--state PATH]
   capo dogfood readiness [--out DIR] [--state PATH]
@@ -1565,30 +1566,68 @@ fn adapter_smoke_report_status(parsed: &ParsedArgs, args: &[String]) -> Result<S
 }
 
 fn adapter_smoke_report_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
-    if let Some(unknown) = args
-        .iter()
-        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--smoke-report" | "--out"))
-    {
+    let latest = has_flag(args, "--latest");
+    let smoke_report_id = optional_arg(args, "--smoke-report");
+    let adapter = optional_arg(args, "--adapter")
+        .map(|adapter| adapter_label(&adapter).to_string())
+        .filter(|adapter| adapter != "unknown");
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--")
+            && !matches!(
+                arg.as_str(),
+                "--smoke-report" | "--latest" | "--adapter" | "--out"
+            )
+    }) {
         return Err(format!(
             "unknown adapter smoke-report evidence option: {unknown}"
         ));
     }
-    let smoke_report_id = required_arg(args, "--smoke-report")?;
+    if optional_arg(args, "--adapter").is_some() && adapter.is_none() {
+        return Err("--adapter must be codex or claude".to_string());
+    }
+    if latest && smoke_report_id.is_some() {
+        return Err(
+            "adapter smoke-report evidence accepts either --smoke-report or --latest".to_string(),
+        );
+    }
+    if !latest && adapter.is_some() {
+        return Err("adapter smoke-report evidence --adapter filter requires --latest".to_string());
+    }
     let out = PathBuf::from(required_arg(args, "--out")?);
     let project_id = project_id();
     let command = envelope(
         "adapter-smoke-report-evidence",
         CommandTarget::Project(project_id.clone()),
         CommandIntent::ExportEvidence,
-        Some(smoke_report_id.clone()),
+        smoke_report_id
+            .clone()
+            .or_else(|| adapter.clone())
+            .or_else(|| Some("latest".to_string())),
     );
     let state = state(parsed)?;
     let dashboard = project_dashboard(&state, ProjectDashboardQuery::new(project_id.clone()))
         .map_err(debug_error)?;
-    let report = dashboard
-        .adapter_smoke_report_status(&smoke_report_id)
-        .ok_or_else(|| format!("missing adapter smoke report: {smoke_report_id}"))?
-        .clone();
+    let report = if latest {
+        dashboard
+            .latest_adapter_smoke_report(adapter.as_deref())
+            .ok_or_else(|| {
+                adapter
+                    .as_ref()
+                    .map(|adapter| {
+                        format!("no recorded adapter smoke reports matching adapter={adapter}")
+                    })
+                    .unwrap_or_else(|| "no recorded adapter smoke reports".to_string())
+            })?
+            .clone()
+    } else {
+        let smoke_report_id = smoke_report_id.ok_or_else(|| {
+            "adapter smoke-report evidence requires --smoke-report or --latest".to_string()
+        })?;
+        dashboard
+            .adapter_smoke_report_status(&smoke_report_id)
+            .ok_or_else(|| format!("missing adapter smoke report: {smoke_report_id}"))?
+            .clone()
+    };
     let markdown = render_adapter_smoke_report_evidence(&project_id, &report);
     fs::create_dir_all(&out).map_err(|error| error.to_string())?;
     let content_hash = stable_cli_hash(&markdown);
@@ -9645,6 +9684,42 @@ mod tests {
         assert!(markdown.contains("does not render stdout"));
         assert!(!markdown.contains("CAPO_CODEX_SMOKE_OK"));
         assert!(!markdown.contains("Authorization:"));
+
+        let latest_evidence = run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "evidence".to_string(),
+            "--latest".to_string(),
+            "--adapter".to_string(),
+            "codex".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("export latest adapter smoke evidence");
+        assert!(latest_evidence.contains("adapter_smoke_report_evidence_exported=true"));
+        assert_eq!(
+            output_value(&latest_evidence, "smoke_report_id"),
+            output_value(&passed, "smoke_report_id")
+        );
+        let missing_latest_evidence = run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "evidence".to_string(),
+            "--latest".to_string(),
+            "--adapter".to_string(),
+            "claude".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("missing latest adapter smoke evidence");
+        assert!(
+            missing_latest_evidence
+                .contains("no recorded adapter smoke reports matching adapter=claude_code")
+        );
         let missing_evidence = run_cli(vec![
             "adapter".to_string(),
             "smoke-report".to_string(),

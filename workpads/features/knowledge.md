@@ -236,6 +236,22 @@ Follow-up:
 
 - When the dogfood gate finally clears, use the dashboard readiness row plus the project readiness artifact as the visible migration checkpoint.
 
+## F1/AC32 - Latest Adapter Smoke Evidence Export
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add latest-selector ergonomics to `capo adapter smoke-report evidence`, matching the existing exact/latest smoke-report status command.
+- Reuse `ProjectDashboard::latest_adapter_smoke_report(...)` instead of adding CLI-specific smoke selection logic.
+- Preserve the existing adapter smoke evidence artifact format, guarded writer, artifact kind, evidence kind, and confidence logic.
+- Keep exact `--smoke-report` and latest `--latest` mutually exclusive. `--adapter` is valid only with `--latest`.
+- Treat the export as read-model-derived provider-free evidence. It records project evidence metadata/artifacts, but does not launch provider CLIs, inspect credentials, render smoke stdout/stderr, materialize prompts, open tunnels, request approvals, activate grants, or mutate connector state.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`: passed.
+
 ## F6/V4 - Dogfood Readiness Conversation
 
 Status: completed on 2026-05-26.
