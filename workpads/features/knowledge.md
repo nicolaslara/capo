@@ -2696,6 +2696,28 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F9/CLI7 - Adapter Dispatch Status And Evidence Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move adapter dispatch gate, dispatch status, and dispatch evidence command handling into `adapter_dispatch.rs`.
+- Keep dispatch gate projection, dispatch status rendering, dispatch evidence rendering, confidence scoring, and guarded dispatch evidence writes private inside the module. The module exposes only the three CLI command handlers needed by `main.rs`.
+- Leave execution request, prompt materialization, run preflight, local run execution, fixture replay, dashboard rendering, and voice summaries in `main.rs` for this slice. Those functions compose runtime execution and replay behavior beyond the read/status/evidence surface moved here.
+- Accept a 542-line module for now because it is one conceptual unit and keeps the dispatch evidence redaction policy next to the command that writes it. The next split should target the execution-request/prompt-materialization/local-run family.
+- Review noted that dispatch concepts remain split across `adapter_dispatch.rs` and `main.rs`. This is accepted for CLI7 because the current module is the status/evidence surface; the follow-up execution/replay split should remove that residual ambiguity.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_dispatch -- --nocapture`: passed.
+- `cargo check -p capo-cli`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- Focused read-only review subagent: no behavior or helper-visibility issues found; residual cohesion risk accepted as the next split target.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.

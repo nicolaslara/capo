@@ -1356,3 +1356,12 @@ Observed 2026-05-26.
 - CLI routing, project dogfood readiness, adapter dispatch gating, dashboard, and voice rendering retained in: `../../crates/capo-cli/src/main.rs`
 - Resulting file sizes: `../../crates/capo-cli/src/main.rs` 6,457 lines; `../../crates/capo-cli/src/adapter_dogfood.rs` 179 lines.
 - No new third-party dependencies were added for CLI6.
+
+## F9/CLI7 Adapter Dispatch Status And Evidence Module Split
+
+Observed 2026-05-26.
+
+- Adapter dispatch status/evidence module: `../../crates/capo-cli/src/adapter_dispatch.rs`
+- CLI routing, adapter dispatch execution request, prompt materialization, preflight, local run, replay, dashboard, and voice summaries retained in: `../../crates/capo-cli/src/main.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 5,941 lines; `../../crates/capo-cli/src/adapter_dispatch.rs` 542 lines.
+- No new third-party dependencies were added for CLI7.
