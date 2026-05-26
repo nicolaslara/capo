@@ -19,6 +19,7 @@ Feature work starts after the prototype gate. Dedicated feature files hold the d
 | `remote-runtime.md` | Remote runtime/tunnel adapters | Local real-agent semantics |
 | `state-store.md` | State persistence resilience and ORM/typed projection strategy | Prototype P2 state store |
 | cross-cutting controller | Controller orchestration readability and boundary splits | Prototype P12 controller path |
+| cross-cutting adapters | Adapter parser, launch, smoke, ACP, and test readability | Prototype P6/P7 adapter path |
 
 ## F0 - Split Feature Workpads
 
@@ -658,6 +659,35 @@ Evidence:
 - `crates/capo-controller/src/local_dispatch.rs`
 - `crates/capo-controller/src/tests.rs`
 - `cargo test -p capo-controller`
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo test --workspace --all-targets`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+
+## F13 - Adapter Maintainability
+
+Status: in_progress
+
+Source workpad: cross-cutting adapter implementation.
+
+Acceptance:
+
+- Reduce `capo-adapters` file size where behavior-preserving splits are available.
+- Preserve fake adapter dispatch, scripted mock dispatch, Codex/Claude/ACP fixture parsing, local launch/smoke safety behavior, ACP client capability routing, and test behavior.
+- Keep local subscription launch/smoke concerns separate from fixture parsing and ACP client setup.
+
+Progress:
+
+- AD1 local subscription launch/smoke and adapter test module split is completed. Codex/Claude local launch plans, restrictive smoke plans, opt-in smoke runner, artifact scan, redaction rules, and credential-marker detection now live in `crates/capo-adapters/src/local_subscription.rs`; adapter tests now live in `crates/capo-adapters/src/tests.rs`; crate-root public exports remain available for downstream callers.
+- `crates/capo-adapters/src/lib.rs` is reduced from 1,897 lines to 932 lines. Future adapter slices should split fixture parsing by provider or ACP session setup when those areas are next touched.
+
+Evidence:
+
+- `crates/capo-adapters/src/lib.rs`
+- `crates/capo-adapters/src/local_subscription.rs`
+- `crates/capo-adapters/src/scripted_mock_agent.rs`
+- `crates/capo-adapters/src/tests.rs`
+- `cargo test -p capo-adapters`
 - `cargo fmt --check`
 - `git diff --check`
 - `cargo test --workspace --all-targets`

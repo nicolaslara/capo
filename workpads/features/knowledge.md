@@ -3159,3 +3159,23 @@ Verification:
 - `git diff --check`: passed.
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+## F13/AD1 - Adapter Local Subscription And Test Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move local subscription-backed launch and smoke logic into `local_subscription.rs` because it is a distinct adapter concern: Codex/Claude launch plans, restrictive smoke plans, opt-in execution, runtime boundary use, output artifact scanning, redaction rules, and credential-marker detection.
+- Keep `LocalAdapterLaunchPlan`, `LocalAdapterSmokePlan`, smoke runner/error/result types, and `scan_artifacts_for_sensitive_markers` re-exported from the crate root. Downstream controller/CLI code keeps the same `capo_adapters::...` import surface while the implementation no longer sits beside parser code.
+- Keep helper functions such as the subscription env allowlist, redaction rules, and sensitive-marker detector module-private. Tests now validate the same behavior through public launch/smoke plan APIs instead of reaching into private helper functions.
+- Move adapter tests into `tests.rs` with the same private-module access pattern used by other maintainability splits. This removes the 1,500+ line root-file hotspot without changing fixture parsing or ACP client behavior.
+- This is a behavior-preserving split. `lib.rs` is now 932 lines, so future adapter work should split fixture parsing by provider or ACP setup once a task touches those areas.
+
+Verification:
+
+- `cargo test -p capo-adapters`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.

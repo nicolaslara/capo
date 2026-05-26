@@ -1532,3 +1532,14 @@ Observed 2026-05-26.
 - Existing focused modules retained: `../../crates/capo-controller/src/adapter_replay.rs`, `../../crates/capo-controller/src/local_dispatch.rs`, `../../crates/capo-controller/src/tests.rs`
 - Resulting file sizes: `../../crates/capo-controller/src/lib.rs` 756 lines; `../../crates/capo-controller/src/fake_session.rs` 684 lines; `../../crates/capo-controller/src/adapter_replay.rs` 438 lines; `../../crates/capo-controller/src/local_dispatch.rs` 45 lines; `../../crates/capo-controller/src/tests.rs` 610 lines.
 - No new third-party dependencies were added for C2.
+
+## F13/AD1 Adapter Local Subscription And Test Module Split
+
+Observed 2026-05-26.
+
+- Adapter crate root after split: `../../crates/capo-adapters/src/lib.rs`
+- Local subscription launch/smoke module: `../../crates/capo-adapters/src/local_subscription.rs`
+- Existing scripted mock module retained: `../../crates/capo-adapters/src/scripted_mock_agent.rs`
+- Adapter regression tests: `../../crates/capo-adapters/src/tests.rs`
+- Resulting file sizes: `../../crates/capo-adapters/src/lib.rs` 932 lines; `../../crates/capo-adapters/src/local_subscription.rs` 364 lines; `../../crates/capo-adapters/src/scripted_mock_agent.rs` 479 lines; `../../crates/capo-adapters/src/tests.rs` 610 lines.
+- No new third-party dependencies were added for AD1.
