@@ -782,3 +782,12 @@ Observed 2026-05-26.
 - ACP/Codex/Claude fixture source: `../../crates/capo-adapters/fixtures/`
 - Permissions source workpad: `permissions-tools.md`
 - No new third-party dependencies were added for PT7.
+
+## F4/PT8 Observed-Only Tool Observation State Projection
+
+Observed 2026-05-26.
+
+- Observed-only tool observation projection, SQLite table, query method, and rebuild regression coverage: `../../crates/capo-state/src/lib.rs`
+- Tool observation architecture source: `../architecture/tool-exposure.md`
+- Permissions source workpad: `permissions-tools.md`
+- No new third-party dependencies were added for PT8.

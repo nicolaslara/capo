@@ -225,3 +225,25 @@ Decision:
 - Preserve source adapter, external tool ref, tool name, observed status, raw event hash, and confidence for future read-model/evaluation ingestion.
 - Use stable adapter timeline confidence to mark observations as high-confidence; heuristic and missing timeline confidence downshift to medium/low.
 - Keep this contract provider-free and execution-free. It parses existing normalized fixture events only.
+
+### PT8 - Observed-Only Tool Observation State Projection
+
+Status: completed
+
+Acceptance:
+
+- Add durable state projection storage for observed-only native tool observations.
+- Keep observations separate from governed `tool_calls` / `ToolInvocation` records.
+- Preserve session, optional tool-call link, source, external ref, tool name, observed status, instrumentation level, confidence, raw event hash, optional artifact, and rebuild sequence.
+- Cover append/read and projection rebuild behavior with tests.
+
+Evidence:
+
+- `ToolObservationProjection`, `tool_observations` table, and `tool_observations_for_session(...)` in `../../crates/capo-state/src/lib.rs`.
+- `cargo test -p capo-state tool_observations -- --nocapture`: passed.
+
+Decision:
+
+- Persist observed-only native tool facts in a dedicated `tool_observations` projection instead of overloading `tool_calls`.
+- Add `tool.observation_recorded` as the event kind for projection append/rebuild evidence.
+- Keep the projection generic enough for ACP, Codex, Claude, provider-native, runtime-output, or manual observations while still requiring explicit instrumentation level and confidence.

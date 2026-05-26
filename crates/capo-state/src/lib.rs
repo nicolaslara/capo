@@ -1568,6 +1568,39 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn tool_observations_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> StateResult<Vec<ToolObservationProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT tool_observation_id, session_id, tool_call_id, source, external_tool_ref,
+                    tool_name, observed_status, instrumentation_level, confidence,
+                    raw_event_hash, artifact_id, updated_sequence
+             FROM tool_observations
+             WHERE session_id = ?1
+             ORDER BY updated_sequence ASC, tool_observation_id ASC",
+        )?;
+        let rows = statement.query_map(params![session_id.as_str()], |row| {
+            Ok(ToolObservationProjection {
+                tool_observation_id: row.get(0)?,
+                session_id: SessionId::new(row.get::<_, String>(1)?),
+                tool_call_id: optional_id(row.get::<_, Option<String>>(2)?),
+                source: row.get(3)?,
+                external_tool_ref: row.get(4)?,
+                tool_name: row.get(5)?,
+                observed_status: row.get(6)?,
+                instrumentation_level: row.get(7)?,
+                confidence: row.get(8)?,
+                raw_event_hash: row.get(9)?,
+                artifact_id: row.get(10)?,
+                updated_sequence: row.get(11)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn workpad_files(&self, project_id: &ProjectId) -> StateResult<Vec<WorkpadFileProjection>> {
         let connection = Connection::open(&self.db_path)?;
         let mut statement = connection.prepare(
@@ -1744,6 +1777,7 @@ pub enum EventKind {
     AdapterDispatchPromptMaterialized,
     ToolCallRequested,
     ToolInvocationStarted,
+    ToolObservationRecorded,
     ToolOutputArtifactRecorded,
     ToolOutputObserved,
     ToolCallCompleted,
@@ -1794,6 +1828,7 @@ impl EventKind {
             Self::AdapterDispatchPromptMaterialized => "adapter.dispatch_prompt_materialized",
             Self::ToolCallRequested => "tool.call_requested",
             Self::ToolInvocationStarted => "tool.invocation_started",
+            Self::ToolObservationRecorded => "tool.observation_recorded",
             Self::ToolOutputArtifactRecorded => "tool.output_artifact_recorded",
             Self::ToolOutputObserved => "tool.output_observed",
             Self::ToolCallCompleted => "tool.call_completed",
@@ -1895,6 +1930,7 @@ pub enum ProjectionRecord {
     AdapterDispatchPromptSource(AdapterDispatchPromptSourceProjection),
     AdapterDispatchPromptMaterialization(AdapterDispatchPromptMaterializationProjection),
     ToolCall(ToolCallProjection),
+    ToolObservation(ToolObservationProjection),
     MemoryPacketRef(MemoryPacketProjection),
     MemoryRecord(Box<MemoryRecordProjection>),
     MemorySource(MemorySourceProjection),
@@ -2183,6 +2219,22 @@ pub struct ToolCallProjection {
     pub status: String,
     pub input_artifact_id: Option<String>,
     pub output_artifact_id: Option<String>,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolObservationProjection {
+    pub tool_observation_id: String,
+    pub session_id: SessionId,
+    pub tool_call_id: Option<ToolCallId>,
+    pub source: String,
+    pub external_tool_ref: Option<String>,
+    pub tool_name: String,
+    pub observed_status: String,
+    pub instrumentation_level: String,
+    pub confidence: String,
+    pub raw_event_hash: String,
+    pub artifact_id: Option<String>,
     pub updated_sequence: i64,
 }
 
@@ -2681,6 +2733,20 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             output_artifact_id TEXT,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS tool_observations (
+            tool_observation_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            tool_call_id TEXT,
+            source TEXT NOT NULL,
+            external_tool_ref TEXT,
+            tool_name TEXT NOT NULL,
+            observed_status TEXT NOT NULL,
+            instrumentation_level TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            raw_event_hash TEXT NOT NULL,
+            artifact_id TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS memory_packet_refs (
             memory_packet_id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -2869,6 +2935,7 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "adapter_dispatch_prompt_sources",
         "adapter_dispatch_prompt_materializations",
         "tool_calls",
+        "tool_observations",
         "memory_packet_refs",
         "memory_records",
         "memory_sources",
@@ -3530,6 +3597,39 @@ fn apply_projection_record(
                 sequence,
             ],
         )?,
+        ProjectionRecord::ToolObservation(observation) => transaction.execute(
+            "INSERT INTO tool_observations(
+                tool_observation_id, session_id, tool_call_id, source, external_tool_ref,
+                tool_name, observed_status, instrumentation_level, confidence,
+                raw_event_hash, artifact_id, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(tool_observation_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                tool_call_id = excluded.tool_call_id,
+                source = excluded.source,
+                external_tool_ref = excluded.external_tool_ref,
+                tool_name = excluded.tool_name,
+                observed_status = excluded.observed_status,
+                instrumentation_level = excluded.instrumentation_level,
+                confidence = excluded.confidence,
+                raw_event_hash = excluded.raw_event_hash,
+                artifact_id = excluded.artifact_id,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                observation.tool_observation_id,
+                observation.session_id.as_str(),
+                observation.tool_call_id.as_ref().map(ToolCallId::as_str),
+                observation.source,
+                observation.external_tool_ref,
+                observation.tool_name,
+                observation.observed_status,
+                observation.instrumentation_level,
+                observation.confidence,
+                observation.raw_event_hash,
+                observation.artifact_id,
+                sequence,
+            ],
+        )?,
         ProjectionRecord::MemoryPacketRef(packet) => transaction.execute(
             "INSERT INTO memory_packet_refs(
                 memory_packet_id, project_id, task_id, agent_id, session_id, run_id,
@@ -4141,6 +4241,23 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
             g: tool_call.output_artifact_id.clone(),
             h: None,
             payload_json: "{}".to_string(),
+        },
+        ProjectionRecord::ToolObservation(observation) => ProjectionRecordRow {
+            kind: "tool_observation",
+            record_id: observation.tool_observation_id.clone(),
+            a: Some(observation.session_id.to_string()),
+            b: observation.tool_call_id.as_ref().map(ToString::to_string),
+            c: Some(observation.source.clone()),
+            d: observation.external_tool_ref.clone(),
+            e: Some(observation.tool_name.clone()),
+            f: Some(observation.observed_status.clone()),
+            g: Some(observation.instrumentation_level.clone()),
+            h: Some(observation.confidence.clone()),
+            payload_json: json!({
+                "raw_event_hash": observation.raw_event_hash,
+                "artifact_id": observation.artifact_id,
+            })
+            .to_string(),
         },
         ProjectionRecord::MemoryPacketRef(packet) => ProjectionRecordRow {
             kind: "memory_packet",
@@ -5255,6 +5372,55 @@ fn projection_record_from_row(
             output_artifact_id: g,
             updated_sequence: 0,
         })),
+        "tool_observation" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::ToolObservation(
+                ToolObservationProjection {
+                    tool_observation_id: record_id,
+                    session_id: SessionId::new(required_field(
+                        &projection_kind,
+                        "tool_observation",
+                        a,
+                        "session_id",
+                    )?),
+                    tool_call_id: optional_id(b),
+                    source: required_field(&projection_kind, "tool_observation", c, "source")?,
+                    external_tool_ref: d,
+                    tool_name: required_field(
+                        &projection_kind,
+                        "tool_observation",
+                        e,
+                        "tool_name",
+                    )?,
+                    observed_status: required_field(
+                        &projection_kind,
+                        "tool_observation",
+                        f,
+                        "observed_status",
+                    )?,
+                    instrumentation_level: required_field(
+                        &projection_kind,
+                        "tool_observation",
+                        g,
+                        "instrumentation_level",
+                    )?,
+                    confidence: required_field(
+                        &projection_kind,
+                        "tool_observation",
+                        h,
+                        "confidence",
+                    )?,
+                    raw_event_hash: required_payload_string(
+                        &projection_kind,
+                        "tool_observation",
+                        &payload,
+                        "raw_event_hash",
+                    )?,
+                    artifact_id: payload_optional_string(&payload, "artifact_id"),
+                    updated_sequence: 0,
+                },
+            ))
+        }
         "memory_packet" => Ok(ProjectionRecord::MemoryPacketRef(MemoryPacketProjection {
             memory_packet_id: MemoryPacketId::new(record_id),
             project_id: ProjectId::new(required_field(
@@ -5883,6 +6049,68 @@ mod tests {
         assert_eq!(session.latest_confidence, Some(70));
         let task = store.task(&task_id).unwrap().expect("task");
         assert_eq!(task.latest_summary.as_deref(), Some("state scaffold"));
+    }
+
+    #[test]
+    fn tool_observations_are_persisted_and_rebuilt() {
+        let store = temp_store("tool-observations");
+        let project_id = ProjectId::new("project-capo");
+        let session_id = SessionId::new("session-tools-observed");
+        let tool_call_id = ToolCallId::new("tool-adapter-native");
+
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-tool-observation".to_string(),
+                    kind: EventKind::ToolObservationRecorded,
+                    actor: "adapter-replay".to_string(),
+                    project_id: Some(project_id),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: Some(session_id.clone()),
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some("tool-1".to_string()),
+                    payload_json: "{\"kind\":\"tool.observation_recorded\"}".to_string(),
+                    idempotency_key: Some("tool-observation:tool-1:completed".to_string()),
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::ToolObservation(
+                    ToolObservationProjection {
+                        tool_observation_id: "observation-tool-1-completed".to_string(),
+                        session_id: session_id.clone(),
+                        tool_call_id: Some(tool_call_id.clone()),
+                        source: "adapter_event".to_string(),
+                        external_tool_ref: Some("tool-1".to_string()),
+                        tool_name: "exec_command".to_string(),
+                        observed_status: "completed".to_string(),
+                        instrumentation_level: "observed_only".to_string(),
+                        confidence: "high".to_string(),
+                        raw_event_hash: "fnv1a64:testhash".to_string(),
+                        artifact_id: Some("artifact-adapter-output".to_string()),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append observation");
+
+        let observations = store
+            .tool_observations_for_session(&session_id)
+            .expect("read observations");
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].tool_call_id, Some(tool_call_id));
+        assert_eq!(observations[0].instrumentation_level, "observed_only");
+        assert_eq!(observations[0].confidence, "high");
+        assert_eq!(
+            observations[0].artifact_id.as_deref(),
+            Some("artifact-adapter-output")
+        );
+
+        store.rebuild_projections().expect("rebuild projections");
+        let rebuilt = store
+            .tool_observations_for_session(&session_id)
+            .expect("read rebuilt observations");
+        assert_eq!(rebuilt, observations);
     }
 
     #[test]

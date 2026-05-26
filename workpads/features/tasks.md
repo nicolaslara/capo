@@ -244,6 +244,7 @@ Progress:
 - PT5 ACP session setup capability plan is completed with adapter setup consuming the Capo tool capability gate before advertising filesystem or terminal capabilities.
 - PT6 ACP client handler wrapper routing is completed with filesystem/terminal calls mapped to Capo wrapper requests only when advertised by setup.
 - PT7 adapter native tool observation contract is completed with observed-only classifications for ACP, Codex, and Claude fixture tool updates.
+- PT8 observed-only tool observation state projection is completed with durable append/read/rebuild coverage.
 
 Evidence:
 
@@ -267,6 +268,7 @@ Evidence:
 - `cargo test -p capo-adapters acp_client -- --nocapture`
 - `cargo test -p capo-adapters acp_terminal -- --nocapture`
 - `cargo test -p capo-adapters adapter_tool_observations -- --nocapture`
+- `cargo test -p capo-state tool_observations -- --nocapture`
 - Focused PT3 wrapper reviews: split authorization replay, arbitrary workpad reads, artifact path escaping, unredacted input artifacts, misleading permission status, same-tool replay, runtime run ID paths, and ambiguous context hashing blockers found and fixed
 
 ## F5 - Memory And Evaluation Reports

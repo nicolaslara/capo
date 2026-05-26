@@ -1714,3 +1714,22 @@ Verification:
 Follow-up:
 
 - Persist observed-only tool observations in the state/query layer once the read model grows a dedicated `ToolObservation` projection.
+
+## F4/PT8 - Observed-Only Tool Observation State Projection
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `ToolObservationProjection` and a `tool_observations` SQLite table for observed-only native tool facts.
+- Keep observed-only native tool observations separate from governed `tool_calls`/invocations so dashboards and evaluations can label partial visibility correctly.
+- Preserve session, optional tool-call link, source, external tool ref, tool name, observed status, instrumentation level, confidence, raw event hash, optional artifact, and sequence.
+- Add `tool.observation_recorded` as the durable event kind for observation projection records.
+
+Verification:
+
+- `cargo test -p capo-state tool_observations -- --nocapture`: passed.
+
+Follow-up:
+
+- Surface `tool_observations` through `capo-query` and dashboard/session evidence views.
