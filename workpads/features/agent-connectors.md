@@ -815,3 +815,28 @@ Decision:
 - Treat latest smoke evidence export as operator ergonomics over the shared adapter smoke selector. It selects the latest matching smoke report, then writes the same Capo-owned connector-readiness evidence artifact as exact export.
 - Keep exact `--smoke-report` and latest `--latest` mutually exclusive; `--adapter` is only valid with `--latest`.
 - Keep the export read-model-derived and provider-free. It records a project evidence row, but does not launch provider CLIs, inspect credentials, materialize prompts, open tunnels, approvals, grants, raw prompt/output rendering, or connector-state mutation.
+
+### AC33 - Adapter Dogfood Gate Evidence Export
+
+Status: completed
+
+Acceptance:
+
+- Add a provider-free command that exports a Capo-owned evidence artifact for the adapter dogfood gate.
+- Include required, proven, and blocked adapters plus connector smoke-report refs.
+- Record the exported markdown as project-level evidence so dashboard/dogfood reviews can cite the first real-agent readiness gate.
+- Use guarded overwrite behavior so Capo does not overwrite user-authored files.
+- Do not launch provider CLIs, inspect credentials, materialize prompts, open tunnels, request approvals, activate grants, render smoke stdout/stderr content, or mutate connector state beyond recording the evidence artifact.
+
+Evidence:
+
+- CLI `capo adapter dogfood-gate evidence --out DIR` in `../../crates/capo-cli/src/main.rs`.
+- Exported artifacts use the `<!-- capo:adapter-dogfood-gate-evidence -->` marker and guarded overwrite behavior.
+- Artifact records use `kind=adapter_dogfood_gate_evidence`; evidence projections use `kind=adapter_dogfood_gate_evidence`.
+- `cargo test -p capo-cli adapter_dogfood -- --nocapture`: passed.
+
+Decision:
+
+- Treat adapter dogfood gate evidence as the connector-level checkpoint before broader `dogfood readiness`.
+- Keep this report narrower than dogfood readiness: it answers only whether recorded connector smoke evidence clears the first real-agent dogfood gate.
+- Keep smoke report refs metadata-only. The report does not render smoke stdout/stderr, raw prompts, provider output, tokens, cookies, subscription sessions, or credential material.

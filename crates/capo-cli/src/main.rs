@@ -71,6 +71,7 @@ Usage:
   capo adapter run-preflight --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
   capo adapter run-local --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter dogfood-gate [--state PATH]
+  capo adapter dogfood-gate evidence --out DIR [--state PATH]
   capo adapter smoke-report scan --artifact-root PATH [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
   capo adapter smoke-report status --smoke-report SMOKE_REPORT_ID [--state PATH]
@@ -194,6 +195,11 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command] if area == "adapter" && command == "dogfood-gate" => {
             adapter_dogfood_gate(&parsed)
+        }
+        [area, command, action, rest @ ..]
+            if area == "adapter" && command == "dogfood-gate" && action == "evidence" =>
+        {
+            adapter_dogfood_gate_evidence(&parsed, rest)
         }
         [area, command, action, rest @ ..]
             if area == "adapter" && command == "smoke-report" && action == "scan" =>
@@ -1856,6 +1862,96 @@ fn adapter_dogfood_gate(parsed: &ParsedArgs) -> Result<String, String> {
     Ok(render_adapter_dogfood_gate(&dashboard.adapter_dogfood_gate))
 }
 
+fn adapter_dogfood_gate_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--out"))
+    {
+        return Err(format!(
+            "unknown adapter dogfood-gate evidence option: {unknown}"
+        ));
+    }
+    let out = PathBuf::from(required_arg(args, "--out")?);
+    let state = state(parsed)?;
+    let project_id = project_id();
+    let dashboard = project_dashboard(&state, ProjectDashboardQuery::new(project_id.clone()))
+        .map_err(debug_error)?;
+    let gate = &dashboard.adapter_dogfood_gate;
+    let command = envelope(
+        "adapter-dogfood-gate-evidence",
+        CommandTarget::Project(project_id.clone()),
+        CommandIntent::ExportEvidence,
+        Some(gate.status.clone()),
+    );
+    let markdown =
+        render_adapter_dogfood_gate_evidence(&project_id, gate, &dashboard.adapter_smoke_reports);
+    fs::create_dir_all(&out).map_err(|error| error.to_string())?;
+    let content_hash = stable_cli_hash(&markdown);
+    let artifact_id = format!("artifact-adapter-dogfood-gate-evidence-{content_hash}");
+    let path = out.join(format!("{artifact_id}.md"));
+    write_adapter_dogfood_gate_evidence_file(&path, &markdown)?;
+    state
+        .record_artifact(ArtifactRecord {
+            artifact_id: artifact_id.clone(),
+            project_id: Some(project_id.clone()),
+            session_id: None,
+            run_id: None,
+            kind: "adapter_dogfood_gate_evidence".to_string(),
+            uri: path.display().to_string(),
+            content_hash: content_hash.clone(),
+            size_bytes: markdown.len() as i64,
+            redaction_state: RedactionState::Safe,
+        })
+        .map_err(debug_error)?;
+    let evidence_id = format!("evidence-{artifact_id}");
+    let sequence = state
+        .append_event(
+            NewEvent {
+                event_id: format!("event-{evidence_id}"),
+                kind: EventKind::EvidenceRecorded,
+                actor: "cli".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: None,
+                run_id: None,
+                turn_id: None,
+                item_id: Some(evidence_id.clone()),
+                payload_json: format!(
+                    "{{\"artifact_id\":\"{}\",\"content_hash\":\"{}\",\"ready\":{},\"status\":\"{}\"}}",
+                    escape_json(&artifact_id),
+                    escape_json(&content_hash),
+                    gate.ready,
+                    escape_json(&gate.status)
+                ),
+                idempotency_key: Some(format!(
+                    "adapter-dogfood-gate-evidence:{}:{}:{content_hash}",
+                    project_id, gate.status
+                )),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Evidence(EvidenceProjection {
+                evidence_id: capo_core::EvidenceId::new(evidence_id.clone()),
+                project_id: project_id.clone(),
+                task_id: None,
+                session_id: None,
+                run_id: None,
+                kind: "adapter_dogfood_gate_evidence".to_string(),
+                artifact_id: Some(artifact_id.clone()),
+                confidence: adapter_dogfood_gate_evidence_confidence(gate),
+                updated_sequence: 0,
+            })],
+        )
+        .map_err(debug_error)?;
+    Ok(format!(
+        "adapter_dogfood_gate_evidence_exported=true\nready_for_first_real_agent_dogfood={}\nstatus={}\nevidence_id={evidence_id}\nartifact_id={artifact_id}\npath={}\ncontent_hash={content_hash}\nsequence={sequence}\ncommand_id={}\nprovider_cli_executed=false credential_material_rendered=false\n",
+        gate.ready,
+        gate.status,
+        path.display(),
+        command.command_id
+    ))
+}
+
 fn dogfood_readiness(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let out = optional_arg(args, "--out").map(PathBuf::from);
     if has_flag(args, "--out") && out.is_none() {
@@ -3173,6 +3269,41 @@ fn render_adapter_dogfood_gate(gate: &AdapterDogfoodGate) -> String {
         comma_or_none(&gate.proven_adapters),
         comma_or_none(&gate.blocked_adapters),
         comma_or_none(&gate.reasons)
+    )
+}
+
+fn adapter_dogfood_gate_evidence_confidence(gate: &AdapterDogfoodGate) -> i64 {
+    if gate.ready { 85 } else { 65 }
+}
+
+fn render_adapter_dogfood_gate_evidence(
+    project_id: &ProjectId,
+    gate: &AdapterDogfoodGate,
+    smoke_reports: &[AdapterSmokeReportProjection],
+) -> String {
+    let smoke_report_refs = smoke_reports
+        .iter()
+        .map(|report| {
+            format!(
+                "{}:{}:{}:{}",
+                report.smoke_report_id,
+                report.adapter_kind,
+                report.smoke_status,
+                report.credential_scan_status
+            )
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "<!-- capo:adapter-dogfood-gate-evidence -->\n# Capo Adapter Dogfood Gate Evidence - {}\n\n## Objective\n\nReview whether recorded connector evidence is sufficient for first real-agent dogfood, without launching subscription-backed provider CLIs or inspecting credential material.\n\n## Gate\n\n- Project: `{}`\n- Ready for first real-agent dogfood: `{}`\n- Status: `{}`\n- Required adapters: `{}`\n- Proven adapters: `{}`\n- Blocked adapters: `{}`\n- Reasons: `{}`\n\n## Connector Evidence Refs\n\n- Smoke report refs: `{}`\n\n## Review Notes\n\n- The first dogfood gate requires a passed Codex smoke report with a clean credential scan, the expected marker present, and `real_agent_connector_proven` as its readiness effect.\n- A blocked gate is still useful evidence because it identifies which connector proof is missing before Capo can dogfood with real local agents.\n- Smoke report refs are metadata only; this report does not render stdout, stderr, prompts, provider output, tokens, cookies, or subscription session material.\n\n## Evidence Policy\n\n- This report is derived from persisted Capo adapter smoke report read models only.\n- It does not launch provider CLIs, materialize prompts, open tunnels, inspect credentials, request approvals, activate grants, or mutate connector state.\n- Credential material, tokens, cookies, subscription sessions, raw prompts, and provider output are not rendered.\n",
+        gate.status,
+        project_id,
+        gate.ready,
+        gate.status,
+        comma_or_none(&gate.required_adapters),
+        comma_or_none(&gate.proven_adapters),
+        comma_or_none(&gate.blocked_adapters),
+        comma_or_none(&gate.reasons),
+        comma_or_none(&smoke_report_refs)
     )
 }
 
@@ -8225,6 +8356,24 @@ fn write_dogfood_readiness_file(path: &Path, markdown: &str) -> Result<(), Strin
     fs::write(path, markdown).map_err(|error| error.to_string())
 }
 
+fn write_adapter_dogfood_gate_evidence_file(path: &Path, markdown: &str) -> Result<(), String> {
+    if let Ok(existing) = fs::read_to_string(path) {
+        if !existing.starts_with("<!-- capo:adapter-dogfood-gate-evidence -->") {
+            return Err(format!(
+                "refusing to overwrite non-Capo adapter dogfood gate evidence file: {}",
+                path.display()
+            ));
+        }
+        if existing != markdown {
+            return Err(format!(
+                "refusing to overwrite changed Capo adapter dogfood gate evidence file: {}",
+                path.display()
+            ));
+        }
+    }
+    fs::write(path, markdown).map_err(|error| error.to_string())
+}
+
 fn write_connectivity_exposure_evidence_file(path: &Path, markdown: &str) -> Result<(), String> {
     if let Ok(existing) = fs::read_to_string(path) {
         if !existing.starts_with("<!-- capo:connectivity-exposure-evidence -->") {
@@ -9875,6 +10024,26 @@ mod tests {
         assert!(blocked.contains("adapter_dogfood_gate=true"));
         assert!(blocked.contains("ready_for_first_real_agent_dogfood=false"));
         assert!(blocked.contains("blocked_adapters=codex_exec"));
+        let evidence_dir = temp_root("adapter-dogfood-gate-evidence");
+        let blocked_evidence = run_cli(vec![
+            "adapter".to_string(),
+            "dogfood-gate".to_string(),
+            "evidence".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("blocked gate evidence");
+        assert!(blocked_evidence.contains("adapter_dogfood_gate_evidence_exported=true"));
+        assert!(blocked_evidence.contains("ready_for_first_real_agent_dogfood=false"));
+        assert!(blocked_evidence.contains("provider_cli_executed=false"));
+        let blocked_evidence_path = output_value(&blocked_evidence, "path");
+        let blocked_markdown =
+            fs::read_to_string(&blocked_evidence_path).expect("read blocked gate evidence");
+        assert!(blocked_markdown.starts_with("<!-- capo:adapter-dogfood-gate-evidence -->"));
+        assert!(blocked_markdown.contains("- Blocked adapters: `codex_exec`"));
+        assert!(blocked_markdown.contains("does not render stdout"));
 
         run_cli(vec![
             "adapter".to_string(),
@@ -9906,6 +10075,24 @@ mod tests {
         assert!(ready.contains("ready_for_first_real_agent_dogfood=true"));
         assert!(ready.contains("status=ready_for_first_real_agent_dogfood"));
         assert!(ready.contains("proven_adapters=codex_exec"));
+        let ready_evidence = run_cli(vec![
+            "adapter".to_string(),
+            "dogfood-gate".to_string(),
+            "evidence".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("ready gate evidence");
+        assert!(ready_evidence.contains("adapter_dogfood_gate_evidence_exported=true"));
+        assert!(ready_evidence.contains("ready_for_first_real_agent_dogfood=true"));
+        let ready_evidence_path = output_value(&ready_evidence, "path");
+        let ready_markdown =
+            fs::read_to_string(&ready_evidence_path).expect("read ready gate evidence");
+        assert!(ready_markdown.contains("- Proven adapters: `codex_exec`"));
+        assert!(ready_markdown.contains("adapter-smoke-codex_exec"));
+        assert!(!ready_markdown.contains("CAPO_CODEX_SMOKE_OK"));
 
         let dashboard = run_cli(vec![
             "dashboard".to_string(),
@@ -9915,6 +10102,8 @@ mod tests {
         .expect("dashboard");
         assert!(dashboard.contains("adapter_dogfood_gate=true"));
         assert!(dashboard.contains("ready_for_first_real_agent_dogfood=true"));
+        assert!(dashboard.contains("project_evidence=2"));
+        assert!(dashboard.contains("kind=adapter_dogfood_gate_evidence"));
     }
 
     #[test]

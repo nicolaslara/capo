@@ -187,6 +187,15 @@ Observed 2026-05-26.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC32.
 
+## F1/AC33 Adapter Dogfood Gate Evidence Export
+
+Observed 2026-05-26.
+
+- CLI adapter dogfood-gate evidence export and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared adapter dogfood gate contract rendered by the export: `../../crates/capo-query/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC33.
+
 ## F1/AC12 Workpad Next Adapter Plan
 
 Observed 2026-05-25.

@@ -252,6 +252,21 @@ Verification:
 
 - `cargo test -p capo-cli adapter_smoke -- --nocapture`: passed.
 
+## F1/AC33 - Adapter Dogfood Gate Evidence Export
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo adapter dogfood-gate evidence --out DIR` as the connector-level evidence checkpoint for first real-agent dogfood readiness.
+- Keep the report narrower than full dogfood readiness. It covers only the adapter dogfood gate: required adapters, proven adapters, blocked adapters, gate reasons, and smoke-report refs.
+- Record the report as project-level evidence with `kind=adapter_dogfood_gate_evidence` so dashboard and future dogfood review flows can cite the gate directly.
+- Preserve provider safety: the export is read-model-derived and does not launch provider CLIs, inspect credentials, render smoke stdout/stderr, materialize prompts, open tunnels, request approvals, activate grants, or mutate connector state beyond recording evidence.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_dogfood -- --nocapture`: passed.
+
 ## F6/V4 - Dogfood Readiness Conversation
 
 Status: completed on 2026-05-26.

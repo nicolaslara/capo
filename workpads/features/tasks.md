@@ -85,6 +85,7 @@ Progress:
 - AC30 adapter smoke report evidence export is completed. `smoke-report evidence` writes a prompt/output-redacted Capo evidence artifact for connector proof or blocker review.
 - AC31 adapter smoke report status query is completed. `smoke-report status` exposes exact and latest connector smoke status through the shared query contract.
 - AC32 latest adapter smoke evidence export is completed. `smoke-report evidence --latest` exports connector proof/blocker artifacts through the shared latest smoke selector.
+- AC33 adapter dogfood gate evidence export is completed. `adapter dogfood-gate evidence` writes a connector-level gate artifact for first real-agent dogfood review.
 
 Evidence:
 
@@ -138,6 +139,7 @@ Evidence:
 - `capo adapter smoke-report status --smoke-report SMOKE_REPORT_ID [--state PATH]`
 - `capo adapter smoke-report status --latest [--adapter codex|claude] [--state PATH]`
 - `capo adapter smoke-report evidence --latest [--adapter codex|claude] --out DIR [--state PATH]`
+- `capo adapter dogfood-gate evidence --out DIR [--state PATH]`
 - Focused F1 connector safety reviews: provider-artifact cleanup blocker found and fixed; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge
