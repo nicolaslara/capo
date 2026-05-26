@@ -417,6 +417,7 @@ Progress:
 - RR8 connectivity exposure evidence export is completed with a Capo-owned project evidence artifact for endpoint/owner/channel/scope/status/health/grant/revocation review.
 - RR9 latest connectivity exposure status is completed with shared exact/latest exposure selectors and a read-only CLI status surface with owner/channel filters.
 - RR10 latest connectivity exposure evidence export is completed with filtered latest-selector export through the shared connectivity exposure query.
+- RR11 runtime target inventory is completed with first-class runtime target metadata persisted separately from connectivity exposures and provider dispatch plans.
 - F7 remains `in_progress` until the real local-agent connector dependency is satisfied; remote execution semantics are still contract-level and loopback/stubbed.
 
 Evidence:
@@ -436,3 +437,9 @@ Evidence:
 - `capo connectivity exposure-evidence --latest [--owner-kind runtime_target|capo_server] [--owner-id OWNER_ID] [--channel CHANNEL] --out DIR [--state PATH]`
 - `capo connectivity exposure-status --exposure EXPOSURE_ID [--state PATH]`
 - `capo connectivity exposure-status --latest [--owner-kind runtime_target|capo_server] [--owner-id OWNER_ID] [--channel CHANNEL] [--state PATH]`
+- `cargo test -p capo-state runtime_targets -- --nocapture`
+- `cargo test -p capo-cli runtime_target -- --nocapture`
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`

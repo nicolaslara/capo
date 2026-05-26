@@ -1944,3 +1944,24 @@ Decisions:
 Verification:
 
 - `cargo test -p capo-cli tool_run_wrapper -- --nocapture`: passed.
+
+## F7/RR11 - Runtime Target Inventory
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add runtime targets as a first-class persisted read model for execution-machine metadata instead of relying on opaque `runtime_target` owner IDs in connectivity exposure rows.
+- Keep the execution placement boundary separate from connectivity and provider dispatch. Runtime targets record runner kind, workspace/artifact roots, default cwd, capability profile, optional connectivity endpoint, and status; they do not represent a running process or an open tunnel.
+- Add `capo runtime target register` and `capo runtime target list` as provider-free operator surfaces over the registry.
+- Render runtime targets in `capo dashboard` through `ProjectDashboard.runtime_targets`, keeping CLI/dashboard/voice/web consumers on the shared query boundary.
+- Preserve the safety boundary: no runtime process launch, provider CLI execution, credential/session inspection, tunnel opening, prompt materialization, or exposure activation.
+
+Verification:
+
+- `cargo test -p capo-state runtime_targets -- --nocapture`: passed.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.

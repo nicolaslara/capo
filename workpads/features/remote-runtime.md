@@ -230,3 +230,33 @@ Decision:
 - Treat latest evidence export as operator ergonomics over the shared connectivity exposure selector. It selects the latest matching exposure, then writes the same Capo-owned connectivity exposure evidence artifact as exact export.
 - Keep exact `--exposure` and latest `--latest` mutually exclusive; owner/channel filters are only valid with `--latest`.
 - Keep the export read-model-derived and provider-free. It does not open tunnels, launch runtimes or providers, inspect credentials, request approvals, activate grants, revoke exposure, or mutate exposure state.
+
+### RR11 - Runtime Target Inventory
+
+Status: completed
+
+Acceptance:
+
+- Add a first-class persisted runtime target read model so connectivity exposures can point at known execution-machine metadata instead of opaque owner IDs only.
+- Keep runtime target metadata separate from connectivity exposure rows and adapter/provider dispatch plans.
+- Expose a provider-free operator surface for registering and listing runtime targets.
+- Render runtime targets through the shared dashboard/query path.
+- Do not launch runtimes, launch provider CLIs, inspect credentials, open tunnels, or activate exposure.
+
+Evidence:
+
+- `RuntimeTargetProjection`, `EventKind::RuntimeTargetRegistered`, SQLite `runtime_targets`, projection-log encode/decode, read query, and rebuild coverage in `../../crates/capo-state/src/lib.rs`.
+- `ProjectDashboard.runtime_targets` in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo runtime target register ...` and `capo runtime target list` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-state runtime_targets -- --nocapture`: passed.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Decision:
+
+- Treat runtime targets as execution placement metadata: runner kind, workspace root, artifact root, default cwd, capability profile, optional connectivity endpoint, and health/status label.
+- Keep actual process execution in runtime requests/outcomes and keep reachability in connectivity exposure records. A runtime target can be listed without any tunnel or provider process existing.
+- Use this registry as the stable owner side for later SSH/Tailscale/cloud target adapters and for dashboard/operator review before real remote execution is enabled.

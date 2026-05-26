@@ -11,9 +11,9 @@ use capo_state::{
     AdapterDispatchPromptMaterializationProjection, AdapterDispatchPromptSourceProjection,
     AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
     AgentProjection, ConnectivityExposureProjection, EventRecord, EvidenceProjection,
-    MemoryPacketProjection, ReviewFindingProjection, RunProjection, SessionProjection,
-    SqliteStateStore, StateResult, TaskOutcomeReportProjection, ToolCallProjection,
-    ToolObservationProjection, WorkpadTaskProjection,
+    MemoryPacketProjection, ReviewFindingProjection, RunProjection, RuntimeTargetProjection,
+    SessionProjection, SqliteStateStore, StateResult, TaskOutcomeReportProjection,
+    ToolCallProjection, ToolObservationProjection, WorkpadTaskProjection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,6 +23,7 @@ pub struct ProjectDashboard {
     pub project_evidence: Vec<EvidenceProjection>,
     pub review_findings: Vec<ReviewFindingProjection>,
     pub task_outcome_reports: Vec<TaskOutcomeReportProjection>,
+    pub runtime_targets: Vec<RuntimeTargetProjection>,
     pub connectivity_exposures: Vec<ConnectivityExposureProjection>,
     pub adapter_readiness: Vec<AdapterReadinessProjection>,
     pub adapter_smoke_reports: Vec<AdapterSmokeReportProjection>,
@@ -445,6 +446,7 @@ pub fn project_dashboard(
         rows.push(AgentDashboardRow { agent, session });
     }
     let connectivity_exposures = state.connectivity_exposures(&query.project_id)?;
+    let runtime_targets = state.runtime_targets(&query.project_id)?;
     let project_evidence = state.project_evidence(&query.project_id)?;
     let review_findings = state.review_findings(&query.project_id)?;
     let task_outcome_reports = state.task_outcome_reports(&query.project_id)?;
@@ -487,6 +489,7 @@ pub fn project_dashboard(
         project_evidence,
         review_findings,
         task_outcome_reports,
+        runtime_targets,
         connectivity_exposures,
         adapter_readiness,
         adapter_smoke_reports,

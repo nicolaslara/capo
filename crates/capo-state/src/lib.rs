@@ -787,6 +787,38 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn runtime_targets(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<RuntimeTargetProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT runtime_target_id, project_id, name, runner_kind, workspace_root,
+                    artifact_root, default_cwd, capability_profile_id, connectivity_endpoint_id,
+                    status, updated_sequence
+             FROM runtime_targets
+             WHERE project_id = ?1
+             ORDER BY updated_sequence ASC, runtime_target_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(RuntimeTargetProjection {
+                runtime_target_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                name: row.get(2)?,
+                runner_kind: row.get(3)?,
+                workspace_root: row.get(4)?,
+                artifact_root: row.get(5)?,
+                default_cwd: row.get(6)?,
+                capability_profile_id: row.get(7)?,
+                connectivity_endpoint_id: row.get(8)?,
+                status: row.get(9)?,
+                updated_sequence: row.get(10)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn adapter_readiness(
         &self,
         project_id: &ProjectId,
@@ -1766,6 +1798,7 @@ pub enum EventKind {
     ConnectivityExposureChanged,
     ConnectivityExposureRevoked,
     ConnectivityHealthChanged,
+    RuntimeTargetRegistered,
     AdapterReadinessChecked,
     AdapterSmokeRecorded,
     AdapterDispatchPlanned,
@@ -1817,6 +1850,7 @@ impl EventKind {
             Self::ConnectivityExposureChanged => "connectivity.exposure_changed",
             Self::ConnectivityExposureRevoked => "connectivity.exposure_revoked",
             Self::ConnectivityHealthChanged => "connectivity.health_changed",
+            Self::RuntimeTargetRegistered => "runtime.target_registered",
             Self::AdapterReadinessChecked => "adapter.readiness_checked",
             Self::AdapterSmokeRecorded => "adapter.smoke_recorded",
             Self::AdapterDispatchPlanned => "adapter.dispatch_planned",
@@ -1920,6 +1954,7 @@ pub enum ProjectionRecord {
     CapabilityGrant(CapabilityGrantProjection),
     PermissionApproval(PermissionApprovalProjection),
     ConnectivityExposure(ConnectivityExposureProjection),
+    RuntimeTarget(RuntimeTargetProjection),
     AdapterReadiness(AdapterReadinessProjection),
     AdapterSmokeReport(AdapterSmokeReportProjection),
     AdapterDispatchPlan(AdapterDispatchPlanProjection),
@@ -2041,6 +2076,21 @@ pub struct ConnectivityExposureProjection {
     pub health_status: String,
     pub reachable: bool,
     pub revoked_at: Option<String>,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeTargetProjection {
+    pub runtime_target_id: String,
+    pub project_id: ProjectId,
+    pub name: String,
+    pub runner_kind: String,
+    pub workspace_root: String,
+    pub artifact_root: String,
+    pub default_cwd: String,
+    pub capability_profile_id: String,
+    pub connectivity_endpoint_id: Option<String>,
+    pub status: String,
     pub updated_sequence: i64,
 }
 
@@ -2574,6 +2624,19 @@ fn migrate(connection: &mut Connection) -> StateResult<()> {
             revoked_at TEXT,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS runtime_targets (
+            runtime_target_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            runner_kind TEXT NOT NULL,
+            workspace_root TEXT NOT NULL,
+            artifact_root TEXT NOT NULL,
+            default_cwd TEXT NOT NULL,
+            capability_profile_id TEXT NOT NULL,
+            connectivity_endpoint_id TEXT,
+            status TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS adapter_readiness (
             adapter_kind TEXT NOT NULL,
             project_id TEXT NOT NULL,
@@ -2925,6 +2988,7 @@ fn clear_projection_tables(transaction: &Transaction<'_>) -> StateResult<()> {
         "capability_grants",
         "permission_approvals",
         "connectivity_exposures",
+        "runtime_targets",
         "adapter_readiness",
         "adapter_smoke_reports",
         "adapter_dispatch_plans",
@@ -3220,6 +3284,37 @@ fn apply_projection_record(
                 exposure.health_status,
                 if exposure.reachable { 1 } else { 0 },
                 exposure.revoked_at,
+                sequence,
+            ],
+        )?,
+        ProjectionRecord::RuntimeTarget(target) => transaction.execute(
+            "INSERT INTO runtime_targets(
+                runtime_target_id, project_id, name, runner_kind, workspace_root,
+                artifact_root, default_cwd, capability_profile_id, connectivity_endpoint_id,
+                status, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(runtime_target_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                name = excluded.name,
+                runner_kind = excluded.runner_kind,
+                workspace_root = excluded.workspace_root,
+                artifact_root = excluded.artifact_root,
+                default_cwd = excluded.default_cwd,
+                capability_profile_id = excluded.capability_profile_id,
+                connectivity_endpoint_id = excluded.connectivity_endpoint_id,
+                status = excluded.status,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                target.runtime_target_id,
+                target.project_id.as_str(),
+                target.name,
+                target.runner_kind,
+                target.workspace_root,
+                target.artifact_root,
+                target.default_cwd,
+                target.capability_profile_id,
+                target.connectivity_endpoint_id,
+                target.status,
                 sequence,
             ],
         )?,
@@ -4054,6 +4149,22 @@ fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionRecordRow {
             })
             .to_string(),
         },
+        ProjectionRecord::RuntimeTarget(target) => ProjectionRecordRow {
+            kind: "runtime_target",
+            record_id: target.runtime_target_id.clone(),
+            a: Some(target.project_id.to_string()),
+            b: Some(target.name.clone()),
+            c: Some(target.runner_kind.clone()),
+            d: Some(target.status.clone()),
+            e: target.connectivity_endpoint_id.clone(),
+            f: Some(target.capability_profile_id.clone()),
+            g: Some(target.workspace_root.clone()),
+            h: Some(target.artifact_root.clone()),
+            payload_json: json!({
+                "default_cwd": target.default_cwd,
+            })
+            .to_string(),
+        },
         ProjectionRecord::AdapterReadiness(readiness) => ProjectionRecordRow {
             kind: "adapter_readiness",
             record_id: readiness.adapter_kind.clone(),
@@ -4626,6 +4737,47 @@ fn projection_record_from_row(
                     updated_sequence: 0,
                 },
             ))
+        }
+        "runtime_target" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::RuntimeTarget(RuntimeTargetProjection {
+                runtime_target_id: record_id,
+                project_id: ProjectId::new(required_field(
+                    &projection_kind,
+                    "runtime_target",
+                    a,
+                    "project_id",
+                )?),
+                name: required_field(&projection_kind, "runtime_target", b, "name")?,
+                runner_kind: required_field(&projection_kind, "runtime_target", c, "runner_kind")?,
+                workspace_root: required_field(
+                    &projection_kind,
+                    "runtime_target",
+                    g,
+                    "workspace_root",
+                )?,
+                artifact_root: required_field(
+                    &projection_kind,
+                    "runtime_target",
+                    h,
+                    "artifact_root",
+                )?,
+                default_cwd: required_payload_string(
+                    &projection_kind,
+                    "runtime_target",
+                    &payload,
+                    "default_cwd",
+                )?,
+                capability_profile_id: required_field(
+                    &projection_kind,
+                    "runtime_target",
+                    f,
+                    "capability_profile_id",
+                )?,
+                connectivity_endpoint_id: e,
+                status: required_field(&projection_kind, "runtime_target", d, "status")?,
+                updated_sequence: 0,
+            }))
         }
         "adapter_readiness" => {
             let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
@@ -6845,6 +6997,55 @@ mod tests {
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].effect, "deny");
         assert_eq!(grants[0].persistence, "until_revoked");
+    }
+
+    #[test]
+    fn runtime_targets_are_persisted_and_rebuilt() {
+        let store = temp_store("runtime-target-rebuild");
+        let project_id = ProjectId::new("project-capo");
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-runtime-target-registered".to_string(),
+                    kind: EventKind::RuntimeTargetRegistered,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some("runtime-target-local-1".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::RuntimeTarget(RuntimeTargetProjection {
+                    runtime_target_id: "runtime-target-local-1".to_string(),
+                    project_id: project_id.clone(),
+                    name: "local dev box".to_string(),
+                    runner_kind: "local-process".to_string(),
+                    workspace_root: "/tmp/capo-workspace".to_string(),
+                    artifact_root: "/tmp/capo-artifacts".to_string(),
+                    default_cwd: "/tmp/capo-workspace".to_string(),
+                    capability_profile_id: "read-only-local".to_string(),
+                    connectivity_endpoint_id: Some("endpoint-loopback-1".to_string()),
+                    status: "available".to_string(),
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append runtime target");
+
+        store.rebuild_projections().expect("rebuild projections");
+        let targets = store.runtime_targets(&project_id).expect("runtime targets");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].runtime_target_id, "runtime-target-local-1");
+        assert_eq!(targets[0].runner_kind, "local-process");
+        assert_eq!(targets[0].workspace_root, "/tmp/capo-workspace");
+        assert_eq!(
+            targets[0].connectivity_endpoint_id.as_deref(),
+            Some("endpoint-loopback-1")
+        );
     }
 
     #[test]

@@ -31,9 +31,9 @@ use capo_state::{
     ArtifactRecord, CapabilityGrantProjection, ConnectivityExposureProjection, EventKind,
     EventRecord, EvidenceProjection, MemoryPacketProjection, MemoryRecordProjection,
     MemorySourceProjection, NewEvent, PermissionApprovalProjection, ProjectionRecord,
-    RedactionState, ReviewFindingProjection, RunProjection, SessionProjection, SqliteStateStore,
-    ToolCallProjection, ToolObservationProjection, WorkpadFileProjection,
-    WorkpadIndexResetProjection, WorkpadTaskProjection,
+    RedactionState, ReviewFindingProjection, RunProjection, RuntimeTargetProjection,
+    SessionProjection, SqliteStateStore, ToolCallProjection, ToolObservationProjection,
+    WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
 use capo_tools::{
     PermissionPolicy, RuntimeToolConfig, RuntimeToolWrappers, WrapperArtifact, WrapperToolRequest,
@@ -85,6 +85,8 @@ Usage:
   capo permission request --approval APPROVAL_ID --scope-json JSON --reason REASON [--profile PROFILE] [--session SESSION_ID] [--tool-call TOOL_CALL_ID] [--subject-json JSON] [--requested-by ACTOR] [--state PATH]
   capo permission list [--state PATH]
   capo permission decide --approval APPROVAL_ID --decision allow_once|allow_always|reject_once|reject_always [--state PATH]
+  capo runtime target register --target TARGET_ID --name NAME --runner local-process|remote-process|container --workspace PATH --artifacts PATH [--cwd PATH] [--capability-profile PROFILE] [--endpoint ENDPOINT_ID] [--status available|disabled|unhealthy] [--state PATH]
+  capo runtime target list [--state PATH]
   capo connectivity expose-stub --endpoint ENDPOINT_ID --owner-kind runtime_target|capo_server --owner-id OWNER_ID --channel control|stdio|logs|dashboard|artifact --exposure loopback|private|public [--address REF] [--record] [--state PATH]
   capo connectivity request-approval --exposure EXPOSURE_ID [--approval APPROVAL_ID] [--state PATH]
   capo connectivity activate-exposure --exposure EXPOSURE_ID [--state PATH]
@@ -218,6 +220,14 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "permission" && command == "decide" => {
             decide_permission_approval(&parsed, rest)
+        }
+        [area, command, action, rest @ ..]
+            if area == "runtime" && command == "target" && action == "register" =>
+        {
+            register_runtime_target(&parsed, rest)
+        }
+        [area, command, action] if area == "runtime" && command == "target" && action == "list" => {
+            list_runtime_targets(&parsed)
         }
         [area, command, rest @ ..] if area == "connectivity" && command == "expose-stub" => {
             expose_connectivity_stub(&parsed, rest)
@@ -3057,6 +3067,14 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
     }
 
     output.push_str(&format!(
+        "runtime_targets={}\n",
+        dashboard.runtime_targets.len()
+    ));
+    for target in &dashboard.runtime_targets {
+        output.push_str(&render_runtime_target_row("runtime_target", target));
+    }
+
+    output.push_str(&format!(
         "connectivity_exposures={}\n",
         dashboard.connectivity_exposures.len()
     ));
@@ -4587,6 +4605,138 @@ fn decide_permission_approval(parsed: &ParsedArgs, args: &[String]) -> Result<St
     ))
 }
 
+fn register_runtime_target(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--")
+            && !matches!(
+                arg.as_str(),
+                "--target"
+                    | "--name"
+                    | "--runner"
+                    | "--workspace"
+                    | "--artifacts"
+                    | "--cwd"
+                    | "--capability-profile"
+                    | "--endpoint"
+                    | "--status"
+            )
+    }) {
+        return Err(format!("unknown runtime target register option: {unknown}"));
+    }
+    let runtime_target_id = required_arg(args, "--target")?;
+    let name = required_arg(args, "--name")?;
+    let runner_kind = parse_runtime_runner_kind(&required_arg(args, "--runner")?)?;
+    let workspace_root = required_arg(args, "--workspace")?;
+    let artifact_root = required_arg(args, "--artifacts")?;
+    let default_cwd = optional_arg(args, "--cwd").unwrap_or_else(|| workspace_root.clone());
+    let capability_profile_id =
+        optional_arg(args, "--capability-profile").unwrap_or_else(|| "read-only-local".to_string());
+    let connectivity_endpoint_id = optional_arg(args, "--endpoint");
+    let status = parse_runtime_target_status(
+        optional_arg(args, "--status")
+            .as_deref()
+            .unwrap_or("available"),
+    )?;
+    let target = RuntimeTargetProjection {
+        runtime_target_id: runtime_target_id.clone(),
+        project_id: project_id(),
+        name,
+        runner_kind,
+        workspace_root,
+        artifact_root,
+        default_cwd,
+        capability_profile_id,
+        connectivity_endpoint_id,
+        status,
+        updated_sequence: 0,
+    };
+    let mut event = NewEvent::new(
+        format!(
+            "event-runtime-target-{}",
+            stable_cli_hash(&target.runtime_target_id)
+        ),
+        EventKind::RuntimeTargetRegistered,
+        "capo-cli",
+    );
+    event.project_id = Some(target.project_id.clone());
+    event.item_id = Some(target.runtime_target_id.clone());
+    event.payload_json = serde_json::json!({
+        "runtime_target_id": target.runtime_target_id,
+        "name": target.name,
+        "runner_kind": target.runner_kind,
+        "workspace_root": target.workspace_root,
+        "artifact_root": target.artifact_root,
+        "default_cwd": target.default_cwd,
+        "capability_profile_id": target.capability_profile_id,
+        "connectivity_endpoint_id": target.connectivity_endpoint_id,
+        "status": target.status,
+        "provider_cli_executed": false,
+        "tunnel_opened": false,
+    })
+    .to_string();
+    event.idempotency_key = Some(format!(
+        "runtime-target:{}:{}",
+        target.project_id, target.runtime_target_id
+    ));
+    event.redaction_state = RedactionState::Safe;
+    let sequence = state(parsed)?
+        .append_event(event, &[ProjectionRecord::RuntimeTarget(target.clone())])
+        .map_err(debug_error)?;
+    Ok(render_runtime_target_registration(&target, sequence))
+}
+
+fn list_runtime_targets(parsed: &ParsedArgs) -> Result<String, String> {
+    let command = envelope(
+        "runtime-target-list",
+        CommandTarget::Project(project_id()),
+        CommandIntent::QueryStatus,
+        None,
+    );
+    let targets = state(parsed)?
+        .runtime_targets(&project_id())
+        .map_err(debug_error)?;
+    let mut output = format!(
+        "command_id={}\nruntime_targets={}\n",
+        command.command_id,
+        targets.len()
+    );
+    for target in &targets {
+        output.push_str(&render_runtime_target_row("runtime_target", target));
+    }
+    Ok(output)
+}
+
+fn render_runtime_target_registration(target: &RuntimeTargetProjection, sequence: i64) -> String {
+    format!(
+        "runtime_target_registered=true\nruntime_target={} name={} runner={} workspace={} artifacts={} default_cwd={} capability_profile={} endpoint={} status={} provider_cli_executed=false tunnel_opened=false sequence={sequence}\n",
+        target.runtime_target_id,
+        target.name,
+        target.runner_kind,
+        target.workspace_root,
+        target.artifact_root,
+        target.default_cwd,
+        target.capability_profile_id,
+        target.connectivity_endpoint_id.as_deref().unwrap_or("none"),
+        target.status
+    )
+}
+
+fn render_runtime_target_row(label: &str, target: &RuntimeTargetProjection) -> String {
+    format!(
+        "{label}={} name={} runner={} workspace={} artifacts={} default_cwd={} capability_profile={} endpoint={} status={} updated_sequence={}\n",
+        target.runtime_target_id,
+        target.name,
+        target.runner_kind,
+        target.workspace_root,
+        target.artifact_root,
+        target.default_cwd,
+        target.capability_profile_id,
+        target.connectivity_endpoint_id.as_deref().unwrap_or("none"),
+        target.status,
+        target.updated_sequence
+    )
+}
+
 fn expose_connectivity_stub(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let endpoint_id = required_arg(args, "--endpoint")?;
     let owner_kind = required_arg(args, "--owner-kind")?;
@@ -5404,6 +5554,24 @@ fn endpoint_owner(owner_kind: &str, owner_id: &str) -> Result<EndpointOwner, Str
         "runtime_target" => Ok(EndpointOwner::runtime_target(owner_id)),
         "capo_server" => Ok(EndpointOwner::capo_server(owner_id)),
         other => Err(format!("unsupported endpoint owner kind: {other}")),
+    }
+}
+
+fn parse_runtime_runner_kind(value: &str) -> Result<String, String> {
+    match value {
+        "local-process" | "remote-process" | "container" => Ok(value.to_string()),
+        other => Err(format!(
+            "unsupported runtime runner kind: {other}; expected local-process, remote-process, or container"
+        )),
+    }
+}
+
+fn parse_runtime_target_status(value: &str) -> Result<String, String> {
+    match value {
+        "available" | "disabled" | "unhealthy" => Ok(value.to_string()),
+        other => Err(format!(
+            "unsupported runtime target status: {other}; expected available, disabled, or unhealthy"
+        )),
     }
 }
 
@@ -7198,6 +7366,8 @@ mod tests {
         assert!(HELP.contains("adapter replay-dispatch"));
         assert!(HELP.contains("adapter dogfood-gate"));
         assert!(HELP.contains("dogfood readiness"));
+        assert!(HELP.contains("runtime target register"));
+        assert!(HELP.contains("runtime target list"));
         assert!(HELP.contains("connectivity expose-stub"));
         assert!(HELP.contains("connectivity request-approval"));
         assert!(HELP.contains("connectivity activate-exposure"));
@@ -9718,6 +9888,65 @@ mod tests {
         assert!(dashboard.contains("exposure_status=blocked_pending_permission"));
         assert!(dashboard.contains("permission_scope=network:connect:private_tunnel"));
         assert!(dashboard.contains("grant=none"));
+    }
+
+    #[test]
+    fn runtime_target_register_lists_dashboard_metadata_without_execution() {
+        let state_root = temp_root("cli-runtime-target-register");
+        let workspace = temp_root("runtime-target-workspace");
+        let artifacts = temp_root("runtime-target-artifacts");
+        let registered = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "register".to_string(),
+            "--target".to_string(),
+            "runtime-target-local-1".to_string(),
+            "--name".to_string(),
+            "local dev box".to_string(),
+            "--runner".to_string(),
+            "local-process".to_string(),
+            "--workspace".to_string(),
+            workspace.display().to_string(),
+            "--artifacts".to_string(),
+            artifacts.display().to_string(),
+            "--capability-profile".to_string(),
+            "read-only-local".to_string(),
+            "--endpoint".to_string(),
+            "endpoint-loopback-1".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("register runtime target");
+
+        assert!(registered.contains("runtime_target_registered=true"));
+        assert!(registered.contains("runtime_target=runtime-target-local-1"));
+        assert!(registered.contains("runner=local-process"));
+        assert!(registered.contains("capability_profile=read-only-local"));
+        assert!(registered.contains("endpoint=endpoint-loopback-1"));
+        assert!(registered.contains("provider_cli_executed=false"));
+        assert!(registered.contains("tunnel_opened=false"));
+
+        let list = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "list".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("list runtime targets");
+        assert!(list.contains("runtime_targets=1"));
+        assert!(list.contains("runtime_target=runtime-target-local-1"));
+        assert!(list.contains("status=available"));
+
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard");
+        assert!(dashboard.contains("runtime_targets=1"));
+        assert!(dashboard.contains("runtime_target=runtime-target-local-1"));
+        assert!(dashboard.contains("runner=local-process"));
     }
 
     #[test]

@@ -916,3 +916,14 @@ Observed 2026-05-26.
 - Runtime wrapper implementation consumed by the CLI: `../../crates/capo-tools/src/lib.rs`
 - Permissions source workpad: `permissions-tools.md`
 - No new third-party dependencies were added for PT13.
+
+## F7/RR11 Runtime Target Inventory
+
+Observed 2026-05-26.
+
+- Runtime target projection, SQLite table, projection-log codec, read query, and rebuild coverage: `../../crates/capo-state/src/lib.rs`
+- Shared dashboard runtime target rows: `../../crates/capo-query/src/lib.rs`
+- CLI `capo runtime target register`, `capo runtime target list`, dashboard rendering, and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Runtime/connectivity architecture source: `../architecture/runtime-tunnel.md`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR11.
