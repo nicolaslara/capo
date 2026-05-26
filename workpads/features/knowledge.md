@@ -2067,6 +2067,10 @@ Verification:
 - `git diff --check`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - `cargo test`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
 
 ## F7/RR17 - Voice Runtime Target Status Query
 
@@ -2088,3 +2092,20 @@ Verification:
 - `git diff --check`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - `cargo test`: passed.
+
+## F7/RR18 - Runtime Target Evidence Export
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo runtime target evidence --target TARGET_ID --out DIR` as a provider-free evidence export for one runtime target.
+- Write a Capo-marked markdown artifact with guarded overwrite behavior and record it as project-level evidence.
+- Use `kind=runtime_target_evidence` for both artifact and evidence rows so dashboards and future readiness checks can distinguish target placement evidence from connectivity exposure evidence.
+- Treat runtime target evidence as reviewable placement/status metadata, not proof that a runtime process is live.
+- Preserve the boundary split: the export does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, prompt materialization, raw transcript retention, or target-state mutation.
+
+Verification:
+
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.

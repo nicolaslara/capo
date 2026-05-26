@@ -421,3 +421,33 @@ Decision:
 - Treat voice runtime target status as a read-only input surface over the same shared target selector used by CLI status.
 - Keep runtime target status distinct from latest connectivity exposure: a user can ask whether a machine is available without asking whether a tunnel/exposure is active.
 - Return a spoken missing-target row for unknown targets instead of mutating state or requesting permission.
+
+### RR18 - Runtime Target Evidence Export
+
+Status: completed
+
+Acceptance:
+
+- Add a provider-free command that exports a Capo-owned evidence artifact for one runtime target's latest placement/status metadata.
+- Record the exported markdown as project-level evidence so dashboards and later dogfood/readiness checks can cite runtime target state.
+- Use guarded overwrite behavior so Capo does not overwrite user-authored files.
+- Return a clear error for an unknown runtime target.
+- Do not launch runtimes, launch providers, inspect credentials, open tunnels, request approvals, activate grants, retain raw transcripts, or mutate runtime target state.
+
+Evidence:
+
+- CLI `capo runtime target evidence --target TARGET_ID --out DIR` in `../../crates/capo-cli/src/main.rs`.
+- Exported artifacts use the `<!-- capo:runtime-target-evidence -->` marker and guarded overwrite behavior.
+- Artifact records use `kind=runtime_target_evidence`; evidence projections use `kind=runtime_target_evidence`.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Decision:
+
+- Treat runtime target evidence as an operator review artifact over placement/status metadata, not proof that a runtime process is live.
+- Keep runtime target evidence separate from connectivity exposure evidence: target status answers whether Capo can select a placement, while exposure evidence answers whether a channel was opened/approved/revoked.
+- Keep the export read-model-derived and provider-free. It records target metadata only, without launching runtimes, launching provider CLIs, opening tunnels, inspecting credentials, materializing prompts, requesting approvals, activating grants, retaining raw transcripts, or mutating target state.

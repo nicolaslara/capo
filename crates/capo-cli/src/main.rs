@@ -88,6 +88,7 @@ Usage:
   capo runtime target register --target TARGET_ID --name NAME --runner local-process|remote-process|container --workspace PATH --artifacts PATH [--cwd PATH] [--capability-profile PROFILE] [--endpoint ENDPOINT_ID] [--status available|disabled|unhealthy] [--state PATH]
   capo runtime target set-status --target TARGET_ID --status available|disabled|unhealthy [--state PATH]
   capo runtime target status --target TARGET_ID [--state PATH]
+  capo runtime target evidence --target TARGET_ID --out DIR [--state PATH]
   capo runtime target list [--state PATH]
   capo connectivity expose-stub --endpoint ENDPOINT_ID --owner-kind runtime_target|capo_server --owner-id OWNER_ID --channel control|stdio|logs|dashboard|artifact --exposure loopback|private|public [--address REF] [--record] [--state PATH]
   capo connectivity request-approval --exposure EXPOSURE_ID [--approval APPROVAL_ID] [--state PATH]
@@ -237,6 +238,11 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             if area == "runtime" && command == "target" && action == "status" =>
         {
             runtime_target_status(&parsed, rest)
+        }
+        [area, command, action, rest @ ..]
+            if area == "runtime" && command == "target" && action == "evidence" =>
+        {
+            runtime_target_evidence(&parsed, rest)
         }
         [area, command, action] if area == "runtime" && command == "target" && action == "list" => {
             list_runtime_targets(&parsed)
@@ -4779,6 +4785,97 @@ fn runtime_target_status(parsed: &ParsedArgs, args: &[String]) -> Result<String,
     Ok(output)
 }
 
+fn runtime_target_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--target" | "--out"))
+    {
+        return Err(format!("unknown runtime target evidence option: {unknown}"));
+    }
+    let runtime_target_id = required_arg(args, "--target")?;
+    let out = PathBuf::from(required_arg(args, "--out")?);
+    let project_id = project_id();
+    let command = envelope(
+        "runtime-target-evidence",
+        CommandTarget::Project(project_id.clone()),
+        CommandIntent::ExportEvidence,
+        Some(runtime_target_id.clone()),
+    );
+    let state = state(parsed)?;
+    let dashboard = project_dashboard(&state, ProjectDashboardQuery::new(project_id.clone()))
+        .map_err(debug_error)?;
+    let target = dashboard
+        .runtime_target_status(&runtime_target_id)
+        .ok_or_else(|| format!("missing runtime target: {runtime_target_id}"))?
+        .clone();
+    let markdown = render_runtime_target_evidence(&project_id, &target);
+    fs::create_dir_all(&out).map_err(|error| error.to_string())?;
+    let content_hash = stable_cli_hash(&markdown);
+    let artifact_id = format!("artifact-runtime-target-evidence-{content_hash}");
+    let path = out.join(format!("{artifact_id}.md"));
+    write_runtime_target_evidence_file(&path, &markdown)?;
+    state
+        .record_artifact(ArtifactRecord {
+            artifact_id: artifact_id.clone(),
+            project_id: Some(project_id.clone()),
+            session_id: None,
+            run_id: None,
+            kind: "runtime_target_evidence".to_string(),
+            uri: path.display().to_string(),
+            content_hash: content_hash.clone(),
+            size_bytes: markdown.len() as i64,
+            redaction_state: RedactionState::Safe,
+        })
+        .map_err(debug_error)?;
+    let evidence_id = format!("evidence-{artifact_id}");
+    let sequence = state
+        .append_event(
+            NewEvent {
+                event_id: format!("event-{evidence_id}"),
+                kind: EventKind::EvidenceRecorded,
+                actor: "cli".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: None,
+                run_id: None,
+                turn_id: None,
+                item_id: Some(evidence_id.clone()),
+                payload_json: format!(
+                    "{{\"artifact_id\":\"{}\",\"content_hash\":\"{}\",\"runtime_target_id\":\"{}\",\"status\":\"{}\"}}",
+                    escape_json(&artifact_id),
+                    escape_json(&content_hash),
+                    escape_json(&target.runtime_target_id),
+                    escape_json(&target.status)
+                ),
+                idempotency_key: Some(format!(
+                    "runtime-target-evidence:{}:{}:{content_hash}",
+                    project_id, target.runtime_target_id
+                )),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Evidence(EvidenceProjection {
+                evidence_id: capo_core::EvidenceId::new(evidence_id.clone()),
+                project_id: project_id.clone(),
+                task_id: None,
+                session_id: None,
+                run_id: None,
+                kind: "runtime_target_evidence".to_string(),
+                artifact_id: Some(artifact_id.clone()),
+                confidence: runtime_target_evidence_confidence(&target),
+                updated_sequence: 0,
+            })],
+        )
+        .map_err(debug_error)?;
+
+    Ok(format!(
+        "runtime_target_evidence_exported=true\nruntime_target={}\nevidence_id={evidence_id}\nartifact_id={artifact_id}\npath={}\ncontent_hash={content_hash}\nsequence={sequence}\ncommand_id={}\n",
+        target.runtime_target_id,
+        path.display(),
+        command.command_id
+    ))
+}
+
 fn set_runtime_target_status(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     if let Some(unknown) = args
         .iter()
@@ -4845,6 +4942,36 @@ fn render_runtime_target_registration(target: &RuntimeTargetProjection, sequence
 fn render_runtime_target_row(label: &str, target: &RuntimeTargetProjection) -> String {
     format!(
         "{label}={} name={} runner={} workspace={} artifacts={} default_cwd={} capability_profile={} endpoint={} status={} updated_sequence={}\n",
+        target.runtime_target_id,
+        target.name,
+        target.runner_kind,
+        target.workspace_root,
+        target.artifact_root,
+        target.default_cwd,
+        target.capability_profile_id,
+        target.connectivity_endpoint_id.as_deref().unwrap_or("none"),
+        target.status,
+        target.updated_sequence
+    )
+}
+
+fn runtime_target_evidence_confidence(target: &RuntimeTargetProjection) -> i64 {
+    match target.status.as_str() {
+        "available" => 80,
+        "disabled" => 75,
+        "unhealthy" => 70,
+        _ => 60,
+    }
+}
+
+fn render_runtime_target_evidence(
+    project_id: &ProjectId,
+    target: &RuntimeTargetProjection,
+) -> String {
+    format!(
+        "<!-- capo:runtime-target-evidence -->\n# Capo Runtime Target Evidence - {}\n\n## Objective\n\nReview a registered runtime target without launching runtime/provider processes or opening connectivity tunnels.\n\n## Runtime Target\n\n- Project: `{}`\n- Runtime target: `{}`\n- Name: `{}`\n- Runner: `{}`\n- Workspace root: `{}`\n- Artifact root: `{}`\n- Default cwd: `{}`\n- Capability profile: `{}`\n- Connectivity endpoint: `{}`\n- Status: `{}`\n- Updated sequence: `{}`\n\n## Review Notes\n\n- Runtime targets describe execution placement metadata; they are not proof that a process is running.\n- Connectivity endpoint references are binding metadata for later tunnel/exposure validation, not evidence that a tunnel is open.\n- Disabled or unhealthy targets remain visible for operator review but should fail recorded exposure guards.\n\n## Evidence Policy\n\n- This report is derived from persisted Capo runtime target read models only.\n- It does not launch runtimes, launch provider CLIs, open tunnels, inspect credentials, materialize prompts, request approvals, activate grants, retain raw transcripts, or mutate runtime target state.\n- Credential material, tokens, cookies, subscription sessions, raw prompts, and provider output are not rendered.\n",
+        target.runtime_target_id,
+        project_id,
         target.runtime_target_id,
         target.name,
         target.runner_kind,
@@ -7261,6 +7388,24 @@ fn write_connectivity_exposure_evidence_file(path: &Path, markdown: &str) -> Res
     fs::write(path, markdown).map_err(|error| error.to_string())
 }
 
+fn write_runtime_target_evidence_file(path: &Path, markdown: &str) -> Result<(), String> {
+    if let Ok(existing) = fs::read_to_string(path) {
+        if !existing.starts_with("<!-- capo:runtime-target-evidence -->") {
+            return Err(format!(
+                "refusing to overwrite non-Capo runtime target evidence file: {}",
+                path.display()
+            ));
+        }
+        if existing != markdown {
+            return Err(format!(
+                "refusing to overwrite changed Capo runtime target evidence file: {}",
+                path.display()
+            ));
+        }
+    }
+    fs::write(path, markdown).map_err(|error| error.to_string())
+}
+
 fn write_task_outcome_report_file(path: &Path, markdown: &str) -> Result<(), String> {
     if let Ok(existing) = fs::read_to_string(path) {
         if !existing.starts_with("<!-- capo:task-outcome-report -->") {
@@ -7527,6 +7672,7 @@ mod tests {
         assert!(HELP.contains("runtime target register"));
         assert!(HELP.contains("runtime target set-status"));
         assert!(HELP.contains("runtime target status"));
+        assert!(HELP.contains("runtime target evidence"));
         assert!(HELP.contains("runtime target list"));
         assert!(HELP.contains("connectivity expose-stub"));
         assert!(HELP.contains("connectivity request-approval"));
@@ -10161,6 +10307,43 @@ mod tests {
         .expect_err("missing runtime target status");
         assert!(missing_status.contains("missing runtime target: missing-runtime-target"));
 
+        let evidence_dir = temp_root("runtime-target-evidence");
+        let evidence = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "evidence".to_string(),
+            "--target".to_string(),
+            "runtime-target-local-1".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("runtime target evidence");
+        assert!(evidence.contains("runtime_target_evidence_exported=true"));
+        assert!(evidence.contains("runtime_target=runtime-target-local-1"));
+        assert!(evidence.contains("evidence_id=evidence-artifact-runtime-target-evidence-"));
+        let evidence_path = output_value(&evidence, "path");
+        let markdown = fs::read_to_string(&evidence_path).expect("read runtime target evidence");
+        assert!(markdown.starts_with("<!-- capo:runtime-target-evidence -->"));
+        assert!(markdown.contains("## Runtime Target"));
+        assert!(markdown.contains("- Status: `available`"));
+        assert!(markdown.contains("- Connectivity endpoint: `endpoint-loopback-1`"));
+        assert!(markdown.contains("does not launch runtimes"));
+        let missing_evidence = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "evidence".to_string(),
+            "--target".to_string(),
+            "missing-runtime-target".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("missing runtime target evidence");
+        assert!(missing_evidence.contains("missing runtime target: missing-runtime-target"));
+
         let dashboard = run_cli(vec![
             "dashboard".to_string(),
             "--state".to_string(),
@@ -10170,6 +10353,8 @@ mod tests {
         assert!(dashboard.contains("runtime_targets=1"));
         assert!(dashboard.contains("runtime_target=runtime-target-local-1"));
         assert!(dashboard.contains("runner=local-process"));
+        assert!(dashboard.contains("project_evidence=1"));
+        assert!(dashboard.contains("kind=runtime_target_evidence"));
     }
 
     #[test]
