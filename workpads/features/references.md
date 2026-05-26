@@ -1179,3 +1179,13 @@ Observed 2026-05-26.
 - SQLx official repository/docs: https://github.com/launchbadge/sqlx
 - SeaORM official docs: https://www.sea-ql.org/SeaORM/docs/index/
 - No new third-party dependencies were added for SS1.
+
+## F8/SS2 State Crate Test Module Split
+
+Observed 2026-05-26.
+
+- State crate split target: `../../crates/capo-state/src/lib.rs`
+- Planned new test module file: `../../crates/capo-state/src/tests.rs`
+- Resulting file sizes: `../../crates/capo-state/src/lib.rs` 6,109 lines; `../../crates/capo-state/src/tests.rs` 1,876 lines.
+- Xhigh split analysis recommended internal module decomposition before new crate boundaries, with state tests as the safest first stage.
+- No new third-party dependencies were added for SS2.

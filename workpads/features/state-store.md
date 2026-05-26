@@ -53,3 +53,31 @@ Follow-up:
 - SS2 should add a small typed projection helper around one existing projection family before any new broad state model is added.
 - SS3 should run a contained Diesel spike against one projection family and compare code size, compile friction, migration ergonomics, rebuild behavior, and test readability.
 - After SS2/SS3, choose either a staged Diesel migration or a stricter in-house `rusqlite` projection registry.
+
+### SS2 - State Crate Test Module Split
+
+Status: completed
+
+Acceptance:
+
+- Move the large `capo-state` inline test module out of `src/lib.rs` into a separate module file.
+- Preserve all existing test behavior and keep crate-root public APIs unchanged.
+- Do not change schema, projection encoding, rebuild semantics, or runtime behavior in this slice.
+- Run focused `capo-state` tests and the standard workspace gate before completion.
+
+Evidence:
+
+- `../../crates/capo-state/src/lib.rs` now keeps `#[cfg(test)] mod tests;` instead of an inline test module.
+- `../../crates/capo-state/src/tests.rs` contains the former state test module body.
+- `../../crates/capo-state/src/lib.rs` is now 6,109 lines and `../../crates/capo-state/src/tests.rs` is 1,876 lines.
+- Xhigh split analysis recommended internal module decomposition before crate splits, with `capo-state` tests as the safest first stage.
+- `git diff --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `cargo fmt --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+Decision:
+
+- Start with tests because this reduces the largest state file without touching projection semantics or downstream imports.
+- Keep the first split mechanical and single-crate. Deeper state modules for events, projections, schema, and queries should follow only after this low-risk move lands cleanly.

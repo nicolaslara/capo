@@ -2434,3 +2434,23 @@ Decisions:
 Verification:
 
 - Documentation-only decision. `git diff --check`: passed.
+
+## F8/SS2 - State Crate Test Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Treat file-size reduction as architecture work because very large files make Capo harder for LLMs and humans to navigate.
+- Follow the split-review recommendation: keep crate boundaries stable and decompose modules internally first.
+- Start with `capo-state` tests because moving the inline test module is the safest split. It reduces `lib.rs` size without changing event append, schema migration, projection encoding, rebuild behavior, or public projection type names.
+- Keep crate-root APIs stable. Downstream crates currently import `capo-state` projection and store types directly, so deeper splits should use `pub use` rather than moving public names out of reach.
+- The first mechanical move reduced `crates/capo-state/src/lib.rs` to 6,109 lines and isolated the former inline tests in `crates/capo-state/src/tests.rs` at 1,876 lines.
+
+Verification:
+
+- `git diff --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `cargo fmt --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.

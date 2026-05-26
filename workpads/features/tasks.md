@@ -531,6 +531,7 @@ Acceptance:
 Progress:
 
 - SS1 state store library decision is completed. Manual `rusqlite` SQL is acceptable as the current implementation, but no longer the preferred path for broad projection growth. Diesel is the first migration candidate to spike; SQLx remains the second candidate for an async/server-oriented path; SeaORM is deferred for the controller core; a typed in-house `rusqlite` projection registry remains the shortest safe hardening option.
+- SS2 state crate test module split is completed. The first maintainability slice moved the large inline `capo-state` test module into its own file before deeper state/query/projection splits.
 
 Evidence:
 
@@ -541,3 +542,8 @@ Evidence:
 - SQLx repository/docs: https://github.com/launchbadge/sqlx
 - SeaORM docs: https://www.sea-ql.org/SeaORM/docs/index/
 - rusqlite repository/docs: https://github.com/rusqlite/rusqlite
+- `git diff --check`
+- `cargo test -p capo-state`
+- `cargo fmt --check`
+- `cargo test --workspace --all-targets`
+- `cargo clippy --all-targets --all-features -- -D warnings`
