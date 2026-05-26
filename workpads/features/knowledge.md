@@ -1439,3 +1439,19 @@ Verification:
 Follow-up:
 
 - Once real connector opt-in evidence is recorded, add an explicit voice path for planning or requesting provider-backed dispatch without bypassing the dispatch gate.
+
+## F3/DS7 - Shared Next Workpad Selection
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Route `workpad next`, `workpad plan-next`, and `workpad start-next` through `ProjectDashboard::next_workpad_task()` and `next_workpad_candidate_count()`.
+- Remove the duplicated CLI sorting/filtering helper so the workpad priority rule lives in `capo-query`, the same read-model surface consumed by voice and future dashboard clients.
+- Preserve existing semantics: optional path filter, actionable observed markdown statuses, `observed_only` Capo execution status, and deterministic source ordering.
+
+Verification:
+
+- `cargo test -p capo-query next_actionable_workpad -- --nocapture`: passed.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_confirmed_start_next_work -- --nocapture`: passed.

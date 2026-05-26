@@ -4806,10 +4806,10 @@ fn default_workpad_task_id(workpad_task_id: &str) -> String {
 fn next_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let path_filter = workpad_path_filter(args)?;
     let state = state(parsed)?;
-    let candidates = next_workpad_candidates(&state, path_filter.as_deref())?;
+    let (next, candidate_count) = next_workpad_selection(&state, path_filter.as_deref())?;
     Ok(render_next_workpad_task(
-        candidates.first(),
-        candidates.len(),
+        next.as_ref(),
+        candidate_count,
         path_filter.as_deref(),
     ))
 }
@@ -4818,11 +4818,8 @@ fn plan_next_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String
     let options = WorkpadPlanNextOptions::parse(args, &parsed.state_root)?;
     validate_local_launch_adapter(&options.adapter)?;
     let state = state(parsed)?;
-    let candidates = next_workpad_candidates(&state, options.path_filter.as_deref())?;
-    let next = candidates
-        .first()
-        .ok_or_else(|| "no actionable observed-only workpad task found".to_string())?
-        .clone();
+    let (next, candidate_count) = next_workpad_selection(&state, options.path_filter.as_deref())?;
+    let next = next.ok_or_else(|| "no actionable observed-only workpad task found".to_string())?;
     let workpad_file = state
         .workpad_file(&project_id(), &next.path)
         .map_err(debug_error)?
@@ -4854,7 +4851,7 @@ fn plan_next_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String
         next.title,
         next.observed_status,
         next.capo_execution_status,
-        candidates.len(),
+        candidate_count,
         options.path_filter.as_deref().unwrap_or("none"),
         render_adapter_dispatch_plan(&plan)
     ))
@@ -4865,11 +4862,8 @@ fn start_next_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<Strin
     let args_without_agent = remove_option(args, "--agent");
     let path_filter = workpad_path_filter(&args_without_agent)?;
     let state = state(parsed)?;
-    let candidates = next_workpad_candidates(&state, path_filter.as_deref())?;
-    let next = candidates
-        .first()
-        .ok_or_else(|| "no actionable observed-only workpad task found".to_string())?
-        .clone();
+    let (next, _) = next_workpad_selection(&state, path_filter.as_deref())?;
+    let next = next.ok_or_else(|| "no actionable observed-only workpad task found".to_string())?;
     if state.agent_by_name(&agent).map_err(debug_error)?.is_none() {
         return Err(format!("missing registered agent: {agent}"));
     }
@@ -5028,31 +5022,19 @@ impl WorkpadPlanNextOptions {
     }
 }
 
-fn next_workpad_candidates(
+fn next_workpad_selection(
     state: &SqliteStateStore,
     path_filter: Option<&str>,
-) -> Result<Vec<WorkpadTaskProjection>, String> {
-    let mut candidates = state
-        .workpad_tasks(&project_id())
-        .map_err(debug_error)?
-        .into_iter()
-        .filter(|task| {
-            path_filter
-                .as_ref()
-                .map(|path| task.path == *path)
-                .unwrap_or(true)
-        })
-        .filter(|task| actionable_workpad_status_rank(&task.observed_status).is_some())
-        .filter(|task| task.capo_execution_status == "observed_only")
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        actionable_workpad_status_rank(&left.observed_status)
-            .cmp(&actionable_workpad_status_rank(&right.observed_status))
-            .then_with(|| left.path.cmp(&right.path))
-            .then_with(|| left.source_anchor.cmp(&right.source_anchor))
-            .then_with(|| left.workpad_task_id.cmp(&right.workpad_task_id))
-    });
-    Ok(candidates)
+) -> Result<(Option<WorkpadTaskProjection>, usize), String> {
+    let mut query = ProjectDashboardQuery::new(project_id());
+    if let Some(path) = path_filter {
+        query = query.with_workpad_path(path);
+    }
+    let dashboard = project_dashboard(state, query).map_err(debug_error)?;
+    Ok((
+        dashboard.next_workpad_task().cloned(),
+        dashboard.next_workpad_candidate_count(),
+    ))
 }
 
 fn render_next_workpad_task(
@@ -5080,16 +5062,6 @@ fn render_next_workpad_task(
         next.capo_execution_status,
         path_filter.unwrap_or("none")
     )
-}
-
-fn actionable_workpad_status_rank(status: &str) -> Option<u8> {
-    match status {
-        "in_progress" => Some(0),
-        "pending" => Some(1),
-        "ready" => Some(2),
-        "waiting_on_opt_in" => Some(3),
-        _ => None,
-    }
 }
 
 fn remove_option(args: &[String], key: &str) -> Vec<String> {

@@ -645,3 +645,12 @@ Observed 2026-05-26.
 - Voice approval and capability grant projections reused from `../../crates/capo-state/src/lib.rs`
 - Voice source workpad: `voice.md`
 - No new third-party dependencies were added for V8.
+
+## F3/DS7 Shared Next Workpad Selection
+
+Observed 2026-05-26.
+
+- Shared workpad next selector: `../../crates/capo-query/src/lib.rs`
+- CLI workpad next/plan-next/start-next routing through the shared selector: `../../crates/capo-cli/src/main.rs`
+- Dashboard source workpad: `dashboard.md`
+- No new third-party dependencies were added for DS7.

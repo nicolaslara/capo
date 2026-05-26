@@ -177,3 +177,25 @@ Decision:
 
 - Keep readiness computation in `capo-query` as a method over `ProjectDashboard`, with the existing `project_dogfood_readiness(...)` function still available for command-specific rendering.
 - The dashboard renders the project-level readiness verdict next to adapter, dispatch, workpad, and project-evidence rows so operators can see both component facts and the migration decision.
+
+### DS7 - Shared Next Workpad Selection
+
+Status: completed
+
+Acceptance:
+
+- Keep next-workpad selection priority in the shared query contract rather than duplicating it in CLI and voice rendering.
+- Route `workpad next`, `workpad plan-next`, `workpad start-next`, and voice next-work/start-next behavior through the same `ProjectDashboard` selector.
+- Preserve existing workpad selection semantics and path filtering.
+
+Evidence:
+
+- `ProjectDashboard::next_workpad_task()` and `ProjectDashboard::next_workpad_candidate_count()` in `../../crates/capo-query/src/lib.rs`.
+- CLI `workpad next`, `plan-next`, and `start-next` now call the shared query selector in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query next_actionable_workpad -- --nocapture`: passed.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_confirmed_start_next_work -- --nocapture`: passed.
+
+Decision:
+
+- Treat the next-workpad selection rule as dashboard/query state, not a CLI convenience. This keeps CLI, voice, web, mobile, and future TUI surfaces aligned on the same source-of-truth read model.
