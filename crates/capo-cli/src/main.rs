@@ -35,6 +35,9 @@ use capo_state::{
     ToolCallProjection, ToolObservationProjection, WorkpadFileProjection,
     WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
+use capo_tools::{
+    PermissionPolicy, RuntimeToolConfig, RuntimeToolWrappers, WrapperArtifact, WrapperToolRequest,
+};
 use capo_voice::{
     MemoryIngestionPolicy, TranscriptRetentionPolicy, VOICE_TRANSCRIPT_RETENTION_DEFAULT,
     VoiceCommandPlan, VoiceIntentKind, VoiceReadScope, VoiceTranscriptInput, plan_dummy_transcript,
@@ -100,6 +103,7 @@ Usage:
   capo evidence export --session SESSION_ID --out DIR [--state PATH]
   capo eval task-outcome --session SESSION_ID --out DIR [--state PATH]
   capo review record --session SESSION_ID --reviewer NAME --kind blocker|finding|no_blockers --summary TEXT --out DIR [--severity LEVEL] [--tool-call TOOL_CALL_ID] [--follow-up-workpad-task WORKPAD_TASK_ID] [--state PATH]
+  capo tool run-wrapper --tool TOOL --workspace PATH --artifacts PATH [--policy read-only|reviewer|trusted-local] [--path PATH] [--content TEXT] [--message TEXT] [--program PROGRAM] [--argv-json JSON] [--cwd PATH]
 
 Prototype notes:
   The P4 CLI uses command envelopes, the fake controller, and SQLite read models.
@@ -263,6 +267,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         [area, command, rest @ ..] if area == "review" && command == "record" => {
             record_review_finding(&parsed, rest)
         }
+        [area, command, rest @ ..] if area == "tool" && command == "run-wrapper" => {
+            run_wrapper_tool(rest)
+        }
         [unknown, ..] => Err(format!("unknown command: {unknown}\nrun `capo --help`")),
     }
 }
@@ -375,6 +382,166 @@ fn list_agents(parsed: &ParsedArgs) -> Result<String, String> {
         ));
     }
     Ok(output)
+}
+
+fn run_wrapper_tool(args: &[String]) -> Result<String, String> {
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--")
+            && !matches!(
+                arg.as_str(),
+                "--tool"
+                    | "--workspace"
+                    | "--artifacts"
+                    | "--policy"
+                    | "--path"
+                    | "--content"
+                    | "--message"
+                    | "--program"
+                    | "--argv-json"
+                    | "--cwd"
+            )
+    }) {
+        return Err(format!("unknown tool run-wrapper option: {unknown}"));
+    }
+    let tool_id = normalize_wrapper_tool_id(&required_arg(args, "--tool")?)?;
+    let workspace = PathBuf::from(required_arg(args, "--workspace")?);
+    let artifacts = PathBuf::from(required_arg(args, "--artifacts")?);
+    let policy = wrapper_tool_policy(optional_arg(args, "--policy").as_deref())?;
+    let input = wrapper_tool_input(&tool_id, args)?;
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts.clone(),
+    ));
+    let request_hash = stable_cli_hash(&format!("{tool_id}:{input}:{workspace:?}:{artifacts:?}"));
+    let request = WrapperToolRequest {
+        tool_call_id: ToolCallId::new(format!("cli-wrapper-{request_hash}")),
+        session_id: SessionId::new("cli-wrapper-session"),
+        run_id: RunId::new(format!("cli-wrapper-run-{request_hash}")),
+        tool_id,
+        capability_profile_id: policy.default_profile_id().to_string(),
+        input,
+    };
+    let result = wrappers.authorize_and_invoke(request, &policy);
+    let mut output = format!(
+        "wrapper_tool_run=true\ntool={}\npolicy={}\nstatus={}\npermission_effect={}\npermission_source={}\ninput_artifact={}\noutput_artifacts={}\n",
+        result.tool_id,
+        result.permission_decision.capability_profile_id,
+        result.status,
+        result.permission_decision.effect,
+        result.permission_decision.decision_source,
+        result
+            .input_artifact
+            .as_ref()
+            .map(|artifact| artifact.artifact_id.as_str())
+            .unwrap_or("none"),
+        result.output_artifacts.len()
+    );
+    if let Some(input_artifact) = &result.input_artifact {
+        output.push_str(&render_wrapper_artifact("input", input_artifact));
+    }
+    for artifact in &result.output_artifacts {
+        output.push_str(&render_wrapper_artifact("output", artifact));
+    }
+    output.push_str(&format!("audit_events={}\n", result.events.len()));
+    for event in &result.events {
+        output.push_str(&format!(
+            "audit_event={} status={}\n",
+            event.kind, event.status
+        ));
+    }
+    output.push_str(&format!("summary={}\n", result.summary));
+    Ok(output)
+}
+
+fn normalize_wrapper_tool_id(tool: &str) -> Result<String, String> {
+    let normalized = match tool {
+        "shell_run" | "shell-run" => "capo.shell_run",
+        "git_status" | "git-status" => "capo.git_status",
+        "git_diff" | "git-diff" => "capo.git_diff",
+        "git_commit" | "git-commit" => "capo.git_commit",
+        "file_read" | "file-read" => "capo.file_read",
+        "file_write" | "file-write" => "capo.file_write",
+        "workpad_read" | "workpad-read" => "capo.workpad_read",
+        other if other.starts_with("capo.") => other,
+        other => {
+            return Err(format!(
+                "unknown wrapper tool: {other}; expected shell_run, git_status, git_diff, git_commit, file_read, file_write, or workpad_read"
+            ));
+        }
+    };
+    Ok(normalized.to_string())
+}
+
+fn wrapper_tool_policy(policy: Option<&str>) -> Result<PermissionPolicy, String> {
+    match policy.unwrap_or("read-only") {
+        "read-only" | "read_only" => Ok(PermissionPolicy::static_read_only_local()),
+        "reviewer" => Ok(PermissionPolicy::static_reviewer()),
+        "trusted-local" | "trusted_local" => Ok(PermissionPolicy::allow_trusted_local()),
+        other => Err(format!(
+            "unknown wrapper policy: {other}; expected read-only, reviewer, or trusted-local"
+        )),
+    }
+}
+
+fn wrapper_tool_input(tool_id: &str, args: &[String]) -> Result<serde_json::Value, String> {
+    match tool_id {
+        "capo.shell_run" => {
+            let program = required_arg(args, "--program")?;
+            let argv = optional_arg(args, "--argv-json")
+                .map(|json| parse_json_array("--argv-json", &json))
+                .transpose()?
+                .unwrap_or_else(|| serde_json::json!([]));
+            let mut input = serde_json::json!({
+                "program": program,
+                "argv": argv,
+            });
+            if let Some(cwd) = optional_arg(args, "--cwd") {
+                input["cwd"] = serde_json::Value::String(cwd);
+            }
+            Ok(input)
+        }
+        "capo.git_status" | "capo.git_diff" => {
+            if let Some(path) = optional_arg(args, "--path") {
+                Ok(serde_json::json!({ "path": path }))
+            } else {
+                Ok(serde_json::json!({}))
+            }
+        }
+        "capo.git_commit" => Ok(serde_json::json!({
+            "message": required_arg(args, "--message")?
+        })),
+        "capo.file_read" | "capo.workpad_read" => Ok(serde_json::json!({
+            "path": required_arg(args, "--path")?
+        })),
+        "capo.file_write" => Ok(serde_json::json!({
+            "path": required_arg(args, "--path")?,
+            "content": required_arg(args, "--content")?
+        })),
+        other => Err(format!("unsupported wrapper tool: {other}")),
+    }
+}
+
+fn parse_json_array(label: &str, json: &str) -> Result<serde_json::Value, String> {
+    let value = serde_json::from_str::<serde_json::Value>(json)
+        .map_err(|error| format!("{label} is not valid JSON: {error}"))?;
+    if value.is_array() {
+        Ok(value)
+    } else {
+        Err(format!("{label} must be a JSON array"))
+    }
+}
+
+fn render_wrapper_artifact(label: &str, artifact: &WrapperArtifact) -> String {
+    format!(
+        "{label}_artifact={} kind={} uri={} hash={} bytes={} redaction={} summary={}\n",
+        artifact.artifact_id,
+        artifact.kind,
+        artifact.uri,
+        artifact.content_hash,
+        artifact.size_bytes,
+        artifact.redaction_state,
+        artifact.summary
+    )
 }
 
 fn replay_adapter_fixture(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
@@ -7009,6 +7176,7 @@ fn path_exists(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -7042,6 +7210,93 @@ mod tests {
         assert!(HELP.contains("workpad start-next"));
         assert!(HELP.contains("workpad propose"));
         assert!(HELP.contains("workpad apply"));
+        assert!(HELP.contains("tool run-wrapper"));
+    }
+
+    #[test]
+    fn tool_run_wrapper_exposes_governed_runtime_wrappers_without_providers() {
+        let workspace = temp_root("cli-tool-wrapper-workspace");
+        let artifacts = temp_root("cli-tool-wrapper-artifacts");
+        fs::create_dir_all(&workspace).expect("workspace");
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&workspace)
+            .output()
+            .expect("git init");
+        fs::write(workspace.join("tracked.txt"), "tracked\n").expect("tracked");
+
+        let read_only_status = run_cli(vec![
+            "tool".to_string(),
+            "run-wrapper".to_string(),
+            "--tool".to_string(),
+            "git_status".to_string(),
+            "--workspace".to_string(),
+            workspace.display().to_string(),
+            "--artifacts".to_string(),
+            artifacts.display().to_string(),
+        ])
+        .expect("read-only git status");
+        assert!(read_only_status.contains("wrapper_tool_run=true"));
+        assert!(read_only_status.contains("tool=capo.git_status"));
+        assert!(read_only_status.contains("policy=read-only-local"));
+        assert!(read_only_status.contains("permission_effect=allow"));
+        assert!(read_only_status.contains("input_artifact=artifact-wrapper-"));
+        assert!(read_only_status.contains("output_artifacts=2"));
+        assert!(read_only_status.contains("output_artifact="));
+        assert!(read_only_status.contains("audit_event=tool.invocation_started"));
+        assert!(!read_only_status.contains("provider_cli_executed=true"));
+
+        Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(&workspace)
+            .output()
+            .expect("git add");
+        let denied_commit = run_cli(vec![
+            "tool".to_string(),
+            "run-wrapper".to_string(),
+            "--tool".to_string(),
+            "git_commit".to_string(),
+            "--workspace".to_string(),
+            workspace.display().to_string(),
+            "--artifacts".to_string(),
+            artifacts.display().to_string(),
+            "--message".to_string(),
+            "Denied wrapper commit".to_string(),
+        ])
+        .expect("denied commit");
+        assert!(denied_commit.contains("tool=capo.git_commit"));
+        assert!(denied_commit.contains("policy=read-only-local"));
+        assert!(denied_commit.contains("status=denied"));
+        assert!(denied_commit.contains("permission_effect=deny"));
+        assert!(denied_commit.contains("git:commit:workspace"));
+        assert!(!denied_commit.contains("audit_event=tool.invocation_started"));
+
+        let trusted_commit = run_cli(vec![
+            "tool".to_string(),
+            "run-wrapper".to_string(),
+            "--tool".to_string(),
+            "git_commit".to_string(),
+            "--workspace".to_string(),
+            workspace.display().to_string(),
+            "--artifacts".to_string(),
+            artifacts.display().to_string(),
+            "--policy".to_string(),
+            "trusted-local".to_string(),
+            "--message".to_string(),
+            "Trusted wrapper commit".to_string(),
+        ])
+        .expect("trusted commit");
+        assert!(trusted_commit.contains("status=exited"));
+        assert!(trusted_commit.contains("permission_effect=allow"));
+        assert!(trusted_commit.contains("output_artifacts=2"));
+        assert!(trusted_commit.contains("kind=git_commit_stdout"));
+        assert!(trusted_commit.contains("kind=git_commit_stderr"));
+        let log = Command::new("git")
+            .args(["log", "--oneline", "-1"])
+            .current_dir(&workspace)
+            .output()
+            .expect("git log");
+        assert!(String::from_utf8_lossy(&log.stdout).contains("Trusted wrapper commit"));
     }
 
     #[test]

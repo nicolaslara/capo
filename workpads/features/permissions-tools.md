@@ -345,3 +345,28 @@ Decision:
 - Require a non-empty single-line message before reaching `LocalProcessRunner`.
 - Trusted-local can invoke the wrapper; static read-only/reviewer profiles deny `git:commit:workspace`.
 - Preserve the existing wrapper audit lifecycle and artifacts: input artifact plus git stdout/stderr runtime artifacts, with no provider CLI execution, credential/session inspection, tunnel use, or raw agent output persistence.
+
+### PT13 - Wrapper Tool CLI Surface
+
+Status: completed
+
+Acceptance:
+
+- Add a provider-free CLI command that invokes registered runtime wrapper tools through `RuntimeToolWrappers`.
+- Require explicit workspace and artifact roots.
+- Default to read-only policy and require explicit trusted-local policy for mutating/high-risk wrappers.
+- Render permission decision, input artifact, output artifacts, and audit lifecycle events without storing provider credentials, subscription sessions, tunnel data, raw prompts, or raw provider output.
+
+Evidence:
+
+- CLI `capo tool run-wrapper` command and regression coverage in `../../crates/capo-cli/src/main.rs`.
+- Runtime wrapper execution and artifact contract in `../../crates/capo-tools/src/lib.rs`.
+- `cargo test -p capo-cli tool_run_wrapper -- --nocapture`: passed.
+
+Decision:
+
+- Add `capo tool run-wrapper` as the first direct operator surface over governed runtime wrapper tools.
+- Require explicit `--workspace` and `--artifacts` paths so wrapper executions do not silently operate on the current checkout or hide artifacts in implicit locations.
+- Default to `read-only-local` policy. Mutating or high-risk wrappers such as `capo.git_commit`, `capo.file_write`, and `capo.shell_run` require explicit `--policy trusted-local`.
+- Render permission effect/source, input artifact, output artifacts, audit events, and summary from the wrapper result.
+- Keep the surface provider-free and tunnel-free. It does not launch provider CLIs, inspect subscription credentials/sessions, materialize prompts, or persist raw agent/provider output in Capo state.

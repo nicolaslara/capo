@@ -907,3 +907,12 @@ Observed 2026-05-26.
 - Tool wrapper architecture source: `../architecture/tool-exposure.md`
 - Permissions source workpad: `permissions-tools.md`
 - No new third-party dependencies were added for PT12.
+
+## F4/PT13 Wrapper Tool CLI Surface
+
+Observed 2026-05-26.
+
+- CLI `capo tool run-wrapper` parser, rendering, and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Runtime wrapper implementation consumed by the CLI: `../../crates/capo-tools/src/lib.rs`
+- Permissions source workpad: `permissions-tools.md`
+- No new third-party dependencies were added for PT13.

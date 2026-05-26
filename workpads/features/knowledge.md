@@ -1928,3 +1928,19 @@ Decisions:
 Verification:
 
 - `cargo test -p capo-tools git_commit -- --nocapture`: passed.
+
+## F4/PT13 - Wrapper Tool CLI Surface
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo tool run-wrapper` as the first direct CLI operator surface over governed runtime wrapper tools.
+- Require explicit workspace and artifact roots for every invocation.
+- Default the surface to `read-only-local`; trusted-local must be requested explicitly for mutating/high-risk wrapper execution.
+- Render the wrapper result contract: permission effect/source, input artifact, output artifact rows, audit lifecycle events, and summary.
+- Keep the command provider-free and state-light. It invokes `RuntimeToolWrappers` directly, does not launch provider CLIs, does not inspect credential/session material, does not open tunnels, does not materialize prompts, and does not write wrapper results into Capo state projections.
+
+Verification:
+
+- `cargo test -p capo-cli tool_run_wrapper -- --nocapture`: passed.
