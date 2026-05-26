@@ -276,3 +276,28 @@ Decision:
 - Extend recent-work answers with `tool_calls` and `tool_observations` from the shared `ProjectDashboard` session rows.
 - Render `spoken_tool_call` separately from `spoken_tool_observation` so voice answers preserve the same governed-vs-observed-only distinction as dashboard, status, and evidence exports.
 - Keep the path read-only and transcript-safe. It does not mutate state, retain raw transcripts, launch providers/runtimes/tunnels, or inspect credentials.
+
+### V13 - Explicit Tool Activity Conversation
+
+Status: completed
+
+Acceptance:
+
+- Recognize simple project-level tool activity questions such as "What tools have my agents used?"
+- Recognize simple agent-level tool activity questions such as "What tools has fake-codex used?"
+- Answer from the shared dashboard/query contract rather than adding voice-specific state reads.
+- Preserve the distinction between Capo-governed tool calls and adapter/provider-native observed-only tool observations.
+- Preserve raw transcript non-retention and avoid mutating state.
+
+Evidence:
+
+- `VoiceIntentKind::ToolActivity`, `VoiceReadScope::ProjectToolActivity`, and `VoiceReadScope::AgentToolActivity` in `../../crates/capo-voice/src/lib.rs`.
+- CLI voice tool-activity rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-voice tool_activity -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_recent_work -- --nocapture`: passed.
+
+Decision:
+
+- Keep explicit tool-activity questions separate from recent-work questions so operators can ask specifically what tools agents used without also getting full progress/status summaries.
+- Reuse `ProjectDashboard` session rows for both project and agent-scoped answers. Voice remains read-only and does not add a separate state lookup path.
+- Render governed `spoken_tool_call` rows separately from observed-only `spoken_tool_observation` rows.

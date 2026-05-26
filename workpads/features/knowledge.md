@@ -1834,3 +1834,20 @@ Verification:
 Follow-up:
 
 - Once real opt-in local dispatch runs are authorized, verify that successful provider execution outcomes either produce structured observed-only tool observations or clearly report that the provider stream did not expose safe tool metadata.
+
+## F6/V13 - Explicit Tool Activity Conversation
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add a distinct voice intent for explicit tool-activity questions instead of relying on recent-work phrasing to carry that operator workflow.
+- Support both project-level questions such as "What tools have my agents used?" and agent-scoped questions such as "What tools has fake-codex used?"
+- Keep the read path over shared `ProjectDashboard` session rows. Voice does not perform its own state reads or infer hidden tool activity.
+- Preserve the governed-vs-observed split in voice output: `spoken_tool_call` remains Capo-governed timeline/tool state, while `spoken_tool_observation` remains adapter/provider-native observed-only activity.
+- The fake controller already creates `capo.session_summary` tool calls for seeded agents; tests intentionally count those governed calls alongside the extra observed-only fixture row.
+
+Verification:
+
+- `cargo test -p capo-voice tool_activity -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_recent_work -- --nocapture`: passed.

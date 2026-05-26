@@ -847,3 +847,14 @@ Observed 2026-05-26.
 - Tool observation architecture source: `../architecture/tool-exposure.md`
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC29.
+
+## F6/V13 Explicit Tool Activity Conversation
+
+Observed 2026-05-26.
+
+- Voice tool-activity intent, read scopes, parser, and unit coverage: `../../crates/capo-voice/src/lib.rs`
+- CLI voice tool-activity rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared dashboard session rows consumed by voice: `../../crates/capo-query/src/lib.rs`
+- Voice source workpad: `voice.md`
+- Tool observation architecture source: `../architecture/tool-exposure.md`
+- No new third-party dependencies were added for V13.

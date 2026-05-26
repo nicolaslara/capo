@@ -38,6 +38,7 @@ pub enum VoiceIntentKind {
     StartNextWork,
     InterruptSession,
     StopSession,
+    ToolActivity,
     Unknown,
 }
 
@@ -85,6 +86,10 @@ pub enum VoiceReadScope {
     ProjectNextWork,
     ProjectRecentWork,
     ProjectReviewNeeds,
+    ProjectToolActivity,
+    AgentToolActivity {
+        agent_name: String,
+    },
     Agent {
         agent_name: String,
     },
@@ -430,6 +435,32 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
         };
     }
 
+    if is_project_tool_activity_question(&normalized) {
+        let mut command = voice_command(
+            "voice-tool-activity",
+            &input,
+            CommandTarget::Project(input.project_id.clone()),
+            CommandIntent::QueryStatus,
+            None,
+        );
+        command
+            .structured_args
+            .push(("view".to_string(), "tool_activity".to_string()));
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::ToolActivity,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::ProjectToolActivity,
+                required_fields: vec!["agents", "tool_calls", "tool_observations"],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: false,
+            assistant_reply_hint:
+                "Summarize governed and observed-only tool activity from shared read models."
+                    .to_string(),
+        };
+    }
+
     if is_review_needs_question(&normalized) {
         let mut command = voice_command(
             "voice-review-needs",
@@ -459,6 +490,35 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
             requires_visible_confirmation: false,
             assistant_reply_hint:
                 "Summarize review blockers and task outcomes from shared dashboard read models."
+                    .to_string(),
+        };
+    }
+
+    if let Some(agent_name) = tool_activity_agent(&normalized) {
+        let mut command = voice_command(
+            "voice-agent-tool-activity",
+            &input,
+            CommandTarget::Agent(AgentId::new(format!("agent-{agent_name}"))),
+            CommandIntent::QueryStatus,
+            None,
+        );
+        command
+            .structured_args
+            .push(("agent".to_string(), agent_name.clone()));
+        command
+            .structured_args
+            .push(("view".to_string(), "tool_activity".to_string()));
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::ToolActivity,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::AgentToolActivity { agent_name },
+                required_fields: vec!["agent_status", "tool_calls", "tool_observations"],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: false,
+            assistant_reply_hint:
+                "Summarize the agent's governed and observed-only tool activity from read models."
                     .to_string(),
         };
     }
@@ -877,6 +937,31 @@ fn is_project_recent_work_question(input: &str) -> bool {
             | "what has the team done"
             | "summarize agent work"
     )
+}
+
+fn is_project_tool_activity_question(input: &str) -> bool {
+    matches!(
+        input,
+        "what tools have my agents used"
+            | "what tools have the agents used"
+            | "what tools did my agents use"
+            | "what tools did the agents use"
+            | "show agent tool activity"
+            | "show tool activity"
+    )
+}
+
+fn tool_activity_agent(normalized: &str) -> Option<String> {
+    normalized
+        .strip_prefix("what tools has ")
+        .and_then(|rest| rest.strip_suffix(" used"))
+        .or_else(|| {
+            normalized
+                .strip_prefix("what tools did ")
+                .and_then(|rest| rest.strip_suffix(" use"))
+        })
+        .or_else(|| normalized.strip_prefix("show tool activity for "))
+        .map(agent_slug)
 }
 
 fn is_review_needs_question(input: &str) -> bool {
@@ -1364,6 +1449,68 @@ mod tests {
                 .find(|(key, _)| key == "view")
                 .map(|(_, value)| value.as_str()),
             Some("recent_work")
+        );
+    }
+
+    #[test]
+    fn tool_activity_questions_read_tool_activity_without_mutation() {
+        let project_plan = plan_dummy_transcript(input("What tools have my agents used?"));
+
+        assert_eq!(project_plan.intent_kind, VoiceIntentKind::ToolActivity);
+        assert_eq!(
+            project_plan.read_contract.query_scope,
+            VoiceReadScope::ProjectToolActivity
+        );
+        assert!(
+            project_plan
+                .read_contract
+                .required_fields
+                .contains(&"tool_calls")
+        );
+        assert!(
+            project_plan
+                .read_contract
+                .required_fields
+                .contains(&"tool_observations")
+        );
+        assert!(!project_plan.requires_visible_confirmation);
+        assert!(!project_plan.transcript_policy.retain_raw_transcript);
+        let command = project_plan.command.expect("voice command");
+        assert_eq!(command.intent, CommandIntent::QueryStatus);
+        assert_eq!(
+            command.target,
+            CommandTarget::Project(ProjectId::new("project-capo"))
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "view")
+                .map(|(_, value)| value.as_str()),
+            Some("tool_activity")
+        );
+
+        let agent_plan = plan_dummy_transcript(input("What tools has fake-codex used?"));
+        assert_eq!(agent_plan.intent_kind, VoiceIntentKind::ToolActivity);
+        assert_eq!(
+            agent_plan.read_contract.query_scope,
+            VoiceReadScope::AgentToolActivity {
+                agent_name: "fake-codex".to_string()
+            }
+        );
+        assert!(!agent_plan.requires_visible_confirmation);
+        let command = agent_plan.command.expect("voice command");
+        assert_eq!(
+            command.target,
+            CommandTarget::Agent(AgentId::new("agent-fake-codex"))
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "view")
+                .map(|(_, value)| value.as_str()),
+            Some("tool_activity")
         );
     }
 

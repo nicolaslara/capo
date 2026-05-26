@@ -3289,6 +3289,7 @@ fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> 
         | VoiceIntentKind::NextWork
         | VoiceIntentKind::RecentWork
         | VoiceIntentKind::ReviewNeeds
+        | VoiceIntentKind::ToolActivity
         | VoiceIntentKind::AgentStatus => {
             let dashboard = voice_dashboard(parsed, &plan)?;
             output.push_str(&render_voice_read_contract(&plan, &dashboard));
@@ -3676,6 +3677,8 @@ fn voice_session_id(
         | VoiceReadScope::ProjectNextWork
         | VoiceReadScope::ProjectRecentWork
         | VoiceReadScope::ProjectReviewNeeds
+        | VoiceReadScope::ProjectToolActivity
+        | VoiceReadScope::AgentToolActivity { .. }
         | VoiceReadScope::None => Ok(None),
     }
 }
@@ -3837,6 +3840,12 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
                 append_voice_agent_row(&mut output, row);
             }
         }
+        VoiceReadScope::ProjectToolActivity => {
+            append_voice_tool_activity_summary(&mut output, dashboard.agents.iter());
+            for row in &dashboard.agents {
+                append_voice_agent_tool_activity(&mut output, row);
+            }
+        }
         VoiceReadScope::ProjectReviewNeeds => {
             let open_review_findings = dashboard
                 .review_findings
@@ -3895,6 +3904,18 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
                 .find(|row| row.agent.name == *agent_name)
             {
                 append_voice_agent_row(&mut output, row);
+            } else {
+                output.push_str(&format!("spoken_agent_missing={agent_name}\n"));
+            }
+        }
+        VoiceReadScope::AgentToolActivity { agent_name } => {
+            if let Some(row) = dashboard
+                .agents
+                .iter()
+                .find(|row| row.agent.name == *agent_name)
+            {
+                append_voice_tool_activity_summary(&mut output, std::iter::once(row));
+                append_voice_agent_tool_activity(&mut output, row);
             } else {
                 output.push_str(&format!("spoken_agent_missing={agent_name}\n"));
             }
@@ -4011,6 +4032,63 @@ fn append_voice_agent_row(output: &mut String, row: &capo_query::AgentDashboardR
     }
 }
 
+fn append_voice_tool_activity_summary<'a, I>(output: &mut String, rows: I)
+where
+    I: Iterator<Item = &'a capo_query::AgentDashboardRow>,
+{
+    let mut agents = 0;
+    let mut tool_calls = 0;
+    let mut tool_observations = 0;
+    for row in rows {
+        agents += 1;
+        if let Some(session_row) = &row.session {
+            tool_calls += session_row.tool_calls.len();
+            tool_observations += session_row.tool_observations.len();
+        }
+    }
+    output.push_str(&format!(
+        "spoken_tool_activity_agents={agents}\nspoken_tool_calls={tool_calls}\nspoken_tool_observations={tool_observations}\n"
+    ));
+}
+
+fn append_voice_agent_tool_activity(output: &mut String, row: &capo_query::AgentDashboardRow) {
+    output.push_str(&format!(
+        "spoken_tool_activity_agent={} agent_status={}\n",
+        row.agent.name, row.agent.status
+    ));
+    if let Some(session_row) = &row.session {
+        output.push_str(&format!(
+            "spoken_tool_activity_session={} tool_calls={} tool_observations={}\n",
+            session_row.session.session_id,
+            session_row.tool_calls.len(),
+            session_row.tool_observations.len()
+        ));
+        for tool_call in &session_row.tool_calls {
+            output.push_str(&format!(
+                "spoken_tool_call={} tool={} origin={} status={} output_artifact={}\n",
+                tool_call.tool_call_id,
+                tool_call.tool_name,
+                tool_call.tool_origin,
+                tool_call.status,
+                tool_call.output_artifact_id.as_deref().unwrap_or("none")
+            ));
+        }
+        for observation in &session_row.tool_observations {
+            output.push_str(&format!(
+                "spoken_tool_observation={} tool={} source={} observed_status={} instrumentation={} confidence={} external_ref={} artifact={}\n",
+                observation.tool_observation_id,
+                observation.tool_name,
+                observation.source,
+                observation.observed_status,
+                observation.instrumentation_level,
+                observation.confidence,
+                observation.external_tool_ref.as_deref().unwrap_or("none"),
+                observation.artifact_id.as_deref().unwrap_or("none")
+            ));
+        }
+    }
+}
+
 fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
     match intent {
         VoiceIntentKind::AgentStatus => "agent_status",
@@ -4025,6 +4103,7 @@ fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
         VoiceIntentKind::StartNextWork => "start_next_work",
         VoiceIntentKind::InterruptSession => "interrupt_session",
         VoiceIntentKind::StopSession => "stop_session",
+        VoiceIntentKind::ToolActivity => "tool_activity",
         VoiceIntentKind::Unknown => "unknown",
     }
 }
@@ -4041,6 +4120,8 @@ fn voice_scope_label(scope: &VoiceReadScope) -> &'static str {
         VoiceReadScope::ProjectNextWork => "project_next_work",
         VoiceReadScope::ProjectRecentWork => "project_recent_work",
         VoiceReadScope::ProjectReviewNeeds => "project_review_needs",
+        VoiceReadScope::ProjectToolActivity => "project_tool_activity",
+        VoiceReadScope::AgentToolActivity { .. } => "agent_tool_activity",
         VoiceReadScope::Agent { .. } => "agent",
         VoiceReadScope::SessionForAgent { .. } => "session_for_agent",
         VoiceReadScope::None => "none",
@@ -9855,6 +9936,55 @@ mod tests {
             agent_output.contains("spoken_tool_observation=tool-observation-voice-recent-work")
         );
         assert!(!agent_output.contains("What has fake-codex done?"));
+        let project_tool_output = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What tools have my agents used?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice project tool activity");
+
+        assert!(project_tool_output.contains("voice_plan=tool_activity"));
+        assert!(project_tool_output.contains("mutation_applied=false"));
+        assert!(project_tool_output.contains("raw_transcript_retained=false"));
+        assert!(project_tool_output.contains("read_scope=project_tool_activity"));
+        assert!(project_tool_output.contains("spoken_tool_activity_agents=2"));
+        assert!(project_tool_output.contains("spoken_tool_calls=3"));
+        assert!(project_tool_output.contains("spoken_tool_observations=1"));
+        assert!(project_tool_output.contains("spoken_tool_activity_agent=fake-codex"));
+        assert!(project_tool_output.contains("spoken_tool_call=tool-voice-recent-work"));
+        assert!(
+            project_tool_output
+                .contains("spoken_tool_observation=tool-observation-voice-recent-work")
+        );
+        assert!(!project_tool_output.contains("What tools have my agents used?"));
+
+        let agent_tool_output = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What tools has fake-codex used?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice agent tool activity");
+
+        assert!(agent_tool_output.contains("voice_plan=tool_activity"));
+        assert!(agent_tool_output.contains("mutation_applied=false"));
+        assert!(agent_tool_output.contains("raw_transcript_retained=false"));
+        assert!(agent_tool_output.contains("read_scope=agent_tool_activity"));
+        assert!(agent_tool_output.contains("spoken_tool_activity_agents=1"));
+        assert!(agent_tool_output.contains("spoken_tool_calls=2"));
+        assert!(agent_tool_output.contains("spoken_tool_observations=1"));
+        assert!(agent_tool_output.contains("spoken_tool_activity_agent=fake-codex"));
+        assert!(agent_tool_output.contains("spoken_tool_call=tool-voice-recent-work"));
+        assert!(
+            agent_tool_output
+                .contains("spoken_tool_observation=tool-observation-voice-recent-work")
+        );
+        assert!(!agent_tool_output.contains("What tools has fake-codex used?"));
         assert_eq!(
             state.last_sequence().expect("after sequence"),
             before_sequence
