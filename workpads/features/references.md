@@ -1317,3 +1317,13 @@ Observed 2026-05-26.
 - Tools tests module: `../../crates/capo-tools/src/tests.rs`
 - Resulting file sizes: `../../crates/capo-tools/src/lib.rs` 1,642 lines; `../../crates/capo-tools/src/tests.rs` 896 lines.
 - No new third-party dependencies were added for T1.
+
+## F11/T2 Tools Permission Policy Module Split
+
+Observed 2026-05-26.
+
+- Tools crate root: `../../crates/capo-tools/src/lib.rs`
+- Permission policy module: `../../crates/capo-tools/src/permission.rs`
+- Tools tests module: `../../crates/capo-tools/src/tests.rs`
+- Resulting file sizes: `../../crates/capo-tools/src/lib.rs` 1,362 lines; `../../crates/capo-tools/src/permission.rs` 285 lines; `../../crates/capo-tools/src/tests.rs` 896 lines.
+- No new third-party dependencies were added for T2.

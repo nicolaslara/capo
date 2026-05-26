@@ -2620,6 +2620,25 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F11/T2 - Tools Permission Policy Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move `PermissionPolicy`, fake/trusted/static policy implementations, `PermissionRequest`, `PermissionDecision`, JSON scope parsing, and scoped grant ID helpers into `permission.rs`.
+- Re-export the permission API from the crate root so `capo-adapters`, `capo-controller`, `capo-cli`, and tests keep the same import surface.
+- Keep ACP capability gating in `lib.rs` for this slice because it depends on tool definitions and wrapper catalog checks, even though it consumes `PermissionPolicy`.
+- Keep `content_hash` in `lib.rs`; only the permission-specific stable grant hash moved with the policy implementation.
+
+Verification:
+
+- `cargo test -p capo-tools`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.

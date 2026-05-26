@@ -596,10 +596,12 @@ Acceptance:
 Progress:
 
 - T1 tools test module split is completed. Production tool registry, wrapper, and permission policy code remains in `crates/capo-tools/src/lib.rs`; tests now live in `crates/capo-tools/src/tests.rs` with the same private-module access pattern.
+- T2 permission policy module split is completed. `PermissionPolicy`, fake/trusted/static policy implementations, permission request/decision records, scope parsing, and scoped grant ID helpers now live in `crates/capo-tools/src/permission.rs`; the crate root re-exports the policy API for existing callers.
 
 Evidence:
 
 - `crates/capo-tools/src/lib.rs`
+- `crates/capo-tools/src/permission.rs`
 - `crates/capo-tools/src/tests.rs`
 - `cargo test -p capo-tools`
 - `cargo fmt --check`
