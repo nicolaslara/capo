@@ -1965,3 +1965,24 @@ Verification:
 - `git diff --check`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - `cargo test`: passed.
+
+## F7/RR12 - Runtime Target Exposure Validation
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Fail closed before recording a `runtime_target` connectivity exposure unless the target exists in the runtime target inventory.
+- Keep dry-run exposure planning available without requiring registered target state because it does not mutate Capo state.
+- Keep `capo_server` exposure owners independent from runtime target registration.
+- Preserve the boundary split: validation only connects exposure metadata to execution-machine metadata; it does not launch runtime processes, provider CLIs, tunnels, approvals, grants, or prompt materialization.
+- Enforce this at the CLI/operator write surface for now. A future service/controller write path should enforce the same invariant if connectivity writes move out of the CLI.
+
+Verification:
+
+- `cargo test -p capo-cli connectivity_expose_stub -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.

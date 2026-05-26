@@ -4806,6 +4806,7 @@ fn expose_connectivity_stub(parsed: &ParsedArgs, args: &[String]) -> Result<Stri
         updated_sequence: 0,
     };
     let sequence = if record {
+        ensure_runtime_target_owner_exists(parsed, &exposure)?;
         let event_kind = if resolved.permission_required {
             EventKind::ConnectivityExposureRequested
         } else {
@@ -4874,6 +4875,28 @@ fn expose_connectivity_stub(parsed: &ParsedArgs, args: &[String]) -> Result<Stri
             .map(|sequence| sequence.to_string())
             .unwrap_or_else(|| "none".to_string())
     ))
+}
+
+fn ensure_runtime_target_owner_exists(
+    parsed: &ParsedArgs,
+    exposure: &ConnectivityExposureProjection,
+) -> Result<(), String> {
+    if exposure.owner_kind != "runtime_target" {
+        return Ok(());
+    }
+    let exists = state(parsed)?
+        .runtime_targets(&exposure.project_id)
+        .map_err(debug_error)?
+        .iter()
+        .any(|target| target.runtime_target_id == exposure.owner_id);
+    if exists {
+        Ok(())
+    } else {
+        Err(format!(
+            "unknown runtime target for recorded connectivity exposure: {}; register it with `capo runtime target register` first",
+            exposure.owner_id
+        ))
+    }
 }
 
 fn request_connectivity_exposure_approval(
@@ -9952,6 +9975,47 @@ mod tests {
     #[test]
     fn connectivity_expose_stub_records_blocked_private_exposure_without_runtime_execution() {
         let state_root = temp_root("cli-connectivity-expose-stub");
+        let blocked_unknown_target = run_cli(vec![
+            "connectivity".to_string(),
+            "expose-stub".to_string(),
+            "--endpoint".to_string(),
+            "endpoint-private-1".to_string(),
+            "--owner-kind".to_string(),
+            "runtime_target".to_string(),
+            "--owner-id".to_string(),
+            "remote-target-1".to_string(),
+            "--channel".to_string(),
+            "control".to_string(),
+            "--exposure".to_string(),
+            "private".to_string(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("record private exposure with unknown runtime target");
+        assert!(blocked_unknown_target.contains("unknown runtime target"));
+
+        run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "register".to_string(),
+            "--target".to_string(),
+            "remote-target-1".to_string(),
+            "--name".to_string(),
+            "remote target 1".to_string(),
+            "--runner".to_string(),
+            "remote-process".to_string(),
+            "--workspace".to_string(),
+            "/tmp/capo-remote-workspace".to_string(),
+            "--artifacts".to_string(),
+            "/tmp/capo-remote-artifacts".to_string(),
+            "--endpoint".to_string(),
+            "endpoint-private-1".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("register runtime target");
+
         let planned = run_cli(vec![
             "connectivity".to_string(),
             "expose-stub".to_string(),
@@ -10013,6 +10077,27 @@ mod tests {
     #[test]
     fn connectivity_exposure_approval_activates_only_with_matching_grant() {
         let state_root = temp_root("cli-connectivity-exposure-approval");
+        run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "register".to_string(),
+            "--target".to_string(),
+            "remote-target-1".to_string(),
+            "--name".to_string(),
+            "remote target 1".to_string(),
+            "--runner".to_string(),
+            "remote-process".to_string(),
+            "--workspace".to_string(),
+            "/tmp/capo-remote-workspace".to_string(),
+            "--artifacts".to_string(),
+            "/tmp/capo-remote-artifacts".to_string(),
+            "--endpoint".to_string(),
+            "endpoint-private-1".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("register runtime target");
+
         let planned = run_cli(vec![
             "connectivity".to_string(),
             "expose-stub".to_string(),

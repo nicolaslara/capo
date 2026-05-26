@@ -260,3 +260,29 @@ Decision:
 - Treat runtime targets as execution placement metadata: runner kind, workspace root, artifact root, default cwd, capability profile, optional connectivity endpoint, and health/status label.
 - Keep actual process execution in runtime requests/outcomes and keep reachability in connectivity exposure records. A runtime target can be listed without any tunnel or provider process existing.
 - Use this registry as the stable owner side for later SSH/Tailscale/cloud target adapters and for dashboard/operator review before real remote execution is enabled.
+
+### RR12 - Runtime Target Exposure Validation
+
+Status: completed
+
+Acceptance:
+
+- Fail closed before recording a connectivity exposure whose owner is `runtime_target` unless the runtime target exists in Capo state.
+- Keep dry-run exposure planning available for inspection without mutating state.
+- Keep `capo_server` owner exposure independent from runtime target inventory.
+- Do not launch runtimes, launch provider CLIs, inspect credentials, open tunnels, request approvals, activate grants, or mutate runtime target state.
+
+Evidence:
+
+- Recorded `capo connectivity expose-stub --owner-kind runtime_target ... --record` validates the owner against `SqliteStateStore::runtime_targets(...)` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-cli connectivity_expose_stub -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Decision:
+
+- Treat runtime target registration as the durable execution-machine inventory. Connectivity exposure rows for runtime owners must point at known targets so later SSH/Tailscale/cloud adapters and dashboards are not built on opaque strings.
+- Keep the validation at the CLI/operator write surface for now because runtime targets and connectivity exposures are still metadata-only feature scaffolding. A future service/controller write path should enforce the same invariant closer to the command handler.
