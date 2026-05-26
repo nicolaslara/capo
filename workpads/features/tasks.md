@@ -176,6 +176,7 @@ Progress:
 - DB7 dogfood readiness evidence export is completed with a Capo-marked markdown artifact and project-level evidence record.
 - DB8 dogfood readiness component refs is completed with connector, workpad, dispatch-chain, and project-evidence refs rendered through the shared readiness query.
 - DB9 runtime target dogfood readiness is completed with available runtime target counts/refs included in shared readiness, dashboard, voice, and evidence surfaces.
+- DB10 first local dogfood readiness checkpoint is completed. Local ignored Capo state now has an available runtime target, indexed workpads, a prompt-redacted Codex workpad dispatch plan, a ready dispatch gate, a fixture replay, dashboard visibility, readiness evidence, and no dogfood blockers.
 
 Evidence:
 
@@ -207,6 +208,13 @@ Evidence:
 - `cargo test -p capo-query dogfood_readiness -- --nocapture` verifies runtime target readiness gating
 - `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture` verifies runtime target refs in readiness/evidence/dashboard output
 - `cargo test -p capo-cli voice_dogfood_readiness -- --nocapture` verifies runtime target readiness in voice answers
+- `capo runtime target register --target local-capo --runner local-process --status available`
+- `capo workpad index --root /Users/nicolas/devel/capo`
+- `capo workpad plan-next --agent codex-local --adapter codex --record`
+- `capo adapter dispatch-gate --dispatch-plan adapter-dispatch-plan-codex_exec-2e26cf61ba2310e8-7463adb44145eaaf --record`
+- `capo adapter replay-dispatch --dispatch-plan adapter-dispatch-plan-codex_exec-2e26cf61ba2310e8-7463adb44145eaaf --fixture crates/capo-adapters/fixtures/codex-exec.jsonl --out .capo-dev/evidence`
+- `capo dogfood readiness`: `ready=true`, `status=ready_for_first_dogfood`
+- Provider-secret-shaped marker scans and raw fixture response scans over `.capo-dev` state/evidence: no matches after excluding broad false positives like `task-`.
 
 ## F3 - Query Surface And Dashboard Upgrade
 

@@ -1498,3 +1498,16 @@ Observed 2026-05-26.
 - State crate module registration retained in: `../../crates/capo-state/src/lib.rs`
 - Resulting file sizes: `../../crates/capo-state/src/codec.rs` 839 lines; `../../crates/capo-state/src/codec_adapter.rs` 763 lines; `../../crates/capo-state/src/codec_encode.rs` 511 lines; `../../crates/capo-state/src/lib.rs` 506 lines.
 - No new third-party dependencies were added for SS2h.
+
+## F2/DB10 First Local Dogfood Readiness Checkpoint
+
+Observed 2026-05-26.
+
+- Local runtime target ref: `local-capo`.
+- Selected indexed workpad task: `workpads:features:agent-connectors.md#ac3`.
+- Codex dispatch plan ref: `adapter-dispatch-plan-codex_exec-2e26cf61ba2310e8-7463adb44145eaaf`.
+- Dispatch gate ref: `adapter-dispatch-gate-c1e061786ffdd9e6-e76900880ff59e82`.
+- Dispatch replay ref: `adapter-dispatch-replay-402f3ecd6c003a86`.
+- Readiness evidence artifact: `.capo-dev/evidence/artifact-dogfood-readiness-38c286e1f2e30354.md` (local ignored runtime state, not committed).
+- Fixture used for deterministic replay: `../../crates/capo-adapters/fixtures/codex-exec.jsonl`.
+- No new third-party dependencies were added for DB10.

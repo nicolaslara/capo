@@ -3038,6 +3038,31 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F2/DB10 - First Local Dogfood Readiness Checkpoint
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Use local ignored `.capo-dev` state to prove the first dogfood readiness checkpoint rather than committing runtime state.
+- Treat this as a control-plane rehearsal, not a real provider execution. The recorded dispatch chain uses the Codex connector shape and subscription-safe launch plan, but replays the deterministic Codex fixture with `provider_cli_executed=false`.
+- Use the indexed next workpad task `workpads:features:agent-connectors.md#ac3` as the first planned dogfood target because it is already the active real-agent controller-path gap.
+- Keep source markdown as the fallback. The checkpoint indexes workpads and records state/evidence but does not import the task as source-of-truth work or edit markdown.
+- Next dogfood work should either import AC3 as a Capo task for a managed rehearsal or run a real opt-in Codex local dispatch after review of prompt/source and raw-output policy.
+
+Verification:
+
+- `capo runtime target register --target local-capo --runner local-process --status available`: recorded an available local target with `provider_cli_executed=false` and `tunnel_opened=false`.
+- `capo workpad index --root /Users/nicolas/devel/capo`: recorded `files=44`, `tasks=206`.
+- `capo workpad next`: selected `workpads:features:agent-connectors.md#ac3`.
+- `capo workpad plan-next --agent codex-local --adapter codex --record`: recorded `adapter-dispatch-plan-codex_exec-2e26cf61ba2310e8-7463adb44145eaaf`, prompt not rendered, prompt source kind `workpad_task`, provider CLI not executed.
+- `capo adapter dispatch-gate --dispatch-plan adapter-dispatch-plan-codex_exec-2e26cf61ba2310e8-7463adb44145eaaf --record`: recorded `adapter-dispatch-gate-c1e061786ffdd9e6-e76900880ff59e82`, `status=ready_for_execution`, provider CLI not executed.
+- `capo adapter replay-dispatch --dispatch-plan adapter-dispatch-plan-codex_exec-2e26cf61ba2310e8-7463adb44145eaaf --fixture crates/capo-adapters/fixtures/codex-exec.jsonl --out .capo-dev/evidence`: recorded `adapter-dispatch-replay-402f3ecd6c003a86`, `appended_events=6`, `tool_events=2`, `raw_content_policy=content_hashed_not_rendered`, provider CLI not executed.
+- `capo dogfood readiness`: `ready=true`, `status=ready_for_first_dogfood`, all component booleans true, no blockers, no next actions.
+- `capo dogfood readiness --out .capo-dev/evidence`: exported `artifact-dogfood-readiness-38c286e1f2e30354.md` after the earlier readiness artifact had been recorded as project evidence.
+- `capo dashboard`: rendered runtime target, workpad rows, connector proof, dispatch plan/gate/replay, observed-only adapter-native tool activity, and `project_dogfood_readiness=true`.
+- Provider-secret-shaped marker scans over `.capo-dev` state and existing generated artifact dirs returned no matches after excluding broad false-positive terms such as bare `token` and `sk-` inside `task-`. Raw fixture response scans also returned no matches.
+
 ## F8/SS2d - State Projection Codec Module Split
 
 Status: completed on 2026-05-26.

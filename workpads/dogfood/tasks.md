@@ -10,7 +10,7 @@ Prototype gate passed with constraints on 2026-05-25. Dogfood planning can start
 
 ## D0 - Dogfood Readiness Review
 
-Status: pending
+Status: completed
 
 Acceptance:
 
@@ -18,6 +18,12 @@ Acceptance:
 - Risks of moving project execution into Capo listed.
 - Rollback/fallback plan recorded.
 - Decide whether first rehearsal uses fake agents or waits for Codex connector proof.
+
+Evidence:
+
+- `workpads/dogfood/knowledge.md` records the first dogfood readiness checkpoint, risks, rollback/fallback plan, and recommended first dogfood path.
+- `capo dogfood readiness`: `ready=true`, `status=ready_for_first_dogfood`, no blockers, no next actions.
+- First rehearsal should use the proven Codex connector path with deterministic fixture replay first, then real opt-in Codex only after prompt/source and raw-output policy review.
 
 ## D1 - Import Capo Workpads
 
@@ -38,7 +44,7 @@ Acceptance:
 
 - A real Capo project task is created, assigned, tracked, and reviewed through Capo.
 - Evidence is recorded both in Capo state and markdown fallback.
-- If real connector proof is still missing, label the run as a fake-agent rehearsal rather than real dogfood.
+- If real provider execution is not used, label the run as a fixture or fake-agent rehearsal rather than full real-agent dogfood.
 
 ## D3 - Dogfood Gate
 

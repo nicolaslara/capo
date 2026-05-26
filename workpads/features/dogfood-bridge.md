@@ -258,3 +258,37 @@ Decision:
 - Treat runtime target readiness as an execution-placement prerequisite distinct from connector proof, workpad bridge state, dispatch-chain state, and connectivity exposure.
 - Count only targets with `status=available` as satisfying the gate. Disabled and unhealthy targets remain visible through runtime target status surfaces but do not clear dogfood readiness.
 - Use runtime target IDs as review breadcrumbs in readiness output and artifacts. The readiness check does not prove a runtime process is live or that a tunnel is open.
+
+### DB10 - First Local Dogfood Readiness Checkpoint
+
+Status: completed
+
+Acceptance:
+
+- Register an available local runtime target in local Capo state without launching a runtime process or tunnel.
+- Index the Capo workpads into local Capo state without modifying source markdown.
+- Record a prompt-redacted Codex workpad dispatch plan, ready dispatch gate, and fixture replay for the next indexed workpad task without executing a provider CLI.
+- Export dogfood readiness evidence and verify the shared readiness query reports no blockers.
+- Scan generated state/evidence for provider-secret-shaped markers and raw fixture response text.
+
+Evidence:
+
+- `capo runtime target register --target local-capo --name "Local Capo Workspace" --runner local-process --workspace /Users/nicolas/devel/capo --artifacts /Users/nicolas/devel/capo/.capo-dev/artifacts --cwd /Users/nicolas/devel/capo --capability-profile trusted-local --status available`: recorded `local-capo`, `status=available`, `provider_cli_executed=false`, `tunnel_opened=false`.
+- `capo workpad index --root /Users/nicolas/devel/capo`: recorded `files=44`, `tasks=206`.
+- `capo workpad next`: selected `workpads:features:agent-connectors.md#ac3` / `AC3 - Real-Agent Controller Path`.
+- `capo workpad plan-next --agent codex-local --adapter codex --workspace /Users/nicolas/devel/capo --artifacts /Users/nicolas/devel/capo/.capo-dev/dispatch-artifacts --record`: recorded `adapter-dispatch-plan-codex_exec-2e26cf61ba2310e8-7463adb44145eaaf`, `provider_cli_executed=false`, `runtime_prompt_policy=not_rendered`, `runtime_prompt_source_kind=workpad_task`.
+- `capo adapter dispatch-gate --dispatch-plan adapter-dispatch-plan-codex_exec-2e26cf61ba2310e8-7463adb44145eaaf --record`: recorded `adapter-dispatch-gate-c1e061786ffdd9e6-e76900880ff59e82`, `status=ready_for_execution`, `provider_cli_executed=false`.
+- `capo adapter replay-dispatch --dispatch-plan adapter-dispatch-plan-codex_exec-2e26cf61ba2310e8-7463adb44145eaaf --fixture crates/capo-adapters/fixtures/codex-exec.jsonl --out .capo-dev/evidence`: recorded `adapter-dispatch-replay-402f3ecd6c003a86`, `provider_cli_executed=false`, `raw_content_policy=content_hashed_not_rendered`, `appended_events=6`, `tool_events=2`.
+- `capo dogfood readiness`: reported `ready=true`, `status=ready_for_first_dogfood`, all component booleans true, no blockers, and no next actions.
+- `capo dogfood readiness --out .capo-dev/evidence`: exported `artifact-dogfood-readiness-38c286e1f2e30354.md` after the earlier readiness artifact was already recorded as project evidence.
+- `capo adapter dispatch-status --latest --agent codex-local`: reported the plan, ready gate, fixture replay, no execution outcome, and `next_action=inspect_replay_or_prepare_real_execution`.
+- `capo dashboard`: rendered the runtime target, indexed workpads, adapter smoke proof, dispatch plan/gate/replay, observed-only native tool observation, and `project_dogfood_readiness=true`.
+- `strings .capo-dev/capo.sqlite | rg "oauth|api_key|anthropic_api_key|openai_api_key|authorization:|set-cookie:|session_token|access_token|refresh_token|\bsk-[A-Za-z0-9]"`: no matches.
+- `rg` over existing generated artifact dirs `.capo-dev/evidence` and `.capo-dev/artifacts` for the same provider-secret-shaped markers: no matches. `.capo-dev/dispatch-artifacts` was not created because no provider/local process execution occurred.
+- `rg "Codex fixture response"` over existing generated artifact dirs `.capo-dev/evidence` and `.capo-dev/artifacts`, plus `strings .capo-dev/capo.sqlite`: no matches.
+
+Decision:
+
+- The first dogfood readiness checkpoint is now proven in local ignored Capo state. This is not a real provider execution: it proves the Capo control-plane path can connect connector proof, runtime placement, workpad indexing, dispatch planning, gate evaluation, fixture replay, dashboard introspection, evidence export, and secret/raw-output non-retention.
+- Keep `.capo-dev/` ignored. Durable proof for the repository is this workpad record plus the command IDs/record IDs; the SQLite database and evidence files are local runtime state.
+- The next dogfood rehearsal should import the selected AC3 workpad task or run a real opt-in Codex local dispatch only after a review checkpoint confirms source markdown remains the fallback and raw prompt/provider output policies are acceptable.
