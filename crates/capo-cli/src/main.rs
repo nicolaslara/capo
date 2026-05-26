@@ -85,6 +85,8 @@ Usage:
   capo connectivity request-approval --exposure EXPOSURE_ID [--approval APPROVAL_ID] [--state PATH]
   capo connectivity activate-exposure --exposure EXPOSURE_ID [--state PATH]
   capo connectivity revoke-exposure --exposure EXPOSURE_ID [--reason REASON] [--state PATH]
+  capo connectivity exposure-status --exposure EXPOSURE_ID [--state PATH]
+  capo connectivity exposure-status --latest [--owner-kind runtime_target|capo_server] [--owner-id OWNER_ID] [--channel control|stdio|logs|dashboard|artifact] [--state PATH]
   capo connectivity exposure-evidence --exposure EXPOSURE_ID --out DIR [--state PATH]
   capo workpad index --root PATH [--state PATH]
   capo workpad next [--path PATH] [--state PATH]
@@ -222,6 +224,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "connectivity" && command == "revoke-exposure" => {
             revoke_connectivity_exposure(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "connectivity" && command == "exposure-status" => {
+            connectivity_exposure_status(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "connectivity" && command == "exposure-evidence" => {
             connectivity_exposure_evidence(&parsed, rest)
@@ -4574,6 +4579,80 @@ fn revoke_connectivity_exposure(parsed: &ParsedArgs, args: &[String]) -> Result<
     ))
 }
 
+fn connectivity_exposure_status(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let latest = has_flag(args, "--latest");
+    let exposure_id = optional_arg(args, "--exposure");
+    let owner_kind = optional_arg(args, "--owner-kind");
+    let owner_id = optional_arg(args, "--owner-id");
+    let channel = optional_arg(args, "--channel");
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--")
+            && !matches!(
+                arg.as_str(),
+                "--exposure" | "--latest" | "--owner-kind" | "--owner-id" | "--channel"
+            )
+    }) {
+        return Err(format!(
+            "unknown connectivity exposure-status option: {unknown}"
+        ));
+    }
+    if latest && exposure_id.is_some() {
+        return Err(
+            "connectivity exposure-status accepts either --exposure or --latest".to_string(),
+        );
+    }
+    if !latest && (owner_kind.is_some() || owner_id.is_some() || channel.is_some()) {
+        return Err("connectivity exposure-status filters require --latest".to_string());
+    }
+    if let Some(kind) = owner_kind.as_deref() {
+        endpoint_owner(kind, owner_id.as_deref().unwrap_or("filter-validation"))?;
+    }
+    if let Some(channel) = channel.as_deref() {
+        parse_channel_kind(channel)?;
+    }
+
+    let state = state(parsed)?;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    let exposure = if latest {
+        dashboard
+            .latest_connectivity_exposure(
+                owner_kind.as_deref(),
+                owner_id.as_deref(),
+                channel.as_deref(),
+            )
+            .ok_or_else(|| {
+                let mut filters = Vec::new();
+                if let Some(owner_kind) = owner_kind.as_deref() {
+                    filters.push(format!("owner_kind={owner_kind}"));
+                }
+                if let Some(owner_id) = owner_id.as_deref() {
+                    filters.push(format!("owner_id={owner_id}"));
+                }
+                if let Some(channel) = channel.as_deref() {
+                    filters.push(format!("channel={channel}"));
+                }
+                if filters.is_empty() {
+                    "no recorded connectivity exposures".to_string()
+                } else {
+                    format!(
+                        "no recorded connectivity exposures matching {}",
+                        filters.join(",")
+                    )
+                }
+            })?
+    } else {
+        let exposure_id = exposure_id.ok_or_else(|| {
+            "connectivity exposure-status requires --exposure or --latest".to_string()
+        })?;
+        dashboard
+            .connectivity_exposure_status(&exposure_id)
+            .ok_or_else(|| format!("missing connectivity exposure: {exposure_id}"))?
+    };
+
+    Ok(render_connectivity_exposure_status(exposure))
+}
+
 fn connectivity_exposure_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let exposure_id = required_arg(args, "--exposure")?;
     let out = PathBuf::from(required_arg(args, "--out")?);
@@ -4691,6 +4770,25 @@ fn render_connectivity_exposure_evidence(
         exposure.health_status,
         exposure.reachable,
         exposure.capability_grant_id.as_deref().unwrap_or("none"),
+        exposure.revoked_at.as_deref().unwrap_or("none"),
+        exposure.updated_sequence
+    )
+}
+
+fn render_connectivity_exposure_status(exposure: &ConnectivityExposureProjection) -> String {
+    format!(
+        "connectivity_exposure_status=true\nexposure={}\nendpoint={}\nowner={}:{}\nchannel={}\nexposure_scope={}\npermission_scope={}\nstatus={}\ngrant={}\nhealth={}\nreachable={}\nrevoked_at={}\nupdated_sequence={}\n",
+        exposure.exposure_id,
+        exposure.connectivity_endpoint_id,
+        exposure.owner_kind,
+        exposure.owner_id,
+        exposure.channel_kind,
+        exposure.exposure,
+        exposure.permission_scope,
+        exposure.status,
+        exposure.capability_grant_id.as_deref().unwrap_or("none"),
+        exposure.health_status,
+        exposure.reachable,
         exposure.revoked_at.as_deref().unwrap_or("none"),
         exposure.updated_sequence
     )
@@ -6597,6 +6695,7 @@ mod tests {
         assert!(HELP.contains("connectivity request-approval"));
         assert!(HELP.contains("connectivity activate-exposure"));
         assert!(HELP.contains("connectivity revoke-exposure"));
+        assert!(HELP.contains("connectivity exposure-status"));
         assert!(HELP.contains("connectivity exposure-evidence"));
         assert!(HELP.contains("workpad index"));
         assert!(HELP.contains("workpad next"));
@@ -9138,6 +9237,40 @@ mod tests {
         assert!(dashboard.contains("exposure_status=active"));
         assert!(dashboard.contains("grant=grant-approval-"));
 
+        let exact_status = run_cli(vec![
+            "connectivity".to_string(),
+            "exposure-status".to_string(),
+            "--exposure".to_string(),
+            output_value(&activated, "exposure"),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("exact exposure status");
+        assert!(exact_status.contains("connectivity_exposure_status=true"));
+        assert!(exact_status.contains("status=active"));
+        assert!(exact_status.contains("owner=runtime_target:remote-target-1"));
+
+        let latest_status = run_cli(vec![
+            "connectivity".to_string(),
+            "exposure-status".to_string(),
+            "--latest".to_string(),
+            "--owner-kind".to_string(),
+            "runtime_target".to_string(),
+            "--owner-id".to_string(),
+            "remote-target-1".to_string(),
+            "--channel".to_string(),
+            "control".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("latest exposure status");
+        assert!(latest_status.contains("connectivity_exposure_status=true"));
+        assert!(latest_status.contains("status=active"));
+        assert_eq!(
+            output_value(&latest_status, "exposure"),
+            output_value(&activated, "exposure")
+        );
+
         let revoked = run_cli(vec![
             "connectivity".to_string(),
             "revoke-exposure".to_string(),
@@ -9166,6 +9299,16 @@ mod tests {
         assert!(dashboard.contains("health=disabled"));
         assert!(dashboard.contains("reachable=false"));
         assert!(dashboard.contains("revoked_at=unix:"));
+
+        let latest_status_after_revoke = run_cli(vec![
+            "connectivity".to_string(),
+            "exposure-status".to_string(),
+            "--latest".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("latest exposure status after revoke");
+        assert!(latest_status_after_revoke.contains("status=revoked"));
 
         let evidence_dir = temp_root("cli-connectivity-exposure-evidence");
         let evidence = run_cli(vec![

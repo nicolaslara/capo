@@ -223,6 +223,42 @@ impl ProjectDashboard {
             .max(latest_replay_sequence)
             .max(latest_execution_sequence)
     }
+
+    pub fn connectivity_exposure_status(
+        &self,
+        exposure_id: &str,
+    ) -> Option<&ConnectivityExposureProjection> {
+        self.connectivity_exposures
+            .iter()
+            .rev()
+            .find(|exposure| exposure.exposure_id == exposure_id)
+    }
+
+    pub fn latest_connectivity_exposure(
+        &self,
+        owner_kind: Option<&str>,
+        owner_id: Option<&str>,
+        channel_kind: Option<&str>,
+    ) -> Option<&ConnectivityExposureProjection> {
+        self.connectivity_exposures
+            .iter()
+            .filter(|exposure| {
+                owner_kind
+                    .map(|kind| exposure.owner_kind == kind)
+                    .unwrap_or(true)
+            })
+            .filter(|exposure| owner_id.map(|id| exposure.owner_id == id).unwrap_or(true))
+            .filter(|exposure| {
+                channel_kind
+                    .map(|channel| exposure.channel_kind == channel)
+                    .unwrap_or(true)
+            })
+            .max_by(|left, right| {
+                left.updated_sequence
+                    .cmp(&right.updated_sequence)
+                    .then_with(|| left.exposure_id.cmp(&right.exposure_id))
+            })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -844,6 +880,57 @@ mod tests {
         assert_eq!(exposure.permission_scope, "network:connect:private_tunnel");
         assert_eq!(exposure.health_status, "unknown");
         assert!(!exposure.reachable);
+    }
+
+    #[test]
+    fn project_dashboard_selects_latest_connectivity_exposure() {
+        let root = temp_root("query-dashboard-latest-connectivity");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        append_connectivity_exposure(&state, &project_id);
+        append_connectivity_exposure_with(
+            &state,
+            &project_id,
+            "exposure-dashboard",
+            "capo_server",
+            "capo-server-1",
+            "dashboard",
+            "public",
+            "network:expose:public",
+            "blocked_pending_permission",
+        );
+        append_connectivity_exposure_with(
+            &state,
+            &project_id,
+            "exposure-runtime-logs",
+            "runtime_target",
+            "remote-target-1",
+            "logs",
+            "private",
+            "network:connect:private_tunnel",
+            "active",
+        );
+
+        let dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+
+        let latest = dashboard
+            .latest_connectivity_exposure(None, None, None)
+            .expect("latest exposure");
+        assert_eq!(latest.exposure_id, "exposure-runtime-logs");
+        let latest_dashboard = dashboard
+            .latest_connectivity_exposure(Some("capo_server"), None, Some("dashboard"))
+            .expect("latest dashboard exposure");
+        assert_eq!(latest_dashboard.exposure_id, "exposure-dashboard");
+        let exact = dashboard
+            .connectivity_exposure_status("exposure-private-control")
+            .expect("exact exposure");
+        assert_eq!(exact.owner_kind, "runtime_target");
+        assert!(
+            dashboard
+                .latest_connectivity_exposure(Some("runtime_target"), Some("missing"), None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1577,10 +1664,35 @@ mod tests {
     }
 
     fn append_connectivity_exposure(state: &SqliteStateStore, project_id: &ProjectId) {
+        append_connectivity_exposure_with(
+            state,
+            project_id,
+            "exposure-private-control",
+            "runtime_target",
+            "remote-target-1",
+            "control",
+            "private",
+            "network:connect:private_tunnel",
+            "blocked_pending_permission",
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_connectivity_exposure_with(
+        state: &SqliteStateStore,
+        project_id: &ProjectId,
+        exposure_id: &str,
+        owner_kind: &str,
+        owner_id: &str,
+        channel_kind: &str,
+        exposure_scope: &str,
+        permission_scope: &str,
+        status: &str,
+    ) {
         state
             .append_event(
                 NewEvent {
-                    event_id: "event-connectivity-exposure".to_string(),
+                    event_id: format!("event-{exposure_id}"),
                     kind: EventKind::ConnectivityExposureRequested,
                     actor: "test".to_string(),
                     project_id: Some(project_id.clone()),
@@ -1589,22 +1701,22 @@ mod tests {
                     session_id: None,
                     run_id: None,
                     turn_id: None,
-                    item_id: Some("exposure-private-control".to_string()),
+                    item_id: Some(exposure_id.to_string()),
                     payload_json: "{}".to_string(),
                     idempotency_key: None,
                     redaction_state: RedactionState::Safe,
                 },
                 &[ProjectionRecord::ConnectivityExposure(
                     ConnectivityExposureProjection {
-                        exposure_id: "exposure-private-control".to_string(),
+                        exposure_id: exposure_id.to_string(),
                         project_id: project_id.clone(),
-                        connectivity_endpoint_id: "endpoint-private-1".to_string(),
-                        owner_kind: "runtime_target".to_string(),
-                        owner_id: "remote-target-1".to_string(),
-                        channel_kind: "control".to_string(),
-                        exposure: "private".to_string(),
-                        permission_scope: "network:connect:private_tunnel".to_string(),
-                        status: "blocked_pending_permission".to_string(),
+                        connectivity_endpoint_id: format!("endpoint-{exposure_id}"),
+                        owner_kind: owner_kind.to_string(),
+                        owner_id: owner_id.to_string(),
+                        channel_kind: channel_kind.to_string(),
+                        exposure: exposure_scope.to_string(),
+                        permission_scope: permission_scope.to_string(),
+                        status: status.to_string(),
                         capability_grant_id: None,
                         health_status: "unknown".to_string(),
                         reachable: false,

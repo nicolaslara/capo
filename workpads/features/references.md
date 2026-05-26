@@ -711,3 +711,13 @@ Observed 2026-05-26.
 - Project-level evidence dashboard path reused by the export: `../../crates/capo-query/src/lib.rs`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR8.
+
+## F7/RR9 Latest Connectivity Exposure Status
+
+Observed 2026-05-26.
+
+- Shared exact/latest connectivity exposure selectors and regression coverage: `../../crates/capo-query/src/lib.rs`
+- CLI `connectivity exposure-status --exposure` and `--latest` rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Connectivity exposure source projections: `../../crates/capo-state/src/lib.rs`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR9.

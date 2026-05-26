@@ -180,3 +180,29 @@ Decision:
 
 - Treat connectivity exposure evidence as an operator review artifact, not proof of real tunnel reachability.
 - Keep the export read-model-derived and provider-free. It records endpoint/owner/channel/scope/status/health/grant/revocation metadata only, without opening tunnels, launching runtimes, launching provider CLIs, inspecting credentials, or mutating exposure state.
+
+### RR9 - Latest Connectivity Exposure Status
+
+Status: completed
+
+Acceptance:
+
+- Add a shared query helper that selects the latest recorded connectivity exposure without requiring the operator to know an exposure ID.
+- Support optional owner and channel filters for remote-control surfaces that need the latest exposure for a runtime target, Capo server, or dashboard channel.
+- Expose exact and latest connectivity exposure status through a read-only operator command.
+- Do not open tunnels, launch runtimes or providers, inspect credentials, request approvals, activate grants, revoke exposure, or mutate state.
+
+Evidence:
+
+- `ProjectDashboard::connectivity_exposure_status(...)` and `ProjectDashboard::latest_connectivity_exposure(...)` in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo connectivity exposure-status --exposure EXPOSURE_ID` in `../../crates/capo-cli/src/main.rs`.
+- CLI `capo connectivity exposure-status --latest [--owner-kind runtime_target|capo_server] [--owner-id OWNER_ID] [--channel control|stdio|logs|dashboard|artifact]` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query latest_connectivity -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Decision:
+
+- Treat latest connectivity exposure selection as query/read-model behavior. The selector uses the newest exposure projection sequence, with exposure ID as a deterministic tie breaker.
+- Keep exact `--exposure` lookup and latest `--latest` lookup mutually exclusive. Owner and channel filters are only valid for latest lookup.
+- Keep status read-only. It does not open tunnels, launch runtimes or providers, inspect credentials, request approvals, activate grants, revoke exposure, or mutate state.

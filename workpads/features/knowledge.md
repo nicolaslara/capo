@@ -1573,3 +1573,24 @@ Verification:
 Follow-up:
 
 - Once a real tunnel adapter exists, add a separate reachability evidence artifact instead of overloading this read-model review report.
+
+## F7/RR9 - Latest Connectivity Exposure Status
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add shared exact/latest connectivity exposure selectors to `ProjectDashboard` so CLI, dashboard, voice, web, and mobile consumers can use one read-model rule.
+- Add `capo connectivity exposure-status --exposure EXPOSURE_ID` for exact inspection and `--latest` with optional owner/channel filters for operator ergonomics.
+- Select latest exposure by the newest projection sequence, with exposure ID as a deterministic tie breaker.
+- Keep the command read-only and connectivity-boundary safe: no tunnel opening, runtime launch, provider launch, credential inspection, approval queueing, activation, revocation, or state mutation.
+
+Verification:
+
+- `cargo test -p capo-query latest_connectivity -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Follow-up:
+
+- Voice and future mobile/web surfaces should use this selector for "latest remote-control exposure" questions instead of requiring exposure IDs.
