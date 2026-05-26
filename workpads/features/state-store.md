@@ -109,3 +109,30 @@ Decision:
 
 - Split event/error types before projection internals because they are stable boundary vocabulary and can be moved without touching persisted projection rows.
 - Keep the new modules private with crate-root `pub use` exports for now. This preserves the current `capo_state::{EventKind, StateError, ...}` import surface while making later `schema`, `projections`, and `queries` splits easier.
+
+### SS2b - State Projection Type Module Split
+
+Status: completed
+
+Acceptance:
+
+- Move projection record and read-model type definitions out of `src/lib.rs`.
+- Preserve crate-root public APIs through re-exports so downstream crates can continue importing the same projection names from `capo_state`.
+- Do not change SQLite schema, projection encoding, projection decoding, query behavior, rebuild behavior, or persisted projection kind strings.
+- Run focused `capo-state` tests and the standard workspace gate before completion.
+
+Evidence:
+
+- `../../crates/capo-state/src/projections.rs` now owns `ProjectionRecord` and the projection/read-model structs.
+- `../../crates/capo-state/src/lib.rs` re-exports projection types at the crate root.
+- Resulting state crate file sizes: `../../crates/capo-state/src/lib.rs` 5,379 lines; `../../crates/capo-state/src/projections.rs` 503 lines; `../../crates/capo-state/src/event.rs` 207 lines; `../../crates/capo-state/src/error.rs` 37 lines; `../../crates/capo-state/src/tests.rs` 1,876 lines.
+- `git diff --check`: passed.
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+Decision:
+
+- Keep projection data structures separate from projection persistence code. This makes the public state read-model vocabulary easier to inspect while leaving the higher-risk SQL, projection log codec, and rebuild code in place for a later dedicated split.
+- Preserve `MemoryRecordProjection::is_packet_eligible` with the type definition because it is a read-model invariant used by consumers, not a SQLite codec concern.

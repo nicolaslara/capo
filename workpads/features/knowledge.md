@@ -2473,3 +2473,22 @@ Verification:
 - `cargo test -p capo-state`: passed.
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+## F8/SS2b - State Projection Type Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move projection/read-model type definitions into `projections.rs` before touching SQL schema or projection codec functions.
+- Preserve all crate-root projection exports with `pub use projections::*;` so `capo-query`, `capo-controller`, `capo-cli`, and tests keep the same import surface.
+- Keep projection persistence, row encoding, row decoding, and SQL migration code in `lib.rs` for this slice. Those areas are higher risk because they define persisted projection kind strings and rebuild behavior.
+- Keep `MemoryRecordProjection::is_packet_eligible` beside `MemoryRecordProjection` because it is a read-model eligibility invariant, not database plumbing.
+
+Verification:
+
+- `git diff --check`: passed.
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
