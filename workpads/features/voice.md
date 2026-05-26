@@ -207,3 +207,25 @@ Evidence:
 Decision:
 
 - Keep dispatch-status voice handling read-only over `ProjectDashboard`. Voice can explain what Capo knows about a recorded dispatch chain, but it does not rerun gates, rematerialize prompts, launch providers, inspect credentials, edit workpads, or retain the raw transcript.
+
+### V10 - Latest Dispatch Status Conversation
+
+Status: completed
+
+Acceptance:
+
+- Recognize simple latest dispatch-chain questions such as "What is the latest dispatch status?"
+- Recognize agent-scoped latest dispatch questions such as "What is the latest dispatch status for codex-worker?"
+- Answer from `ProjectDashboard::latest_adapter_dispatch_status(...)` rather than requiring a dispatch-plan ID.
+- Preserve raw transcript non-retention, avoid mutating state, and avoid provider CLI execution.
+
+Evidence:
+
+- `VoiceReadScope::ProjectLatestDispatchStatus` in `../../crates/capo-voice/src/lib.rs`.
+- CLI voice latest dispatch-status rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-voice latest_dispatch_status -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_dispatch_status -- --nocapture`: passed.
+
+Decision:
+
+- Keep latest dispatch-status voice handling read-only over the shared dashboard query. This makes voice usable without copying dispatch-plan IDs while preserving the same prompt/output redaction and provider-safety boundary as exact dispatch-status questions.

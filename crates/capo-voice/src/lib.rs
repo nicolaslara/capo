@@ -70,6 +70,7 @@ pub struct VoiceReadContract {
 pub enum VoiceReadScope {
     ProjectDashboard,
     ProjectDispatchStatus { dispatch_plan_id: String },
+    ProjectLatestDispatchStatus { agent_name: Option<String> },
     ProjectDogfoodReadiness,
     ProjectNextWork,
     ProjectRecentWork,
@@ -193,6 +194,51 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
             requires_visible_confirmation: false,
             assistant_reply_hint:
                 "Answer dispatch-chain status from the shared project dashboard query.".to_string(),
+        };
+    }
+
+    if let Some(agent_name) = latest_dispatch_status_agent(&normalized) {
+        let mut command = voice_command(
+            "voice-latest-dispatch-status",
+            &input,
+            CommandTarget::Project(input.project_id.clone()),
+            CommandIntent::QueryStatus,
+            None,
+        );
+        command
+            .structured_args
+            .push(("view".to_string(), "dispatch_status".to_string()));
+        command
+            .structured_args
+            .push(("dispatch_selector".to_string(), "latest".to_string()));
+        if let Some(agent_name) = &agent_name {
+            command
+                .structured_args
+                .push(("agent".to_string(), agent_name.clone()));
+        }
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::DispatchStatus,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::ProjectLatestDispatchStatus { agent_name },
+                required_fields: vec![
+                    "dispatch_plan_id",
+                    "adapter_kind",
+                    "agent_name",
+                    "plan_status",
+                    "dogfood_gate_status",
+                    "latest_gate_status",
+                    "latest_replay_appended_events",
+                    "latest_execution_status",
+                    "provider_cli_executed",
+                    "next_action",
+                ],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: false,
+            assistant_reply_hint:
+                "Answer latest dispatch-chain status from the shared project dashboard query."
+                    .to_string(),
         };
     }
 
@@ -654,6 +700,27 @@ fn dispatch_status_plan(normalized: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn latest_dispatch_status_agent(normalized: &str) -> Option<Option<String>> {
+    if matches!(
+        normalized,
+        "what is the latest dispatch status"
+            | "what's the latest dispatch status"
+            | "show latest dispatch status"
+            | "latest dispatch status"
+    ) {
+        return Some(None);
+    }
+
+    normalized
+        .strip_prefix("what is the latest dispatch status for ")
+        .or_else(|| normalized.strip_prefix("what's the latest dispatch status for "))
+        .or_else(|| normalized.strip_prefix("show latest dispatch status for "))
+        .or_else(|| normalized.strip_prefix("latest dispatch status for "))
+        .map(agent_slug)
+        .filter(|agent_name| !agent_name.is_empty())
+        .map(Some)
+}
+
 fn is_project_recent_work_question(input: &str) -> bool {
     matches!(
         input,
@@ -880,6 +947,47 @@ mod tests {
                 .find(|(key, _)| key == "dispatch_plan")
                 .map(|(_, value)| value.as_str()),
             Some("adapter-dispatch-plan-codex")
+        );
+    }
+
+    #[test]
+    fn latest_dispatch_status_question_reads_latest_dispatch_without_mutation() {
+        let plan = plan_dummy_transcript(input("What is the latest dispatch status?"));
+
+        assert_eq!(plan.intent_kind, VoiceIntentKind::DispatchStatus);
+        assert_eq!(
+            plan.read_contract.query_scope,
+            VoiceReadScope::ProjectLatestDispatchStatus { agent_name: None }
+        );
+        assert!(plan.read_contract.required_fields.contains(&"agent_name"));
+        assert!(!plan.requires_visible_confirmation);
+        let command = plan.command.expect("voice command");
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "dispatch_selector")
+                .map(|(_, value)| value.as_str()),
+            Some("latest")
+        );
+
+        let agent_plan = plan_dummy_transcript(input(
+            "What is the latest dispatch status for codex-worker?",
+        ));
+        assert_eq!(
+            agent_plan.read_contract.query_scope,
+            VoiceReadScope::ProjectLatestDispatchStatus {
+                agent_name: Some("codex-worker".to_string())
+            }
+        );
+        let command = agent_plan.command.expect("voice command");
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "agent")
+                .map(|(_, value)| value.as_str()),
+            Some("codex-worker")
         );
     }
 

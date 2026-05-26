@@ -3594,6 +3594,7 @@ fn voice_session_id(
         }
         VoiceReadScope::ProjectDashboard
         | VoiceReadScope::ProjectDispatchStatus { .. }
+        | VoiceReadScope::ProjectLatestDispatchStatus { .. }
         | VoiceReadScope::ProjectDogfoodReadiness
         | VoiceReadScope::ProjectNextWork
         | VoiceReadScope::ProjectRecentWork
@@ -3679,30 +3680,22 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
         }
         VoiceReadScope::ProjectDispatchStatus { dispatch_plan_id } => {
             if let Some(status) = dashboard.adapter_dispatch_status(dispatch_plan_id) {
-                output.push_str(&format!(
-                    "spoken_dispatch_plan={} spoken_adapter={} spoken_agent={} spoken_plan_status={} spoken_provider_kind={} spoken_credential_scope={} spoken_provider_cli_executed={} spoken_dogfood_gate={} spoken_latest_gate_status={} spoken_latest_gate_provider_cli_execution_allowed={} spoken_latest_gate_reasons={} spoken_latest_dispatch_replay={} spoken_latest_replay_appended_events={} spoken_latest_execution_status={} spoken_latest_execution_provider_cli_executed={} spoken_latest_execution_credential_scan_status={} spoken_next_action={}\n",
-                    status.dispatch_plan_id,
-                    status.adapter_kind,
-                    status.agent_name,
-                    status.plan_status,
-                    status.provider_kind,
-                    status.credential_scope,
-                    status.provider_cli_executed,
-                    status.dogfood_gate_status,
-                    status.latest_gate_status,
-                    status.latest_gate_provider_cli_execution_allowed,
-                    status.latest_gate_reasons,
-                    status.latest_dispatch_replay_id,
-                    status.latest_replay_appended_events,
-                    status.latest_execution_status,
-                    status.latest_execution_provider_cli_executed,
-                    status.latest_execution_credential_scan_status,
-                    status.next_action
-                ));
+                append_voice_dispatch_status(&mut output, &status);
             } else {
                 output.push_str(&format!(
                     "spoken_dispatch_plan_missing={dispatch_plan_id}\n"
                 ));
+            }
+        }
+        VoiceReadScope::ProjectLatestDispatchStatus { agent_name } => {
+            if let Some(status) = dashboard.latest_adapter_dispatch_status(agent_name.as_deref()) {
+                append_voice_dispatch_status(&mut output, &status);
+            } else if let Some(agent_name) = agent_name {
+                output.push_str(&format!(
+                    "spoken_latest_dispatch_missing_for_agent={agent_name}\n"
+                ));
+            } else {
+                output.push_str("spoken_latest_dispatch_missing=true\n");
             }
         }
         VoiceReadScope::ProjectDogfoodReadiness => {
@@ -3819,6 +3812,29 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
     output
 }
 
+fn append_voice_dispatch_status(output: &mut String, status: &AdapterDispatchStatus) {
+    output.push_str(&format!(
+        "spoken_dispatch_plan={} spoken_adapter={} spoken_agent={} spoken_plan_status={} spoken_provider_kind={} spoken_credential_scope={} spoken_provider_cli_executed={} spoken_dogfood_gate={} spoken_latest_gate_status={} spoken_latest_gate_provider_cli_execution_allowed={} spoken_latest_gate_reasons={} spoken_latest_dispatch_replay={} spoken_latest_replay_appended_events={} spoken_latest_execution_status={} spoken_latest_execution_provider_cli_executed={} spoken_latest_execution_credential_scan_status={} spoken_next_action={}\n",
+        status.dispatch_plan_id,
+        status.adapter_kind,
+        status.agent_name,
+        status.plan_status,
+        status.provider_kind,
+        status.credential_scope,
+        status.provider_cli_executed,
+        status.dogfood_gate_status,
+        status.latest_gate_status,
+        status.latest_gate_provider_cli_execution_allowed,
+        status.latest_gate_reasons,
+        status.latest_dispatch_replay_id,
+        status.latest_replay_appended_events,
+        status.latest_execution_status,
+        status.latest_execution_provider_cli_executed,
+        status.latest_execution_credential_scan_status,
+        status.next_action
+    ));
+}
+
 fn append_voice_agent_row(output: &mut String, row: &capo_query::AgentDashboardRow) {
     output.push_str(&format!(
         "spoken_agent={} agent_status={}\n",
@@ -3878,6 +3894,7 @@ fn voice_scope_label(scope: &VoiceReadScope) -> &'static str {
     match scope {
         VoiceReadScope::ProjectDashboard => "project_dashboard",
         VoiceReadScope::ProjectDispatchStatus { .. } => "project_dispatch_status",
+        VoiceReadScope::ProjectLatestDispatchStatus { .. } => "project_latest_dispatch_status",
         VoiceReadScope::ProjectDogfoodReadiness => "project_dogfood_readiness",
         VoiceReadScope::ProjectNextWork => "project_next_work",
         VoiceReadScope::ProjectRecentWork => "project_recent_work",
@@ -9492,6 +9509,44 @@ mod tests {
         assert!(!output.contains("Do not render this voice dispatch prompt"));
         assert_eq!(
             state.last_sequence().expect("after sequence"),
+            before_sequence
+        );
+
+        let latest_output = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What is the latest dispatch status?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice latest dispatch status");
+
+        assert!(latest_output.contains("voice_plan=dispatch_status"));
+        assert!(latest_output.contains("mutation_applied=false"));
+        assert!(latest_output.contains("read_scope=project_latest_dispatch_status"));
+        assert!(latest_output.contains(&format!("spoken_dispatch_plan={dispatch_plan_id}")));
+        assert!(latest_output.contains("spoken_agent=codex-worker"));
+        assert!(latest_output.contains("spoken_next_action=record_clean_real_smoke_evidence"));
+        assert!(!latest_output.contains("What is the latest dispatch status"));
+        assert!(!latest_output.contains("Do not render this voice dispatch prompt"));
+
+        let latest_agent_output = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What is the latest dispatch status for codex-worker?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice latest dispatch status for agent");
+
+        assert!(latest_agent_output.contains("read_scope=project_latest_dispatch_status"));
+        assert!(latest_agent_output.contains(&format!("spoken_dispatch_plan={dispatch_plan_id}")));
+        assert!(latest_agent_output.contains("spoken_agent=codex-worker"));
+        assert!(!latest_agent_output.contains("What is the latest dispatch status"));
+        assert_eq!(
+            state.last_sequence().expect("after latest sequence"),
             before_sequence
         );
     }

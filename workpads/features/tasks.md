@@ -321,6 +321,7 @@ Progress:
 - V7 next work conversation is completed with a read-only project workpad-queue question over the shared dashboard query.
 - V8 confirmed start-next conversation is completed with visible approval before importing and dispatching the next workpad task through the fake/local controller path.
 - V9 dispatch status conversation is completed with a read-only dispatch-chain status question over `ProjectDashboard::adapter_dispatch_status(...)`.
+- V10 latest dispatch status conversation is completed with read-only project and agent-scoped questions over `ProjectDashboard::latest_adapter_dispatch_status(...)`.
 
 Evidence:
 
@@ -340,6 +341,7 @@ Evidence:
 - `cargo test -p capo-voice start_next_work -- --nocapture`
 - `cargo test -p capo-cli voice_confirmed_start_next_work -- --nocapture`
 - `cargo test -p capo-voice dispatch_status -- --nocapture`
+- `cargo test -p capo-voice latest_dispatch_status -- --nocapture`
 - `cargo test -p capo-cli voice_dispatch_status -- --nocapture`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`

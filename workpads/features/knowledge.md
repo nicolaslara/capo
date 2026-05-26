@@ -337,6 +337,26 @@ Follow-up:
 
 - Voice can use this latest selector in a future natural-language convenience path if direct dispatch-plan IDs prove awkward during dogfooding.
 
+## F6/V10 - Latest Dispatch Status Conversation
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add a read-only voice path for "latest dispatch status" questions so operators do not need to know a dispatch-plan ID during conversational control.
+- Support an optional agent filter for "latest dispatch status for AGENT" using `ProjectDashboard::latest_adapter_dispatch_status(...)`.
+- Reuse the same voice rendering helper as exact dispatch-status questions, so exact and latest status output stay aligned.
+- Preserve safety boundaries: no raw transcript retention, no mutation, no provider execution, no prompt materialization, no credential inspection, and no workpad edits.
+
+Verification:
+
+- `cargo test -p capo-voice latest_dispatch_status -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_dispatch_status -- --nocapture`: passed.
+
+Follow-up:
+
+- Once real dispatch traces exist, dogfood whether latest-by-agent is enough or whether voice needs latest-by-workpad-task and latest-by-session selectors.
+
 ## F1/AC1-AC2 - Local Connector Preflight
 
 Status: in progress on 2026-05-25.
