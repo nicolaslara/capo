@@ -1235,3 +1235,12 @@ Observed 2026-05-26.
 - Private apply helper imports from store implementation: `../../crates/capo-state/src/lib.rs`
 - Resulting file sizes: `../../crates/capo-state/src/lib.rs` 1,828 lines; `../../crates/capo-state/src/apply.rs` 984 lines; `../../crates/capo-state/src/codec.rs` 2,067 lines; `../../crates/capo-state/src/schema.rs` 537 lines; `../../crates/capo-state/src/projections.rs` 503 lines; `../../crates/capo-state/src/tests.rs` 1,876 lines.
 - No new third-party dependencies were added for SS2e.
+
+## F8/SS2f State Query Module Split
+
+Observed 2026-05-26.
+
+- Read-only state query module: `../../crates/capo-state/src/queries.rs`
+- Store implementation and mutation paths retained in: `../../crates/capo-state/src/lib.rs`
+- Resulting file sizes: `../../crates/capo-state/src/lib.rs` 503 lines; `../../crates/capo-state/src/queries.rs` 1,334 lines; `../../crates/capo-state/src/codec.rs` 2,067 lines; `../../crates/capo-state/src/apply.rs` 984 lines; `../../crates/capo-state/src/tests.rs` 1,876 lines.
+- No new third-party dependencies were added for SS2f.

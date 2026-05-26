@@ -219,3 +219,30 @@ Decision:
 
 - Move read-model apply SQL separately from projection-log codec code. This keeps durable row encoding/decoding in `codec.rs` while isolating the runtime mutation path in `apply.rs`.
 - Keep `insert_projection_record` in `lib.rs` for now because it is part of event append and projection-log insertion, not read-model application. A later query/store split can move append and query surfaces with their own regression evidence.
+
+### SS2f - State Query Module Split
+
+Status: completed
+
+Acceptance:
+
+- Move read-only projection and event query methods out of `src/lib.rs`.
+- Preserve `SqliteStateStore` public method names and return types so downstream crates do not change imports or call sites.
+- Do not change schema, projection encoding, projection application, event append behavior, rebuild behavior, or recovery behavior.
+- Run focused `capo-state` tests and the standard workspace gate before completion.
+
+Evidence:
+
+- `../../crates/capo-state/src/queries.rs` now owns read-only query methods from `watermark` through `recent_events_for_session`.
+- `../../crates/capo-state/src/lib.rs` keeps store construction, append/event mutation paths, recovery mutation paths, projection rebuild, sequence helpers, projection-log insertion, and shared ID/JSON helpers.
+- Resulting state crate file sizes: `../../crates/capo-state/src/lib.rs` 503 lines; `../../crates/capo-state/src/queries.rs` 1,334 lines; `../../crates/capo-state/src/codec.rs` 2,067 lines; `../../crates/capo-state/src/apply.rs` 984 lines; `../../crates/capo-state/src/tests.rs` 1,876 lines.
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+Decision:
+
+- Keep query methods as a second inherent `impl SqliteStateStore` block rather than introducing a trait or wrapper. This preserves the current crate API while making the read-model query surface easier to inspect.
+- Leave event append, permission-decision mutation, recovery mutation, and rebuild logic in `lib.rs` for now because they share transaction sequencing and should move only with dedicated mutation-path evidence.

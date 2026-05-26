@@ -2493,6 +2493,25 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F8/SS2f - State Query Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move read-only projection/event query methods into `queries.rs` as a second inherent `impl SqliteStateStore` block.
+- Preserve the existing public method surface instead of introducing a query trait in this slice. The goal is concern separation and file-size reduction without changing downstream call sites.
+- Keep mutation-heavy paths in `lib.rs`: event append, permission approval decision, active-run recovery mutation, rebuild orchestration, projection-log insertion, and sequence helpers.
+- Use explicit imports in `queries.rs` rather than a crate-wide glob so the module's read-model dependencies remain visible to reviewers and LLMs.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2d - State Projection Codec Module Split
 
 Status: completed on 2026-05-26.
