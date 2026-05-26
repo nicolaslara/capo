@@ -624,7 +624,7 @@ Evidence:
 
 ## F11 - Tools Maintainability
 
-Status: in_progress
+Status: completed
 
 Source workpad: `permissions-tools.md` and cross-cutting tool wrapper implementation.
 
@@ -639,12 +639,16 @@ Progress:
 - T1 tools test module split is completed. Production tool registry, wrapper, and permission policy code remains in `crates/capo-tools/src/lib.rs`; tests now live in `crates/capo-tools/src/tests.rs` with the same private-module access pattern.
 - T2 permission policy module split is completed. `PermissionPolicy`, fake/trusted/static policy implementations, permission request/decision records, scope parsing, and scoped grant ID helpers now live in `crates/capo-tools/src/permission.rs`; the crate root re-exports the policy API for existing callers.
 - T3 runtime wrapper module split is completed. Runtime wrapper config, wrapper execution, wrapper request/result/artifact types, workspace path guards, runtime artifact conversion, redaction, and input hashing now live in `crates/capo-tools/src/runtime_wrappers.rs`; the crate root keeps shared tool definitions, Capo registry behavior, ACP capability planning, and public re-exports.
+- T4 runtime wrapper contract and path helper split is completed. Public runtime wrapper config/request/result/artifact types now live in `crates/capo-tools/src/runtime_wrapper_types.rs`; workspace path guards and run/tool-call path sanitization live in `crates/capo-tools/src/runtime_wrapper_paths.rs`; runtime wrapper execution remains in `crates/capo-tools/src/runtime_wrappers.rs`.
+- `crates/capo-tools/src/runtime_wrappers.rs` is reduced from 775 lines to 607 lines. `crates/capo-tools/src/lib.rs` remains 597 lines because it still owns the Capo tool registry and ACP client capability planning; future tool-registry behavior work should split those concerns if needed.
 
 Evidence:
 
 - `crates/capo-tools/src/lib.rs`
 - `crates/capo-tools/src/permission.rs`
 - `crates/capo-tools/src/runtime_wrappers.rs`
+- `crates/capo-tools/src/runtime_wrapper_types.rs`
+- `crates/capo-tools/src/runtime_wrapper_paths.rs`
 - `crates/capo-tools/src/tests.rs`
 - `cargo test -p capo-tools`
 - `cargo fmt --check`

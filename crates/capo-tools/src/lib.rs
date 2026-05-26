@@ -6,8 +6,11 @@
 
 use capo_core::{BoundaryBinding, BoundaryKind, RunId, SessionId, ToolCallId};
 mod permission;
+mod runtime_wrapper_paths;
+mod runtime_wrapper_types;
 mod runtime_wrappers;
 pub use permission::*;
+pub use runtime_wrapper_types::*;
 pub use runtime_wrappers::*;
 
 /// First Capo-owned tools selected by the architecture.

@@ -1386,6 +1386,19 @@ Observed 2026-05-26.
 - Resulting file sizes: `../../crates/capo-tools/src/lib.rs` 594 lines; `../../crates/capo-tools/src/runtime_wrappers.rs` 775 lines; `../../crates/capo-tools/src/permission.rs` 285 lines; `../../crates/capo-tools/src/tests.rs` 900 lines.
 - No new third-party dependencies were added for T3.
 
+## F11/T4 Tools Runtime Wrapper Contract And Path Helper Split
+
+Observed 2026-05-26.
+
+- Tools crate root: `../../crates/capo-tools/src/lib.rs`
+- Runtime wrapper execution module: `../../crates/capo-tools/src/runtime_wrappers.rs`
+- Runtime wrapper public contract types: `../../crates/capo-tools/src/runtime_wrapper_types.rs`
+- Runtime wrapper workspace path guards and path sanitization helpers: `../../crates/capo-tools/src/runtime_wrapper_paths.rs`
+- Permission policy module: `../../crates/capo-tools/src/permission.rs`
+- Tools tests module: `../../crates/capo-tools/src/tests.rs`
+- Resulting file sizes: `../../crates/capo-tools/src/lib.rs` 597 lines; `../../crates/capo-tools/src/runtime_wrappers.rs` 607 lines; `../../crates/capo-tools/src/runtime_wrapper_types.rs` 81 lines; `../../crates/capo-tools/src/runtime_wrapper_paths.rs` 101 lines; `../../crates/capo-tools/src/permission.rs` 285 lines; `../../crates/capo-tools/src/tests.rs` 900 lines.
+- No new third-party dependencies were added for T4.
+
 ## F9/CLI5 Adapter Smoke Command Module Split
 
 Observed 2026-05-26.

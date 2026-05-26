@@ -2705,6 +2705,26 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F11/T4 - Tools Runtime Wrapper Contract And Path Helper Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move public runtime wrapper contract types into `runtime_wrapper_types.rs`: `RuntimeToolConfig`, `WrapperToolRequest`, `WrapperToolResult`, and `WrapperArtifact`. This gives adapter/ACP/client-call routing and future tool-exposure code a short contract file to inspect without reading local execution logic.
+- Move workspace path validation, workspace-relative git path validation, artifact path sanitization, and sanitized run ID helpers into `runtime_wrapper_paths.rs`. These helpers are security-sensitive and should be reviewable as a small unit.
+- Keep `RuntimeToolWrappers` execution behavior in `runtime_wrappers.rs`. It still owns authorization handoff, audit lifecycle, runtime process invocation, file read/write, git commands, artifact recording, redaction, and runtime artifact conversion.
+- Preserve the public crate-root re-export surface. Existing callers continue to import wrapper config/request/result/artifact types through `capo_tools::...`.
+- Mark F11 complete because production files are now within the near-term acceptable range and the remaining large `tests.rs` file is test-only.
+
+Verification:
+
+- `cargo test -p capo-tools -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F9/CLI5 - Adapter Smoke Command Module Split
 
 Status: completed on 2026-05-26.

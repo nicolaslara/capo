@@ -1,39 +1,23 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use capo_core::{BoundaryBinding, BoundaryKind, RunId, SessionId, ToolCallId};
+use capo_core::{BoundaryBinding, BoundaryKind};
 use capo_runtime::{
-    LocalProcessConfig, LocalProcessRequest, LocalProcessRunner, RedactionRule, RuntimeError,
+    LocalProcessConfig, LocalProcessRequest, LocalProcessRunner, RuntimeError,
     RuntimeOutputArtifact,
 };
 use serde_json::Value;
 
-use crate::{
-    CAPO_WRAPPER_TOOLS, PermissionDecision, PermissionPolicy, PermissionRequest, ToolAuditEvent,
-    ToolAuthorization, ToolDefinition, content_hash, json_array, unknown_tool_definition,
+use crate::runtime_wrapper_paths::{
+    ensure_under_workspace, is_workpad_path, nearest_existing_ancestor, sanitize_path_component,
+    sanitized_run_id, workspace_path, workspace_relative_path,
 };
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeToolConfig {
-    pub workspace_root: PathBuf,
-    pub artifact_root: PathBuf,
-    pub env_allowlist: Vec<String>,
-    pub redaction_rules: Vec<RedactionRule>,
-    pub output_limit_bytes: usize,
-}
-
-impl RuntimeToolConfig {
-    pub fn local_workspace(workspace_root: PathBuf, artifact_root: PathBuf) -> Self {
-        Self {
-            workspace_root,
-            artifact_root,
-            env_allowlist: Vec::new(),
-            redaction_rules: Vec::new(),
-            output_limit_bytes: 64 * 1024,
-        }
-    }
-}
+use crate::{
+    CAPO_WRAPPER_TOOLS, PermissionPolicy, PermissionRequest, ToolAuditEvent, ToolAuthorization,
+    ToolDefinition, content_hash, json_array, unknown_tool_definition,
+};
+use crate::{RuntimeToolConfig, WrapperArtifact, WrapperToolRequest, WrapperToolResult};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeToolWrappers {
@@ -540,59 +524,6 @@ impl RuntimeToolWrappers {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WrapperToolRequest {
-    pub tool_call_id: ToolCallId,
-    pub session_id: SessionId,
-    pub run_id: capo_core::RunId,
-    pub tool_id: String,
-    pub capability_profile_id: String,
-    pub input: Value,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WrapperToolResult {
-    pub tool_call_id: ToolCallId,
-    pub tool_id: String,
-    pub status: String,
-    pub summary: String,
-    pub input_artifact: Option<WrapperArtifact>,
-    pub output_artifacts: Vec<WrapperArtifact>,
-    pub permission_decision: PermissionDecision,
-    pub events: Vec<ToolAuditEvent>,
-}
-
-impl WrapperToolResult {
-    fn denied(
-        request: WrapperToolRequest,
-        definition: ToolDefinition,
-        permission_decision: PermissionDecision,
-        events: Vec<ToolAuditEvent>,
-    ) -> Self {
-        Self {
-            tool_call_id: request.tool_call_id,
-            tool_id: definition.tool_id,
-            status: "denied".to_string(),
-            summary: permission_decision.explanation.clone(),
-            input_artifact: None,
-            output_artifacts: Vec::new(),
-            permission_decision,
-            events,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WrapperArtifact {
-    pub artifact_id: String,
-    pub kind: String,
-    pub uri: String,
-    pub content_hash: String,
-    pub size_bytes: i64,
-    pub redaction_state: String,
-    pub summary: String,
-}
-
 struct WrapperExecution {
     status: String,
     summary: String,
@@ -658,104 +589,6 @@ fn json_string_array(value: &Value) -> Result<Vec<String>, String> {
                 .ok_or_else(|| "argv must contain only strings".to_string())
         })
         .collect()
-}
-
-fn is_workpad_path(path: &str) -> bool {
-    let path = Path::new(path);
-    if path.is_absolute()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::ParentDir | std::path::Component::Prefix(_)
-            )
-        })
-    {
-        return false;
-    }
-    let normalized = path.display().to_string();
-    normalized == "TASKS.md"
-        || normalized == "project.md"
-        || (normalized.starts_with("workpads/")
-            && normalized.ends_with(".md")
-            && !normalized.contains("/research-clones/")
-            && !normalized.contains("/scratch/"))
-}
-
-fn workspace_path(workspace_root: &Path, path: &str) -> PathBuf {
-    let path = Path::new(path);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        workspace_root.join(path)
-    }
-}
-
-fn workspace_relative_path(path: &str) -> Result<String, String> {
-    let path = Path::new(path);
-    if path.is_absolute()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::ParentDir | std::path::Component::Prefix(_)
-            )
-        })
-    {
-        return Err(format!(
-            "git path must be workspace-relative: {}",
-            path.display()
-        ));
-    }
-    Ok(path.display().to_string())
-}
-
-fn sanitize_path_component(value: &str) -> String {
-    let mut sanitized = String::new();
-    let mut previous_dash = false;
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            sanitized.push(ch);
-            previous_dash = false;
-        } else if !previous_dash {
-            sanitized.push('-');
-            previous_dash = true;
-        }
-    }
-    let trimmed = sanitized.trim_matches('-');
-    if trimmed.is_empty() {
-        "tool-call".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn sanitized_run_id(run_id: &RunId) -> RunId {
-    RunId::new(sanitize_path_component(run_id.as_str()))
-}
-
-fn ensure_under_workspace(path: &Path, workspace_root: &Path) -> Result<(), String> {
-    let workspace_root = workspace_root
-        .canonicalize()
-        .map_err(|error| error.to_string())?;
-    if path.starts_with(&workspace_root) {
-        Ok(())
-    } else {
-        Err(format!(
-            "path escapes workspace: {} not under {}",
-            path.display(),
-            workspace_root.display()
-        ))
-    }
-}
-
-fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
-    let mut cursor = path.parent();
-    while let Some(parent) = cursor {
-        if parent.exists() {
-            return Some(parent.to_path_buf());
-        }
-        cursor = parent.parent();
-    }
-    None
 }
 
 fn wrapper_artifact(kind: &str, artifact: RuntimeOutputArtifact) -> WrapperArtifact {
