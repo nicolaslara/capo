@@ -1299,3 +1299,12 @@ Observed 2026-05-26.
 - CLI routing, dashboard rendering, and voice summaries retained in: `../../crates/capo-cli/src/main.rs`
 - Resulting file sizes: `../../crates/capo-cli/src/main.rs` 7,033 lines; `../../crates/capo-cli/src/connectivity.rs` 701 lines; `../../crates/capo-cli/src/connectivity_evidence.rs` 217 lines; `../../crates/capo-cli/src/runtime_target.rs` 407 lines; `../../crates/capo-cli/src/runtime_target_evidence.rs` 422 lines; `../../crates/capo-cli/src/cli_surface.rs` 122 lines; `../../crates/capo-cli/src/tests.rs` 5,405 lines.
 - No new third-party dependencies were added for CLI4.
+
+## F10/Q1 Query Test Module Split
+
+Observed 2026-05-26.
+
+- Query production module: `../../crates/capo-query/src/lib.rs`
+- Query tests module: `../../crates/capo-query/src/tests.rs`
+- Resulting file sizes: `../../crates/capo-query/src/lib.rs` 880 lines; `../../crates/capo-query/src/tests.rs` 1,838 lines.
+- No new third-party dependencies were added for Q1.

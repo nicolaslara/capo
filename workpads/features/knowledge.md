@@ -2584,6 +2584,24 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F10/Q1 - Query Test Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move the `capo-query` test module from `lib.rs` into `tests.rs` using Rust's module-file convention.
+- Keep tests as a child module of `lib.rs`, not integration tests, so they can continue exercising private helpers such as dashboard selection and status-ranking behavior.
+- Do not split production query structs or aggregation yet. This slice is a mechanical reduction before deeper dashboard/readiness concern separation.
+
+Verification:
+
+- `cargo test -p capo-query`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.

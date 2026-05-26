@@ -555,6 +555,32 @@ Evidence:
 - `cargo test --workspace --all-targets`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 
+## F10 - Query Maintainability
+
+Status: in_progress
+
+Source workpad: cross-cutting query/read-model implementation.
+
+Acceptance:
+
+- Reduce `capo-query` file size where behavior-preserving splits are available.
+- Preserve query structs, public functions, dashboard aggregation behavior, and test behavior.
+- Keep production query code locally understandable before adding more read-model surfaces.
+
+Progress:
+
+- Q1 query test module split is completed. The production dashboard query implementation remains in `crates/capo-query/src/lib.rs`; tests now live in `crates/capo-query/src/tests.rs` with the same private-module access pattern.
+
+Evidence:
+
+- `crates/capo-query/src/lib.rs`
+- `crates/capo-query/src/tests.rs`
+- `cargo test -p capo-query`
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo test --workspace --all-targets`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+
 ## F9 - CLI Maintainability
 
 Status: in_progress
