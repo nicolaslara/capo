@@ -2474,6 +2474,26 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F8/SS2d - State Projection Codec Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move projection-log row encoding and decoding into `codec.rs` as one compatibility unit. Persisted kind strings, `a` through `h` column mapping, `payload_json`, and decode error behavior must stay together.
+- Keep projection apply SQL in `lib.rs`. Applying decoded records into read-model tables is a separate runtime concern from encoding records into the append-only projection log.
+- Keep shared `optional_id` and `escape_json` helpers in `lib.rs` for now because they are used both by store/query code and the codec. A later helper-module cleanup can move them once query splitting clarifies the right home.
+- The move preserved crate-root projection APIs and did not add dependencies or alter SQLite schema.
+
+Verification:
+
+- `git diff --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `cargo fmt`: applied.
+- `cargo fmt --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2c - State Schema Module Split
 
 Status: completed on 2026-05-26.

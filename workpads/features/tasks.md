@@ -535,6 +535,7 @@ Progress:
 - SS2a state event/error module split is completed. Stable event envelope, redaction, artifact, recovery, and error/result types now live in focused modules with crate-root re-exports preserved.
 - SS2b state projection type module split is completed. Projection/read-model type definitions now live in `projections.rs` with crate-root re-exports preserved, while SQL codec/rebuild behavior remains unchanged.
 - SS2c state schema module split is completed. SQLite migration DDL, compatibility column backfills, and projection-table reset helpers now live in `schema.rs` without changing schema or rebuild behavior.
+- SS2d state projection codec module split is completed. Projection-log row encode/decode logic now lives in `codec.rs` while apply SQL, queries, and public APIs remain unchanged.
 
 Evidence:
 

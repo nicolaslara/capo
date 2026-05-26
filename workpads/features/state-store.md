@@ -163,3 +163,32 @@ Decision:
 
 - Keep schema and projection-table reset together for now because both define the physical SQLite table set. This makes later projection codec extraction safer by leaving the table lifecycle in one place.
 - Leave `update_watermark`, projection row encoding/decoding, and `apply_projection_record` in `lib.rs` for this slice. Those functions are part of the projection runtime path and should move together in a dedicated codec/apply split with rebuild-focused regression evidence.
+
+### SS2d - State Projection Codec Module Split
+
+Status: completed
+
+Acceptance:
+
+- Move projection-log row encoding and decoding out of `src/lib.rs`.
+- Preserve persisted projection kind strings, `a` through `h` column mapping, `payload_json` contents, decode errors, and rebuild behavior.
+- Keep projection apply SQL, state queries, event append behavior, and crate-root public APIs unchanged.
+- Run focused `capo-state` tests and the standard workspace gate before completion.
+
+Evidence:
+
+- `../../crates/capo-state/src/codec.rs` now owns `ProjectionRecordRow`, projection row encoding, projection row decoding, decode errors, and projection JSON field validation.
+- `../../crates/capo-state/src/lib.rs` imports codec helpers privately and still owns event append, projection insertion, projection apply SQL, queries, and recovery.
+- Shared `optional_id` and `escape_json` helpers remain in `../../crates/capo-state/src/lib.rs` because both query/recovery code and the codec use them.
+- Resulting state crate file sizes: `../../crates/capo-state/src/lib.rs` 2,801 lines; `../../crates/capo-state/src/codec.rs` 2,067 lines; `../../crates/capo-state/src/schema.rs` 537 lines; `../../crates/capo-state/src/projections.rs` 503 lines; `../../crates/capo-state/src/event.rs` 207 lines; `../../crates/capo-state/src/error.rs` 37 lines; `../../crates/capo-state/src/tests.rs` 1,876 lines.
+- `git diff --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `cargo fmt`: applied.
+- `cargo fmt --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+Decision:
+
+- Move encode/decode together because those functions jointly define the durable projection-log compatibility contract.
+- Keep `apply_projection_record` in `lib.rs` for now. It is SQL write behavior, not row codec behavior, and should move in a separate projection-apply slice with rebuild-focused evidence.
