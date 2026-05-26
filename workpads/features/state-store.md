@@ -192,3 +192,30 @@ Decision:
 
 - Move encode/decode together because those functions jointly define the durable projection-log compatibility contract.
 - Keep `apply_projection_record` in `lib.rs` for now. It is SQL write behavior, not row codec behavior, and should move in a separate projection-apply slice with rebuild-focused evidence.
+
+### SS2e - State Projection Apply Module Split
+
+Status: completed
+
+Acceptance:
+
+- Move projection read-model mutation SQL and projection watermark updates out of `src/lib.rs`.
+- Preserve projection apply behavior for every read-model table, projection watermarks, append/rebuild behavior, schema, projection codec behavior, and crate-root public APIs.
+- Keep event append, projection-log insertion, read queries, and recovery behavior unchanged.
+- Run focused `capo-state` tests and the standard workspace gate before completion.
+
+Evidence:
+
+- `../../crates/capo-state/src/apply.rs` now owns `apply_projection_record` and `update_watermark`.
+- `../../crates/capo-state/src/lib.rs` imports apply helpers privately and still owns event append, projection-log insertion, read queries, and recovery.
+- Resulting state crate file sizes: `../../crates/capo-state/src/lib.rs` 1,828 lines; `../../crates/capo-state/src/apply.rs` 984 lines; `../../crates/capo-state/src/codec.rs` 2,067 lines; `../../crates/capo-state/src/schema.rs` 537 lines; `../../crates/capo-state/src/projections.rs` 503 lines; `../../crates/capo-state/src/tests.rs` 1,876 lines.
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+Decision:
+
+- Move read-model apply SQL separately from projection-log codec code. This keeps durable row encoding/decoding in `codec.rs` while isolating the runtime mutation path in `apply.rs`.
+- Keep `insert_projection_record` in `lib.rs` for now because it is part of event append and projection-log insertion, not read-model application. A later query/store split can move append and query surfaces with their own regression evidence.

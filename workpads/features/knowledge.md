@@ -2474,6 +2474,25 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F8/SS2e - State Projection Apply Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move read-model mutation SQL and projection watermark updates into `apply.rs` as the projection runtime apply boundary.
+- Keep projection-log encode/decode in `codec.rs`; row compatibility and read-model mutation are separate concerns.
+- Keep event append and `insert_projection_record` in `lib.rs` for now because they are part of appending events and recording projection-log entries, not applying records into read-model tables.
+- Preserve schema, projection codec behavior, rebuild semantics, query behavior, and crate-root public APIs.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2d - State Projection Codec Module Split
 
 Status: completed on 2026-05-26.
