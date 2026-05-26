@@ -1555,3 +1555,16 @@ Observed 2026-05-26.
 - Deterministic agent interaction mock retained from AC34: `../../crates/capo-adapters/src/scripted_mock_agent.rs`
 - Resulting file sizes: `../../crates/capo-voice/src/lib.rs` 829 lines; `../../crates/capo-voice/src/contract.rs` 119 lines; `../../crates/capo-voice/src/planning_support.rs` 467 lines; `../../crates/capo-voice/src/tests.rs` 782 lines.
 - No new third-party dependencies were added for VM1.
+
+## F1/AC3a Real Dispatch Output Ingestion And Timeout Guard
+
+Observed 2026-05-26.
+
+- Real dispatch execution surface: `../../crates/capo-cli/src/adapter_dispatch_run.rs`
+- Shared adapter fixture/stdout parser: `../../crates/capo-cli/src/adapter_replay.rs`
+- Runtime timeout implementation: `../../crates/capo-runtime/src/lib.rs`
+- Local subscription launch output cap and scanner vocabulary: `../../crates/capo-adapters/src/local_subscription.rs`
+- Deterministic CLI regression coverage: `../../crates/capo-cli/src/tests.rs`
+- Runtime timeout regression coverage: `../../crates/capo-runtime/src/lib.rs`
+- Latest bounded local execution ref in ignored state: `adapter-dispatch-execution-c1e061786ffdd9e6-10194ea23d78c1dc`
+- No new third-party dependencies were added for AC3a.

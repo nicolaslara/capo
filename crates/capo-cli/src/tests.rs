@@ -4,7 +4,9 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
-use crate::adapter_dispatch_run::scan_dispatch_artifacts_or_delete;
+use crate::adapter_dispatch_run::{
+    apply_dispatch_adapter_output, scan_dispatch_artifacts_or_delete,
+};
 use capo_adapters::LocalAdapterSmokeError;
 use capo_core::{RunId, SessionId, TaskId, ToolCallId};
 use capo_state::{
@@ -1628,6 +1630,49 @@ fn workpad_index_imports_markdown_refs_without_modifying_sources() {
     assert!(run_preflight.contains("CAPO_RUN_CODEX_LOCAL_DISPATCH=1_required"));
     assert!(run_preflight.contains("raw_prompt_policy=not_rendered"));
     assert!(!run_preflight.contains("Work on Workpad Dogfood Bridge"));
+    let parsed = ParsedArgs::new(vec![
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("parsed state args");
+    let codex_stream = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../capo-adapters/fixtures/codex-exec.jsonl"),
+    )
+    .expect("fixture");
+    let ingestion = apply_dispatch_adapter_output(
+        &parsed,
+        &plans[0],
+        &codex_stream,
+        "test-runtime-process".to_string(),
+        None,
+    )
+    .expect("ingest adapter output through controller");
+    assert!(ingestion.report.input_event_count > 0);
+    assert!(ingestion.report.appended_event_count > 0);
+    assert!(ingestion.report.summary_event_count > 0);
+    assert!(ingestion.report.tool_event_count > 0);
+    assert!(ingestion.evidence_output.is_empty());
+    let dispatch_session = state
+        .session(&plans[0].session_id)
+        .expect("dispatch session query")
+        .expect("dispatch session");
+    assert!(
+        dispatch_session
+            .latest_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Adapter codex_exec")
+    );
+    let dispatch_tool_calls = state
+        .tool_calls_for_session(&plans[0].session_id)
+        .expect("dispatch tool calls");
+    assert!(
+        dispatch_tool_calls
+            .iter()
+            .all(|tool_call| tool_call.tool_origin != "capo"),
+        "real adapter ingestion must not create fake Capo tool calls"
+    );
     let planned_workpad_task = state
         .workpad_task(&project_id(), "workpads:features:tasks.md#f2")
         .expect("planned workpad task query")

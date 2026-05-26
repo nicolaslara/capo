@@ -92,6 +92,7 @@ Progress:
 - AC32 latest adapter smoke evidence export is completed. `smoke-report evidence --latest` exports connector proof/blocker artifacts through the shared latest smoke selector.
 - AC33 adapter dogfood gate evidence export is completed. `adapter dogfood-gate evidence` writes a connector-level gate artifact for first real-agent dogfood review.
 - AC34 scriptable mock agent harness is completed. Scripted mock turns now emit stable normalized adapter events and drive deterministic multi-turn controller tests through the existing adapter replay path without provider subscriptions.
+- AC3 real run-local stream ingestion is partially completed. `run-local` now parses successful provider stdout through the adapter replay/controller path and can export evidence, while timed-out provider runs are recorded instead of hanging. The latest approved Codex dispatch against the broad AC3 workpad prompt timed out cleanly with `provider_cli_executed=true`, `credential_scan_status=clean`, and `adapter_stream_ingested=false`, so F1 remains in progress until a bounded real stream completes and is ingested.
 
 Evidence:
 
@@ -148,6 +149,9 @@ Evidence:
 - `capo adapter dogfood-gate evidence --out DIR [--state PATH]`
 - `cargo test -p capo-adapters scripted_mock_agent -- --nocapture`
 - `cargo test -p capo-controller scripted_mock_agent_drives_multi_turn_controller_state -- --nocapture`
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture` verifies deterministic dispatch-output ingestion coverage
+- `cargo test -p capo-runtime local_process_runner_times_out_and_collects_partial_artifacts -- --nocapture`
+- `CAPO_RUN_CODEX_LOCAL_DISPATCH=1 capo adapter run-local --dispatch-plan adapter-dispatch-plan-codex_exec-2e26cf61ba2310e8 --record --timeout-seconds 5 --state .capo-dev`: recorded timed-out execution with clean credential scan and no stream ingestion
 - `CAPO_RUN_CODEX_LOCAL_SMOKE=1 cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture`
 - `capo adapter smoke-report scan --artifact-root <local-temp-codex-smoke-artifacts>`
 - `rg -a` over `.capo-dev` for credential/session marker names

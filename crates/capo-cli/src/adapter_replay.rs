@@ -213,7 +213,7 @@ pub(crate) fn replay_adapter_dispatch_fixture(
     Ok(output)
 }
 
-fn parse_adapter_fixture(
+pub(crate) fn parse_adapter_fixture(
     adapter: &str,
     fixture: &str,
 ) -> Result<Vec<NormalizedAdapterEvent>, String> {

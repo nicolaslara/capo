@@ -570,15 +570,33 @@ fn artifact_scanner_allows_redacted_markers_and_rejects_raw_secrets() {
     fs::create_dir_all(&root).unwrap();
     let redacted = root.join("redacted.txt");
     let raw = root.join("raw.txt");
+    let benign = root.join("benign.txt");
+    let provider_key = root.join("provider-key.txt");
     fs::write(&redacted, "Authorization: [REDACTED]\n").unwrap();
     fs::write(&raw, "Authorization: bearer secret\n").unwrap();
+    fs::write(&benign, "Task-specific context is not a secret marker.\n").unwrap();
+    fs::write(&provider_key, "example leaked key sk-proj-not-a-real-key\n").unwrap();
 
     scan_artifacts_for_sensitive_markers([&redacted]).unwrap();
+    scan_artifacts_for_sensitive_markers([&benign]).unwrap();
     let error = scan_artifacts_for_sensitive_markers([&raw]).unwrap_err();
+    let key_error = scan_artifacts_for_sensitive_markers([&provider_key]).unwrap_err();
 
     assert!(matches!(
         error,
         LocalAdapterSmokeError::SensitiveArtifact { marker, .. } if marker == "authorization:"
+    ));
+    assert!(matches!(
+        key_error,
+        LocalAdapterSmokeError::SensitiveArtifact { marker, .. } if marker == "sk-proj-"
+    ));
+
+    let legacy = root.join("legacy-key.txt");
+    fs::write(&legacy, "legacy leaked key sk-abcdefghijklmnopqrstuvwx\n").unwrap();
+    let legacy_error = scan_artifacts_for_sensitive_markers([&legacy]).unwrap_err();
+    assert!(matches!(
+        legacy_error,
+        LocalAdapterSmokeError::SensitiveArtifact { marker, .. } if marker == "sk-"
     ));
 }
 

@@ -33,6 +33,8 @@ mod adapter_replay;
 mod fake_session;
 mod local_dispatch;
 
+pub use local_dispatch::LocalAdapterDispatchRunStart;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FakeBoundaryController {
     project_id: ProjectId,

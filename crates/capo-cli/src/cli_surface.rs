@@ -23,7 +23,7 @@ Usage:
   capo adapter execution-request --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter materialize-prompt --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter run-preflight --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
-  capo adapter run-local --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
+  capo adapter run-local --dispatch-plan DISPATCH_PLAN_ID [--record] [--out DIR] [--timeout-seconds N] [--state PATH]
   capo adapter dogfood-gate [--state PATH]
   capo adapter dogfood-gate evidence --out DIR [--state PATH]
   capo adapter smoke-report scan --artifact-root PATH [--state PATH]

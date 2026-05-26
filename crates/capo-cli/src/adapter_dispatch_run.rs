@@ -1,11 +1,13 @@
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use capo_adapters::{
     ClaudeCodeAdapter, CodexExecAdapter, LocalAdapterLaunchPlan, LocalAdapterSmokeError,
     scan_artifacts_for_sensitive_markers,
 };
-use capo_core::RunId;
+use capo_controller::{AdapterReplayReport, LocalAdapterDispatchRunStart};
+use capo_core::{RunId, TaskId};
 use capo_query::{ProjectDashboardQuery, project_dashboard};
 use capo_runtime::LocalProcessRunner;
 use capo_state::{
@@ -18,10 +20,12 @@ use capo_state::{
 use crate::adapter_dispatch_prepare::{
     AdapterDispatchRunPreflight, dispatch_run_preflight, split_source_ref,
 };
+use crate::adapter_replay::parse_adapter_fixture;
 use crate::adapter_smoke::format_smoke_scan_error;
-use crate::cli_surface::{ParsedArgs, has_flag, required_arg};
+use crate::cli_surface::{ParsedArgs, has_flag, optional_arg, required_arg};
+use crate::evidence::export_evidence;
 use crate::workpad::workpad_task_goal;
-use crate::{debug_error, escape_json, project_id, stable_cli_hash, state};
+use crate::{controller, debug_error, escape_json, project_id, stable_cli_hash, state};
 
 pub(crate) fn scan_dispatch_artifacts_or_delete<'a>(
     paths: impl IntoIterator<Item = &'a PathBuf>,
@@ -44,8 +48,21 @@ pub(crate) fn adapter_dispatch_run_local(
 ) -> Result<String, String> {
     let dispatch_plan_id = required_arg(args, "--dispatch-plan")?;
     let record = has_flag(args, "--record");
+    let out = optional_arg(args, "--out");
+    let timeout_seconds = optional_arg(args, "--timeout-seconds")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| format!("invalid --timeout-seconds value: {value}"))
+        })
+        .transpose()?
+        .unwrap_or(300);
     if let Some(unknown) = args.iter().find(|arg| {
-        arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan" | "--record")
+        arg.starts_with("--")
+            && !matches!(
+                arg.as_str(),
+                "--dispatch-plan" | "--record" | "--out" | "--timeout-seconds"
+            )
     }) {
         return Err(format!("unknown adapter run-local option: {unknown}"));
     }
@@ -105,12 +122,80 @@ pub(crate) fn adapter_dispatch_run_local(
     fs::create_dir_all(&launch_plan.artifact_root)
         .map_err(|error| format!("failed to create dispatch artifact root: {error}"))?;
     let runner = LocalProcessRunner::new(launch_plan.runtime_config());
+    let mut process = runner
+        .spawn_process(launch_plan.runtime_request(RunId::new(plan.run_id.to_string())))
+        .map_err(LocalAdapterSmokeError::Runtime)
+        .map_err(format_smoke_scan_error)?;
     let outcome = runner
-        .start_process(launch_plan.runtime_request(RunId::new(plan.run_id.to_string())))
+        .wait_running_with_timeout(&mut process, Duration::from_secs(timeout_seconds))
         .map_err(LocalAdapterSmokeError::Runtime)
         .map_err(format_smoke_scan_error)?;
     scan_dispatch_artifacts_or_delete([&outcome.stdout.path, &outcome.stderr.path])
         .map_err(format_smoke_scan_error)?;
+    if outcome.process.status != "exited" {
+        let execution = adapter_dispatch_execution_projection(
+            plan,
+            execution_request,
+            &preflight,
+            AdapterDispatchExecutionRuntimeOutcome {
+                provider_cli_executed: true,
+                status: outcome.process.status.clone(),
+                exit_code: outcome.exit_code.map(i64::from),
+                runtime_process_ref: Some(outcome.process.runtime_process_ref.clone()),
+                stdout_artifact_id: Some(outcome.stdout.artifact_id.clone()),
+                stderr_artifact_id: Some(outcome.stderr.artifact_id.clone()),
+                credential_scan_status: "clean".to_string(),
+                raw_output_policy: "bounded_redacted_artifacts".to_string(),
+                reason_codes: format!("provider_cli_{}", outcome.process.status),
+            },
+        );
+        let recorded_sequence = record_adapter_dispatch_execution(&state, plan, &execution)?;
+        return Ok(format!(
+            "adapter_dispatch_run_local=true
+dispatch_execution={}
+dispatch_plan={}
+adapter={}
+provider_cli_execution_allowed=true
+provider_cli_executed=true
+status={}
+runtime_process_ref={}
+exit_code={}
+stdout_artifact={}
+stderr_artifact={}
+artifact_root={}
+raw_prompt_policy={}
+raw_output_policy=bounded_redacted_artifacts
+adapter_stream_ingested=false
+recorded=true
+recorded_sequence={}
+",
+            execution.dispatch_execution_id,
+            plan.dispatch_plan_id,
+            plan.adapter_kind,
+            outcome.process.status,
+            outcome.process.runtime_process_ref,
+            outcome
+                .exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".to_string()),
+            outcome.stdout.artifact_id,
+            outcome.stderr.artifact_id,
+            launch_plan.artifact_root.display(),
+            materialization
+                .map(|row| row.raw_prompt_policy.as_str())
+                .unwrap_or("none"),
+            recorded_sequence
+        ));
+    }
+    let adapter_stdout = fs::read_to_string(&outcome.stdout.path)
+        .map_err(|error| format!("failed to read adapter stdout artifact: {error}"))?;
+    let ingestion = apply_dispatch_adapter_output(
+        parsed,
+        plan,
+        &adapter_stdout,
+        outcome.process.runtime_process_ref.clone(),
+        out,
+    )?;
     let execution = adapter_dispatch_execution_projection(
         plan,
         execution_request,
@@ -143,9 +228,15 @@ stderr_artifact={}
 artifact_root={}
 raw_prompt_policy={}
 raw_output_policy=bounded_redacted_artifacts
+adapter_stream_ingested=true
+adapter_stream_input_events={}
+adapter_stream_appended_events={}
+adapter_stream_tool_events={}
+adapter_stream_summary_events={}
+adapter_stream_completed_turns={}
 recorded=true
 recorded_sequence={}
-",
+{}",
         execution.dispatch_execution_id,
         plan.dispatch_plan_id,
         plan.adapter_kind,
@@ -161,8 +252,80 @@ recorded_sequence={}
         materialization
             .map(|row| row.raw_prompt_policy.as_str())
             .unwrap_or("none"),
-        recorded_sequence
+        ingestion.report.input_event_count,
+        ingestion.report.appended_event_count,
+        ingestion.report.tool_event_count,
+        ingestion.report.summary_event_count,
+        ingestion.report.completed_turn_count,
+        recorded_sequence,
+        ingestion.evidence_output
     ))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DispatchAdapterOutputIngestion {
+    pub(crate) report: AdapterReplayReport,
+    pub(crate) evidence_output: String,
+}
+
+pub(crate) fn apply_dispatch_adapter_output(
+    parsed: &ParsedArgs,
+    plan: &AdapterDispatchPlanProjection,
+    adapter_output: &str,
+    runtime_process_ref: String,
+    out: Option<String>,
+) -> Result<DispatchAdapterOutputIngestion, String> {
+    let adapter_events = parse_adapter_fixture(&plan.adapter_kind, adapter_output)?;
+    if adapter_events.is_empty() {
+        return Err(format!(
+            "adapter output for dispatch plan {} produced no normalized adapter events",
+            plan.dispatch_plan_id
+        ));
+    }
+    let controller = controller(parsed)?;
+    let refs = controller
+        .prepare_local_adapter_dispatch_run(LocalAdapterDispatchRunStart {
+            agent_name: plan.agent_name.clone(),
+            task_id: TaskId::new(format!(
+                "task-adapter-dispatch-{}",
+                stable_cli_hash(&plan.dispatch_plan_id)
+            )),
+            session_id: plan.session_id.clone(),
+            run_id: plan.run_id.clone(),
+            goal: format!(
+                "Ingest real adapter output for dispatch plan {}",
+                plan.dispatch_plan_id
+            ),
+            runtime_process_ref,
+            external_session_ref: format!("local-adapter-session-{}", plan.dispatch_plan_id),
+        })
+        .map_err(debug_error)?;
+    if refs.session_id != plan.session_id || refs.run_id != plan.run_id {
+        return Err(format!(
+            "dispatch run output ref mismatch for {}: expected session={} run={}, got session={} run={}",
+            plan.dispatch_plan_id, plan.session_id, plan.run_id, refs.session_id, refs.run_id
+        ));
+    }
+    let report = controller
+        .apply_normalized_adapter_events(&refs, &adapter_events)
+        .map_err(debug_error)?;
+    let evidence_output = if let Some(out) = out {
+        export_evidence(
+            parsed,
+            &[
+                "--session".to_string(),
+                refs.session_id.to_string(),
+                "--out".to_string(),
+                out,
+            ],
+        )?
+    } else {
+        String::new()
+    };
+    Ok(DispatchAdapterOutputIngestion {
+        report,
+        evidence_output,
+    })
 }
 
 fn render_adapter_dispatch_run_local_blocked(

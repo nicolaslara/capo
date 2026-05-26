@@ -3199,3 +3199,26 @@ Verification:
 - `git diff --check`: passed.
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+## F1/AC3a - Real Dispatch Output Ingestion And Timeout Guard
+
+Status: completed as a hardening slice on 2026-05-26; AC3 remains in progress.
+
+Decisions:
+
+- Treat real provider stdout as an adapter event stream only after the runtime artifact scan passes. Successful `run-local` stdout now uses the same parser and `FakeBoundaryController::apply_normalized_adapter_events` path as fixture replay.
+- Raise local launch output capture from the smoke-sized 128 KiB cap to 1 MiB. The approved Codex dispatch produced more than 128 KiB of JSONL before Capo could parse it, so the old cap was too small for real adapter streams while still bounded.
+- Tighten scanner matching from bare `sk-` to provider-key-shaped prefixes such as `sk-proj-`, `sk-ant-`, `sk-live-`, `sk_test_`, and `sk-svcacct-`. Bare `sk-` caused known false positives in benign words such as `task-specific`.
+- Add `LocalProcessRunner::wait_running_with_timeout` and `capo adapter run-local --timeout-seconds N`. Subscription-backed provider dispatch must fail closed with a recorded timeout instead of hanging indefinitely.
+- The latest approved Codex run against the full AC3 workpad prompt timed out cleanly. This proves the timeout guard, not AC3 completion. The next real-stream proof should use a narrower proof prompt or dedicated dispatch-proof source before full workpad task execution.
+- Focused review issues were fixed before commit: oversized output now removes raw stdout/stderr files before returning an error, timeout attempts terminate the process group on Unix before killing the direct child, real dispatch output ingestion initializes session/run state without fake adapter/tool/memory events, and scanner matching now includes long legacy `sk-...` key shapes.
+
+Verification:
+
+- `cargo test -p capo-adapters artifact_scanner_allows_redacted_markers_and_rejects_raw_secrets -- --nocapture`: passed.
+- `cargo test -p capo-adapters launch_plan -- --nocapture`: passed.
+- `cargo test -p capo-runtime local_process_runner_times_out_and_collects_partial_artifacts -- --nocapture`: passed.
+- `cargo test -p capo-runtime local_process -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `CAPO_RUN_CODEX_LOCAL_DISPATCH=1 capo adapter run-local --dispatch-plan adapter-dispatch-plan-codex_exec-2e26cf61ba2310e8 --record --timeout-seconds 5 --state .capo-dev`: recorded `status=timed_out`, `provider_cli_executed=true`, `credential_scan_status=clean`, and `adapter_stream_ingested=false`.
+- Provider-key-shaped marker scan over `.capo-dev`: no matches.

@@ -9,8 +9,12 @@ use std::fs;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use capo_core::{BoundaryBinding, BoundaryKind, RunId};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 /// First runtime variants from the prototype plan.
 pub const PLANNED_RUNTIMES: &[&str] = &["fake", "local-process", "remote-process"];
@@ -332,6 +336,10 @@ impl LocalProcessRunner {
         self.apply_request_env(&mut command, &request)?;
         command.stdout(Stdio::from(File::create(&stdout_path)?));
         command.stderr(Stdio::from(File::create(&stderr_path)?));
+        #[cfg(unix)]
+        {
+            command.process_group(0);
+        }
 
         let child = command.spawn()?;
         let external_pid = child.id();
@@ -419,8 +427,20 @@ impl LocalProcessRunner {
         let status = process.child.wait()?;
         let stdout = fs::read(&process.stdout_path)?;
         let stderr = fs::read(&process.stderr_path)?;
-        let stdout = self.redact_output(&capped_output(stdout, self.config.output_limit_bytes)?);
-        let stderr = self.redact_output(&capped_output(stderr, self.config.output_limit_bytes)?);
+        let stdout = match capped_output(stdout, self.config.output_limit_bytes) {
+            Ok(stdout) => self.redact_output(&stdout),
+            Err(error) => {
+                self.remove_raw_output_files(process);
+                return Err(error);
+            }
+        };
+        let stderr = match capped_output(stderr, self.config.output_limit_bytes) {
+            Ok(stderr) => self.redact_output(&stderr),
+            Err(error) => {
+                self.remove_raw_output_files(process);
+                return Err(error);
+            }
+        };
         fs::write(&process.stdout_path, &stdout.bytes)?;
         fs::write(&process.stderr_path, &stderr.bytes)?;
         let stdout_artifact = self.output_artifact_from_path(
@@ -443,6 +463,8 @@ impl LocalProcessRunner {
         );
         let exit_status = if status.success() {
             "exited"
+        } else if process.process.status == "timed_out" {
+            "timed_out"
         } else if process.process.status == "killed" {
             "killed"
         } else {
@@ -476,6 +498,26 @@ impl LocalProcessRunner {
                 },
             ],
         })
+    }
+
+    pub fn wait_running_with_timeout(
+        &self,
+        process: &mut LocalRunningProcess,
+        timeout: Duration,
+    ) -> RuntimeResult<LocalProcessOutcome> {
+        let started = Instant::now();
+        loop {
+            if process.child.try_wait()?.is_some() {
+                return self.wait_running(process);
+            }
+            if started.elapsed() >= timeout {
+                self.terminate_process_group(process);
+                process.child.kill()?;
+                process.process.status = "timed_out".to_string();
+                return self.wait_running(process);
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 
     pub fn health(&self, process: &LocalRuntimeProcessRef) -> RuntimeHealth {
@@ -541,6 +583,32 @@ impl LocalProcessRunner {
                 status: status.to_string(),
                 detail: reason.to_string(),
             }],
+        }
+    }
+
+    fn remove_raw_output_files(&self, process: &LocalRunningProcess) {
+        let _ = fs::remove_file(&process.stdout_path);
+        let _ = fs::remove_file(&process.stderr_path);
+    }
+
+    fn terminate_process_group(&self, process: &LocalRunningProcess) {
+        #[cfg(unix)]
+        {
+            if let Some(pid) = process.process.external_pid {
+                let _ = Command::new("/bin/kill")
+                    .arg("-TERM")
+                    .arg(format!("-{pid}"))
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                thread::sleep(Duration::from_millis(100));
+                let _ = Command::new("/bin/kill")
+                    .arg("-KILL")
+                    .arg(format!("-{pid}"))
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
         }
     }
 
@@ -1506,6 +1574,97 @@ mod tests {
                 .unwrap()
                 .contains("before-sleep")
         );
+    }
+
+    #[test]
+    fn local_process_runner_times_out_and_collects_partial_artifacts() {
+        let workspace = temp_root("workspace-timeout");
+        let artifacts = temp_root("artifacts-timeout");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner =
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+
+        let mut running = runner
+            .spawn_process(LocalProcessRequest {
+                run_id: RunId::new("run-timeout"),
+                program: "/bin/sh".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    "printf before-timeout; sleep 5; printf after-timeout".to_string(),
+                ],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("spawn local process");
+
+        let outcome = runner
+            .wait_running_with_timeout(&mut running, std::time::Duration::from_millis(100))
+            .unwrap();
+
+        assert_eq!(outcome.process.status, "timed_out");
+        let stdout = fs::read_to_string(&outcome.stdout.path).unwrap();
+        assert!(stdout.contains("before-timeout"));
+        assert!(!stdout.contains("after-timeout"));
+    }
+
+    #[test]
+    fn local_process_timeout_terminates_descendant_processes() {
+        let workspace = temp_root("workspace-timeout-tree");
+        let artifacts = temp_root("artifacts-timeout-tree");
+        fs::create_dir_all(&workspace).unwrap();
+        let marker = workspace.join("descendant-survived.txt");
+        let runner =
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+
+        let mut running = runner
+            .spawn_process(LocalProcessRequest {
+                run_id: RunId::new("run-timeout-tree"),
+                program: "/bin/sh".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    format!("(sleep 1; printf survived > {}) & wait", marker.display()),
+                ],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("spawn local process tree");
+
+        let outcome = runner
+            .wait_running_with_timeout(&mut running, std::time::Duration::from_millis(100))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+
+        assert_eq!(outcome.process.status, "timed_out");
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn local_process_runner_removes_raw_files_when_output_exceeds_limit() {
+        let workspace = temp_root("workspace-output-limit");
+        let artifacts = temp_root("artifacts-output-limit");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut config = LocalProcessConfig::for_test(workspace.clone(), artifacts.clone());
+        config.output_limit_bytes = 8;
+        let runner = LocalProcessRunner::new(config);
+
+        let mut running = runner
+            .spawn_process(LocalProcessRequest {
+                run_id: RunId::new("run-output-limit"),
+                program: "/bin/sh".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    "printf this-output-is-too-large".to_string(),
+                ],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("spawn local process");
+
+        let error = runner.wait_running(&mut running).unwrap_err();
+
+        assert!(matches!(error, RuntimeError::OutputLimitExceeded { .. }));
+        assert!(!artifacts.join("run-output-limit/stdout.txt").exists());
+        assert!(!artifacts.join("run-output-limit/stderr.txt").exists());
     }
 
     #[test]

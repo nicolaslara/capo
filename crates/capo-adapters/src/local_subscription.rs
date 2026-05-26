@@ -196,7 +196,7 @@ impl CodexExecAdapter {
             artifact_root,
             env_allowlist: local_subscription_cli_env_allowlist(),
             redaction_rules: local_adapter_redaction_rules(),
-            output_limit_bytes: 128 * 1024,
+            output_limit_bytes: 1024 * 1024,
             stdout_format: "jsonl".to_string(),
             stderr_policy: "logs_redacted".to_string(),
         }
@@ -261,7 +261,7 @@ impl ClaudeCodeAdapter {
             artifact_root,
             env_allowlist: local_subscription_cli_env_allowlist(),
             redaction_rules: local_adapter_redaction_rules(),
-            output_limit_bytes: 128 * 1024,
+            output_limit_bytes: 1024 * 1024,
             stdout_format: "stream-json".to_string(),
             stderr_policy: "logs_redacted".to_string(),
         }
@@ -352,13 +352,37 @@ fn sensitive_marker(contents: &str) -> Option<String> {
             "api_key",
             "anthropic_api_key",
             "openai_api_key",
-            "sk-",
         ]
         .into_iter()
         .find(|marker| lower.contains(marker))
         {
             return Some(marker.to_string());
         }
+        if let Some(marker) = ["sk-proj-", "sk-ant-", "sk-live-", "sk_test_", "sk-svcacct-"]
+            .into_iter()
+            .find(|marker| lower.contains(marker))
+        {
+            return Some(marker.to_string());
+        }
+        if has_legacy_openai_key_shape(&lower) {
+            return Some("sk-".to_string());
+        }
     }
     None
+}
+
+fn has_legacy_openai_key_shape(line: &str) -> bool {
+    let mut rest = line;
+    while let Some(index) = rest.find("sk-") {
+        let candidate = &rest[index + 3..];
+        let token_len = candidate
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+            .count();
+        if token_len >= 20 {
+            return true;
+        }
+        rest = &candidate[token_len..];
+    }
+    false
 }
