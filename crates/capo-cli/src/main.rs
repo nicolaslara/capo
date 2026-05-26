@@ -2782,6 +2782,20 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
     }
 
     output.push_str(&format!(
+        "project_evidence={}\n",
+        dashboard.project_evidence.len()
+    ));
+    for evidence in &dashboard.project_evidence {
+        output.push_str(&format!(
+            "project_evidence_ref={} kind={} artifact={} confidence={}\n",
+            evidence.evidence_id,
+            evidence.kind,
+            evidence.artifact_id.as_deref().unwrap_or("none"),
+            evidence.confidence
+        ));
+    }
+
+    output.push_str(&format!(
         "connectivity_exposures={}\n",
         dashboard.connectivity_exposures.len()
     ));
@@ -6879,6 +6893,15 @@ mod tests {
         assert!(!readiness_markdown.contains("Do not render this dispatch prompt"));
         assert!(!readiness_markdown.contains("Codex fixture response."));
         assert!(!readiness_markdown.contains("cargo test"));
+        let dashboard_after_readiness = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard after dogfood readiness evidence");
+        assert!(dashboard_after_readiness.contains("project_evidence=1"));
+        assert!(dashboard_after_readiness.contains("kind=dogfood_readiness"));
+        assert!(dashboard_after_readiness.contains("artifact=artifact-dogfood-readiness-"));
         assert_text_absent_in_tree(&state_root, "Do not render this dispatch prompt");
         assert_text_absent_in_tree(&state_root, "Codex fixture response.");
         assert_text_absent_in_tree(&state_root, "cargo test");

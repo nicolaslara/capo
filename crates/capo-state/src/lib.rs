@@ -1144,6 +1144,32 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn project_evidence(&self, project_id: &ProjectId) -> StateResult<Vec<EvidenceProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT evidence_id, project_id, task_id, session_id, run_id, kind, artifact_id,
+                    confidence, updated_sequence
+             FROM evidence
+             WHERE project_id = ?1 AND session_id IS NULL
+             ORDER BY updated_sequence ASC, evidence_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(EvidenceProjection {
+                evidence_id: EvidenceId::new(row.get::<_, String>(0)?),
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                task_id: optional_id(row.get::<_, Option<String>>(2)?),
+                session_id: optional_id(row.get::<_, Option<String>>(3)?),
+                run_id: optional_id(row.get::<_, Option<String>>(4)?),
+                kind: row.get(5)?,
+                artifact_id: row.get(6)?,
+                confidence: row.get(7)?,
+                updated_sequence: row.get(8)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn memory_packets_for_session(
         &self,
         session_id: &SessionId,

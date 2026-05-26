@@ -19,6 +19,7 @@ use capo_state::{
 pub struct ProjectDashboard {
     pub project_id: ProjectId,
     pub agents: Vec<AgentDashboardRow>,
+    pub project_evidence: Vec<EvidenceProjection>,
     pub connectivity_exposures: Vec<ConnectivityExposureProjection>,
     pub adapter_readiness: Vec<AdapterReadinessProjection>,
     pub adapter_smoke_reports: Vec<AdapterSmokeReportProjection>,
@@ -157,6 +158,7 @@ pub fn project_dashboard(
         rows.push(AgentDashboardRow { agent, session });
     }
     let connectivity_exposures = state.connectivity_exposures(&query.project_id)?;
+    let project_evidence = state.project_evidence(&query.project_id)?;
     let adapter_readiness = state.adapter_readiness(&query.project_id)?;
     let adapter_smoke_reports = state.adapter_smoke_reports(&query.project_id)?;
     let adapter_dispatch_plans = state.adapter_dispatch_plans(&query.project_id)?;
@@ -193,6 +195,7 @@ pub fn project_dashboard(
     Ok(ProjectDashboard {
         project_id: query.project_id,
         agents: rows,
+        project_evidence,
         connectivity_exposures,
         adapter_readiness,
         adapter_smoke_reports,
@@ -491,6 +494,55 @@ mod tests {
             MemoryPacketId::new("packet-demo")
         );
         assert_eq!(session.recent_events[0].kind, "session.started");
+    }
+
+    #[test]
+    fn project_dashboard_includes_project_level_evidence() {
+        let root = temp_root("query-dashboard-project-evidence");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        append_agent(&state, &project_id, "agent-idle", None);
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-project-evidence".to_string(),
+                    kind: EventKind::EvidenceRecorded,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some("evidence-dogfood-readiness".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::Evidence(EvidenceProjection {
+                    evidence_id: EvidenceId::new("evidence-dogfood-readiness"),
+                    project_id: project_id.clone(),
+                    task_id: None,
+                    session_id: None,
+                    run_id: None,
+                    kind: "dogfood_readiness".to_string(),
+                    artifact_id: Some("artifact-dogfood-readiness".to_string()),
+                    confidence: 65,
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append project evidence");
+
+        let dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+
+        assert_eq!(dashboard.project_evidence.len(), 1);
+        assert_eq!(
+            dashboard.project_evidence[0].evidence_id,
+            EvidenceId::new("evidence-dogfood-readiness")
+        );
+        assert_eq!(dashboard.project_evidence[0].kind, "dogfood_readiness");
+        assert!(dashboard.project_evidence[0].session_id.is_none());
     }
 
     #[test]

@@ -198,6 +198,25 @@ Follow-up:
 
 - Use readiness exports as the reviewed checkpoint artifact before switching the active project loop into Capo-managed dogfood.
 
+## F3/DS5 - Project Evidence Visibility
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add a state/query/dashboard path for project-level evidence so dogfood readiness and migration checkpoint artifacts are visible without binding them to a fake session.
+- Define project evidence for the current query surface as evidence rows with `session_id IS NULL`. Session-owned evidence remains visible through session dashboard rows and status commands.
+- Render project evidence IDs, kinds, artifact refs, and confidence in `capo dashboard` while keeping the view read-only and projection-derived.
+
+Verification:
+
+- `cargo test -p capo-query project_dashboard_includes_project_level_evidence -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Follow-up:
+
+- Future richer dashboards can group project evidence by readiness checkpoint, migration gate, or review artifact without changing the state authority.
+
 ## F1/AC1-AC2 - Local Connector Preflight
 
 Status: in progress on 2026-05-25.

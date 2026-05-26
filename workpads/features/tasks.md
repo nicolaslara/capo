@@ -189,6 +189,7 @@ Progress:
 - DS2 richer operator dashboard view is completed with project/session/status filters, tool-call refs, memory-packet refs, and fail-closed filter parsing.
 - DS3 workpad queue visibility is completed with shared query rows and CLI dashboard rendering.
 - DS4 workpad queue filters are completed with explicit `--workpad-path` and `--workpad-status` filters.
+- DS5 project evidence visibility is completed with shared query rows and CLI dashboard rendering for project-level evidence artifacts.
 
 Evidence:
 
@@ -202,6 +203,8 @@ Evidence:
 - `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`
 - `cargo test -p capo-query workpad -- --nocapture`
 - `cargo test -p capo-cli dashboard_rejects_malformed_filters -- --nocapture`
+- `cargo test -p capo-query project_dashboard_includes_project_level_evidence -- --nocapture`
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`

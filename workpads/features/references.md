@@ -97,6 +97,16 @@ Observed 2026-05-26.
 - Dogfood bridge source workpad: `dogfood-bridge.md`
 - No new third-party dependencies were added for DB7.
 
+## F3/DS5 Project Evidence Visibility
+
+Observed 2026-05-26.
+
+- Project-level evidence query: `../../crates/capo-state/src/lib.rs`
+- Shared dashboard project evidence contract: `../../crates/capo-query/src/lib.rs`
+- CLI dashboard project evidence rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Dashboard source workpad: `dashboard.md`
+- No new third-party dependencies were added for DS5.
+
 ## F1/AC1-AC2 Local Connector Preflight
 
 Observed 2026-05-25.

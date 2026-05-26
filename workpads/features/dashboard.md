@@ -130,3 +130,27 @@ Decision:
 
 - Use explicit workpad filter names instead of overloading `--status`. This keeps operator intent clear when filtering agent/session state versus markdown workpad queue state.
 - `--workpad-status` matches either observed markdown status or Capo execution status, because dashboard rows intentionally show both state dimensions.
+
+### DS5 - Project Evidence Visibility
+
+Status: completed
+
+Acceptance:
+
+- Expose project-level evidence rows through the shared dashboard/query surface.
+- Keep session evidence refs scoped to sessions while showing migration/checkpoint evidence at project scope.
+- Render project evidence IDs, kinds, artifact refs, and confidence in the CLI dashboard.
+- Keep the dashboard read-only and derived from persisted projections.
+
+Evidence:
+
+- `SqliteStateStore::project_evidence(...)` in `../../crates/capo-state/src/lib.rs`.
+- `ProjectDashboard.project_evidence` in `../../crates/capo-query/src/lib.rs`.
+- CLI dashboard project-evidence rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query project_dashboard_includes_project_level_evidence -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Project evidence currently means evidence rows with `session_id IS NULL`. This avoids duplicating session evidence while making dogfood readiness and migration checkpoint reports visible from the shared operator dashboard.
+- Keep project evidence in `ProjectDashboard` rather than adding a CLI-only lookup so voice, web, mobile, and future TUI surfaces consume the same read contract.
