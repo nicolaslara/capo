@@ -267,6 +267,7 @@ Progress:
 - ME1 memory record read models are completed.
 - ME2 task outcome reports are completed.
 - ME3 review feedback loop is completed.
+- ME4 review finding dashboard visibility is completed with project/session review findings in the shared query and CLI dashboard.
 
 Evidence:
 
@@ -277,6 +278,8 @@ Evidence:
 - `cargo test -p capo-state task_outcome`
 - `cargo test -p capo-eval`
 - `cargo test -p capo-cli cli_drives_fake_controller_and_exports_evidence`
+- `cargo test -p capo-query review_findings -- --nocapture`
+- `cargo test -p capo-cli dashboard_renders_review_findings -- --nocapture`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`

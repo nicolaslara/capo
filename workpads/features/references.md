@@ -375,6 +375,16 @@ Observed 2026-05-25.
 - Memory/evaluation source workpad: `memory-eval.md`
 - No new third-party dependencies were added for ME3.
 
+## F5/ME4 Review Finding Dashboard Visibility
+
+Observed 2026-05-26.
+
+- Project-scoped review finding state lookup: `../../crates/capo-state/src/lib.rs`
+- Shared dashboard review finding contract: `../../crates/capo-query/src/lib.rs`
+- CLI dashboard review finding rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Memory/evaluation source workpad: `memory-eval.md`
+- No new third-party dependencies were added for ME4.
+
 ## F6/V1 Voice Controller Integration
 
 Observed 2026-05-25.

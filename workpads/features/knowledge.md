@@ -799,6 +799,26 @@ Follow-up:
 - Future dashboard/query work should expose review findings directly so operators do not need to inspect markdown artifacts for blockers.
 - Future workpad writeback should use review findings as the durable source when creating follow-up items or marking findings resolved.
 
+## F5/ME4 - Review Finding Dashboard Visibility
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add project-scoped review finding lookup to the state boundary so query surfaces can retrieve all recorded findings without parsing artifacts.
+- Add `review_findings` to `ProjectDashboard` and per-session `review_findings` to `SessionDashboardRow`.
+- Render project-level and session-level review findings in `capo dashboard`, including kind, severity, status, reviewer, evidence artifact, follow-up, and summary.
+- Keep dashboard review visibility read-only and projection-derived. Review markdown artifacts remain durable evidence, but operators no longer need to open them to see blockers.
+
+Verification:
+
+- `cargo test -p capo-query review_findings -- --nocapture`: passed.
+- `cargo test -p capo-cli dashboard_renders_review_findings -- --nocapture`: passed.
+
+Follow-up:
+
+- Future workpad writeback can use these review-finding rows as the durable source for creating or resolving follow-up tasks.
+
 ## F4/PT1 - Static Policy Variant
 
 Status: completed on 2026-05-25.

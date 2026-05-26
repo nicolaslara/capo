@@ -11,8 +11,8 @@ use capo_state::{
     AdapterDispatchPromptMaterializationProjection, AdapterDispatchPromptSourceProjection,
     AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
     AgentProjection, ConnectivityExposureProjection, EventRecord, EvidenceProjection,
-    MemoryPacketProjection, RunProjection, SessionProjection, SqliteStateStore, StateResult,
-    ToolCallProjection, WorkpadTaskProjection,
+    MemoryPacketProjection, ReviewFindingProjection, RunProjection, SessionProjection,
+    SqliteStateStore, StateResult, ToolCallProjection, WorkpadTaskProjection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,6 +20,7 @@ pub struct ProjectDashboard {
     pub project_id: ProjectId,
     pub agents: Vec<AgentDashboardRow>,
     pub project_evidence: Vec<EvidenceProjection>,
+    pub review_findings: Vec<ReviewFindingProjection>,
     pub connectivity_exposures: Vec<ConnectivityExposureProjection>,
     pub adapter_readiness: Vec<AdapterReadinessProjection>,
     pub adapter_smoke_reports: Vec<AdapterSmokeReportProjection>,
@@ -61,6 +62,7 @@ pub struct SessionDashboardRow {
     pub evidence: Vec<EvidenceProjection>,
     pub tool_calls: Vec<ToolCallProjection>,
     pub memory_packets: Vec<MemoryPacketProjection>,
+    pub review_findings: Vec<ReviewFindingProjection>,
     pub recent_events: Vec<EventRecord>,
 }
 
@@ -163,6 +165,7 @@ pub fn project_dashboard(
     }
     let connectivity_exposures = state.connectivity_exposures(&query.project_id)?;
     let project_evidence = state.project_evidence(&query.project_id)?;
+    let review_findings = state.review_findings(&query.project_id)?;
     let adapter_readiness = state.adapter_readiness(&query.project_id)?;
     let adapter_smoke_reports = state.adapter_smoke_reports(&query.project_id)?;
     let adapter_dispatch_plans = state.adapter_dispatch_plans(&query.project_id)?;
@@ -200,6 +203,7 @@ pub fn project_dashboard(
         project_id: query.project_id,
         agents: rows,
         project_evidence,
+        review_findings,
         connectivity_exposures,
         adapter_readiness,
         adapter_smoke_reports,
@@ -338,6 +342,7 @@ fn session_dashboard(
         evidence: state.evidence_for_session(session_id)?,
         tool_calls: state.tool_calls_for_session(session_id)?,
         memory_packets: state.memory_packets_for_session(session_id)?,
+        review_findings: state.review_findings_for_session(session_id)?,
         recent_events: state.recent_events_for_session(session_id, recent_event_limit)?,
         session,
     })
@@ -547,6 +552,29 @@ mod tests {
         );
         assert_eq!(dashboard.project_evidence[0].kind, "dogfood_readiness");
         assert!(dashboard.project_evidence[0].session_id.is_none());
+    }
+
+    #[test]
+    fn project_dashboard_includes_review_findings() {
+        let root = temp_root("query-dashboard-review-findings");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        append_agent(&state, &project_id, "agent-active", Some("session-active"));
+        append_minimal_session(&state, &project_id, "agent-active", "session-active");
+        append_review_finding(&state, &project_id, "review-finding-blocker");
+
+        let dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+
+        assert_eq!(dashboard.review_findings.len(), 1);
+        assert_eq!(
+            dashboard.review_findings[0].review_finding_id,
+            "review-finding-blocker"
+        );
+        assert_eq!(dashboard.review_findings[0].finding_kind, "blocker");
+        let session = dashboard.agents[0].session.as_ref().expect("session row");
+        assert_eq!(session.review_findings.len(), 1);
+        assert_eq!(session.review_findings[0].severity, "high");
     }
 
     #[test]
@@ -1057,6 +1085,45 @@ mod tests {
                 &[],
             )
             .expect("append session event");
+    }
+
+    fn append_review_finding(state: &SqliteStateStore, project_id: &ProjectId, finding_id: &str) {
+        state
+            .append_event(
+                NewEvent {
+                    event_id: format!("event-{finding_id}"),
+                    kind: EventKind::ReviewFindingRecorded,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: Some(TaskId::new("task-agent-active")),
+                    agent_id: Some(AgentId::new("agent-active")),
+                    session_id: Some(SessionId::new("session-active")),
+                    run_id: Some(RunId::new("run-agent-active")),
+                    turn_id: None,
+                    item_id: Some(finding_id.to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::ReviewFinding(ReviewFindingProjection {
+                    review_finding_id: finding_id.to_string(),
+                    project_id: project_id.clone(),
+                    task_id: TaskId::new("task-agent-active"),
+                    session_id: SessionId::new("session-active"),
+                    run_id: Some(RunId::new("run-agent-active")),
+                    tool_call_id: None,
+                    workpad_task_id: Some("ME3".to_string()),
+                    reviewer: "focused-review".to_string(),
+                    finding_kind: "blocker".to_string(),
+                    severity: "high".to_string(),
+                    summary: "Review blocker needs follow-up.".to_string(),
+                    status: "open".to_string(),
+                    evidence_artifact_id: Some("artifact-review-finding-blocker".to_string()),
+                    follow_up: Some("Create follow-up workpad task.".to_string()),
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append review finding");
     }
 
     fn append_connectivity_exposure(state: &SqliteStateStore, project_id: &ProjectId) {

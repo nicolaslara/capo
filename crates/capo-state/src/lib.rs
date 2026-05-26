@@ -1421,6 +1421,42 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn review_findings(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<ReviewFindingProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT review_finding_id, project_id, task_id, session_id, run_id, tool_call_id,
+                    workpad_task_id, reviewer, finding_kind, severity, summary, status,
+                    evidence_artifact_id, follow_up, updated_sequence
+             FROM review_findings
+             WHERE project_id = ?1
+             ORDER BY updated_sequence ASC, review_finding_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(ReviewFindingProjection {
+                review_finding_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                task_id: TaskId::new(row.get::<_, String>(2)?),
+                session_id: SessionId::new(row.get::<_, String>(3)?),
+                run_id: optional_id(row.get::<_, Option<String>>(4)?),
+                tool_call_id: optional_id(row.get::<_, Option<String>>(5)?),
+                workpad_task_id: row.get(6)?,
+                reviewer: row.get(7)?,
+                finding_kind: row.get(8)?,
+                severity: row.get(9)?,
+                summary: row.get(10)?,
+                status: row.get(11)?,
+                evidence_artifact_id: row.get(12)?,
+                follow_up: row.get(13)?,
+                updated_sequence: row.get(14)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn tool_calls_for_session(
         &self,
         session_id: &SessionId,

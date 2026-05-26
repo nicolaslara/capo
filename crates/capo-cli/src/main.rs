@@ -2758,6 +2758,24 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
             session_row.memory_packets.len(),
             session_row.recent_events.len()
         ));
+        output.push_str(&format!(
+            "session_review_findings={}\n",
+            session_row.review_findings.len()
+        ));
+        for finding in &session_row.review_findings {
+            output.push_str(&format!(
+                "review_finding={} session={} kind={} severity={} status={} reviewer={} evidence_artifact={} follow_up={} summary={}\n",
+                finding.review_finding_id,
+                finding.session_id,
+                finding.finding_kind,
+                finding.severity,
+                finding.status,
+                finding.reviewer,
+                finding.evidence_artifact_id.as_deref().unwrap_or("none"),
+                finding.follow_up.as_deref().unwrap_or("none"),
+                finding.summary
+            ));
+        }
         for tool_call in &session_row.tool_calls {
             output.push_str(&format!(
                 "tool_call={} tool={} tool_origin={} tool_status={} input_artifact={} output_artifact={}\n",
@@ -2793,6 +2811,25 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
             evidence.kind,
             evidence.artifact_id.as_deref().unwrap_or("none"),
             evidence.confidence
+        ));
+    }
+
+    output.push_str(&format!(
+        "review_findings={}\n",
+        dashboard.review_findings.len()
+    ));
+    for finding in &dashboard.review_findings {
+        output.push_str(&format!(
+            "project_review_finding={} session={} kind={} severity={} status={} reviewer={} evidence_artifact={} follow_up={} summary={}\n",
+            finding.review_finding_id,
+            finding.session_id,
+            finding.finding_kind,
+            finding.severity,
+            finding.status,
+            finding.reviewer,
+            finding.evidence_artifact_id.as_deref().unwrap_or("none"),
+            finding.follow_up.as_deref().unwrap_or("none"),
+            finding.summary
         ));
     }
 
@@ -8434,6 +8471,50 @@ mod tests {
         ])
         .unwrap_err();
         assert!(missing_workpad_status.contains("--workpad-status requires a value"));
+    }
+
+    #[test]
+    fn dashboard_renders_review_findings_from_shared_query() {
+        let state_root = temp_root("cli-dashboard-review-findings");
+        let evidence_dir = temp_root("cli-dashboard-review-finding-evidence");
+        seed_running_agent(&state_root, "fake-codex", "Inspect the project");
+
+        let review = run_cli(vec![
+            "review".to_string(),
+            "record".to_string(),
+            "--session".to_string(),
+            "session-fake-codex".to_string(),
+            "--reviewer".to_string(),
+            "focused-review".to_string(),
+            "--kind".to_string(),
+            "blocker".to_string(),
+            "--summary".to_string(),
+            "Dashboard must expose review blockers.".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record review finding");
+        assert!(review.contains("review_finding_recorded=true"));
+        let review_finding_id = output_value(&review, "review_finding_id");
+
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard with review finding");
+
+        assert!(dashboard.contains("review_findings=1"));
+        assert!(dashboard.contains("session_review_findings=1"));
+        assert!(dashboard.contains(&format!("project_review_finding={review_finding_id}")));
+        assert!(dashboard.contains(&format!("review_finding={review_finding_id}")));
+        assert!(dashboard.contains("kind=blocker"));
+        assert!(dashboard.contains("severity=high"));
+        assert!(dashboard.contains("status=open"));
+        assert!(dashboard.contains("reviewer=focused-review"));
+        assert!(dashboard.contains("summary=Dashboard must expose review blockers."));
     }
 
     #[test]
