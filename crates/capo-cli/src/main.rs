@@ -3189,7 +3189,9 @@ fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> 
 
     let mut output = render_voice_header(&plan, plan.command.as_ref(), false, false);
     match plan.intent_kind {
-        VoiceIntentKind::DashboardSummary | VoiceIntentKind::AgentStatus => {
+        VoiceIntentKind::DashboardSummary
+        | VoiceIntentKind::DogfoodReadiness
+        | VoiceIntentKind::AgentStatus => {
             let dashboard = voice_dashboard(parsed, &plan)?;
             output.push_str(&render_voice_read_contract(&plan, &dashboard));
         }
@@ -3548,7 +3550,9 @@ fn voice_session_id(
                 .and_then(|row| row.session.as_ref())
                 .map(|row| row.session.session_id.clone()))
         }
-        VoiceReadScope::ProjectDashboard | VoiceReadScope::None => Ok(None),
+        VoiceReadScope::ProjectDashboard
+        | VoiceReadScope::ProjectDogfoodReadiness
+        | VoiceReadScope::None => Ok(None),
     }
 }
 
@@ -3627,6 +3631,19 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
                 append_voice_agent_row(&mut output, row);
             }
         }
+        VoiceReadScope::ProjectDogfoodReadiness => {
+            let readiness = dashboard.dogfood_readiness();
+            output.push_str(&format!(
+                "spoken_dogfood_ready={}\nspoken_dogfood_status={}\nspoken_real_agent_connector_ready={}\nspoken_workpad_bridge_ready={}\nspoken_dispatch_chain_ready={}\nspoken_blockers={}\nspoken_next_actions={}\n",
+                readiness.ready,
+                readiness.status,
+                readiness.real_agent_connector_ready,
+                readiness.workpad_bridge_ready,
+                readiness.dispatch_chain_ready,
+                comma_or_none(&readiness.blockers),
+                comma_or_none(&readiness.next_actions)
+            ));
+        }
         VoiceReadScope::Agent { agent_name } | VoiceReadScope::SessionForAgent { agent_name } => {
             if let Some(row) = dashboard
                 .agents
@@ -3685,6 +3702,7 @@ fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
     match intent {
         VoiceIntentKind::AgentStatus => "agent_status",
         VoiceIntentKind::DashboardSummary => "dashboard_summary",
+        VoiceIntentKind::DogfoodReadiness => "dogfood_readiness",
         VoiceIntentKind::RedirectSession => "redirect_session",
         VoiceIntentKind::InterruptSession => "interrupt_session",
         VoiceIntentKind::StopSession => "stop_session",
@@ -3695,6 +3713,7 @@ fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
 fn voice_scope_label(scope: &VoiceReadScope) -> &'static str {
     match scope {
         VoiceReadScope::ProjectDashboard => "project_dashboard",
+        VoiceReadScope::ProjectDogfoodReadiness => "project_dogfood_readiness",
         VoiceReadScope::Agent { .. } => "agent",
         VoiceReadScope::SessionForAgent { .. } => "session_for_agent",
         VoiceReadScope::None => "none",
@@ -8711,6 +8730,37 @@ mod tests {
         assert!(output.contains("spoken_agent=fake-codex agent_status=running"));
         assert!(output.contains("current_goal=Inspect the project"));
         assert!(!output.contains("What is fake-codex doing?"));
+        assert_eq!(
+            state.last_sequence().expect("after sequence"),
+            before_sequence
+        );
+    }
+
+    #[test]
+    fn voice_dogfood_readiness_reads_shared_query_without_mutating() {
+        let state_root = temp_root("cli-voice-dogfood-readiness");
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        let before_sequence = state.last_sequence().expect("before sequence");
+
+        let output = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "Are we ready to dogfood?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice dogfood readiness");
+
+        assert!(output.contains("voice_plan=dogfood_readiness"));
+        assert!(output.contains("mutation_applied=false"));
+        assert!(output.contains("raw_transcript_retained=false"));
+        assert!(output.contains("read_scope=project_dogfood_readiness"));
+        assert!(output.contains("spoken_dogfood_ready=false"));
+        assert!(output.contains("spoken_dogfood_status=blocked_pending_dogfood_prerequisites"));
+        assert!(output.contains("spoken_blockers=real_agent_connector_not_proven,workpad_index_missing,dispatch_chain_missing"));
+        assert!(output.contains("spoken_next_actions=record_clean_codex_smoke_evidence,run_workpad_index,record_or_replay_workpad_dispatch_plan"));
+        assert!(!output.contains("Are we ready to dogfood?"));
         assert_eq!(
             state.last_sequence().expect("after sequence"),
             before_sequence

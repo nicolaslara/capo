@@ -28,6 +28,7 @@ pub enum MemoryIngestionPolicy {
 pub enum VoiceIntentKind {
     AgentStatus,
     DashboardSummary,
+    DogfoodReadiness,
     RedirectSession,
     InterruptSession,
     StopSession,
@@ -63,6 +64,7 @@ pub struct VoiceReadContract {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VoiceReadScope {
     ProjectDashboard,
+    ProjectDogfoodReadiness,
     Agent { agent_name: String },
     SessionForAgent { agent_name: String },
     None,
@@ -111,6 +113,39 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
             requires_visible_confirmation: false,
             assistant_reply_hint: "Summarize active agents, goals, blockers, and recent events."
                 .to_string(),
+        };
+    }
+
+    if is_dogfood_readiness_question(&normalized) {
+        let mut command = voice_command(
+            "voice-dogfood-readiness",
+            &input,
+            CommandTarget::Project(input.project_id.clone()),
+            CommandIntent::QueryStatus,
+            None,
+        );
+        command
+            .structured_args
+            .push(("view".to_string(), "dogfood_readiness".to_string()));
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::DogfoodReadiness,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::ProjectDogfoodReadiness,
+                required_fields: vec![
+                    "ready",
+                    "status",
+                    "real_agent_connector_ready",
+                    "workpad_bridge_ready",
+                    "dispatch_chain_ready",
+                    "blockers",
+                    "next_actions",
+                ],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: false,
+            assistant_reply_hint:
+                "Answer dogfood readiness from the shared project dashboard query.".to_string(),
         };
     }
 
@@ -331,6 +366,18 @@ fn interrupt_agent(normalized: &str) -> Option<(String, String)> {
     Some((agent_slug(agent), reason.trim().to_string()))
 }
 
+fn is_dogfood_readiness_question(input: &str) -> bool {
+    matches!(
+        input,
+        "are we ready to dogfood"
+            | "are we ready for dogfood"
+            | "can we dogfood capo"
+            | "can capo dogfood itself"
+            | "is capo ready to dogfood"
+            | "what is dogfood readiness"
+    )
+}
+
 fn normalize(input: &str) -> String {
     input
         .trim()
@@ -461,6 +508,38 @@ mod tests {
         assert_eq!(
             plan.command.expect("voice command").intent,
             CommandIntent::QueryStatus
+        );
+    }
+
+    #[test]
+    fn dogfood_readiness_question_reads_project_readiness_without_mutation() {
+        let plan = plan_dummy_transcript(input("Are we ready to dogfood?"));
+
+        assert_eq!(plan.intent_kind, VoiceIntentKind::DogfoodReadiness);
+        assert_eq!(
+            plan.read_contract.query_scope,
+            VoiceReadScope::ProjectDogfoodReadiness
+        );
+        assert!(
+            plan.read_contract
+                .required_fields
+                .contains(&"real_agent_connector_ready")
+        );
+        assert!(!plan.requires_visible_confirmation);
+        assert!(!plan.transcript_policy.retain_raw_transcript);
+        let command = plan.command.expect("voice command");
+        assert_eq!(command.intent, CommandIntent::QueryStatus);
+        assert_eq!(
+            command.target,
+            CommandTarget::Project(ProjectId::new("project-capo"))
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "view")
+                .map(|(_, value)| value.as_str()),
+            Some("dogfood_readiness")
         );
     }
 

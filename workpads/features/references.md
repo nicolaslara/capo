@@ -116,6 +116,16 @@ Observed 2026-05-26.
 - Dashboard source workpad: `dashboard.md`
 - No new third-party dependencies were added for DS6.
 
+## F6/V4 Dogfood Readiness Conversation
+
+Observed 2026-05-26.
+
+- Voice dogfood-readiness planning and unit coverage: `../../crates/capo-voice/src/lib.rs`
+- CLI voice read-contract rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared readiness query consumed by voice: `../../crates/capo-query/src/lib.rs`
+- Voice source workpad: `voice.md`
+- No new third-party dependencies were added for V4.
+
 ## F1/AC1-AC2 Local Connector Preflight
 
 Observed 2026-05-25.

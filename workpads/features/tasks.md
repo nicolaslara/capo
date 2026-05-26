@@ -301,6 +301,7 @@ Progress:
 - V1 controller integration is completed.
 - V2 voice permission confirmation is completed.
 - V3 retention and redaction smoke is completed.
+- V4 dogfood readiness conversation is completed with a read-only voice intent over the shared dashboard readiness query.
 
 Evidence:
 
@@ -308,6 +309,8 @@ Evidence:
 - `crates/capo-cli/src/main.rs`
 - `cargo test -p capo-voice`
 - `cargo test -p capo-cli voice -- --nocapture`
+- `cargo test -p capo-voice dogfood_readiness -- --nocapture`
+- `cargo test -p capo-cli voice_dogfood_readiness -- --nocapture`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`

@@ -236,6 +236,26 @@ Follow-up:
 
 - When the dogfood gate finally clears, use the dashboard readiness row plus the project readiness artifact as the visible migration checkpoint.
 
+## F6/V4 - Dogfood Readiness Conversation
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add a read-only voice intent for simple dogfood-readiness questions such as "Are we ready to dogfood?"
+- Route the answer through the shared project dashboard readiness query, not through voice-specific readiness logic.
+- Render readiness status, real-agent connector readiness, workpad bridge readiness, dispatch-chain readiness, blockers, and next actions in the voice read contract.
+- Preserve the existing voice safety boundary: no raw transcript retention, no mutation, no provider execution, no credential inspection, and no workpad edits.
+
+Verification:
+
+- `cargo test -p capo-voice dogfood_readiness -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_dogfood_readiness -- --nocapture`: passed.
+
+Follow-up:
+
+- Extend this pattern to richer conversational status questions only after dogfood traces show which readiness or agent-state summaries operators actually ask for.
+
 ## F1/AC1-AC2 - Local Connector Preflight
 
 Status: in progress on 2026-05-25.

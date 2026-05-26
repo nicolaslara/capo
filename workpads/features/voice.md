@@ -71,3 +71,25 @@ Evidence:
 - `cargo fmt --check`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - `cargo test`: passed.
+
+### V4 - Dogfood Readiness Conversation
+
+Status: completed
+
+Acceptance:
+
+- Recognize simple dogfood-readiness questions as a read-only voice intent.
+- Answer from the shared project dashboard/query contract rather than duplicating readiness logic in voice code.
+- Render readiness status, component readiness booleans, blockers, and next actions.
+- Preserve raw transcript non-retention and avoid mutating state.
+
+Evidence:
+
+- `VoiceIntentKind::DogfoodReadiness` and `VoiceReadScope::ProjectDogfoodReadiness` in `../../crates/capo-voice/src/lib.rs`.
+- CLI voice dogfood-readiness rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-voice dogfood_readiness -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_dogfood_readiness -- --nocapture`: passed.
+
+Decision:
+
+- Keep dogfood-readiness voice handling as a read-only query over `ProjectDashboard::dogfood_readiness()`. Voice does not run providers, inspect credentials, edit workpads, or create readiness artifacts.
