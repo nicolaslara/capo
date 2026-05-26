@@ -27,3 +27,13 @@ Observed 2026-05-26.
 - Live repo smoke task-outcome artifact ID: `artifact-task-outcome-313ed4c2f4ccd1f6`.
 - The D2 pass is explicitly a fake-agent rehearsal, not full real-agent dogfood.
 - No new third-party dependencies were added for D2.
+
+## D3 Dogfood Gate
+
+Observed 2026-05-26.
+
+- Dogfood gate decision: `../../workpads/dogfood/knowledge.md`
+- Dogfood task ledger: `../../workpads/dogfood/tasks.md`
+- Top-level workpad queue closure: `../../TASKS.md`
+- Phase routing update: `../../workpads/WORKPADS.md`
+- D3 is documentation and gate-state only; no new third-party dependencies were added.

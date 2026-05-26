@@ -10,7 +10,7 @@
 | **architecture** | Complete | Gate passed 2026-05-25 — boundary definitions, data model, contracts, security model, and prototype plan |
 | **prototype** | Complete | Gate passed with constraints 2026-05-25 — local scaffold, fake-agent e2e, dashboard, voice contract, evidence export |
 | **features** | Complete | Feature gate passed 2026-05-26 — real connectors, dogfood bridge, dashboard/query, permissions/tools, memory/eval, voice, remote runtime, and maintainability splits |
-| **dogfood** | **Active** | Move Capo project execution into Capo |
+| **dogfood** | Complete | Dogfood gate passed 2026-05-26 — Capo-assisted development with markdown/git fallback |
 
 ## research
 
@@ -181,7 +181,7 @@ workpads/prototype/knowledge.md
 
 ## dogfood
 
-**Status:** Active.
+**Status:** Complete. Dogfood gate passed 2026-05-26 for Capo-assisted development with markdown/git fallback.
 
 **Prerequisites:** Prototype gate passed and feature gate passed.
 

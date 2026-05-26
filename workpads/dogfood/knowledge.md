@@ -106,3 +106,32 @@ Risk:
 Next:
 
 - D3 should decide whether the current fake-agent rehearsal is enough to keep iterating inside Capo, and list any remaining manual workflow pieces before calling the dogfood gate complete.
+
+## D3 - Dogfood Gate
+
+Status: completed on 2026-05-26.
+
+Decision:
+
+- Dogfood gate passes for Capo-assisted development with markdown/git fallback. Capo is stable enough to act as the controller for continued Capo project work: it can index the project queue, import/bind workpad tasks, create and track controller-owned sessions, expose dashboard/query/voice/read-model state, record review findings, export session evidence, export task outcome reports, and preserve source markdown.
+- This is not a claim of full unattended dogfood. The first Capo-managed project task was a fake-agent rehearsal; the real Codex connector path is proven separately and remains explicit opt-in for any real provider execution.
+- Source workpad markdown remains the human-authored authority until a future source-writeback gate adds reviewed patch artifacts, source-hash validation at apply time, rollback artifacts, and explicit confirmation.
+- Local ignored `.capo-dev` or temporary state is runtime evidence only. Git commits and workpad markdown remain the durable handoff until Capo has a persistent server/runtime state policy.
+
+Remaining manual workflow pieces:
+
+- Select the next Capo task through the workpad loop and decide whether to run it through fake rehearsal, deterministic fixture replay, or explicit opt-in real Codex dispatch.
+- Review provider-dispatch prompts and keep `CAPO_RUN_CODEX_LOCAL_DISPATCH=1` or similar provider execution opt-ins manual.
+- Apply source markdown changes by hand after reviewing Capo-owned proposal/evidence artifacts; automated source writeback remains disabled.
+- Make git commits manually after verification gates pass.
+- Use human review judgment to decide whether task-outcome reports and no-blockers review artifacts are sufficient before marking a workpad task complete.
+- Treat `.capo-dev/` and temporary state roots as rebuildable runtime state, not committed product truth.
+
+What the gate proves:
+
+- The scaffold now covers the requested controller shape: human input surfaces, task/session orchestration, adapter dispatch, tool instrumentation, agent introspection, SQLite event/projection state, memory/evidence refs, review/evaluation reporting, remote-runtime metadata, and dogfood workpad binding.
+- Capo can continue iterating on itself while the markdown workpad system remains the audit fallback.
+
+Next:
+
+- Future work should move from phase-gate scaffolding to normal backlog slices: richer Capo-managed execution, optional real-provider dogfood runs, source-writeback review gates, server/dashboard UI, and production hardening.

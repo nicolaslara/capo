@@ -60,9 +60,15 @@ Evidence:
 
 ## D3 - Dogfood Gate
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - Decision recorded in `knowledge.md`.
 - Remaining manual workflow parts listed.
+
+Evidence:
+
+- `workpads/dogfood/knowledge.md` records the 2026-05-26 gate decision: Capo may be used as the controller for continued Capo development with markdown/git fallback, while full unattended or source-writing dogfood remains gated.
+- Remaining manual workflow pieces are listed in `workpads/dogfood/knowledge.md`: explicit provider opt-in for real Codex dispatch, manual source markdown updates, git commits, review judgment, and ignored local `.capo-dev` state management.
+- Gate verification: all dogfood tasks D0-D3 are completed; `TASKS.md` keeps markdown/git fallback explicit while marking the dogfood phase complete.
