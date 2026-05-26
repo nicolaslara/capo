@@ -576,3 +576,28 @@ Decision:
 - Treat latest readiness as operator ergonomics over the existing target selector and readiness contract. It does not introduce a second readiness model.
 - Keep exact `--target` and latest `--latest` mutually exclusive; runner/status filters are only valid with `--latest`.
 - Keep the output explicit about selector and filters so voice/web/mobile clients can show which target Capo selected.
+
+### RR24 - Latest Runtime Target Control Readiness Evidence Export
+
+Status: completed
+
+Acceptance:
+
+- Add a latest-selector path for runtime target control-readiness evidence export.
+- Support the same optional runner/status filters as latest runtime target readiness.
+- Reuse the shared runtime target selector before deriving target/control-exposure readiness.
+- Reuse the Capo-marked runtime target readiness evidence artifact format and guarded writer.
+- Record exported markdown as project-level evidence for dashboard and dogfood-readiness inspection.
+- Do not launch runtimes, launch providers, inspect credentials, open tunnels, request approvals, activate grants, retain raw transcripts, or mutate runtime target/connectivity state beyond recording the evidence artifact.
+
+Evidence:
+
+- CLI `capo runtime target readiness-evidence --latest [--runner local-process|remote-process|container] [--status available|disabled|unhealthy] --out DIR` in `../../crates/capo-cli/src/main.rs`.
+- Latest export reuses `ProjectDashboard::latest_runtime_target(...)` before calling `ProjectDashboard::runtime_target_control_readiness(...)`.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+
+Decision:
+
+- Treat latest readiness evidence as operator ergonomics over the existing target selector and readiness contract. It does not introduce a second readiness artifact format.
+- Keep exact `--target` and latest `--latest` mutually exclusive; runner/status filters are only valid with `--latest`.
+- Keep the export read-model-derived and provider-free. It records a project evidence row, but does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, prompt materialization, raw transcript retention, or target/exposure state changes.

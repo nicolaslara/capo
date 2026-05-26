@@ -1157,3 +1157,12 @@ Observed 2026-05-26.
 - Runtime target projections and connectivity exposure projections stored separately by state layer: `../../crates/capo-state/src/lib.rs`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR22.
+
+## F7/RR24 Latest Runtime Target Control Readiness Evidence Export
+
+Observed 2026-05-26.
+
+- CLI latest runtime target readiness-evidence selector, markdown renderer reuse, guarded writer, project evidence record, and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared latest runtime target selector and control-readiness query consumed by evidence export: `../../crates/capo-query/src/lib.rs`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR24.

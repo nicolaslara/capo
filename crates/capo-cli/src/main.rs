@@ -98,6 +98,7 @@ Usage:
   capo runtime target readiness --target TARGET_ID [--state PATH]
   capo runtime target readiness --latest [--runner local-process|remote-process|container] [--status available|disabled|unhealthy] [--state PATH]
   capo runtime target readiness-evidence --target TARGET_ID --out DIR [--state PATH]
+  capo runtime target readiness-evidence --latest [--runner local-process|remote-process|container] [--status available|disabled|unhealthy] --out DIR [--state PATH]
   capo runtime target evidence --target TARGET_ID --out DIR [--state PATH]
   capo runtime target evidence --latest [--runner local-process|remote-process|container] [--status available|disabled|unhealthy] --out DIR [--state PATH]
   capo runtime target list [--state PATH]
@@ -5623,29 +5624,76 @@ fn runtime_target_readiness_evidence(
     parsed: &ParsedArgs,
     args: &[String],
 ) -> Result<String, String> {
-    if let Some(unknown) = args
-        .iter()
-        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--target" | "--out"))
-    {
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--")
+            && !matches!(
+                arg.as_str(),
+                "--target" | "--latest" | "--runner" | "--status" | "--out"
+            )
+    }) {
         return Err(format!(
             "unknown runtime target readiness-evidence option: {unknown}"
         ));
     }
-    let runtime_target_id = required_arg(args, "--target")?;
+    let latest = has_flag(args, "--latest");
+    let runtime_target_id = optional_arg(args, "--target");
+    let runner_kind = optional_arg(args, "--runner")
+        .map(|runner| parse_runtime_runner_kind(&runner))
+        .transpose()?;
+    let status = optional_arg(args, "--status")
+        .map(|status| parse_runtime_target_status(&status))
+        .transpose()?;
+    if latest && runtime_target_id.is_some() {
+        return Err(
+            "runtime target readiness-evidence accepts either --target or --latest".to_string(),
+        );
+    }
+    if !latest && (runner_kind.is_some() || status.is_some()) {
+        return Err(
+            "runtime target readiness-evidence --runner/--status filters require --latest"
+                .to_string(),
+        );
+    }
     let out = PathBuf::from(required_arg(args, "--out")?);
     let project_id = project_id();
+    let command_item_id = runtime_target_id
+        .clone()
+        .unwrap_or_else(|| "latest".to_string());
     let command = envelope(
         "runtime-target-readiness-evidence",
         CommandTarget::Project(project_id.clone()),
         CommandIntent::ExportEvidence,
-        Some(runtime_target_id.clone()),
+        Some(command_item_id),
     );
     let state = state(parsed)?;
     let dashboard = project_dashboard(&state, ProjectDashboardQuery::new(project_id.clone()))
         .map_err(debug_error)?;
+    let selected_target_id = if latest {
+        dashboard
+            .latest_runtime_target(runner_kind.as_deref(), status.as_deref())
+            .map(|target| target.runtime_target_id.clone())
+            .ok_or_else(|| {
+                let mut filters = Vec::new();
+                if let Some(runner_kind) = &runner_kind {
+                    filters.push(format!("runner={runner_kind}"));
+                }
+                if let Some(status) = &status {
+                    filters.push(format!("status={status}"));
+                }
+                if filters.is_empty() {
+                    "no recorded runtime targets".to_string()
+                } else {
+                    format!("no recorded runtime targets matching {}", filters.join(" "))
+                }
+            })?
+    } else {
+        runtime_target_id.ok_or_else(|| {
+            "runtime target readiness-evidence requires --target or --latest".to_string()
+        })?
+    };
     let readiness = dashboard
-        .runtime_target_control_readiness(&runtime_target_id)
-        .ok_or_else(|| format!("missing runtime target: {runtime_target_id}"))?;
+        .runtime_target_control_readiness(&selected_target_id)
+        .ok_or_else(|| format!("missing runtime target: {selected_target_id}"))?;
     let markdown = render_runtime_target_readiness_evidence(&project_id, &readiness);
     fs::create_dir_all(&out).map_err(|error| error.to_string())?;
     let content_hash = stable_cli_hash(&markdown);
@@ -5707,13 +5755,27 @@ fn runtime_target_readiness_evidence(
         )
         .map_err(debug_error)?;
 
-    Ok(format!(
-        "runtime_target_readiness_evidence_exported=true\nruntime_target={}\nready={}\nevidence_id={evidence_id}\nartifact_id={artifact_id}\npath={}\ncontent_hash={content_hash}\nsequence={sequence}\ncommand_id={}\nprovider_cli_executed=false tunnel_opened=false runtime_process_started=false\n",
+    let mut output = format!(
+        "runtime_target_readiness_evidence_exported=true\nruntime_target={}\nready={}\nevidence_id={evidence_id}\nartifact_id={artifact_id}\npath={}\ncontent_hash={content_hash}\nsequence={sequence}\ncommand_id={}\n",
         readiness.runtime_target_id,
         readiness.ready,
         path.display(),
         command.command_id
-    ))
+    );
+    if latest {
+        output.push_str("runtime_target_selector=latest\n");
+        output.push_str(&format!(
+            "runtime_target_filter_runner={}\nruntime_target_filter_status={}\n",
+            runner_kind.as_deref().unwrap_or("any"),
+            status.as_deref().unwrap_or("any")
+        ));
+    } else {
+        output.push_str("runtime_target_selector=exact\n");
+    }
+    output.push_str(
+        "provider_cli_executed=false tunnel_opened=false runtime_process_started=false\n",
+    );
+    Ok(output)
 }
 
 fn runtime_target_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
@@ -12291,6 +12353,7 @@ mod tests {
         assert!(readiness_evidence.contains("runtime_target_readiness_evidence_exported=true"));
         assert!(readiness_evidence.contains("runtime_target=remote-target-1"));
         assert!(readiness_evidence.contains("ready=true"));
+        assert!(readiness_evidence.contains("runtime_target_selector=exact"));
         assert!(
             readiness_evidence
                 .contains("evidence_id=evidence-artifact-runtime-target-readiness-evidence-")
@@ -12307,6 +12370,52 @@ mod tests {
         assert!(readiness_markdown.contains("- Ready for control: `true`"));
         assert!(readiness_markdown.contains("- Blockers: `none`"));
         assert!(readiness_markdown.contains("does not launch runtimes"));
+
+        let latest_readiness_evidence = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "readiness-evidence".to_string(),
+            "--latest".to_string(),
+            "--runner".to_string(),
+            "remote-process".to_string(),
+            "--status".to_string(),
+            "available".to_string(),
+            "--out".to_string(),
+            readiness_evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("latest runtime target readiness evidence");
+        assert!(
+            latest_readiness_evidence.contains("runtime_target_readiness_evidence_exported=true")
+        );
+        assert!(latest_readiness_evidence.contains("runtime_target_selector=latest"));
+        assert!(latest_readiness_evidence.contains("runtime_target_filter_runner=remote-process"));
+        assert!(latest_readiness_evidence.contains("runtime_target_filter_status=available"));
+        assert!(latest_readiness_evidence.contains("runtime_target=remote-target-1"));
+        assert!(latest_readiness_evidence.contains("ready=true"));
+        assert!(latest_readiness_evidence.contains("provider_cli_executed=false"));
+        assert!(latest_readiness_evidence.contains("tunnel_opened=false"));
+        assert!(latest_readiness_evidence.contains("runtime_process_started=false"));
+        let missing_latest_readiness_evidence = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "readiness-evidence".to_string(),
+            "--latest".to_string(),
+            "--runner".to_string(),
+            "container".to_string(),
+            "--status".to_string(),
+            "available".to_string(),
+            "--out".to_string(),
+            readiness_evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("missing latest runtime target readiness evidence");
+        assert!(
+            missing_latest_readiness_evidence
+                .contains("no recorded runtime targets matching runner=container status=available")
+        );
 
         let exact_status = run_cli(vec![
             "connectivity".to_string(),

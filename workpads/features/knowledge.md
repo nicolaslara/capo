@@ -2400,3 +2400,19 @@ Decisions:
 Verification:
 
 - `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+
+## F7/RR24 - Latest Runtime Target Control Readiness Evidence Export
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo runtime target readiness-evidence --latest [--runner ...] [--status ...] --out DIR` as a provider-free latest-selector export for aggregate target/control-exposure readiness.
+- Reuse `ProjectDashboard::latest_runtime_target(...)` before deriving `ProjectDashboard::runtime_target_control_readiness(...)`, matching `runtime target readiness --latest`.
+- Reuse the existing Capo-marked readiness evidence artifact and guarded writer instead of adding a second evidence format.
+- Keep exact target and latest selector modes mutually exclusive; runner/status filters are valid only with `--latest`.
+- Preserve the boundary split: the export records project evidence from read models and does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, prompt materialization, raw transcript retention, or target/exposure state changes.
+
+Verification:
+
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
