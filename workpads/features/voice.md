@@ -115,3 +115,25 @@ Evidence:
 Decision:
 
 - Keep recent-work voice handling read-only over `ProjectDashboard`. Voice summarizes shared read-model facts and does not infer hidden agent activity, run providers, inspect credentials, edit workpads, or retain the raw transcript.
+
+### V6 - Review Needs Conversation
+
+Status: completed
+
+Acceptance:
+
+- Recognize simple review/outcome questions such as "What needs review?"
+- Answer from shared dashboard/query review findings and task outcome reports.
+- Render review-finding counts, open blockers, outcome-report counts, reports with findings, latest review outcome, and linked finding/report rows.
+- Preserve raw transcript non-retention and avoid mutating state.
+
+Evidence:
+
+- `VoiceIntentKind::ReviewNeeds` and `VoiceReadScope::ProjectReviewNeeds` in `../../crates/capo-voice/src/lib.rs`.
+- CLI voice review-needs rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-voice review_needs -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_review_needs -- --nocapture`: passed.
+
+Decision:
+
+- Keep review-needs voice handling read-only over `ProjectDashboard`. Voice summarizes persisted review findings and task outcome reports, but does not create review state, infer hidden blockers, run providers, inspect credentials, edit workpads, or retain the raw transcript.

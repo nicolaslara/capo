@@ -612,3 +612,14 @@ Observed 2026-05-26.
 - Evidence and artifact projection types reused by the export: `../../crates/capo-state/src/lib.rs`
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC25.
+
+## F6/V6 Review Needs Conversation
+
+Observed 2026-05-26.
+
+- Voice review-needs planning and unit coverage: `../../crates/capo-voice/src/lib.rs`
+- CLI voice read-contract rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared dashboard review/outcome projections consumed by voice: `../../crates/capo-query/src/lib.rs`
+- Review finding and task outcome source projections: `../../crates/capo-state/src/lib.rs`
+- Voice source workpad: `voice.md`
+- No new third-party dependencies were added for V6.

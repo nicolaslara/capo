@@ -3280,6 +3280,7 @@ fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> 
         VoiceIntentKind::DashboardSummary
         | VoiceIntentKind::DogfoodReadiness
         | VoiceIntentKind::RecentWork
+        | VoiceIntentKind::ReviewNeeds
         | VoiceIntentKind::AgentStatus => {
             let dashboard = voice_dashboard(parsed, &plan)?;
             output.push_str(&render_voice_read_contract(&plan, &dashboard));
@@ -3642,6 +3643,7 @@ fn voice_session_id(
         VoiceReadScope::ProjectDashboard
         | VoiceReadScope::ProjectDogfoodReadiness
         | VoiceReadScope::ProjectRecentWork
+        | VoiceReadScope::ProjectReviewNeeds
         | VoiceReadScope::None => Ok(None),
     }
 }
@@ -3745,6 +3747,57 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
                 append_voice_agent_row(&mut output, row);
             }
         }
+        VoiceReadScope::ProjectReviewNeeds => {
+            let open_review_findings = dashboard
+                .review_findings
+                .iter()
+                .filter(|finding| finding.status == "open")
+                .count();
+            let review_blockers = dashboard
+                .review_findings
+                .iter()
+                .filter(|finding| finding.status == "open" && finding.finding_kind == "blocker")
+                .count();
+            let reports_with_findings = dashboard
+                .task_outcome_reports
+                .iter()
+                .filter(|report| report.review_outcome == "reviewed_with_findings")
+                .count();
+            let latest_review_outcome = dashboard
+                .task_outcome_reports
+                .iter()
+                .max_by_key(|report| report.updated_sequence)
+                .map(|report| report.review_outcome.as_str())
+                .unwrap_or("none");
+            output.push_str(&format!(
+                "spoken_review_findings={}\nspoken_open_review_findings={}\nspoken_review_blockers={}\nspoken_task_outcome_reports={}\nspoken_reports_with_findings={}\nspoken_latest_review_outcome={}\n",
+                dashboard.review_findings.len(),
+                open_review_findings,
+                review_blockers,
+                dashboard.task_outcome_reports.len(),
+                reports_with_findings,
+                latest_review_outcome
+            ));
+            for finding in &dashboard.review_findings {
+                output.push_str(&format!(
+                    "spoken_review_finding={} kind={} severity={} status={} summary={}\n",
+                    finding.review_finding_id,
+                    finding.finding_kind,
+                    finding.severity,
+                    finding.status,
+                    finding.summary
+                ));
+            }
+            for report in &dashboard.task_outcome_reports {
+                output.push_str(&format!(
+                    "spoken_task_outcome_report={} outcome_status={} review_outcome={} artifact={}\n",
+                    report.task_outcome_report_id,
+                    report.outcome_status,
+                    report.review_outcome,
+                    report.report_artifact_id.as_deref().unwrap_or("none")
+                ));
+            }
+        }
         VoiceReadScope::Agent { agent_name } | VoiceReadScope::SessionForAgent { agent_name } => {
             if let Some(row) = dashboard
                 .agents
@@ -3805,6 +3858,7 @@ fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
         VoiceIntentKind::DashboardSummary => "dashboard_summary",
         VoiceIntentKind::DogfoodReadiness => "dogfood_readiness",
         VoiceIntentKind::RecentWork => "recent_work",
+        VoiceIntentKind::ReviewNeeds => "review_needs",
         VoiceIntentKind::RedirectSession => "redirect_session",
         VoiceIntentKind::InterruptSession => "interrupt_session",
         VoiceIntentKind::StopSession => "stop_session",
@@ -3817,6 +3871,7 @@ fn voice_scope_label(scope: &VoiceReadScope) -> &'static str {
         VoiceReadScope::ProjectDashboard => "project_dashboard",
         VoiceReadScope::ProjectDogfoodReadiness => "project_dogfood_readiness",
         VoiceReadScope::ProjectRecentWork => "project_recent_work",
+        VoiceReadScope::ProjectReviewNeeds => "project_review_needs",
         VoiceReadScope::Agent { .. } => "agent",
         VoiceReadScope::SessionForAgent { .. } => "session_for_agent",
         VoiceReadScope::None => "none",
@@ -8997,6 +9052,110 @@ mod tests {
         assert!(agent_output.contains("current_goal=Inspect the project"));
         assert!(agent_output.contains("latest_summary=Fake adapter processed goal for fake-codex"));
         assert!(!agent_output.contains("What has fake-codex done?"));
+        assert_eq!(
+            state.last_sequence().expect("after sequence"),
+            before_sequence
+        );
+    }
+
+    #[test]
+    fn voice_review_needs_reads_review_and_outcome_state_without_mutating() {
+        let state_root = temp_root("cli-voice-review-needs");
+        let evidence_dir = temp_root("cli-voice-review-needs-evidence");
+        seed_running_agent(&state_root, "fake-codex", "Inspect the project");
+
+        run_cli(vec![
+            "review".to_string(),
+            "record".to_string(),
+            "--session".to_string(),
+            "session-fake-codex".to_string(),
+            "--reviewer".to_string(),
+            "focused-review".to_string(),
+            "--kind".to_string(),
+            "blocker".to_string(),
+            "--summary".to_string(),
+            "Dashboard must expose review blockers.".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record review blocker");
+
+        SqliteStateStore::open(&state_root)
+            .expect("state")
+            .append_event(
+                NewEvent {
+                    event_id: "event-cli-voice-review-needs-task-outcome".to_string(),
+                    kind: EventKind::TaskOutcomeReportGenerated,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id()),
+                    task_id: Some(TaskId::new("task-inspect-the-project")),
+                    agent_id: Some(AgentId::new("agent-fake-codex")),
+                    session_id: Some(SessionId::new("session-fake-codex")),
+                    run_id: Some(RunId::new("run-fake-codex")),
+                    turn_id: None,
+                    item_id: Some("task-outcome-report-voice-review-needs".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::TaskOutcomeReport(
+                    capo_state::TaskOutcomeReportProjection {
+                        task_outcome_report_id: "task-outcome-report-voice-review-needs"
+                            .to_string(),
+                        project_id: project_id(),
+                        task_id: TaskId::new("task-inspect-the-project"),
+                        session_id: SessionId::new("session-fake-codex"),
+                        run_id: RunId::new("run-fake-codex"),
+                        outcome_status: "completed".to_string(),
+                        started_sequence: 1,
+                        completed_sequence: 12,
+                        duration_sequence_span: 11,
+                        action_count: 4,
+                        tool_call_count: 1,
+                        evidence_count: 1,
+                        memory_packet_count: 1,
+                        confidence: Some(78),
+                        blocker: Some("Needs review follow-up".to_string()),
+                        review_outcome: "reviewed_with_findings".to_string(),
+                        report_artifact_id: Some(
+                            "artifact-task-outcome-voice-review-needs".to_string(),
+                        ),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append task outcome report");
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        let before_sequence = state.last_sequence().expect("before sequence");
+
+        let output = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What needs review?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice review needs");
+
+        assert!(output.contains("voice_plan=review_needs"));
+        assert!(output.contains("mutation_applied=false"));
+        assert!(output.contains("raw_transcript_retained=false"));
+        assert!(output.contains("read_scope=project_review_needs"));
+        assert!(output.contains("spoken_review_findings=1"));
+        assert!(output.contains("spoken_open_review_findings=1"));
+        assert!(output.contains("spoken_review_blockers=1"));
+        assert!(output.contains("spoken_task_outcome_reports=1"));
+        assert!(output.contains("spoken_reports_with_findings=1"));
+        assert!(output.contains("spoken_latest_review_outcome=reviewed_with_findings"));
+        assert!(output.contains("kind=blocker severity=high status=open"));
+        assert!(output.contains("summary=Dashboard must expose review blockers."));
+        assert!(
+            output.contains("spoken_task_outcome_report=task-outcome-report-voice-review-needs")
+        );
+        assert!(!output.contains("What needs review?"));
         assert_eq!(
             state.last_sequence().expect("after sequence"),
             before_sequence

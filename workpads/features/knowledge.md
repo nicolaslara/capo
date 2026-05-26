@@ -1377,3 +1377,23 @@ Verification:
 Follow-up:
 
 - After explicit provider opt-in, use the same export command to review a successful local execution row before using it as dogfood evidence.
+
+## F6/V6 - Review Needs Conversation
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add a read-only voice intent for review/outcome questions such as "What needs review?"
+- Route the answer through the shared project dashboard query instead of adding voice-specific state reads.
+- Render review-finding counts, open blockers, task outcome report counts, reports with findings, latest review outcome, and linked finding/report rows.
+- Preserve the existing voice safety boundary: no raw transcript retention, no mutation, no provider execution, no credential inspection, and no workpad edits.
+
+Verification:
+
+- `cargo test -p capo-voice review_needs -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_review_needs -- --nocapture`: passed.
+
+Follow-up:
+
+- After more dogfood traces, decide whether review-needs responses should group findings by agent/session or stay project-level by default.

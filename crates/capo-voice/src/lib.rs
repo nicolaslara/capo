@@ -30,6 +30,7 @@ pub enum VoiceIntentKind {
     DashboardSummary,
     DogfoodReadiness,
     RecentWork,
+    ReviewNeeds,
     RedirectSession,
     InterruptSession,
     StopSession,
@@ -67,6 +68,7 @@ pub enum VoiceReadScope {
     ProjectDashboard,
     ProjectDogfoodReadiness,
     ProjectRecentWork,
+    ProjectReviewNeeds,
     Agent { agent_name: String },
     SessionForAgent { agent_name: String },
     None,
@@ -180,6 +182,39 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
             requires_visible_confirmation: false,
             assistant_reply_hint:
                 "Summarize what agents have done from shared read models and evidence refs."
+                    .to_string(),
+        };
+    }
+
+    if is_review_needs_question(&normalized) {
+        let mut command = voice_command(
+            "voice-review-needs",
+            &input,
+            CommandTarget::Project(input.project_id.clone()),
+            CommandIntent::QueryStatus,
+            None,
+        );
+        command
+            .structured_args
+            .push(("view".to_string(), "review_needs".to_string()));
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::ReviewNeeds,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::ProjectReviewNeeds,
+                required_fields: vec![
+                    "review_findings",
+                    "open_review_findings",
+                    "review_blockers",
+                    "task_outcome_reports",
+                    "reports_with_findings",
+                    "latest_review_outcome",
+                ],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: false,
+            assistant_reply_hint:
+                "Summarize review blockers and task outcomes from shared dashboard read models."
                     .to_string(),
         };
     }
@@ -474,6 +509,18 @@ fn is_project_recent_work_question(input: &str) -> bool {
     )
 }
 
+fn is_review_needs_question(input: &str) -> bool {
+    matches!(
+        input,
+        "what needs review"
+            | "what are the review blockers"
+            | "show review blockers"
+            | "what outcomes need attention"
+            | "what needs attention"
+            | "summarize review blockers"
+    )
+}
+
 fn normalize(input: &str) -> String {
     input
         .trim()
@@ -707,6 +754,43 @@ mod tests {
                 .find(|(key, _)| key == "view")
                 .map(|(_, value)| value.as_str()),
             Some("recent_work")
+        );
+    }
+
+    #[test]
+    fn review_needs_question_reads_review_and_outcome_state_without_mutation() {
+        let plan = plan_dummy_transcript(input("What needs review?"));
+
+        assert_eq!(plan.intent_kind, VoiceIntentKind::ReviewNeeds);
+        assert_eq!(
+            plan.read_contract.query_scope,
+            VoiceReadScope::ProjectReviewNeeds
+        );
+        assert!(
+            plan.read_contract
+                .required_fields
+                .contains(&"review_blockers")
+        );
+        assert!(
+            plan.read_contract
+                .required_fields
+                .contains(&"task_outcome_reports")
+        );
+        assert!(!plan.requires_visible_confirmation);
+        assert!(!plan.transcript_policy.retain_raw_transcript);
+        let command = plan.command.expect("voice command");
+        assert_eq!(command.intent, CommandIntent::QueryStatus);
+        assert_eq!(
+            command.target,
+            CommandTarget::Project(ProjectId::new("project-capo"))
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "view")
+                .map(|(_, value)| value.as_str()),
+            Some("review_needs")
         );
     }
 
