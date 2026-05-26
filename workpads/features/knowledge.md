@@ -2026,6 +2026,25 @@ Verification:
 - `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
 - `cargo test`: passed.
 
+## F6/V15 - Latest Runtime Target Status Conversation
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `VoiceReadScope::ProjectLatestRuntimeTargetStatus` so voice can answer latest runtime placement/status questions through the shared dashboard query instead of requiring a target ID.
+- Support optional voice filters for runner kind and target status using the same vocabulary as the CLI selector: `local-process`, `remote-process`, `container`, `available`, `disabled`, and `unhealthy`.
+- Keep the voice path read-only and transcript-safe. It does not retain raw transcripts, launch runtimes, run provider CLIs, open tunnels, inspect credentials, request approvals, activate grants, edit workpads, or mutate state.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test -p capo-voice runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo test`: passed.
+
 ## F7/RR11 - Runtime Target Inventory
 
 Status: completed on 2026-05-26.

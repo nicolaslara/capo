@@ -4286,6 +4286,7 @@ fn voice_session_id(
         VoiceReadScope::ProjectDashboard
         | VoiceReadScope::ProjectLatestConnectivityExposure { .. }
         | VoiceReadScope::ProjectRuntimeTargetStatus { .. }
+        | VoiceReadScope::ProjectLatestRuntimeTargetStatus { .. }
         | VoiceReadScope::ProjectAdapterSmokeReportStatus { .. }
         | VoiceReadScope::ProjectLatestAdapterSmokeReport { .. }
         | VoiceReadScope::ProjectDispatchStatus { .. }
@@ -4434,6 +4435,22 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
             } else {
                 output.push_str(&format!(
                     "spoken_runtime_target_missing={runtime_target_id}\n"
+                ));
+            }
+        }
+        VoiceReadScope::ProjectLatestRuntimeTargetStatus {
+            runner_kind,
+            status,
+        } => {
+            if let Some(target) =
+                dashboard.latest_runtime_target(runner_kind.as_deref(), status.as_deref())
+            {
+                append_voice_runtime_target_status(&mut output, target);
+            } else {
+                output.push_str(&format!(
+                    "spoken_latest_runtime_target_missing=true\nspoken_latest_runtime_target_filter_runner={} spoken_latest_runtime_target_filter_status={}\n",
+                    runner_kind.as_deref().unwrap_or("any"),
+                    status.as_deref().unwrap_or("any")
                 ));
             }
         }
@@ -4798,6 +4815,9 @@ fn voice_scope_label(scope: &VoiceReadScope) -> &'static str {
             "project_latest_connectivity_exposure"
         }
         VoiceReadScope::ProjectRuntimeTargetStatus { .. } => "project_runtime_target_status",
+        VoiceReadScope::ProjectLatestRuntimeTargetStatus { .. } => {
+            "project_latest_runtime_target_status"
+        }
         VoiceReadScope::ProjectAdapterSmokeReportStatus { .. } => {
             "project_adapter_smoke_report_status"
         }
@@ -10936,6 +10956,39 @@ mod tests {
         assert!(voice_status.contains("spoken_runtime_status=available"));
         assert!(voice_status.contains("mutation_applied=false"));
         assert!(voice_status.contains("raw_transcript_retained=false"));
+
+        let latest_voice_status = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What is the latest runtime target status for available local process?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice latest runtime target status");
+        assert!(latest_voice_status.contains("voice_plan=runtime_target_status"));
+        assert!(latest_voice_status.contains("read_scope=project_latest_runtime_target_status"));
+        assert!(latest_voice_status.contains("spoken_runtime_target=runtime-target-local-1"));
+        assert!(latest_voice_status.contains("spoken_runner=local-process"));
+        assert!(latest_voice_status.contains("spoken_runtime_status=available"));
+        assert!(latest_voice_status.contains("mutation_applied=false"));
+        assert!(latest_voice_status.contains("raw_transcript_retained=false"));
+
+        let latest_voice_missing = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What is the latest runtime target status for remote process?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice missing latest runtime target status");
+        assert!(latest_voice_missing.contains("voice_plan=runtime_target_status"));
+        assert!(latest_voice_missing.contains("spoken_latest_runtime_target_missing=true"));
+        assert!(
+            latest_voice_missing
+                .contains("spoken_latest_runtime_target_filter_runner=remote-process")
+        );
 
         let missing_voice_status = run_cli(vec![
             "voice".to_string(),

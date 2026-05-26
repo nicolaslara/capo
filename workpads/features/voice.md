@@ -329,3 +329,32 @@ Decision:
 
 - Keep connector smoke-status voice handling read-only over the shared dashboard query. Voice can answer what Capo knows about connector proof or blockers without running provider CLIs or asking the user to copy smoke-report IDs when the latest selector is enough.
 - Normalize voice adapter filters to stored adapter kinds: `codex_exec` and `claude_code`.
+
+### V15 - Latest Runtime Target Status Conversation
+
+Status: completed
+
+Acceptance:
+
+- Recognize simple latest runtime-target questions such as "What is the latest runtime target status?"
+- Recognize filtered latest runtime-target questions such as "latest runtime target status for available local process" or "latest runtime target status for remote process".
+- Answer from `ProjectDashboard::latest_runtime_target(...)` rather than duplicating runtime target lookup in voice code.
+- Render target placement/status metadata and a clear missing-latest row when no target matches.
+- Preserve raw transcript non-retention, avoid mutating state, and avoid launching runtimes, launching providers, opening tunnels, inspecting credentials, requesting approvals, activating grants, or editing workpads.
+
+Evidence:
+
+- `VoiceReadScope::ProjectLatestRuntimeTargetStatus` in `../../crates/capo-voice/src/lib.rs`.
+- CLI voice latest runtime-target status rendering in `../../crates/capo-cli/src/main.rs`.
+- Shared latest runtime target selector in `../../crates/capo-query/src/lib.rs`.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test -p capo-voice runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo test`: passed.
+
+Decision:
+
+- Keep latest runtime target voice handling read-only over the shared dashboard query. Voice can answer execution-placement status without requiring the operator to copy a target ID, but it cannot launch runtimes, run providers, open tunnels, inspect credentials, or mutate Capo state.
+- Use the same runner/status vocabulary as the CLI latest selector: `local-process`, `remote-process`, `container`, `available`, `disabled`, and `unhealthy`.

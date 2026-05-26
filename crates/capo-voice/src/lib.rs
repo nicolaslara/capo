@@ -81,6 +81,10 @@ pub enum VoiceReadScope {
     ProjectRuntimeTargetStatus {
         runtime_target_id: String,
     },
+    ProjectLatestRuntimeTargetStatus {
+        runner_kind: Option<String>,
+        status: Option<String>,
+    },
     ProjectAdapterSmokeReportStatus {
         smoke_report_id: String,
     },
@@ -410,6 +414,58 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
             assistant_reply_hint:
                 "Answer latest connectivity exposure status from shared dashboard read models."
                     .to_string(),
+        };
+    }
+
+    if let Some(filter) = latest_runtime_target_status_filter(&normalized) {
+        let mut command = voice_command(
+            "voice-latest-runtime-target-status",
+            &input,
+            CommandTarget::Project(input.project_id.clone()),
+            CommandIntent::QueryStatus,
+            None,
+        );
+        command
+            .structured_args
+            .push(("view".to_string(), "runtime_target_status".to_string()));
+        command
+            .structured_args
+            .push(("runtime_target_selector".to_string(), "latest".to_string()));
+        if let Some(runner_kind) = &filter.runner_kind {
+            command
+                .structured_args
+                .push(("runner".to_string(), runner_kind.clone()));
+        }
+        if let Some(status) = &filter.status {
+            command
+                .structured_args
+                .push(("status".to_string(), status.clone()));
+        }
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::RuntimeTargetStatus,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::ProjectLatestRuntimeTargetStatus {
+                    runner_kind: filter.runner_kind,
+                    status: filter.status,
+                },
+                required_fields: vec![
+                    "runtime_target_id",
+                    "name",
+                    "runner",
+                    "workspace",
+                    "artifacts",
+                    "default_cwd",
+                    "capability_profile",
+                    "endpoint",
+                    "status",
+                    "updated_sequence",
+                ],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: false,
+            assistant_reply_hint:
+                "Answer latest runtime target status from shared dashboard read models.".to_string(),
         };
     }
 
@@ -1116,6 +1172,79 @@ fn latest_connectivity_exposure_filter(
     None
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RuntimeTargetVoiceFilter {
+    pub runner_kind: Option<String>,
+    pub status: Option<String>,
+}
+
+fn latest_runtime_target_status_filter(normalized: &str) -> Option<RuntimeTargetVoiceFilter> {
+    if matches!(
+        normalized,
+        "what is latest runtime target status"
+            | "what is the latest runtime target status"
+            | "what's latest runtime target status"
+            | "what's the latest runtime target status"
+            | "show latest runtime target status"
+            | "latest runtime target status"
+    ) {
+        return Some(RuntimeTargetVoiceFilter::default());
+    }
+
+    let rest = normalized
+        .strip_prefix("what is latest runtime target status for ")
+        .or_else(|| normalized.strip_prefix("what is the latest runtime target status for "))
+        .or_else(|| normalized.strip_prefix("what's latest runtime target status for "))
+        .or_else(|| normalized.strip_prefix("what's the latest runtime target status for "))
+        .or_else(|| normalized.strip_prefix("show latest runtime target status for "))
+        .or_else(|| normalized.strip_prefix("latest runtime target status for "))?
+        .trim();
+
+    runtime_target_voice_filter(rest)
+}
+
+fn runtime_target_voice_filter(value: &str) -> Option<RuntimeTargetVoiceFilter> {
+    let slug = agent_slug(value);
+    if let Some(status) = runtime_target_status_slug(&slug) {
+        return Some(RuntimeTargetVoiceFilter {
+            runner_kind: None,
+            status: Some(status.to_string()),
+        });
+    }
+    if let Some(runner_kind) = runtime_runner_kind_slug(&slug) {
+        return Some(RuntimeTargetVoiceFilter {
+            runner_kind: Some(runner_kind.to_string()),
+            status: None,
+        });
+    }
+
+    let (status_part, runner_part) = slug.split_once('-')?;
+    let status = runtime_target_status_slug(status_part)?;
+    let runner_kind = runtime_runner_kind_slug(runner_part)?;
+    Some(RuntimeTargetVoiceFilter {
+        runner_kind: Some(runner_kind.to_string()),
+        status: Some(status.to_string()),
+    })
+}
+
+fn runtime_target_status_slug(value: &str) -> Option<&'static str> {
+    match value {
+        "available" => Some("available"),
+        "disabled" => Some("disabled"),
+        "unhealthy" => Some("unhealthy"),
+        _ => None,
+    }
+}
+
+fn runtime_runner_kind_slug(value: &str) -> Option<&'static str> {
+    match value {
+        "local" | "local-process" => Some("local-process"),
+        "remote" | "remote-process" => Some("remote-process"),
+        "container" => Some("container"),
+        _ => None,
+    }
+}
+
 fn runtime_target_status_id(normalized: &str) -> Option<String> {
     normalized
         .strip_prefix("what is the runtime target status for ")
@@ -1563,6 +1692,57 @@ mod tests {
 
     #[test]
     fn runtime_target_status_question_reads_target_without_mutation() {
+        let latest = plan_dummy_transcript(input("What is the latest runtime target status?"));
+
+        assert_eq!(latest.intent_kind, VoiceIntentKind::RuntimeTargetStatus);
+        assert_eq!(
+            latest.read_contract.query_scope,
+            VoiceReadScope::ProjectLatestRuntimeTargetStatus {
+                runner_kind: None,
+                status: None,
+            }
+        );
+        assert!(!latest.requires_visible_confirmation);
+        assert!(!latest.transcript_policy.retain_raw_transcript);
+        let command = latest.command.expect("voice command");
+        assert_eq!(command.intent, CommandIntent::QueryStatus);
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "runtime_target_selector")
+                .map(|(_, value)| value.as_str()),
+            Some("latest")
+        );
+
+        let filtered = plan_dummy_transcript(input(
+            "What is the latest runtime target status for available local process?",
+        ));
+        assert_eq!(
+            filtered.read_contract.query_scope,
+            VoiceReadScope::ProjectLatestRuntimeTargetStatus {
+                runner_kind: Some("local-process".to_string()),
+                status: Some("available".to_string()),
+            }
+        );
+        let command = filtered.command.expect("voice command");
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "runner")
+                .map(|(_, value)| value.as_str()),
+            Some("local-process")
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "status")
+                .map(|(_, value)| value.as_str()),
+            Some("available")
+        );
+
         let plan = plan_dummy_transcript(input(
             "What is the runtime target status for remote target 1?",
         ));

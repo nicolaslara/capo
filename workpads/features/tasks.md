@@ -374,6 +374,7 @@ Progress:
 - V12 recent-work tool activity conversation is completed with governed tool calls and observed-only tool observations included in project/agent recent-work answers.
 - V13 explicit tool activity conversation is completed with read-only project and agent-scoped questions over shared dashboard tool-call and tool-observation rows.
 - V14 adapter smoke status conversation is completed with read-only exact/latest connector smoke questions over shared dashboard query selectors.
+- V15 latest runtime target status conversation is completed with read-only latest/filter questions over `ProjectDashboard::latest_runtime_target(...)`.
 
 Evidence:
 
@@ -403,6 +404,8 @@ Evidence:
 - `cargo test -p capo-cli voice_recent_work -- --nocapture` verifies explicit tool activity questions
 - `cargo test -p capo-voice adapter_smoke -- --nocapture`
 - `cargo test -p capo-cli voice_adapter_smoke -- --nocapture`
+- `cargo test -p capo-voice runtime_target -- --nocapture`
+- `cargo test -p capo-cli runtime_target -- --nocapture` verifies latest runtime target voice status
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`

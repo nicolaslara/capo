@@ -1059,3 +1059,13 @@ Observed 2026-05-26.
 - CLI exact/latest runtime target status rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR19.
+
+## F6/V15 Latest Runtime Target Status Conversation
+
+Observed 2026-05-26.
+
+- Voice latest runtime target status planning and unit coverage: `../../crates/capo-voice/src/lib.rs`
+- CLI voice latest runtime target status rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared latest runtime target selector: `../../crates/capo-query/src/lib.rs`
+- Voice source workpad: `voice.md`
+- No new third-party dependencies were added for V15.
