@@ -3204,6 +3204,25 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F12/C3 - Controller Session Control Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move active session lookup, read-model observation, redirect, interrupt, and stop orchestration into `session_control.rs`. These methods all operate on an already-active session/run and are distinct from initial send-task orchestration.
+- Preserve the existing inherent `FakeBoundaryController` method surface so CLI, voice, workpad, and tests continue to call the same controller API.
+- Keep command-envelope handlers and agent registration in `lib.rs` for now. The root now acts as the controller facade: construction, command routing, registration, recovery, public result types, and shared event/helper functions.
+- Mark F12 complete because controller production modules are now under the near-term warning threshold while preserving adapter replay, local dispatch, fake-session send-task, and session-control boundaries.
+
+Verification:
+
+- `cargo test -p capo-controller -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F13/AD1 - Adapter Local Subscription And Test Module Split
 
 Status: completed on 2026-05-26.
