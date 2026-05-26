@@ -1,0 +1,438 @@
+use super::*;
+
+impl FakeBoundaryController {
+    pub fn apply_normalized_adapter_events(
+        &self,
+        refs: &FakeRunRefs,
+        adapter_events: &[NormalizedAdapterEvent],
+    ) -> StateResult<AdapterReplayReport> {
+        let session = self
+            .state
+            .session(&refs.session_id)?
+            .ok_or_else(|| missing_read_model("session", &refs.session_id))?;
+        let task = self
+            .state
+            .task(&refs.task_id)?
+            .ok_or_else(|| missing_read_model("task", &refs.task_id))?;
+        let mut appended_event_count = 0;
+        let mut tool_event_count = 0;
+        let mut summary_event_count = 0;
+        let mut completed_turn_count = 0;
+
+        for (index, adapter_event) in adapter_events.iter().enumerate() {
+            let event_identity = adapter_event_identity(adapter_event, index);
+            let Some((event_kind, projection)) =
+                self.adapter_event_projection(refs, adapter_event, &session, &task)?
+            else {
+                continue;
+            };
+            let mut event = scoped_event(
+                &format!(
+                    "event-adapter-replay-{}-{}-{}",
+                    adapter_event.adapter_kind.as_str(),
+                    refs.session_id,
+                    event_identity
+                ),
+                event_kind,
+                &self.project_id,
+                &refs.task_id,
+                &refs.agent_id,
+                &refs.session_id,
+                &refs.run_id,
+            );
+            event.turn_id = adapter_event
+                .timeline_key
+                .as_ref()
+                .map(|key| format!("turn-{}", slug(key)))
+                .or_else(|| Some("turn-adapter-replay".to_string()));
+            event.item_id = adapter_event.external_item_ref.clone();
+            event.payload_json = adapter_event_payload_json(adapter_event);
+            event.idempotency_key = adapter_event
+                .idempotency_key
+                .clone()
+                .or_else(|| Some(format!("adapter-replay:{}:{index}", refs.session_id)));
+            event.redaction_state = RedactionState::Safe;
+            let before = self.state.event_count()?;
+            self.state.append_event(event, &[projection])?;
+            if self.state.event_count()? > before {
+                appended_event_count += 1;
+                match adapter_event.kind.as_str() {
+                    "adapter.tool_call_requested"
+                    | "adapter.tool_call_started"
+                    | "adapter.tool_call_completed"
+                    | "adapter.tool_call_failed" => tool_event_count += 1,
+                    "adapter.item_completed" | "adapter.item_delta" | "adapter.plan_replaced" => {
+                        summary_event_count += 1
+                    }
+                    "adapter.turn_completed" => completed_turn_count += 1,
+                    _ => {}
+                }
+            }
+            if let Some(observation_projection) =
+                self.adapter_tool_observation_projection(refs, adapter_event)?
+            {
+                let mut observation_event = scoped_event(
+                    &format!(
+                        "event-adapter-tool-observation-{}-{}-{}",
+                        adapter_event.adapter_kind.as_str(),
+                        refs.session_id,
+                        event_identity
+                    ),
+                    EventKind::ToolObservationRecorded,
+                    &self.project_id,
+                    &refs.task_id,
+                    &refs.agent_id,
+                    &refs.session_id,
+                    &refs.run_id,
+                );
+                observation_event.turn_id = adapter_event
+                    .timeline_key
+                    .as_ref()
+                    .map(|key| format!("turn-{}", slug(key)))
+                    .or_else(|| Some("turn-adapter-replay".to_string()));
+                observation_event.item_id = adapter_event.external_item_ref.clone();
+                observation_event.payload_json = adapter_event_payload_json(adapter_event);
+                observation_event.idempotency_key = adapter_event
+                    .idempotency_key
+                    .as_ref()
+                    .map(|key| format!("{key}:tool-observation"))
+                    .or_else(|| {
+                        Some(format!(
+                            "adapter-replay:{}:{index}:tool-observation",
+                            refs.session_id
+                        ))
+                    });
+                observation_event.redaction_state = RedactionState::Safe;
+                let before = self.state.event_count()?;
+                self.state
+                    .append_event(observation_event, &[observation_projection])?;
+                if self.state.event_count()? > before {
+                    appended_event_count += 1;
+                }
+            }
+        }
+
+        Ok(AdapterReplayReport {
+            input_event_count: adapter_events.len(),
+            appended_event_count,
+            tool_event_count,
+            summary_event_count,
+            completed_turn_count,
+        })
+    }
+
+    pub fn apply_scripted_mock_turn(
+        &self,
+        refs: &FakeRunRefs,
+        turn: &ScriptedMockTurn,
+    ) -> StateResult<AdapterReplayReport> {
+        let adapter = AgentAdapter::scripted_mock(
+            ScriptedMockAgent::new(refs.external_session_ref.clone()).with_turn(turn.clone()),
+        );
+        let events = adapter
+            .scripted_turn_events(turn.turn_ref())
+            .ok_or_else(|| missing_read_model("scripted_mock_turn", &turn.turn_ref()))?;
+        self.apply_normalized_adapter_events(refs, &events)
+    }
+
+    fn adapter_event_projection(
+        &self,
+        refs: &FakeRunRefs,
+        adapter_event: &NormalizedAdapterEvent,
+        session: &SessionProjection,
+        task: &TaskProjection,
+    ) -> StateResult<Option<(EventKind, ProjectionRecord)>> {
+        match adapter_event.kind.as_str() {
+            "adapter.item_completed" | "adapter.item_delta" | "adapter.plan_replaced" => {
+                let content_hash = adapter_event
+                    .content
+                    .as_ref()
+                    .map(|content| stable_hash(content.as_bytes()))
+                    .unwrap_or_else(|| adapter_event.raw_event_hash.clone());
+                Ok(Some((
+                    EventKind::SessionSummaryUpdated,
+                    ProjectionRecord::Session(SessionProjection {
+                        session_id: refs.session_id.clone(),
+                        project_id: self.project_id.clone(),
+                        task_id: Some(refs.task_id.clone()),
+                        agent_id: refs.agent_id.clone(),
+                        title: session.title.clone(),
+                        status: "active".to_string(),
+                        current_goal: session.current_goal.clone(),
+                        latest_summary: Some(format!(
+                            "Adapter {} {} observed content_hash={content_hash}",
+                            adapter_event.adapter_kind.as_str(),
+                            adapter_event.role.as_deref().unwrap_or("event")
+                        )),
+                        latest_confidence: Some(match adapter_event.timeline_confidence {
+                            capo_adapters::AdapterTimelineConfidence::Stable => 82,
+                            capo_adapters::AdapterTimelineConfidence::Heuristic => 60,
+                            capo_adapters::AdapterTimelineConfidence::None => 40,
+                        }),
+                        latest_blocker: None,
+                        updated_sequence: 0,
+                    }),
+                )))
+            }
+            "adapter.tool_call_requested"
+            | "adapter.tool_call_started"
+            | "adapter.tool_call_completed"
+            | "adapter.tool_call_failed" => {
+                let tool_call_id = adapter_tool_call_id(adapter_event);
+                let existing_tool_name = self
+                    .state
+                    .tool_calls_for_session(&refs.session_id)?
+                    .into_iter()
+                    .find(|tool| tool.tool_call_id == tool_call_id)
+                    .map(|tool| tool.tool_name);
+                let status = match adapter_event.kind.as_str() {
+                    "adapter.tool_call_requested" => "requested",
+                    "adapter.tool_call_started" => "started",
+                    "adapter.tool_call_completed" => "completed",
+                    "adapter.tool_call_failed" => "failed",
+                    _ => unreachable!("matched above"),
+                };
+                Ok(Some((
+                    match adapter_event.kind.as_str() {
+                        "adapter.tool_call_requested" => EventKind::ToolCallRequested,
+                        "adapter.tool_call_started" => EventKind::ToolInvocationStarted,
+                        "adapter.tool_call_completed" | "adapter.tool_call_failed" => {
+                            EventKind::ToolCallCompleted
+                        }
+                        _ => unreachable!("matched above"),
+                    },
+                    ProjectionRecord::ToolCall(capo_state::ToolCallProjection {
+                        tool_call_id,
+                        session_id: refs.session_id.clone(),
+                        turn_id: adapter_event
+                            .timeline_key
+                            .as_ref()
+                            .map(|key| format!("turn-{}", slug(key))),
+                        tool_name: adapter_event
+                            .tool_name
+                            .clone()
+                            .or(existing_tool_name)
+                            .unwrap_or_else(|| "adapter-native-tool".to_string()),
+                        tool_origin: format!(
+                            "adapter_native:{}",
+                            adapter_event.adapter_kind.as_str()
+                        ),
+                        status: status.to_string(),
+                        input_artifact_id: None,
+                        output_artifact_id: adapter_event.content.as_ref().map(|_| {
+                            format!("artifact-adapter-output-{}", adapter_event.raw_event_hash)
+                        }),
+                        updated_sequence: 0,
+                    }),
+                )))
+            }
+            "adapter.turn_completed" => Ok(Some((
+                EventKind::EvidenceRecorded,
+                ProjectionRecord::Evidence(capo_state::EvidenceProjection {
+                    evidence_id: EvidenceId::new(format!(
+                        "evidence-adapter-replay-{}-{}",
+                        adapter_event.adapter_kind.as_str(),
+                        refs.session_id
+                    )),
+                    project_id: self.project_id.clone(),
+                    task_id: Some(refs.task_id.clone()),
+                    session_id: Some(refs.session_id.clone()),
+                    run_id: Some(refs.run_id.clone()),
+                    kind: format!("adapter_replay:{}", adapter_event.adapter_kind.as_str()),
+                    artifact_id: None,
+                    confidence: if task.capo_execution_status == "active" {
+                        78
+                    } else {
+                        60
+                    },
+                    updated_sequence: 0,
+                }),
+            ))),
+            "adapter.permission_requested" => Ok(Some((
+                EventKind::PermissionRequested,
+                ProjectionRecord::Session(SessionProjection {
+                    session_id: refs.session_id.clone(),
+                    project_id: self.project_id.clone(),
+                    task_id: Some(refs.task_id.clone()),
+                    agent_id: refs.agent_id.clone(),
+                    title: session.title.clone(),
+                    status: "waiting_for_permission".to_string(),
+                    current_goal: session.current_goal.clone(),
+                    latest_summary: session.latest_summary.clone(),
+                    latest_confidence: session.latest_confidence,
+                    latest_blocker: Some(format!(
+                        "Adapter {} requested permission for content_hash={}",
+                        adapter_event.adapter_kind.as_str(),
+                        adapter_event
+                            .content
+                            .as_ref()
+                            .map(|content| stable_hash(content.as_bytes()))
+                            .unwrap_or_else(|| adapter_event.raw_event_hash.clone())
+                    )),
+                    updated_sequence: 0,
+                }),
+            ))),
+            "adapter.turn_failed" | "adapter.turn_interrupted" => {
+                let interrupted = adapter_event.kind == "adapter.turn_interrupted";
+                Ok(Some((
+                    if interrupted {
+                        EventKind::SessionInterrupted
+                    } else {
+                        EventKind::RunExited
+                    },
+                    ProjectionRecord::Session(SessionProjection {
+                        session_id: refs.session_id.clone(),
+                        project_id: self.project_id.clone(),
+                        task_id: Some(refs.task_id.clone()),
+                        agent_id: refs.agent_id.clone(),
+                        title: session.title.clone(),
+                        status: if interrupted {
+                            "canceled".to_string()
+                        } else {
+                            "failed".to_string()
+                        },
+                        current_goal: session.current_goal.clone(),
+                        latest_summary: Some(format!(
+                            "Adapter {} {} content_hash={}",
+                            adapter_event.adapter_kind.as_str(),
+                            if interrupted { "interrupted" } else { "failed" },
+                            adapter_event
+                                .content
+                                .as_ref()
+                                .map(|content| stable_hash(content.as_bytes()))
+                                .unwrap_or_else(|| adapter_event.raw_event_hash.clone())
+                        )),
+                        latest_confidence: Some(40),
+                        latest_blocker: adapter_event.content.as_ref().map(|content| {
+                            format!(
+                                "Adapter {} {} content_hash={}",
+                                adapter_event.adapter_kind.as_str(),
+                                if interrupted { "interrupted" } else { "failed" },
+                                stable_hash(content.as_bytes())
+                            )
+                        }),
+                        updated_sequence: 0,
+                    }),
+                )))
+            }
+            "adapter.session_started" | "adapter.raw_event" => Ok(None),
+            _ => Ok(None),
+        }
+    }
+
+    fn adapter_tool_observation_projection(
+        &self,
+        refs: &FakeRunRefs,
+        adapter_event: &NormalizedAdapterEvent,
+    ) -> StateResult<Option<ProjectionRecord>> {
+        let Some(mut observation) = adapter_event.tool_observation() else {
+            return Ok(None);
+        };
+        if observation.tool_name == "adapter-native-tool" {
+            let tool_call_id = adapter_tool_call_id(adapter_event);
+            if let Some(existing_tool_name) = self
+                .state
+                .tool_calls_for_session(&refs.session_id)?
+                .into_iter()
+                .find(|tool| tool.tool_call_id == tool_call_id)
+                .map(|tool| tool.tool_name)
+            {
+                observation.tool_name = existing_tool_name;
+            }
+        }
+        Ok(Some(ProjectionRecord::ToolObservation(
+            tool_observation_projection(refs, adapter_event, &observation),
+        )))
+    }
+}
+
+fn adapter_event_payload_json(adapter_event: &NormalizedAdapterEvent) -> String {
+    let content_hash = adapter_event
+        .content
+        .as_ref()
+        .map(|content| stable_hash(content.as_bytes()));
+    format!(
+        "{{\"adapter_kind\":\"{}\",\"provider_event_kind\":\"{}\",\"normalized_kind\":\"{}\",\"external_session_ref\":\"{}\",\"external_item_ref\":\"{}\",\"timeline_key\":\"{}\",\"timeline_confidence\":\"{:?}\",\"tool_name\":\"{}\",\"status\":\"{}\",\"content_hash\":\"{}\",\"raw_event_hash\":\"{}\"}}",
+        adapter_event.adapter_kind.as_str(),
+        escape_json(&adapter_event.provider_event_kind),
+        escape_json(&adapter_event.kind),
+        escape_json(
+            adapter_event
+                .external_session_ref
+                .as_deref()
+                .unwrap_or("none")
+        ),
+        escape_json(adapter_event.external_item_ref.as_deref().unwrap_or("none")),
+        escape_json(adapter_event.timeline_key.as_deref().unwrap_or("none")),
+        adapter_event.timeline_confidence,
+        escape_json(adapter_event.tool_name.as_deref().unwrap_or("none")),
+        escape_json(adapter_event.status.as_deref().unwrap_or("none")),
+        content_hash.as_deref().unwrap_or("none"),
+        escape_json(&adapter_event.raw_event_hash)
+    )
+}
+
+fn adapter_event_identity(adapter_event: &NormalizedAdapterEvent, fallback_index: usize) -> String {
+    let mut identity = slug(
+        adapter_event
+            .idempotency_key
+            .as_deref()
+            .or(adapter_event.timeline_key.as_deref())
+            .or(adapter_event.external_item_ref.as_deref())
+            .unwrap_or(&adapter_event.raw_event_hash),
+    );
+    identity = identity.chars().take(96).collect::<String>();
+    identity = identity.trim_matches('-').to_string();
+    if identity.is_empty() {
+        format!("event-{fallback_index}")
+    } else {
+        identity
+    }
+}
+
+fn adapter_tool_call_id(adapter_event: &NormalizedAdapterEvent) -> ToolCallId {
+    ToolCallId::new(format!(
+        "tool-adapter-{}",
+        slug(
+            adapter_event
+                .external_item_ref
+                .as_deref()
+                .or(adapter_event.timeline_key.as_deref())
+                .unwrap_or(&adapter_event.raw_event_hash)
+        )
+    ))
+}
+
+fn tool_observation_projection(
+    refs: &FakeRunRefs,
+    adapter_event: &NormalizedAdapterEvent,
+    observation: &AdapterToolObservation,
+) -> capo_state::ToolObservationProjection {
+    capo_state::ToolObservationProjection {
+        tool_observation_id: format!(
+            "tool-observation-{}-{}",
+            adapter_event.adapter_kind.as_str(),
+            slug(
+                observation
+                    .external_tool_ref
+                    .as_deref()
+                    .or(adapter_event.timeline_key.as_deref())
+                    .unwrap_or(&observation.raw_event_hash)
+            )
+        ),
+        session_id: refs.session_id.clone(),
+        tool_call_id: Some(adapter_tool_call_id(adapter_event)),
+        source: format!("adapter_event:{}", observation.source_adapter),
+        external_tool_ref: observation.external_tool_ref.clone(),
+        tool_name: observation.tool_name.clone(),
+        observed_status: observation.observed_status.clone(),
+        instrumentation_level: observation.instrumentation_level.clone(),
+        confidence: observation.confidence.clone(),
+        raw_event_hash: observation.raw_event_hash.clone(),
+        artifact_id: adapter_event
+            .content
+            .as_ref()
+            .map(|_| format!("artifact-adapter-output-{}", adapter_event.raw_event_hash)),
+        updated_sequence: 0,
+    }
+}

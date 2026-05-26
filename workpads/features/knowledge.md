@@ -3120,3 +3120,23 @@ Verification:
 - `cargo test -p capo-state`: passed.
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+## F12/C1 - Controller Adapter Replay, Local Dispatch, And Test Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Split `capo-controller` by responsibility rather than only by line count. Adapter replay is now a focused module because it owns normalized provider/mock event ingestion, replay projection mapping, tool-observation projection, and prompt/output redaction-safe payload metadata.
+- Keep local adapter dispatch planning in `local_dispatch.rs` instead of `adapter_replay.rs`. Planning a Codex/Claude launch contract is related to agent dispatch, but it is not replay ingestion, and the separate module avoids attracting launch-planning edits into the replay boundary.
+- Keep the moved methods as inherent `FakeBoundaryController` methods in the focused modules. This preserves the public controller surface used by CLI, fixture replay, scripted mock tests, and future real-adapter controller paths while making each implementation easier to inspect in one pass.
+- Move controller tests into `tests.rs` with the same private-module access pattern used by the other maintainability splits. This keeps behavioral regression coverage close to the crate without keeping every test in the production orchestration file.
+- This is a behavior-preserving split, not a finished controller decomposition. `lib.rs` is still 1,436 lines, so follow-up slices should separate command routing helpers, fake session orchestration, or permission/tool audit flow when the next task touches those areas.
+
+Verification:
+
+- `cargo test -p capo-controller`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.

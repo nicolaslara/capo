@@ -1511,3 +1511,14 @@ Observed 2026-05-26.
 - Readiness evidence artifact: `.capo-dev/evidence/artifact-dogfood-readiness-38c286e1f2e30354.md` (local ignored runtime state, not committed).
 - Fixture used for deterministic replay: `../../crates/capo-adapters/fixtures/codex-exec.jsonl`.
 - No new third-party dependencies were added for DB10.
+
+## F12/C1 Controller Adapter Replay, Local Dispatch, And Test Module Split
+
+Observed 2026-05-26.
+
+- Controller crate root after split: `../../crates/capo-controller/src/lib.rs`
+- Adapter replay controller extension: `../../crates/capo-controller/src/adapter_replay.rs`
+- Local adapter dispatch planning extension: `../../crates/capo-controller/src/local_dispatch.rs`
+- Controller regression tests: `../../crates/capo-controller/src/tests.rs`
+- Resulting file sizes: `../../crates/capo-controller/src/lib.rs` 1,436 lines; `../../crates/capo-controller/src/adapter_replay.rs` 438 lines; `../../crates/capo-controller/src/local_dispatch.rs` 45 lines; `../../crates/capo-controller/src/tests.rs` 610 lines.
+- No new third-party dependencies were added for C1.

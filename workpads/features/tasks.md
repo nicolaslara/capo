@@ -18,6 +18,7 @@ Feature work starts after the prototype gate. Dedicated feature files hold the d
 | `voice.md` | Conversational Capo loop from P14 contract | Prototype P14 |
 | `remote-runtime.md` | Remote runtime/tunnel adapters | Local real-agent semantics |
 | `state-store.md` | State persistence resilience and ORM/typed projection strategy | Prototype P2 state store |
+| cross-cutting controller | Controller orchestration readability and boundary splits | Prototype P12 controller path |
 
 ## F0 - Split Feature Workpads
 
@@ -626,6 +627,35 @@ Evidence:
 - `crates/capo-tools/src/runtime_wrappers.rs`
 - `crates/capo-tools/src/tests.rs`
 - `cargo test -p capo-tools`
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo test --workspace --all-targets`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+
+## F12 - Controller Maintainability
+
+Status: in_progress
+
+Source workpad: cross-cutting controller orchestration implementation.
+
+Acceptance:
+
+- Reduce `capo-controller` file size where behavior-preserving splits are available.
+- Preserve controller command behavior, adapter replay behavior, permission/tool audit behavior, and test behavior.
+- Keep orchestration code aligned with boundary responsibilities: command/controller flow in the crate root, adapter replay in its own module, tests in their own module.
+
+Progress:
+
+- C1 controller adapter replay, local dispatch, and test module split is completed. Adapter replay methods, replay projection mapping, and replay payload/id helpers now live in `crates/capo-controller/src/adapter_replay.rs`; local adapter dispatch planning lives in `crates/capo-controller/src/local_dispatch.rs`; controller tests now live in `crates/capo-controller/src/tests.rs`; crate-root public methods remain available on `FakeBoundaryController`.
+- `crates/capo-controller/src/lib.rs` is reduced to 1,436 lines, but remains above the desired LLM-friendly target. Future slices should split command handling, fake session orchestration, or permission/tool audit flow by responsibility.
+
+Evidence:
+
+- `crates/capo-controller/src/lib.rs`
+- `crates/capo-controller/src/adapter_replay.rs`
+- `crates/capo-controller/src/local_dispatch.rs`
+- `crates/capo-controller/src/tests.rs`
+- `cargo test -p capo-controller`
 - `cargo fmt --check`
 - `git diff --check`
 - `cargo test --workspace --all-targets`
