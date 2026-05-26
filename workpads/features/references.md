@@ -772,3 +772,13 @@ Observed 2026-05-26.
 - ACP tool/client handler design source: `../architecture/tool-exposure.md`
 - Permissions source workpad: `permissions-tools.md`
 - No new third-party dependencies were added for PT6.
+
+## F4/PT7 Adapter Native Tool Observation Contract
+
+Observed 2026-05-26.
+
+- Adapter observed-only tool observation contract and fixture regression coverage: `../../crates/capo-adapters/src/lib.rs`
+- Tool observation architecture source: `../architecture/tool-exposure.md`
+- ACP/Codex/Claude fixture source: `../../crates/capo-adapters/fixtures/`
+- Permissions source workpad: `permissions-tools.md`
+- No new third-party dependencies were added for PT7.

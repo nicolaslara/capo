@@ -679,6 +679,41 @@ impl NormalizedAdapterEvent {
         ));
         self
     }
+
+    pub fn tool_observation(&self) -> Option<AdapterToolObservation> {
+        if !matches!(
+            self.kind.as_str(),
+            "adapter.tool_call_requested"
+                | "adapter.tool_call_started"
+                | "adapter.tool_call_completed"
+                | "adapter.tool_call_failed"
+        ) {
+            return None;
+        }
+        Some(AdapterToolObservation {
+            source_adapter: self.adapter_kind.as_str().to_string(),
+            external_tool_ref: self
+                .external_item_ref
+                .clone()
+                .or_else(|| self.timeline_key.clone()),
+            tool_name: self
+                .tool_name
+                .clone()
+                .unwrap_or_else(|| "adapter-native-tool".to_string()),
+            observed_status: self
+                .status
+                .clone()
+                .unwrap_or_else(|| "observed".to_string()),
+            instrumentation_level: "observed_only".to_string(),
+            confidence: match self.timeline_confidence {
+                AdapterTimelineConfidence::Stable => "high",
+                AdapterTimelineConfidence::Heuristic => "medium",
+                AdapterTimelineConfidence::None => "low",
+            }
+            .to_string(),
+            raw_event_hash: self.raw_event_hash.clone(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -700,6 +735,24 @@ impl AdapterFixtureParse {
         }
         deduped
     }
+
+    pub fn tool_observations(&self) -> Vec<AdapterToolObservation> {
+        self.deduped_by_idempotency()
+            .into_iter()
+            .filter_map(|event| event.tool_observation())
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterToolObservation {
+    pub source_adapter: String,
+    pub external_tool_ref: Option<String>,
+    pub tool_name: String,
+    pub observed_status: String,
+    pub instrumentation_level: String,
+    pub confidence: String,
+    pub raw_event_hash: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1334,6 +1387,46 @@ mod tests {
 
         assert_eq!(before, 2);
         assert_eq!(after, 1);
+    }
+
+    #[test]
+    fn adapter_tool_observations_are_observed_only() {
+        let acp =
+            AcpAdapter::parse_replay_jsonl(include_str!("../fixtures/acp-replay.jsonl")).unwrap();
+        let acp_observations = acp.tool_observations();
+
+        assert_eq!(acp_observations.len(), 3);
+        assert!(acp_observations.iter().all(|observation| {
+            observation.source_adapter == "acp"
+                && observation.instrumentation_level == "observed_only"
+                && observation.confidence == "high"
+                && observation.external_tool_ref.as_deref() == Some("tool-1")
+        }));
+        assert!(
+            acp_observations
+                .iter()
+                .any(|observation| observation.observed_status == "completed")
+        );
+
+        let codex =
+            CodexExecAdapter::parse_jsonl(include_str!("../fixtures/codex-exec.jsonl")).unwrap();
+        let codex_observations = codex.tool_observations();
+        assert!(codex_observations.iter().any(|observation| {
+            observation.source_adapter == "codex_exec"
+                && observation.instrumentation_level == "observed_only"
+                && observation.tool_name == "exec_command"
+        }));
+
+        let claude = ClaudeCodeAdapter::parse_stream_json(include_str!(
+            "../fixtures/claude-code-stream.jsonl"
+        ))
+        .unwrap();
+        let claude_observations = claude.tool_observations();
+        assert!(claude_observations.iter().any(|observation| {
+            observation.source_adapter == "claude_code"
+                && observation.instrumentation_level == "observed_only"
+                && observation.external_tool_ref.as_deref() == Some("toolu_1")
+        }));
     }
 
     #[test]

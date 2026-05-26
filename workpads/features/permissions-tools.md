@@ -202,3 +202,26 @@ Decision:
 - Treat ACP client handlers as transport adapters over Capo wrapper tools, not as direct filesystem or terminal execution.
 - Refuse handler calls when the setup plan did not advertise the capability, even if the raw method name is recognized.
 - Leave actual wrapper invocation to the controller/tool boundary so permission, artifacts, redaction, and audit lifecycle stay centralized.
+
+### PT7 - Adapter Native Tool Observation Contract
+
+Status: completed
+
+Acceptance:
+
+- Add an adapter-layer record for provider/ACP native tool observations that labels them as observed-only rather than governed executions.
+- Derive observations from normalized adapter tool events without launching providers, runtimes, tunnels, or tools.
+- Preserve external tool refs, tool names, observed status, source adapter, raw event hash, and confidence.
+- Cover ACP structured tool updates and Codex/Claude fixture tool events with tests.
+
+Evidence:
+
+- `AdapterToolObservation`, `NormalizedAdapterEvent::tool_observation()`, and `AdapterFixtureParse::tool_observations()` in `../../crates/capo-adapters/src/lib.rs`.
+- `cargo test -p capo-adapters adapter_tool_observations -- --nocapture`: passed.
+
+Decision:
+
+- Treat provider/ACP native tool updates as observed-only adapter facts unless Capo executed a registered wrapper tool.
+- Preserve source adapter, external tool ref, tool name, observed status, raw event hash, and confidence for future read-model/evaluation ingestion.
+- Use stable adapter timeline confidence to mark observations as high-confidence; heuristic and missing timeline confidence downshift to medium/low.
+- Keep this contract provider-free and execution-free. It parses existing normalized fixture events only.

@@ -1694,3 +1694,23 @@ Verification:
 Follow-up:
 
 - The future ACP stdio loop should call this routing seam for client handler requests, then invoke the returned wrapper request through the controller/tool boundary.
+
+## F4/PT7 - Adapter Native Tool Observation Contract
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `AdapterToolObservation` as the adapter-layer record for provider/ACP native tool updates that Capo did not execute through a wrapper.
+- Derive observations from normalized adapter tool events and mark them `instrumentation_level=observed_only`.
+- Preserve source adapter, external tool ref, tool name, observed status, raw event hash, and confidence for future state/query/evaluation ingestion.
+- Use adapter timeline confidence to set observation confidence: stable -> high, heuristic -> medium, none -> low.
+- Keep observed-only classification separate from governed `WrapperToolRequest`/tool invocation paths.
+
+Verification:
+
+- `cargo test -p capo-adapters adapter_tool_observations -- --nocapture`: passed.
+
+Follow-up:
+
+- Persist observed-only tool observations in the state/query layer once the read model grows a dedicated `ToolObservation` projection.
