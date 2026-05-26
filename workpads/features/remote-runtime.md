@@ -361,3 +361,33 @@ Decision:
 
 - Treat runtime target status changes as metadata transitions over the target inventory, not runtime lifecycle operations.
 - Reuse the existing `RuntimeTargetProjection` upsert path so dashboards and exposure validation see the latest target state through the same read model.
+
+### RR16 - Runtime Target Status Query Surface
+
+Status: completed
+
+Acceptance:
+
+- Add a shared query helper that selects an exact runtime target by ID from the runtime target read model.
+- Expose a read-only operator command for inspecting one runtime target's latest placement/status metadata.
+- Render the same metadata shape as runtime target list/dashboard rows so future voice/web/mobile surfaces have a stable contract.
+- Return a clear error for an unknown runtime target.
+- Do not launch runtimes, launch providers, inspect credentials, open tunnels, request approvals, activate grants, or mutate state.
+
+Evidence:
+
+- `ProjectDashboard::runtime_target_status(...)` in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo runtime target status --target TARGET_ID` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Decision:
+
+- Treat exact runtime target status as shared query/read-model behavior so CLI, dashboard, voice, web, and mobile surfaces can reuse the same selector.
+- Keep the operator command read-only. It renders placement/status metadata and explicitly reports that provider CLIs, tunnels, runtime processes, and state mutation were not used.
+- Keep missing-target behavior fail-closed with a clear operator error instead of returning an empty status row.

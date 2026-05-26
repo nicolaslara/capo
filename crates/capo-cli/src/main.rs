@@ -87,6 +87,7 @@ Usage:
   capo permission decide --approval APPROVAL_ID --decision allow_once|allow_always|reject_once|reject_always [--state PATH]
   capo runtime target register --target TARGET_ID --name NAME --runner local-process|remote-process|container --workspace PATH --artifacts PATH [--cwd PATH] [--capability-profile PROFILE] [--endpoint ENDPOINT_ID] [--status available|disabled|unhealthy] [--state PATH]
   capo runtime target set-status --target TARGET_ID --status available|disabled|unhealthy [--state PATH]
+  capo runtime target status --target TARGET_ID [--state PATH]
   capo runtime target list [--state PATH]
   capo connectivity expose-stub --endpoint ENDPOINT_ID --owner-kind runtime_target|capo_server --owner-id OWNER_ID --channel control|stdio|logs|dashboard|artifact --exposure loopback|private|public [--address REF] [--record] [--state PATH]
   capo connectivity request-approval --exposure EXPOSURE_ID [--approval APPROVAL_ID] [--state PATH]
@@ -231,6 +232,11 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             if area == "runtime" && command == "target" && action == "set-status" =>
         {
             set_runtime_target_status(&parsed, rest)
+        }
+        [area, command, action, rest @ ..]
+            if area == "runtime" && command == "target" && action == "status" =>
+        {
+            runtime_target_status(&parsed, rest)
         }
         [area, command, action] if area == "runtime" && command == "target" && action == "list" => {
             list_runtime_targets(&parsed)
@@ -4712,6 +4718,38 @@ fn list_runtime_targets(parsed: &ParsedArgs) -> Result<String, String> {
     Ok(output)
 }
 
+fn runtime_target_status(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--target"))
+    {
+        return Err(format!("unknown runtime target status option: {unknown}"));
+    }
+    let runtime_target_id = required_arg(args, "--target")?;
+    let command_slug = format!("runtime-target-status-{runtime_target_id}");
+    let command = envelope(
+        &command_slug,
+        CommandTarget::Project(project_id()),
+        CommandIntent::QueryStatus,
+        None,
+    );
+    let state = state(parsed)?;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    let target = dashboard
+        .runtime_target_status(&runtime_target_id)
+        .ok_or_else(|| format!("missing runtime target: {runtime_target_id}"))?;
+    let mut output = format!(
+        "command_id={}\nruntime_target_status_found=true\n",
+        command.command_id
+    );
+    output.push_str(&render_runtime_target_row("runtime_target", target));
+    output.push_str(
+        "provider_cli_executed=false tunnel_opened=false runtime_process_started=false state_mutated=false\n",
+    );
+    Ok(output)
+}
+
 fn set_runtime_target_status(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     if let Some(unknown) = args
         .iter()
@@ -7459,6 +7497,7 @@ mod tests {
         assert!(HELP.contains("dogfood readiness"));
         assert!(HELP.contains("runtime target register"));
         assert!(HELP.contains("runtime target set-status"));
+        assert!(HELP.contains("runtime target status"));
         assert!(HELP.contains("runtime target list"));
         assert!(HELP.contains("connectivity expose-stub"));
         assert!(HELP.contains("connectivity request-approval"));
@@ -10029,6 +10068,36 @@ mod tests {
         assert!(list.contains("runtime_targets=1"));
         assert!(list.contains("runtime_target=runtime-target-local-1"));
         assert!(list.contains("status=available"));
+
+        let status = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "status".to_string(),
+            "--target".to_string(),
+            "runtime-target-local-1".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("runtime target status");
+        assert!(status.contains("runtime_target_status_found=true"));
+        assert!(status.contains("runtime_target=runtime-target-local-1"));
+        assert!(status.contains("status=available"));
+        assert!(status.contains("provider_cli_executed=false"));
+        assert!(status.contains("tunnel_opened=false"));
+        assert!(status.contains("runtime_process_started=false"));
+        assert!(status.contains("state_mutated=false"));
+
+        let missing_status = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "status".to_string(),
+            "--target".to_string(),
+            "missing-runtime-target".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("missing runtime target status");
+        assert!(missing_status.contains("missing runtime target: missing-runtime-target"));
 
         let dashboard = run_cli(vec![
             "dashboard".to_string(),

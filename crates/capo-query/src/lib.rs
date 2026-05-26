@@ -247,6 +247,16 @@ impl ProjectDashboard {
             .max(latest_execution_sequence)
     }
 
+    pub fn runtime_target_status(
+        &self,
+        runtime_target_id: &str,
+    ) -> Option<&RuntimeTargetProjection> {
+        self.runtime_targets
+            .iter()
+            .rev()
+            .find(|target| target.runtime_target_id == runtime_target_id)
+    }
+
     pub fn connectivity_exposure_status(
         &self,
         exposure_id: &str,
@@ -997,6 +1007,29 @@ mod tests {
         assert_eq!(exposure.permission_scope, "network:connect:private_tunnel");
         assert_eq!(exposure.health_status, "unknown");
         assert!(!exposure.reachable);
+    }
+
+    #[test]
+    fn project_dashboard_selects_runtime_target_status() {
+        let root = temp_root("query-dashboard-runtime-target-status");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        append_runtime_target(&state, &project_id, "remote-target-1", "disabled");
+        append_runtime_target(&state, &project_id, "remote-target-1", "available");
+
+        let dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+
+        let target = dashboard
+            .runtime_target_status("remote-target-1")
+            .expect("runtime target status");
+        assert_eq!(target.runtime_target_id, "remote-target-1");
+        assert_eq!(target.status, "available");
+        assert!(
+            dashboard
+                .runtime_target_status("missing-runtime-target")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1841,6 +1874,46 @@ mod tests {
             "network:connect:private_tunnel",
             "blocked_pending_permission",
         );
+    }
+
+    fn append_runtime_target(
+        state: &SqliteStateStore,
+        project_id: &ProjectId,
+        runtime_target_id: &str,
+        status: &str,
+    ) {
+        state
+            .append_event(
+                NewEvent {
+                    event_id: format!("event-runtime-target-{runtime_target_id}-{status}"),
+                    kind: EventKind::RuntimeTargetRegistered,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some(runtime_target_id.to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::RuntimeTarget(RuntimeTargetProjection {
+                    runtime_target_id: runtime_target_id.to_string(),
+                    project_id: project_id.clone(),
+                    name: "remote target".to_string(),
+                    runner_kind: "remote_process".to_string(),
+                    workspace_root: "/tmp/capo-runtime-workspace".to_string(),
+                    artifact_root: "/tmp/capo-runtime-artifacts".to_string(),
+                    default_cwd: "/tmp/capo-runtime-workspace".to_string(),
+                    capability_profile_id: "read-only-local".to_string(),
+                    connectivity_endpoint_id: Some("endpoint-runtime-1".to_string()),
+                    status: status.to_string(),
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append runtime target");
     }
 
     #[allow(clippy::too_many_arguments)]

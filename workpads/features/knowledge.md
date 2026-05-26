@@ -2045,3 +2045,25 @@ Verification:
 - `git diff --check`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - `cargo test`: passed.
+
+## F7/RR16 - Runtime Target Status Query Surface
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `ProjectDashboard::runtime_target_status(...)` as the shared exact selector for runtime target metadata.
+- Add `capo runtime target status --target TARGET_ID` as a read-only operator surface over that selector.
+- Render the same target metadata shape as runtime target list/dashboard rows and include explicit no-side-effect markers for provider CLI execution, tunnel opening, runtime process start, and state mutation.
+- Keep missing target lookup fail-closed with a clear operator error.
+- Preserve the boundary split: this query does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, or prompt materialization.
+
+Verification:
+
+- `cargo test -p capo-query runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.

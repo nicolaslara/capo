@@ -967,3 +967,13 @@ Observed 2026-05-26.
 - Runtime/connectivity architecture source: `../architecture/runtime-tunnel.md`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR15.
+
+## F7/RR16 Runtime Target Status Query Surface
+
+Observed 2026-05-26.
+
+- Shared runtime target status selector and regression coverage: `../../crates/capo-query/src/lib.rs`
+- CLI `capo runtime target status` parser, rendering, and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Runtime/connectivity architecture source: `../architecture/runtime-tunnel.md`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR16.
