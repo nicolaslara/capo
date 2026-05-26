@@ -15,6 +15,7 @@ Usage:
   capo agent list [--state PATH]
   capo adapter readiness [--record] [--state PATH]
   capo adapter plan-launch --adapter codex|claude --agent NAME --goal GOAL [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
+  capo adapter plan-proof --adapter codex|claude --agent NAME [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
   capo adapter dispatch-gate --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter dispatch-status --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
   capo adapter dispatch-status --latest [--agent NAME] [--state PATH]

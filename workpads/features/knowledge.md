@@ -3222,3 +3222,26 @@ Verification:
 - `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
 - `CAPO_RUN_CODEX_LOCAL_DISPATCH=1 capo adapter run-local --dispatch-plan adapter-dispatch-plan-codex_exec-2e26cf61ba2310e8 --record --timeout-seconds 5 --state .capo-dev`: recorded `status=timed_out`, `provider_cli_executed=true`, `credential_scan_status=clean`, and `adapter_stream_ingested=false`.
 - Provider-key-shaped marker scan over `.capo-dev`: no matches.
+
+## F1/AC3b - Dispatch Proof Prompt Source
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo adapter plan-proof` as a provider-free planning command that records a `dispatch_proof` prompt source. This is not a Capo mode; it is a small replayable prompt source for verifying the real provider stream path before broad workpad dispatch.
+- Keep the proof prompt built in, versioned by `capo://adapter-dispatch-proof/v1`, and raw-prompt redacted from Capo CLI output, dashboard, evidence, and state payloads. Materialization records only source hash, prompt hash, status, and reason codes. The local provider process may still receive the prompt as process argv until a stdin/non-argv transport is added.
+- Require local dispatch execution to use a materialization row tied to the exact prompt source selected for the dispatch plan. This avoids accidentally pairing one replayable source with another source's materialization.
+- Tighten artifact scanning after review: redacted lines are still scanned for provider-key-shaped tokens, so a partially redacted line cannot hide a remaining `sk-proj-`, `sk-ant-`, `sk-live-`, `sk_test_`, `sk-svcacct-`, or long legacy `sk-...` token.
+- Reuse the existing dispatch chain: plan -> gate -> materialize -> execution request -> preflight -> `run-local`. The proof source therefore exercises the same preflight and runtime boundaries as workpad prompts, but with lower timeout variance.
+- The approved Codex proof run completed AC3 after this slice: provider execution exited successfully, artifacts scanned clean, and the real adapter stream was ingested through Capo controller/state.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_plan_proof -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-adapters artifact_scanner_allows_redacted_markers_and_rejects_raw_secrets -- --nocapture`: passed, including a redacted line that still contains a provider-key-shaped token.
+- `CAPO_RUN_CODEX_LOCAL_DISPATCH=1 cargo run -q -p capo-cli -- adapter run-local --dispatch-plan adapter-dispatch-plan-codex_exec-b030193b63cd8c74-5600a749443fe93a --record --timeout-seconds 60 --out .capo-dev/evidence --state .capo-dev`: recorded `adapter-dispatch-execution-90ae27de1dd522ae-3390880dca5e76be` with `status=exited`, `exit_code=0`, `credential_scan_status=clean`, and `adapter_stream_ingested=true`.
+- `cargo run -q -p capo-cli -- adapter smoke-report scan --artifact-root .capo-dev/adapter-proof/artifacts --state .capo-dev`: passed with `credential_scan_status=clean` after the redacted-line scanner hardening.
+- Provider-key-shaped marker scan over `.capo-dev`: no matches.
+- `cargo run -q -p capo-cli -- adapter dispatch-evidence --dispatch-plan adapter-dispatch-plan-codex_exec-b030193b63cd8c74-5600a749443fe93a --out .capo-dev/evidence --state .capo-dev`: exported prompt-redacted dispatch evidence.

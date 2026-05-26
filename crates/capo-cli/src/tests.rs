@@ -20,6 +20,7 @@ fn help_mentions_command_envelopes_and_no_credentials() {
     assert!(HELP.contains("does not read provider credentials"));
     assert!(HELP.contains("adapter readiness"));
     assert!(HELP.contains("adapter plan-launch"));
+    assert!(HELP.contains("adapter plan-proof"));
     assert!(HELP.contains("adapter dispatch-gate"));
     assert!(HELP.contains("adapter dispatch-status"));
     assert!(HELP.contains("adapter dispatch-evidence"));
@@ -264,6 +265,149 @@ fn adapter_plan_launch_builds_dispatch_contract_without_running_provider_cli() {
     assert!(dashboard.contains("source_kind=inline_cli_prompt"));
     assert!(dashboard.contains("adapter_dispatch_plan=adapter-dispatch-plan-codex_exec"));
     assert!(!dashboard.contains("Summarize this workpad"));
+}
+
+#[test]
+fn adapter_plan_proof_creates_replayable_bounded_dispatch_prompt() {
+    let state_root = temp_root("adapter-plan-proof-state");
+    let workspace = temp_root("adapter-plan-proof-workspace");
+    let artifacts = temp_root("adapter-plan-proof-artifacts");
+    let output = run_cli(vec![
+        "adapter".to_string(),
+        "plan-proof".to_string(),
+        "--adapter".to_string(),
+        "codex".to_string(),
+        "--agent".to_string(),
+        "codex-proof-worker".to_string(),
+        "--workspace".to_string(),
+        workspace.display().to_string(),
+        "--artifacts".to_string(),
+        artifacts.display().to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("adapter proof plan");
+
+    assert!(output.contains("adapter_proof_planned=true"));
+    assert!(output.contains("adapter=codex_exec"));
+    assert!(output.contains("runtime_prompt_policy=not_rendered"));
+    assert!(output.contains("runtime_prompt_source_kind=dispatch_proof"));
+    assert!(output.contains("runtime_prompt_materialization=replayable_builtin_proof_prompt"));
+    assert!(output.contains("provider_cli_executed=false"));
+    assert!(output.contains("recorded=true"));
+    assert!(output.contains("proof_source_ref=capo://adapter-dispatch-proof/v1"));
+    assert!(!output.contains("CAPO_DISPATCH_PROOF_OK"));
+    assert!(!workspace.exists());
+    assert!(!artifacts.exists());
+
+    let state = SqliteStateStore::open(&state_root).expect("state");
+    let plans = state
+        .adapter_dispatch_plans(&project_id())
+        .expect("dispatch plans");
+    assert_eq!(plans.len(), 1);
+    let prompt_sources = state
+        .adapter_dispatch_prompt_sources(&project_id())
+        .expect("dispatch prompt sources");
+    assert_eq!(prompt_sources.len(), 1);
+    assert_eq!(prompt_sources[0].source_kind, "dispatch_proof");
+    assert_eq!(
+        prompt_sources[0].source_ref.as_deref(),
+        Some("capo://adapter-dispatch-proof/v1")
+    );
+    assert_eq!(
+        prompt_sources[0].materialization_status,
+        "replayable_builtin_proof_prompt"
+    );
+    assert_eq!(prompt_sources[0].raw_prompt_policy, "not_rendered");
+
+    let materialize = run_cli(vec![
+        "adapter".to_string(),
+        "materialize-prompt".to_string(),
+        "--dispatch-plan".to_string(),
+        plans[0].dispatch_plan_id.clone(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("materialize proof prompt");
+    assert!(materialize.contains("adapter_dispatch_prompt_materialization=true"));
+    assert!(materialize.contains("source_kind=dispatch_proof"));
+    assert!(materialize.contains("status=ready_without_rendering_prompt"));
+    assert!(materialize.contains("reasons=dispatch_proof_prompt_hash_matches"));
+    assert!(materialize.contains("raw_prompt_policy=not_rendered"));
+    assert!(!materialize.contains("CAPO_DISPATCH_PROOF_OK"));
+
+    let artifact_root = temp_root("adapter-plan-proof-smoke-artifacts");
+    fs::create_dir_all(&artifact_root).expect("artifact dir");
+    fs::write(artifact_root.join("stdout.txt"), "CAPO_CODEX_SMOKE_OK\n").expect("artifact");
+    run_cli(vec![
+        "adapter".to_string(),
+        "smoke-report".to_string(),
+        "record".to_string(),
+        "--adapter".to_string(),
+        "codex".to_string(),
+        "--status".to_string(),
+        "passed".to_string(),
+        "--credential-scan".to_string(),
+        "clean".to_string(),
+        "--marker-found".to_string(),
+        "--artifact-root".to_string(),
+        artifact_root.display().to_string(),
+        "--reason".to_string(),
+        "operator recorded clean proof smoke".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("record smoke");
+    let gate = run_cli(vec![
+        "adapter".to_string(),
+        "dispatch-gate".to_string(),
+        "--dispatch-plan".to_string(),
+        plans[0].dispatch_plan_id.clone(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("dispatch gate");
+    assert!(gate.contains("provider_cli_execution_allowed=true"));
+    assert!(gate.contains("status=ready_for_execution"));
+    let request = run_cli(vec![
+        "adapter".to_string(),
+        "execution-request".to_string(),
+        "--dispatch-plan".to_string(),
+        plans[0].dispatch_plan_id.clone(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("execution request");
+    assert!(request.contains("provider_cli_execution_allowed=true"));
+    assert!(request.contains("provider_cli_executed=false"));
+    assert!(request.contains("status=waiting_on_explicit_provider_opt_in"));
+
+    let preflight = run_cli(vec![
+        "adapter".to_string(),
+        "run-preflight".to_string(),
+        "--dispatch-plan".to_string(),
+        plans[0].dispatch_plan_id.clone(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("proof preflight");
+    assert!(preflight.contains("adapter_dispatch_run_preflight=true"));
+    assert!(preflight.contains("raw_prompt_policy=not_rendered"));
+    assert!(!preflight.contains("CAPO_DISPATCH_PROOF_OK"));
+
+    let dashboard = run_cli(vec![
+        "dashboard".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("dashboard");
+    assert!(dashboard.contains("source_kind=dispatch_proof"));
+    assert!(dashboard.contains("status=ready_without_rendering_prompt"));
+    assert!(!dashboard.contains("CAPO_DISPATCH_PROOF_OK"));
 }
 
 #[test]

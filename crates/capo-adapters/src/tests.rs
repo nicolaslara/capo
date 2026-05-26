@@ -572,15 +572,23 @@ fn artifact_scanner_allows_redacted_markers_and_rejects_raw_secrets() {
     let raw = root.join("raw.txt");
     let benign = root.join("benign.txt");
     let provider_key = root.join("provider-key.txt");
+    let redacted_with_key = root.join("redacted-with-key.txt");
     fs::write(&redacted, "Authorization: [REDACTED]\n").unwrap();
     fs::write(&raw, "Authorization: bearer secret\n").unwrap();
     fs::write(&benign, "Task-specific context is not a secret marker.\n").unwrap();
     fs::write(&provider_key, "example leaked key sk-proj-not-a-real-key\n").unwrap();
+    fs::write(
+        &redacted_with_key,
+        "Authorization: [REDACTED] Bearer sk-proj-not-a-real-key\n",
+    )
+    .unwrap();
 
     scan_artifacts_for_sensitive_markers([&redacted]).unwrap();
     scan_artifacts_for_sensitive_markers([&benign]).unwrap();
     let error = scan_artifacts_for_sensitive_markers([&raw]).unwrap_err();
     let key_error = scan_artifacts_for_sensitive_markers([&provider_key]).unwrap_err();
+    let redacted_key_error =
+        scan_artifacts_for_sensitive_markers([&redacted_with_key]).unwrap_err();
 
     assert!(matches!(
         error,
@@ -588,6 +596,10 @@ fn artifact_scanner_allows_redacted_markers_and_rejects_raw_secrets() {
     ));
     assert!(matches!(
         key_error,
+        LocalAdapterSmokeError::SensitiveArtifact { marker, .. } if marker == "sk-proj-"
+    ));
+    assert!(matches!(
+        redacted_key_error,
         LocalAdapterSmokeError::SensitiveArtifact { marker, .. } if marker == "sk-proj-"
     ));
 

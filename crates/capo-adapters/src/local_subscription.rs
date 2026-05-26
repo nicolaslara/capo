@@ -337,10 +337,19 @@ fn local_adapter_redaction_rules() -> Vec<RedactionRule> {
 
 fn sensitive_marker(contents: &str) -> Option<String> {
     for line in contents.lines() {
-        if line.to_ascii_lowercase().contains("[redacted]") {
+        let lower = line.to_ascii_lowercase();
+        if let Some(marker) = ["sk-proj-", "sk-ant-", "sk-live-", "sk_test_", "sk-svcacct-"]
+            .into_iter()
+            .find(|marker| lower.contains(marker))
+        {
+            return Some(marker.to_string());
+        }
+        if has_legacy_openai_key_shape(&lower) {
+            return Some("sk-".to_string());
+        }
+        if lower.contains("[redacted]") {
             continue;
         }
-        let lower = line.to_ascii_lowercase();
         if let Some(marker) = [
             "authorization:",
             "cookie:",
@@ -357,15 +366,6 @@ fn sensitive_marker(contents: &str) -> Option<String> {
         .find(|marker| lower.contains(marker))
         {
             return Some(marker.to_string());
-        }
-        if let Some(marker) = ["sk-proj-", "sk-ant-", "sk-live-", "sk_test_", "sk-svcacct-"]
-            .into_iter()
-            .find(|marker| lower.contains(marker))
-        {
-            return Some(marker.to_string());
-        }
-        if has_legacy_openai_key_shape(&lower) {
-            return Some("sk-".to_string());
         }
     }
     None

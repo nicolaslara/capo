@@ -136,6 +136,58 @@ pub(crate) fn plan_adapter_launch(parsed: &ParsedArgs, args: &[String]) -> Resul
     ))
 }
 
+pub(crate) fn plan_adapter_proof(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let adapter = required_arg(args, "--adapter")?;
+    validate_local_launch_adapter(&adapter)?;
+    let agent = required_arg(args, "--agent")?;
+    let record = has_flag(args, "--record");
+    let state_root = parsed.state_root.clone();
+    let workspace = optional_arg(args, "--workspace")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_root.join("adapter-proof").join("workspace"));
+    let artifacts = optional_arg(args, "--artifacts")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_root.join("adapter-proof").join("artifacts"));
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--")
+            && !matches!(
+                arg.as_str(),
+                "--adapter" | "--agent" | "--workspace" | "--artifacts" | "--record"
+            )
+    }) {
+        return Err(format!("unknown adapter plan-proof option: {unknown}"));
+    }
+    let plan = recordable_adapter_dispatch_plan(
+        parsed,
+        DispatchPlanRecordRequest {
+            adapter: &adapter,
+            agent: &agent,
+            goal: dispatch_proof_prompt(),
+            workspace,
+            artifacts,
+            prompt_source: DispatchPromptSourceInput::dispatch_proof(),
+            record,
+        },
+    )?;
+    Ok(format!(
+        "adapter_proof_planned=true\nproof_source_ref={DISPATCH_PROOF_SOURCE_REF}\n{}\n",
+        render_adapter_dispatch_plan(&plan)
+    ))
+}
+
+pub(crate) const DISPATCH_PROOF_SOURCE_REF: &str = "capo://adapter-dispatch-proof/v1";
+const DISPATCH_PROOF_SOURCE_VERSION: &str = "adapter-dispatch-proof:v1";
+const DISPATCH_PROOF_PROMPT: &str =
+    "Reply with exactly CAPO_DISPATCH_PROOF_OK. Do not inspect files. Do not run tools.";
+
+pub(crate) fn dispatch_proof_prompt() -> &'static str {
+    DISPATCH_PROOF_PROMPT
+}
+
+pub(crate) fn dispatch_proof_source_hash() -> String {
+    stable_cli_hash(DISPATCH_PROOF_SOURCE_VERSION)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RecordedAdapterDispatchPlan {
     pub(crate) projection: AdapterDispatchPlanProjection,
@@ -369,6 +421,15 @@ impl DispatchPromptSourceInput {
             source_ref: Some(format!("{}#{}", task.path, task.source_anchor)),
             source_hash: Some(source_hash),
             materialization_status: "replayable_if_source_hash_matches".to_string(),
+        }
+    }
+
+    pub(crate) fn dispatch_proof() -> Self {
+        Self {
+            source_kind: "dispatch_proof".to_string(),
+            source_ref: Some(DISPATCH_PROOF_SOURCE_REF.to_string()),
+            source_hash: Some(dispatch_proof_source_hash()),
+            materialization_status: "replayable_builtin_proof_prompt".to_string(),
         }
     }
 }

@@ -37,7 +37,7 @@ use adapter_dispatch_prepare::{
 };
 use adapter_dispatch_run::adapter_dispatch_run_local;
 use adapter_dogfood::{adapter_dogfood_gate, adapter_dogfood_gate_evidence};
-use adapter_launch::{adapter_readiness, plan_adapter_launch};
+use adapter_launch::{adapter_readiness, plan_adapter_launch, plan_adapter_proof};
 use adapter_replay::{replay_adapter_dispatch_fixture, replay_adapter_fixture};
 use adapter_smoke::{
     adapter_smoke_report_evidence, adapter_smoke_report_status, record_adapter_smoke_report,
@@ -115,6 +115,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "adapter" && command == "plan-launch" => {
             plan_adapter_launch(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "adapter" && command == "plan-proof" => {
+            plan_adapter_proof(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "adapter" && command == "dispatch-gate" => {
             adapter_dispatch_gate(&parsed, rest)

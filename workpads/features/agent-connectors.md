@@ -90,7 +90,7 @@ Review:
 
 ### AC3 - Real-Agent Controller Path
 
-Status: in_progress
+Status: completed
 
 Acceptance:
 
@@ -104,8 +104,10 @@ Progress:
 - CLI fixture replay is completed for deterministic local evidence export. This gives operators a non-subscription-backed e2e command for replaying normalized provider fixtures through Capo state/read models and markdown evidence.
 - Real `run-local` output ingestion is implemented. Successful provider stdout is now parsed through the same adapter parser and `FakeBoundaryController::apply_normalized_adapter_events` path used by fixture replay, with optional session evidence export.
 - Approved Codex dispatch attempts against the broad AC3 workpad prompt exposed three harness requirements before AC3 can be marked complete: the real dispatch output cap needed to be higher than the smoke cap, scanner matching needed provider-key-shaped prefixes instead of bare `sk-`, and provider execution needed an explicit timeout. The first two were fixed; `run-local --timeout-seconds` now records timed-out executions instead of hanging.
-- Latest bounded Codex dispatch proof recorded `adapter-dispatch-execution-c1e061786ffdd9e6-10194ea23d78c1dc` with `provider_cli_executed=true`, `status=timed_out`, `credential_scan_status=clean`, and `adapter_stream_ingested=false`. AC3 remains in progress until a bounded real provider stream completes and is ingested.
+- Latest broad-prompt Codex dispatch proof recorded `adapter-dispatch-execution-c1e061786ffdd9e6-10194ea23d78c1dc` with `provider_cli_executed=true`, `status=timed_out`, `credential_scan_status=clean`, and `adapter_stream_ingested=false`; this remains useful timeout evidence but did not complete AC3.
 - Focused AC3a review found four issues before commit: oversize output could leave raw files, ingestion could create fake controller tool/memory state, timeout cleanup only killed the direct child, and scanner matching missed long legacy `sk-...` keys. All four were fixed in this slice.
+- AC3b added a built-in `dispatch_proof` prompt source and `capo adapter plan-proof`. The proof source is redacted from Capo CLI/dashboard/evidence/state output, hash-materialized, and replayable through the existing materialize/preflight/run-local chain so real-provider stream proof can use a tiny bounded prompt before sending broad workpad tasks.
+- Bounded Codex proof dispatch `adapter-dispatch-plan-codex_exec-b030193b63cd8c74-5600a749443fe93a` completed with execution `adapter-dispatch-execution-90ae27de1dd522ae-3390880dca5e76be`: `status=exited`, `exit_code=0`, `credential_scan_status=clean`, `adapter_stream_ingested=true`, `input_events=4`, `appended_events=2`, `summary_events=1`, and `completed_turns=1`.
 
 Evidence:
 
@@ -117,18 +119,24 @@ Evidence:
 - `cargo test -p capo-cli adapter_fixture -- --nocapture`: passed.
 - `capo adapter run-local --dispatch-plan DISPATCH_PLAN_ID --record [--out DIR] [--timeout-seconds N]` now executes through `LocalProcessRunner`, scans bounded artifacts, parses successful provider stdout as adapter events, applies them through controller read models, and records timeout outcomes without hanging.
 - `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed with deterministic dispatch-output ingestion coverage.
+- `cargo test -p capo-cli adapter_plan_proof -- --nocapture`: passed.
 - `cargo test -p capo-runtime local_process_runner_times_out_and_collects_partial_artifacts -- --nocapture`: passed.
 - `cargo test -p capo-runtime local_process -- --nocapture`: passed and covers timeout, process-tree cleanup, output-limit raw-file removal, and local process lifecycle behavior.
 - `CAPO_RUN_CODEX_LOCAL_DISPATCH=1 capo adapter run-local --dispatch-plan adapter-dispatch-plan-codex_exec-2e26cf61ba2310e8 --record --timeout-seconds 5 --state .capo-dev`: recorded timed-out execution `adapter-dispatch-execution-c1e061786ffdd9e6-10194ea23d78c1dc` with clean credential scan and no stream ingestion.
-- Provider-key-shaped marker scan over `.capo-dev` after the bounded timeout run returned no matches.
+- `CAPO_RUN_CODEX_LOCAL_DISPATCH=1 cargo run -q -p capo-cli -- adapter run-local --dispatch-plan adapter-dispatch-plan-codex_exec-b030193b63cd8c74-5600a749443fe93a --record --timeout-seconds 60 --out .capo-dev/evidence --state .capo-dev`: recorded successful real Codex stream ingestion.
+- `cargo run -q -p capo-cli -- adapter smoke-report scan --artifact-root .capo-dev/adapter-proof/artifacts --state .capo-dev`: `credential_scan_status=clean`.
+- Provider-key-shaped marker scan over `.capo-dev` after the bounded proof run returned no matches.
+- `cargo run -q -p capo-cli -- adapter dispatch-evidence --dispatch-plan adapter-dispatch-plan-codex_exec-b030193b63cd8c74-5600a749443fe93a --out .capo-dev/evidence --state .capo-dev`: exported `.capo-dev/evidence/artifact-adapter-dispatch-evidence-90ae27de1dd522ae-46c4d8f77f57630e.md`.
 
 Skipped verification:
 
-- A real local Codex or Claude adapter process has still not produced accepted completed-stream proof. User opt-in was granted on 2026-05-26, and the latest bounded Codex run timed out safely rather than completing the AC3 stream-ingestion gate.
+- Claude Code real stream ingestion is not part of AC3 completion; AC2 records restricted-argument readiness for a later Claude-specific smoke/dispatch pass.
 
 Decision:
 
-- Keep `run-local` timeout support as a required control-plane guard for subscription-backed dispatch. The next AC3 attempt should use a narrower proof prompt or a dedicated dispatch-proof source before using a full workpad task prompt.
+- Keep `run-local` timeout support as a required control-plane guard for subscription-backed dispatch.
+- Use `capo adapter plan-proof` before broad workpad dispatch whenever a provider/runtime path needs a low-variance real-stream proof.
+- Treat `runtime_prompt_policy=not_rendered` as a Capo retention/rendering policy, not a claim that the provider process never receives a prompt in argv. A later stdin/non-argv transport should narrow local process prompt visibility for broad workpad prompts.
 - Keep artifact scanning fail-closed, but match provider-key-shaped prefixes such as `sk-proj-`, `sk-ant-`, and `sk-live-`, plus long legacy `sk-...` tokens. Bare short `sk-` substrings appear in benign text such as `task-specific`.
 
 ### AC4 - Connector Readiness Surface

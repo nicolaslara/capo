@@ -8,6 +8,7 @@ use capo_state::{
     SqliteStateStore,
 };
 
+use crate::adapter_launch::{dispatch_proof_prompt, dispatch_proof_source_hash};
 use crate::cli_surface::{ParsedArgs, has_flag, required_arg};
 use crate::workpad::workpad_task_goal;
 use crate::{debug_error, escape_json, project_id, stable_cli_hash, state};
@@ -319,7 +320,31 @@ fn adapter_dispatch_prompt_materialization_projection(
     let mut status = "blocked_non_replayable_prompt".to_string();
     let mut reasons = vec!["manual_prompt_not_replayable".to_string()];
 
-    if source.source_kind == "workpad_task" {
+    if source.source_kind == "dispatch_proof" {
+        reasons.clear();
+        let observed_hash = dispatch_proof_source_hash();
+        observed_source_hash = Some(observed_hash.clone());
+        if source.source_hash.as_deref() != Some(observed_hash.as_str()) {
+            status = "blocked_source_hash_mismatch".to_string();
+            reasons.push("dispatch_proof_source_hash_mismatch".to_string());
+            return Ok(prompt_materialization_row(
+                source,
+                observed_source_hash,
+                materialized_prompt_hash,
+                status,
+                reasons,
+            ));
+        }
+        let prompt_hash = stable_cli_hash(dispatch_proof_prompt());
+        materialized_prompt_hash = Some(prompt_hash.clone());
+        if prompt_hash == source.prompt_hash {
+            status = "ready_without_rendering_prompt".to_string();
+            reasons.push("dispatch_proof_prompt_hash_matches".to_string());
+        } else {
+            status = "blocked_prompt_hash_mismatch".to_string();
+            reasons.push("dispatch_proof_prompt_hash_mismatch".to_string());
+        }
+    } else if source.source_kind == "workpad_task" {
         reasons.clear();
         let source_ref = source
             .source_ref

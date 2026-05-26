@@ -1568,3 +1568,20 @@ Observed 2026-05-26.
 - Runtime timeout regression coverage: `../../crates/capo-runtime/src/lib.rs`
 - Latest bounded local execution ref in ignored state: `adapter-dispatch-execution-c1e061786ffdd9e6-10194ea23d78c1dc`
 - No new third-party dependencies were added for AC3a.
+
+## F1/AC3b Dispatch Proof Prompt Source
+
+Observed 2026-05-26.
+
+- Proof planning CLI: `../../crates/capo-cli/src/adapter_launch.rs`
+- Prompt materialization support: `../../crates/capo-cli/src/adapter_dispatch_prepare.rs`
+- Local run launch support for proof sources: `../../crates/capo-cli/src/adapter_dispatch_run.rs`
+- Artifact scanner hardening: `../../crates/capo-adapters/src/local_subscription.rs`
+- CLI routing/help: `../../crates/capo-cli/src/main.rs`, `../../crates/capo-cli/src/cli_surface.rs`
+- Regression coverage: `../../crates/capo-cli/src/tests.rs`
+- Scanner regression coverage: `../../crates/capo-adapters/src/tests.rs`
+- Built-in proof source ref: `capo://adapter-dispatch-proof/v1`
+- Successful ignored-state Codex proof dispatch plan: `adapter-dispatch-plan-codex_exec-b030193b63cd8c74-5600a749443fe93a`
+- Successful ignored-state Codex proof execution: `adapter-dispatch-execution-90ae27de1dd522ae-3390880dca5e76be`
+- Prompt-redacted dispatch evidence artifact: `.capo-dev/evidence/artifact-adapter-dispatch-evidence-90ae27de1dd522ae-46c4d8f77f57630e.md`
+- No new third-party dependencies were added for AC3b.

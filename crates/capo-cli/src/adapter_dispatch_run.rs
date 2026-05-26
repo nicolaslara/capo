@@ -20,6 +20,7 @@ use capo_state::{
 use crate::adapter_dispatch_prepare::{
     AdapterDispatchRunPreflight, dispatch_run_preflight, split_source_ref,
 };
+use crate::adapter_launch::dispatch_proof_prompt;
 use crate::adapter_replay::parse_adapter_fixture;
 use crate::adapter_smoke::format_smoke_scan_error;
 use crate::cli_surface::{ParsedArgs, has_flag, optional_arg, required_arg};
@@ -504,27 +505,37 @@ fn build_dispatch_run_launch_plan(
     source: &AdapterDispatchPromptSourceProjection,
     materialization: Option<&AdapterDispatchPromptMaterializationProjection>,
 ) -> Result<LocalAdapterLaunchPlan, String> {
-    if source.source_kind != "workpad_task" {
-        return Err(format!(
-            "dispatch prompt source is not replayable for local run: {}",
-            source.source_kind
-        ));
-    }
     let materialization = materialization
         .filter(|row| row.status == "ready_without_rendering_prompt")
         .ok_or_else(|| "dispatch prompt is not materialized for local run".to_string())?;
-    let source_ref = source
-        .source_ref
-        .as_deref()
-        .ok_or_else(|| "workpad prompt source missing source_ref".to_string())?;
-    let (path, anchor) = split_source_ref(source_ref)?;
-    let task = state
-        .workpad_tasks(&source.project_id)
-        .map_err(debug_error)?
-        .into_iter()
-        .find(|task| task.path == path && task.source_anchor == anchor)
-        .ok_or_else(|| format!("workpad prompt source is missing: {source_ref}"))?;
-    let prompt = workpad_task_goal(&task);
+    if materialization.prompt_source_id != source.prompt_source_id {
+        return Err(format!(
+            "dispatch prompt materialization source mismatch for local run: expected {}, got {}",
+            source.prompt_source_id, materialization.prompt_source_id
+        ));
+    }
+    let prompt = match source.source_kind.as_str() {
+        "dispatch_proof" => dispatch_proof_prompt().to_string(),
+        "workpad_task" => {
+            let source_ref = source
+                .source_ref
+                .as_deref()
+                .ok_or_else(|| "workpad prompt source missing source_ref".to_string())?;
+            let (path, anchor) = split_source_ref(source_ref)?;
+            let task = state
+                .workpad_tasks(&source.project_id)
+                .map_err(debug_error)?
+                .into_iter()
+                .find(|task| task.path == path && task.source_anchor == anchor)
+                .ok_or_else(|| format!("workpad prompt source is missing: {source_ref}"))?;
+            workpad_task_goal(&task)
+        }
+        other => {
+            return Err(format!(
+                "dispatch prompt source is not replayable for local run: {other}"
+            ));
+        }
+    };
     let prompt_hash = stable_cli_hash(&prompt);
     if materialization.materialized_prompt_hash.as_deref() != Some(prompt_hash.as_str()) {
         return Err("dispatch prompt materialization no longer matches source".to_string());

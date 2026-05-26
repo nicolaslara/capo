@@ -44,7 +44,7 @@ Evidence:
 
 ## F1 - Real Local Agent Connector Proof
 
-Status: in_progress
+Status: completed
 
 Source workpad: `agent-connectors.md`
 
@@ -60,7 +60,7 @@ Progress:
 
 - AC1 Codex smoke is completed. The approved real local Codex smoke initially exposed a trust-check compatibility gap, then passed after adding smoke-only `--skip-git-repo-check` to the isolated temporary workspace plan. The passed report is `adapter-smoke-codex_exec-b2e582887f9c0820` with clean credential scan, marker present, and `real_agent_connector_proven`.
 - AC2 Claude Code restricted-args verification is completed for installed `claude 2.1.150`.
-- AC3 deterministic normalized adapter replay through controller/state is completed for Codex and Claude fixtures, but the real-agent controller path remains pending until at least one approved real local adapter stream is run and accepted as evidence.
+- AC3 real-agent controller path is completed. Codex and Claude fixtures remain deterministic regression coverage, and a bounded approved Codex proof dispatch exited successfully, scanned clean, ingested a real adapter stream through Capo controller/state, and exported prompt-redacted evidence.
 - AC4 connector readiness surface is completed. `capo adapter readiness` reports configured Codex/Claude opt-in gates and smoke-plan safety metadata without launching provider CLIs or inspecting credentials.
 - AC5 durable connector readiness state is completed. `capo adapter readiness --record` persists readiness rows and the dashboard renders the remaining dogfood blocker.
 - AC6 real smoke evidence contract is completed. `capo adapter smoke-report record` can persist skipped/failed/passed smoke reports and refuses passed reports without a clean credential scan plus expected marker.
@@ -92,7 +92,8 @@ Progress:
 - AC32 latest adapter smoke evidence export is completed. `smoke-report evidence --latest` exports connector proof/blocker artifacts through the shared latest smoke selector.
 - AC33 adapter dogfood gate evidence export is completed. `adapter dogfood-gate evidence` writes a connector-level gate artifact for first real-agent dogfood review.
 - AC34 scriptable mock agent harness is completed. Scripted mock turns now emit stable normalized adapter events and drive deterministic multi-turn controller tests through the existing adapter replay path without provider subscriptions.
-- AC3 real run-local stream ingestion is partially completed. `run-local` now parses successful provider stdout through the adapter replay/controller path and can export evidence, while timed-out provider runs are recorded instead of hanging. The latest approved Codex dispatch against the broad AC3 workpad prompt timed out cleanly with `provider_cli_executed=true`, `credential_scan_status=clean`, and `adapter_stream_ingested=false`, so F1 remains in progress until a bounded real stream completes and is ingested.
+- AC3 real run-local stream ingestion is completed. `run-local` parses successful provider stdout through the adapter replay/controller path and can export evidence; timed-out provider runs remain recorded instead of hanging.
+- AC3b dispatch proof prompt source is completed. `capo adapter plan-proof` creates a prompt-redacted, replayable, built-in proof dispatch plan for Codex/Claude so the next real-provider AC3 attempt can use a tiny bounded prompt instead of the broad workpad task prompt.
 
 Evidence:
 
@@ -150,14 +151,19 @@ Evidence:
 - `cargo test -p capo-adapters scripted_mock_agent -- --nocapture`
 - `cargo test -p capo-controller scripted_mock_agent_drives_multi_turn_controller_state -- --nocapture`
 - `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture` verifies deterministic dispatch-output ingestion coverage
+- `cargo test -p capo-cli adapter_plan_proof -- --nocapture`
 - `cargo test -p capo-runtime local_process_runner_times_out_and_collects_partial_artifacts -- --nocapture`
 - `CAPO_RUN_CODEX_LOCAL_DISPATCH=1 capo adapter run-local --dispatch-plan adapter-dispatch-plan-codex_exec-2e26cf61ba2310e8 --record --timeout-seconds 5 --state .capo-dev`: recorded timed-out execution with clean credential scan and no stream ingestion
+- `CAPO_RUN_CODEX_LOCAL_DISPATCH=1 cargo run -q -p capo-cli -- adapter run-local --dispatch-plan adapter-dispatch-plan-codex_exec-b030193b63cd8c74-5600a749443fe93a --record --timeout-seconds 60 --out .capo-dev/evidence --state .capo-dev`: recorded successful real Codex execution `adapter-dispatch-execution-90ae27de1dd522ae-3390880dca5e76be` with clean credential scan and `adapter_stream_ingested=true`.
+- `cargo run -q -p capo-cli -- adapter smoke-report scan --artifact-root .capo-dev/adapter-proof/artifacts --state .capo-dev`: `credential_scan_status=clean`.
+- Provider-key-shaped marker scan over `.capo-dev`: no matches.
+- `cargo run -q -p capo-cli -- adapter dispatch-evidence --dispatch-plan adapter-dispatch-plan-codex_exec-b030193b63cd8c74-5600a749443fe93a --out .capo-dev/evidence --state .capo-dev`: exported `.capo-dev/evidence/artifact-adapter-dispatch-evidence-90ae27de1dd522ae-46c4d8f77f57630e.md`.
 - `CAPO_RUN_CODEX_LOCAL_SMOKE=1 cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture`
 - `capo adapter smoke-report scan --artifact-root <local-temp-codex-smoke-artifacts>`
 - `rg -a` over `.capo-dev` for credential/session marker names
 - `capo adapter smoke-report record --adapter codex --status passed --credential-scan clean --marker-found --artifact-root <local-temp-codex-smoke-artifacts>`
 - `capo adapter dogfood-gate`
-- Focused F1 connector safety reviews: provider-artifact cleanup blocker found and fixed; Codex real-agent connector proof is now recorded, while full dogfood readiness remains blocked on runtime target, workpad index, and dispatch-chain evidence.
+- Focused F1 connector safety reviews: provider-artifact cleanup blocker found and fixed; Codex real-agent connector proof is now recorded and `.capo-dev` dogfood readiness reports ready for first dogfood.
 
 ## F2 - Workpad Dogfood Bridge
 
