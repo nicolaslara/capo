@@ -1544,6 +1544,19 @@ Observed 2026-05-26.
 - Resulting file sizes: `../../crates/capo-adapters/src/lib.rs` 932 lines; `../../crates/capo-adapters/src/local_subscription.rs` 364 lines; `../../crates/capo-adapters/src/scripted_mock_agent.rs` 479 lines; `../../crates/capo-adapters/src/tests.rs` 610 lines.
 - No new third-party dependencies were added for AD1.
 
+## F13/AD2 Adapter Facade, Event, Provider Parser, And ACP Client Split
+
+Observed 2026-05-26.
+
+- Adapter crate root after split: `../../crates/capo-adapters/src/lib.rs`
+- Static fake/scripted adapter facade: `../../crates/capo-adapters/src/adapter.rs`
+- Normalized adapter event model and parser helpers: `../../crates/capo-adapters/src/event.rs`
+- Codex/Claude/ACP fixture parsers: `../../crates/capo-adapters/src/provider_parsers.rs`
+- ACP client capability setup and wrapper call routing: `../../crates/capo-adapters/src/acp_client.rs`
+- Deterministic scripted mock harness retained: `../../crates/capo-adapters/src/scripted_mock_agent.rs`
+- Resulting file sizes: `../../crates/capo-adapters/src/lib.rs` 36 lines; `../../crates/capo-adapters/src/adapter.rs` 220 lines; `../../crates/capo-adapters/src/event.rs` 263 lines; `../../crates/capo-adapters/src/provider_parsers.rs` 306 lines; `../../crates/capo-adapters/src/acp_client.rs` 131 lines; `../../crates/capo-adapters/src/local_subscription.rs` 388 lines; `../../crates/capo-adapters/src/scripted_mock_agent.rs` 479 lines; `../../crates/capo-adapters/src/tests.rs` 647 lines.
+- No new third-party dependencies were added for AD2.
+
 ## F14/VM1 Voice Contract, Planning Support, And Test Module Split
 
 Observed 2026-05-26.

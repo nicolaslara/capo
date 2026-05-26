@@ -549,7 +549,7 @@ Evidence:
 
 ## F8 - State Store Resilience
 
-Status: in_progress
+Status: completed
 
 Source workpad: `state-store.md`
 
@@ -677,7 +677,7 @@ Evidence:
 
 ## F13 - Adapter Maintainability
 
-Status: in_progress
+Status: completed
 
 Source workpad: cross-cutting adapter implementation.
 
@@ -690,11 +690,16 @@ Acceptance:
 Progress:
 
 - AD1 local subscription launch/smoke and adapter test module split is completed. Codex/Claude local launch plans, restrictive smoke plans, opt-in smoke runner, artifact scan, redaction rules, and credential-marker detection now live in `crates/capo-adapters/src/local_subscription.rs`; adapter tests now live in `crates/capo-adapters/src/tests.rs`; crate-root public exports remain available for downstream callers.
-- `crates/capo-adapters/src/lib.rs` is reduced from 1,897 lines to 932 lines. Future adapter slices should split fixture parsing by provider or ACP session setup when those areas are next touched.
+- AD2 adapter facade, normalized event, provider parser, and ACP client setup split is completed. Static fake/scripted adapter dispatch now lives in `crates/capo-adapters/src/adapter.rs`; normalized event types and parser helpers live in `crates/capo-adapters/src/event.rs`; Codex/Claude/ACP fixture parsers live in `crates/capo-adapters/src/provider_parsers.rs`; ACP client capability setup and wrapper routing live in `crates/capo-adapters/src/acp_client.rs`.
+- `crates/capo-adapters/src/lib.rs` is reduced from 932 lines to 36 lines, while the deterministic `ScriptedMockAgent` harness remains a first-class static-dispatch adapter for controller tests.
 
 Evidence:
 
 - `crates/capo-adapters/src/lib.rs`
+- `crates/capo-adapters/src/adapter.rs`
+- `crates/capo-adapters/src/event.rs`
+- `crates/capo-adapters/src/provider_parsers.rs`
+- `crates/capo-adapters/src/acp_client.rs`
 - `crates/capo-adapters/src/local_subscription.rs`
 - `crates/capo-adapters/src/scripted_mock_agent.rs`
 - `crates/capo-adapters/src/tests.rs`

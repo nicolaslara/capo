@@ -3178,6 +3178,23 @@ Verification:
 - `cargo fmt --check`: passed.
 - `git diff --check`: passed.
 - `cargo test --workspace --all-targets`: passed.
+
+## F13/AD2 - Adapter Facade, Event, Provider Parser, And ACP Client Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Keep `capo_adapters::...` as the public import surface, but make the crate root a map of adapter concerns instead of a 900+ line mixed implementation file.
+- Move static fake/scripted adapter dispatch into `adapter.rs`. This makes the deterministic `ScriptedMockAgent` test harness easier to find and keeps it on the same static-dispatch boundary as the fake adapter rather than a test-only shortcut.
+- Move normalized adapter events, idempotency helpers, tool-observation mapping, and JSONL/parser utility functions into `event.rs`. Provider parsers now depend on one shared normalized-event model instead of each owning identity logic.
+- Move Codex, Claude Code, and ACP fixture parsing into `provider_parsers.rs`. These parsers are provider/protocol normalization concerns; local subscription launch/smoke remains in `local_subscription.rs`.
+- Move ACP session setup and client capability wrapper routing into `acp_client.rs`. ACP capability advertisement now stays separate from fixture parsing and from subscription-backed provider launch.
+- This is a behavior-preserving split. The root file is now 36 lines, and all adapter test coverage still exercises fake adapter dispatch, scripted mock dispatch, Codex/Claude/ACP fixture parsing, ACP client routing, launch-plan safety, smoke opt-in, and artifact scanning.
+
+Verification:
+
+- `cargo test -p capo-adapters -- --nocapture`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
 ## F14/VM1 - Voice Contract, Planning Support, And Test Module Split
