@@ -80,6 +80,7 @@ Progress:
 - AC25 dispatch chain evidence export is completed. `dispatch-evidence` writes a prompt-redacted Capo evidence artifact for plan/gate/replay/execution review.
 - AC26 dispatch status query contract is completed. `dispatch-status` now renders a reusable `capo-query` summary instead of assembling dispatch-chain state in the CLI.
 - AC27 latest dispatch status selection is completed. `dispatch-status --latest [--agent NAME]` selects the latest dispatch-chain status through the shared query contract.
+- AC28 latest dispatch evidence export is completed. `dispatch-evidence --latest [--agent NAME]` exports prompt-redacted evidence for the latest dispatch chain through the shared query selector.
 
 Evidence:
 
@@ -122,6 +123,7 @@ Evidence:
 - `cargo test -p capo-state adapter_dispatch_execution -- --nocapture`
 - `capo adapter dispatch-status --dispatch-plan DISPATCH_PLAN_ID [--state PATH]`
 - `capo adapter dispatch-evidence --dispatch-plan DISPATCH_PLAN_ID --out DIR [--state PATH]`
+- `capo adapter dispatch-evidence --latest [--agent NAME] --out DIR [--state PATH]`
 - `cargo test -p capo-query adapter_dispatch_status -- --nocapture`
 - `cargo test -p capo-query latest_adapter_dispatch_status -- --nocapture`
 - `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`

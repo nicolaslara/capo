@@ -631,6 +631,15 @@ Observed 2026-05-26.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC27.
 
+## F1/AC28 Latest Dispatch Evidence Export
+
+Observed 2026-05-26.
+
+- CLI latest dispatch-evidence selector and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared latest dispatch selector consumed by the export: `../../crates/capo-query/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC28.
+
 ## F6/V6 Review Needs Conversation
 
 Observed 2026-05-26.

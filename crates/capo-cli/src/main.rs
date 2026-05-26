@@ -60,6 +60,7 @@ Usage:
   capo adapter dispatch-status --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
   capo adapter dispatch-status --latest [--agent NAME] [--state PATH]
   capo adapter dispatch-evidence --dispatch-plan DISPATCH_PLAN_ID --out DIR [--state PATH]
+  capo adapter dispatch-evidence --latest [--agent NAME] --out DIR [--state PATH]
   capo adapter execution-request --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter materialize-prompt --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter run-preflight --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
@@ -1434,19 +1435,47 @@ fn adapter_dispatch_status(parsed: &ParsedArgs, args: &[String]) -> Result<Strin
 }
 
 fn adapter_dispatch_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
-    let dispatch_plan_id = required_arg(args, "--dispatch-plan")?;
+    let latest = has_flag(args, "--latest");
+    let dispatch_plan_id = optional_arg(args, "--dispatch-plan");
+    let agent_name = optional_arg(args, "--agent");
     let out = PathBuf::from(required_arg(args, "--out")?);
-    if let Some(unknown) = args
-        .iter()
-        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan" | "--out"))
-    {
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--")
+            && !matches!(
+                arg.as_str(),
+                "--dispatch-plan" | "--latest" | "--agent" | "--out"
+            )
+    }) {
         return Err(format!(
             "unknown adapter dispatch-evidence option: {unknown}"
         ));
     }
+    if latest && dispatch_plan_id.is_some() {
+        return Err(
+            "adapter dispatch-evidence accepts either --dispatch-plan or --latest".to_string(),
+        );
+    }
+    if !latest && agent_name.is_some() {
+        return Err("adapter dispatch-evidence --agent requires --latest".to_string());
+    }
     let state = state(parsed)?;
     let dashboard =
         project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    let dispatch_plan_id = if latest {
+        dashboard
+            .latest_adapter_dispatch_status(agent_name.as_deref())
+            .ok_or_else(|| {
+                agent_name.map_or_else(
+                    || "no recorded adapter dispatch plans".to_string(),
+                    |agent| format!("no recorded adapter dispatch plans for agent: {agent}"),
+                )
+            })?
+            .dispatch_plan_id
+    } else {
+        dispatch_plan_id.ok_or_else(|| {
+            "adapter dispatch-evidence requires --dispatch-plan or --latest".to_string()
+        })?
+    };
     let plan = dashboard
         .adapter_dispatch_plans
         .iter()
@@ -7050,6 +7079,9 @@ mod tests {
         assert!(dispatch_evidence.contains("adapter_dispatch_evidence_exported=true"));
         assert!(dispatch_evidence.contains("evidence_id="));
         assert!(dispatch_evidence.contains("artifact_id=artifact-adapter-dispatch-evidence-"));
+        assert!(
+            dispatch_evidence.contains(&format!("dispatch_plan={}", replays[0].dispatch_plan_id))
+        );
         let dispatch_evidence_path = dispatch_evidence
             .lines()
             .find_map(|line| line.strip_prefix("path="))
@@ -7069,6 +7101,43 @@ mod tests {
         assert!(!dispatch_evidence_markdown.contains("Do not render this dispatch prompt"));
         assert!(!dispatch_evidence_markdown.contains("Codex fixture response."));
         assert!(!dispatch_evidence_markdown.contains("cargo test"));
+        let latest_dispatch_evidence_dir = temp_root("adapter-dispatch-chain-latest-evidence");
+        let latest_dispatch_evidence = run_cli(vec![
+            "adapter".to_string(),
+            "dispatch-evidence".to_string(),
+            "--latest".to_string(),
+            "--agent".to_string(),
+            "codex-worker".to_string(),
+            "--out".to_string(),
+            latest_dispatch_evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("export latest dispatch evidence");
+        assert!(latest_dispatch_evidence.contains("adapter_dispatch_evidence_exported=true"));
+        assert!(
+            latest_dispatch_evidence
+                .contains(&format!("dispatch_plan={}", replays[0].dispatch_plan_id))
+        );
+        let latest_dispatch_evidence_path = latest_dispatch_evidence
+            .lines()
+            .find_map(|line| line.strip_prefix("path="))
+            .map(PathBuf::from)
+            .expect("latest dispatch evidence path");
+        let latest_dispatch_evidence_markdown =
+            fs::read_to_string(&latest_dispatch_evidence_path).expect("read latest evidence");
+        assert!(
+            latest_dispatch_evidence_markdown
+                .starts_with("<!-- capo:adapter-dispatch-evidence -->")
+        );
+        assert!(latest_dispatch_evidence_markdown.contains("## Latest Fixture Replay"));
+        assert!(
+            latest_dispatch_evidence_markdown.contains("Raw dispatch prompts are not rendered")
+        );
+        assert!(!latest_dispatch_evidence.contains("Do not render this dispatch prompt"));
+        assert!(!latest_dispatch_evidence_markdown.contains("Do not render this dispatch prompt"));
+        assert!(!latest_dispatch_evidence_markdown.contains("Codex fixture response."));
+        assert!(!latest_dispatch_evidence_markdown.contains("cargo test"));
         let dispatch_evidence_rows = SqliteStateStore::open(&state_root)
             .expect("state")
             .evidence_for_session(&replays[0].session_id)

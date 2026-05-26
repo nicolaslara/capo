@@ -687,3 +687,24 @@ Decision:
 
 - Treat latest dispatch selection as query/read-model behavior. It chooses the dispatch plan with the latest plan/gate/replay/execution activity and then renders the same `AdapterDispatchStatus` contract as ID-based lookup.
 - Keep `--agent` scoped to `--latest` so ID-based lookup remains unambiguous.
+
+### AC28 - Latest Dispatch Evidence Export
+
+Status: completed
+
+Acceptance:
+
+- Add a provider-free latest-selector path for dispatch evidence export.
+- Support optional agent-name filtering so operators can export latest dispatch-chain evidence for a specific agent.
+- Reuse the prompt-redacted dispatch evidence artifact format and guarded writer.
+- Do not run provider CLIs, materialize prompts, open tunnels, or inspect credentials.
+
+Evidence:
+
+- CLI `capo adapter dispatch-evidence --latest [--agent NAME] --out DIR` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Treat latest evidence export as operator ergonomics over the shared dispatch status selector. It selects the latest plan through `ProjectDashboard::latest_adapter_dispatch_status(...)`, then writes the same Capo-owned prompt-redacted evidence artifact as exact plan export.
+- Keep exact `--dispatch-plan` and latest `--latest` mutually exclusive; `--agent` is only valid with `--latest`.

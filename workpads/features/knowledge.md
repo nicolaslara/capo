@@ -357,6 +357,24 @@ Follow-up:
 
 - Once real dispatch traces exist, dogfood whether latest-by-agent is enough or whether voice needs latest-by-workpad-task and latest-by-session selectors.
 
+## F1/AC28 - Latest Dispatch Evidence Export
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Extend `dispatch-evidence` with `--latest [--agent NAME]` so reviewed evidence can be exported without copying dispatch-plan IDs.
+- Reuse `ProjectDashboard::latest_adapter_dispatch_status(...)` for selection and the existing dispatch-evidence renderer for artifact contents.
+- Preserve provider safety: read projections and write Capo-owned evidence only; no provider execution, prompt materialization, credential inspection, tunnels, or workpad edits.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Follow-up:
+
+- Future voice/web/mobile evidence export should use the same selector once those surfaces can request reviewed artifacts.
+
 ## F1/AC1-AC2 - Local Connector Preflight
 
 Status: in progress on 2026-05-25.
