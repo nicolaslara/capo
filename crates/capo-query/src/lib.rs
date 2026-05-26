@@ -71,6 +71,110 @@ impl ProjectDashboard {
             .filter(|task| task.capo_execution_status == "observed_only")
             .count()
     }
+
+    pub fn adapter_dispatch_status(&self, dispatch_plan_id: &str) -> Option<AdapterDispatchStatus> {
+        let plan = self
+            .adapter_dispatch_plans
+            .iter()
+            .find(|plan| plan.dispatch_plan_id == dispatch_plan_id)?;
+        let latest_gate = self
+            .adapter_dispatch_gates
+            .iter()
+            .rev()
+            .find(|gate| gate.dispatch_plan_id == plan.dispatch_plan_id);
+        let latest_replay = self
+            .adapter_dispatch_replays
+            .iter()
+            .rev()
+            .find(|replay| replay.dispatch_plan_id == plan.dispatch_plan_id);
+        let latest_execution = self
+            .adapter_dispatch_executions
+            .iter()
+            .rev()
+            .find(|execution| execution.dispatch_plan_id == plan.dispatch_plan_id);
+
+        let next_action = if latest_execution
+            .map(|execution| execution.provider_cli_executed)
+            .unwrap_or(false)
+        {
+            "inspect_execution_artifacts_and_export_evidence"
+        } else if latest_replay.is_some() {
+            "inspect_replay_or_prepare_real_execution"
+        } else if latest_execution.is_some() {
+            "resolve_latest_execution_blocker"
+        } else if latest_gate
+            .map(|gate| gate.provider_cli_execution_allowed && gate.status == "ready_for_execution")
+            .unwrap_or(false)
+        {
+            "replay_dispatch_fixture_or_run_provider_execution_after_explicit_opt_in"
+        } else if self.adapter_dogfood_gate.ready {
+            "record_ready_dispatch_gate"
+        } else {
+            "record_clean_real_smoke_evidence"
+        };
+
+        Some(AdapterDispatchStatus {
+            dispatch_plan_id: plan.dispatch_plan_id.clone(),
+            adapter_kind: plan.adapter_kind.clone(),
+            agent_name: plan.agent_name.clone(),
+            session_id: plan.session_id.to_string(),
+            run_id: plan.run_id.to_string(),
+            plan_status: plan.status.clone(),
+            provider_kind: plan.provider_kind.clone(),
+            credential_scope: plan.credential_scope.clone(),
+            runtime_program: plan.runtime_program.clone(),
+            runtime_arg_count: plan.runtime_arg_count,
+            runtime_prompt_policy: plan.runtime_prompt_policy.clone(),
+            provider_cli_executed: plan.provider_cli_executed,
+            dogfood_gate_status: self.adapter_dogfood_gate.status.clone(),
+            latest_dispatch_gate_id: latest_gate
+                .map(|gate| gate.dispatch_gate_id.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            latest_gate_status: latest_gate
+                .map(|gate| gate.status.clone())
+                .unwrap_or_else(|| "missing".to_string()),
+            latest_gate_provider_cli_execution_allowed: latest_gate
+                .map(|gate| gate.provider_cli_execution_allowed)
+                .unwrap_or(false),
+            latest_gate_reasons: latest_gate
+                .map(|gate| gate.reason_codes.clone())
+                .unwrap_or_else(|| "recorded_dispatch_gate_missing".to_string()),
+            latest_dispatch_replay_id: latest_replay
+                .map(|replay| replay.dispatch_replay_id.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            latest_replay_appended_events: latest_replay
+                .map(|replay| replay.appended_event_count)
+                .unwrap_or(0),
+            latest_replay_raw_content_policy: latest_replay
+                .map(|replay| replay.raw_content_policy.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            latest_dispatch_execution_id: latest_execution
+                .map(|execution| execution.dispatch_execution_id.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            latest_execution_status: latest_execution
+                .map(|execution| execution.status.clone())
+                .unwrap_or_else(|| "missing".to_string()),
+            latest_execution_provider_cli_execution_allowed: latest_execution
+                .map(|execution| execution.provider_cli_execution_allowed)
+                .unwrap_or(false),
+            latest_execution_provider_cli_executed: latest_execution
+                .map(|execution| execution.provider_cli_executed)
+                .unwrap_or(false),
+            latest_execution_credential_scan_status: latest_execution
+                .map(|execution| execution.credential_scan_status.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            latest_execution_stdout_artifact_id: latest_execution
+                .and_then(|execution| execution.stdout_artifact_id.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            latest_execution_stderr_artifact_id: latest_execution
+                .and_then(|execution| execution.stderr_artifact_id.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            latest_execution_reasons: latest_execution
+                .map(|execution| execution.reason_codes.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            next_action: next_action.to_string(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -99,6 +203,39 @@ pub struct AdapterDogfoodGate {
     pub proven_adapters: Vec<String>,
     pub blocked_adapters: Vec<String>,
     pub reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterDispatchStatus {
+    pub dispatch_plan_id: String,
+    pub adapter_kind: String,
+    pub agent_name: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub plan_status: String,
+    pub provider_kind: String,
+    pub credential_scope: String,
+    pub runtime_program: String,
+    pub runtime_arg_count: i64,
+    pub runtime_prompt_policy: String,
+    pub provider_cli_executed: bool,
+    pub dogfood_gate_status: String,
+    pub latest_dispatch_gate_id: String,
+    pub latest_gate_status: String,
+    pub latest_gate_provider_cli_execution_allowed: bool,
+    pub latest_gate_reasons: String,
+    pub latest_dispatch_replay_id: String,
+    pub latest_replay_appended_events: i64,
+    pub latest_replay_raw_content_policy: String,
+    pub latest_dispatch_execution_id: String,
+    pub latest_execution_status: String,
+    pub latest_execution_provider_cli_execution_allowed: bool,
+    pub latest_execution_provider_cli_executed: bool,
+    pub latest_execution_credential_scan_status: String,
+    pub latest_execution_stdout_artifact_id: String,
+    pub latest_execution_stderr_artifact_id: String,
+    pub latest_execution_reasons: String,
+    pub next_action: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -824,6 +961,68 @@ mod tests {
         );
         assert_eq!(materialization.status, "ready_without_rendering_prompt");
         assert_eq!(materialization.raw_prompt_policy, "not_rendered");
+    }
+
+    #[test]
+    fn project_dashboard_summarizes_adapter_dispatch_status() {
+        let root = temp_root("query-adapter-dispatch-status");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        append_adapter_smoke_report(
+            &state,
+            &project_id,
+            "adapter-smoke-codex-clean",
+            "codex_exec",
+            "passed",
+            "clean",
+            true,
+        );
+        append_adapter_dispatch_plan(&state, &project_id);
+        append_adapter_dispatch_gate(&state, &project_id);
+        append_adapter_dispatch_replay(&state, &project_id);
+        append_adapter_dispatch_execution(&state, &project_id);
+
+        let dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+        let status = dashboard
+            .adapter_dispatch_status("adapter-dispatch-plan-codex")
+            .expect("dispatch status");
+
+        assert_eq!(status.dispatch_plan_id, "adapter-dispatch-plan-codex");
+        assert_eq!(status.adapter_kind, "codex_exec");
+        assert_eq!(status.provider_kind, "codex_subscription");
+        assert_eq!(status.credential_scope, "user_local_subscription");
+        assert_eq!(
+            status.dogfood_gate_status,
+            "ready_for_first_real_agent_dogfood"
+        );
+        assert_eq!(
+            status.latest_dispatch_gate_id,
+            "adapter-dispatch-gate-codex"
+        );
+        assert_eq!(
+            status.latest_dispatch_replay_id,
+            "adapter-dispatch-replay-codex"
+        );
+        assert_eq!(
+            status.latest_dispatch_execution_id,
+            "adapter-dispatch-execution-codex"
+        );
+        assert_eq!(status.latest_execution_status, "completed");
+        assert!(status.latest_execution_provider_cli_executed);
+        assert_eq!(
+            status.latest_execution_stdout_artifact_id,
+            "artifact-dispatch-stdout"
+        );
+        assert_eq!(
+            status.next_action,
+            "inspect_execution_artifacts_and_export_evidence"
+        );
+        assert!(
+            dashboard
+                .adapter_dispatch_status("missing-dispatch-plan")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1622,6 +1821,53 @@ mod tests {
                 )],
             )
             .expect("append adapter dispatch prompt materialization");
+    }
+
+    fn append_adapter_dispatch_execution(state: &SqliteStateStore, project_id: &ProjectId) {
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-adapter-dispatch-execution-codex".to_string(),
+                    kind: EventKind::AdapterDispatchExecuted,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: Some(AgentId::new("agent-codex")),
+                    session_id: Some(SessionId::new("session-codex")),
+                    run_id: Some(RunId::new("run-codex")),
+                    turn_id: None,
+                    item_id: Some("adapter-dispatch-execution-codex".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::AdapterDispatchExecution(
+                    AdapterDispatchExecutionProjection {
+                        dispatch_execution_id: "adapter-dispatch-execution-codex".to_string(),
+                        project_id: project_id.clone(),
+                        dispatch_plan_id: "adapter-dispatch-plan-codex".to_string(),
+                        execution_request_id: "adapter-dispatch-execution-request-codex"
+                            .to_string(),
+                        adapter_kind: "codex_exec".to_string(),
+                        session_id: SessionId::new("session-codex"),
+                        run_id: RunId::new("run-codex"),
+                        provider_cli_execution_allowed: true,
+                        provider_cli_executed: true,
+                        status: "completed".to_string(),
+                        exit_code: Some(0),
+                        runtime_process_ref: Some("runtime-process-codex".to_string()),
+                        stdout_artifact_id: Some("artifact-dispatch-stdout".to_string()),
+                        stderr_artifact_id: Some("artifact-dispatch-stderr".to_string()),
+                        artifact_root: "/tmp/capo-artifacts".to_string(),
+                        credential_scan_status: "clean".to_string(),
+                        raw_prompt_policy: "not_rendered".to_string(),
+                        raw_output_policy: "artifacts_scanned_redacted".to_string(),
+                        reason_codes: "provider_cli_executed_with_clean_artifacts".to_string(),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append adapter dispatch execution");
     }
 
     fn append_workpad_task(

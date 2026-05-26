@@ -613,6 +613,15 @@ Observed 2026-05-26.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC25.
 
+## F1/AC26 Dispatch Status Query Contract
+
+Observed 2026-05-26.
+
+- Shared dispatch status summary contract and regression coverage: `../../crates/capo-query/src/lib.rs`
+- CLI `dispatch-status` rendering over the shared summary: `../../crates/capo-cli/src/main.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC26.
+
 ## F6/V6 Review Needs Conversation
 
 Observed 2026-05-26.

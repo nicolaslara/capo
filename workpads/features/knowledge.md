@@ -277,6 +277,26 @@ Follow-up:
 
 - Dogfood actual voice conversations before adding broader natural-language parsing; the current grammar deliberately stays narrow and auditable.
 
+## F1/AC26 - Dispatch Status Query Contract
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `ProjectDashboard::adapter_dispatch_status(...)` and `AdapterDispatchStatus` so dispatch-chain status is a shared read-model contract rather than CLI-only aggregation.
+- Keep the CLI responsible for text formatting, but move plan/gate/replay/execution selection and next-action derivation into `capo-query`.
+- Preserve the provider safety boundary: the status contract exposes metadata, artifact IDs, booleans, counts, statuses, and reason codes only. It does not render raw prompts, raw provider fixture text, or raw provider output.
+- Leave `dispatch-evidence` on its existing projection inputs for now because it has broader markdown artifact rendering needs than the compact status contract.
+
+Verification:
+
+- `cargo test -p capo-query adapter_dispatch_status -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Follow-up:
+
+- Future voice/web/mobile/TUI status surfaces should consume `AdapterDispatchStatus` instead of reimplementing dispatch-chain lookup.
+
 ## F1/AC1-AC2 - Local Connector Preflight
 
 Status: in progress on 2026-05-25.

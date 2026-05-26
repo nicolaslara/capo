@@ -641,3 +641,26 @@ Decision:
 - Treat dispatch-chain evidence as a review artifact, not a new execution step. The command reads existing projections and writes only Capo-owned evidence metadata/artifacts.
 - Use artifact IDs and policy fields instead of raw output in the report. Runtime stdout/stderr remain referenced by artifact ID only.
 - This prepares the real opt-in execution path for review without weakening the provider boundary.
+
+### AC26 - Dispatch Status Query Contract
+
+Status: completed
+
+Acceptance:
+
+- Move dispatch-status plan/gate/replay/execution summary assembly into the shared query surface.
+- Keep CLI output stable while making the same dispatch-chain status available to future voice, web, mobile, and TUI consumers.
+- Preserve prompt/output redaction: status fields expose metadata, artifact IDs, booleans, counts, and next action only.
+- Do not run provider CLIs, materialize prompts, open tunnels, or inspect credentials.
+
+Evidence:
+
+- `ProjectDashboard::adapter_dispatch_status(...)` and `AdapterDispatchStatus` in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo adapter dispatch-status` now renders the shared query summary in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query adapter_dispatch_status -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Treat dispatch-chain status as a read-model query contract, not CLI glue. The CLI still owns text formatting, but the cross-row selection and next-action derivation live in `capo-query`.
+- Keep dispatch evidence export on its existing projection inputs for now; it produces a markdown artifact and has broader rendering needs than the one-line status contract.

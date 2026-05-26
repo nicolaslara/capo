@@ -16,8 +16,8 @@ use capo_core::{
 };
 use capo_eval::TaskOutcomeReport;
 use capo_query::{
-    AdapterDogfoodGate, ProjectDashboard, ProjectDashboardQuery, ProjectDogfoodReadiness,
-    project_dashboard, project_dogfood_readiness,
+    AdapterDispatchStatus, AdapterDogfoodGate, ProjectDashboard, ProjectDashboardQuery,
+    ProjectDogfoodReadiness, project_dashboard, project_dogfood_readiness,
 };
 use capo_runtime::{
     ChannelKind, ConnectivityEndpointConfig, ConnectivityTunnel, EndpointOwner, ExposureScope,
@@ -1403,33 +1403,10 @@ fn adapter_dispatch_status(parsed: &ParsedArgs, args: &[String]) -> Result<Strin
     let state = state(parsed)?;
     let dashboard =
         project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
-    let plan = dashboard
-        .adapter_dispatch_plans
-        .iter()
-        .find(|plan| plan.dispatch_plan_id == dispatch_plan_id)
+    let status = dashboard
+        .adapter_dispatch_status(&dispatch_plan_id)
         .ok_or_else(|| format!("unknown adapter dispatch plan: {dispatch_plan_id}"))?;
-    let latest_gate = dashboard
-        .adapter_dispatch_gates
-        .iter()
-        .rev()
-        .find(|gate| gate.dispatch_plan_id == plan.dispatch_plan_id);
-    let latest_replay = dashboard
-        .adapter_dispatch_replays
-        .iter()
-        .rev()
-        .find(|replay| replay.dispatch_plan_id == plan.dispatch_plan_id);
-    let latest_execution = dashboard
-        .adapter_dispatch_executions
-        .iter()
-        .rev()
-        .find(|execution| execution.dispatch_plan_id == plan.dispatch_plan_id);
-    Ok(render_adapter_dispatch_status(
-        plan,
-        latest_gate,
-        latest_replay,
-        latest_execution,
-        &dashboard.adapter_dogfood_gate,
-    ))
+    Ok(render_adapter_dispatch_status(&status))
 }
 
 fn adapter_dispatch_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
@@ -2420,109 +2397,38 @@ fn render_adapter_dispatch_gate(
     )
 }
 
-fn render_adapter_dispatch_status(
-    plan: &AdapterDispatchPlanProjection,
-    latest_gate: Option<&AdapterDispatchGateProjection>,
-    latest_replay: Option<&AdapterDispatchReplayProjection>,
-    latest_execution: Option<&AdapterDispatchExecutionProjection>,
-    dogfood_gate: &AdapterDogfoodGate,
-) -> String {
-    let gate_id = latest_gate
-        .map(|gate| gate.dispatch_gate_id.as_str())
-        .unwrap_or("none");
-    let gate_status = latest_gate
-        .map(|gate| gate.status.as_str())
-        .unwrap_or("missing");
-    let gate_allowed = latest_gate
-        .map(|gate| gate.provider_cli_execution_allowed.to_string())
-        .unwrap_or_else(|| "false".to_string());
-    let gate_reasons = latest_gate
-        .map(|gate| gate.reason_codes.as_str())
-        .unwrap_or("recorded_dispatch_gate_missing");
-    let replay_id = latest_replay
-        .map(|replay| replay.dispatch_replay_id.as_str())
-        .unwrap_or("none");
-    let replay_count = latest_replay
-        .map(|replay| replay.appended_event_count.to_string())
-        .unwrap_or_else(|| "0".to_string());
-    let replay_raw_policy = latest_replay
-        .map(|replay| replay.raw_content_policy.as_str())
-        .unwrap_or("none");
-    let execution_id = latest_execution
-        .map(|execution| execution.dispatch_execution_id.as_str())
-        .unwrap_or("none");
-    let execution_status = latest_execution
-        .map(|execution| execution.status.as_str())
-        .unwrap_or("missing");
-    let execution_allowed = latest_execution
-        .map(|execution| execution.provider_cli_execution_allowed.to_string())
-        .unwrap_or_else(|| "false".to_string());
-    let execution_provider_cli_executed = latest_execution
-        .map(|execution| execution.provider_cli_executed.to_string())
-        .unwrap_or_else(|| "false".to_string());
-    let execution_credential_scan = latest_execution
-        .map(|execution| execution.credential_scan_status.as_str())
-        .unwrap_or("none");
-    let execution_stdout_artifact = latest_execution
-        .and_then(|execution| execution.stdout_artifact_id.as_deref())
-        .unwrap_or("none");
-    let execution_stderr_artifact = latest_execution
-        .and_then(|execution| execution.stderr_artifact_id.as_deref())
-        .unwrap_or("none");
-    let execution_reasons = latest_execution
-        .map(|execution| execution.reason_codes.as_str())
-        .unwrap_or("none");
-    let next_action = if latest_execution
-        .map(|execution| execution.provider_cli_executed)
-        .unwrap_or(false)
-    {
-        "inspect_execution_artifacts_and_export_evidence"
-    } else if latest_replay.is_some() {
-        "inspect_replay_or_prepare_real_execution"
-    } else if latest_execution.is_some() {
-        "resolve_latest_execution_blocker"
-    } else if latest_gate
-        .map(|gate| gate.provider_cli_execution_allowed && gate.status == "ready_for_execution")
-        .unwrap_or(false)
-    {
-        "replay_dispatch_fixture_or_run_provider_execution_after_explicit_opt_in"
-    } else if dogfood_gate.ready {
-        "record_ready_dispatch_gate"
-    } else {
-        "record_clean_real_smoke_evidence"
-    };
-
+fn render_adapter_dispatch_status(status: &AdapterDispatchStatus) -> String {
     format!(
         "adapter_dispatch_status=true\ndispatch_plan={}\nadapter={}\nagent={}\nsession_id={}\nrun_id={}\nplan_status={}\nprovider_kind={}\ncredential_scope={}\nruntime_program={}\nruntime_arg_count={}\nruntime_prompt_policy={}\nprovider_cli_executed={}\ndogfood_gate={}\nlatest_dispatch_gate={}\nlatest_gate_status={}\nlatest_gate_provider_cli_execution_allowed={}\nlatest_gate_reasons={}\nlatest_dispatch_replay={}\nlatest_replay_appended_events={}\nlatest_replay_raw_content_policy={}\nlatest_dispatch_execution={}\nlatest_execution_status={}\nlatest_execution_provider_cli_execution_allowed={}\nlatest_execution_provider_cli_executed={}\nlatest_execution_credential_scan_status={}\nlatest_execution_stdout_artifact={}\nlatest_execution_stderr_artifact={}\nlatest_execution_reasons={}\nnext_action={}\n",
-        plan.dispatch_plan_id,
-        plan.adapter_kind,
-        plan.agent_name,
-        plan.session_id,
-        plan.run_id,
-        plan.status,
-        plan.provider_kind,
-        plan.credential_scope,
-        plan.runtime_program,
-        plan.runtime_arg_count,
-        plan.runtime_prompt_policy,
-        plan.provider_cli_executed,
-        dogfood_gate.status,
-        gate_id,
-        gate_status,
-        gate_allowed,
-        gate_reasons,
-        replay_id,
-        replay_count,
-        replay_raw_policy,
-        execution_id,
-        execution_status,
-        execution_allowed,
-        execution_provider_cli_executed,
-        execution_credential_scan,
-        execution_stdout_artifact,
-        execution_stderr_artifact,
-        execution_reasons,
-        next_action
+        status.dispatch_plan_id,
+        status.adapter_kind,
+        status.agent_name,
+        status.session_id,
+        status.run_id,
+        status.plan_status,
+        status.provider_kind,
+        status.credential_scope,
+        status.runtime_program,
+        status.runtime_arg_count,
+        status.runtime_prompt_policy,
+        status.provider_cli_executed,
+        status.dogfood_gate_status,
+        status.latest_dispatch_gate_id,
+        status.latest_gate_status,
+        status.latest_gate_provider_cli_execution_allowed,
+        status.latest_gate_reasons,
+        status.latest_dispatch_replay_id,
+        status.latest_replay_appended_events,
+        status.latest_replay_raw_content_policy,
+        status.latest_dispatch_execution_id,
+        status.latest_execution_status,
+        status.latest_execution_provider_cli_execution_allowed,
+        status.latest_execution_provider_cli_executed,
+        status.latest_execution_credential_scan_status,
+        status.latest_execution_stdout_artifact_id,
+        status.latest_execution_stderr_artifact_id,
+        status.latest_execution_reasons,
+        status.next_action
     )
 }
 
