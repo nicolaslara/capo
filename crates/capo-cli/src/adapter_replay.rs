@@ -10,9 +10,8 @@ use capo_state::{
 };
 
 use crate::cli_surface::{ParsedArgs, optional_arg, required_arg};
-use crate::{
-    controller, debug_error, escape_json, export_evidence, project_id, stable_cli_hash, state,
-};
+use crate::evidence::export_evidence;
+use crate::{controller, debug_error, escape_json, project_id, stable_cli_hash, state};
 
 pub(crate) fn replay_adapter_fixture(
     parsed: &ParsedArgs,

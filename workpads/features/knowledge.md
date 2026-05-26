@@ -2886,6 +2886,31 @@ Verification:
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - Focused read-only review subagent: no issues found; residual gap is that voice output compatibility remains covered by assertions rather than full golden snapshots.
 
+## F9/CLI15 - Evidence And Review Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move session evidence export, task-outcome report export, and review finding recording into `evidence.rs`.
+- Keep review outcome derivation, evidence/review markdown rendering, and guarded evidence/review artifact writers with the command surfaces that use them.
+- Keep dogfood readiness artifact writing in `main.rs` because it belongs to project readiness, not session evidence/review.
+- Keep session status rendering in `main.rs` for this slice because it is CLI observation output, not artifact export.
+- Update adapter fixture replay to depend on `evidence::export_evidence` explicitly for replay evidence chaining.
+
+Verification:
+
+- `cargo check -p capo-cli`: passed.
+- `cargo test -p capo-cli evidence_export_handles_completed_runs_and_refuses_foreign_files -- --nocapture`: passed.
+- `cargo test -p capo-cli dashboard_renders_review_findings -- --nocapture`: passed.
+- `cargo test -p capo-cli dashboard_renders_task_outcome_reports -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_fixture_replay_cli_exports_evidence_without_raw_provider_text -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- Focused read-only review subagent: no issues found; output strings, overwrite guards, idempotency keys, redaction states, and adapter replay evidence chaining were preserved.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.

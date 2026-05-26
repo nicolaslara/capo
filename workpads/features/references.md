@@ -1435,3 +1435,13 @@ Observed 2026-05-26.
 - CLI routing, evidence exports, review/eval surfaces, permissions, and session control retained in: `../../crates/capo-cli/src/main.rs`
 - Resulting file sizes: `../../crates/capo-cli/src/main.rs` 1,780 lines; `../../crates/capo-cli/src/voice.rs` 505 lines; `../../crates/capo-cli/src/voice_render.rs` 579 lines.
 - No new third-party dependencies were added for CLI14.
+
+## F9/CLI15 Evidence And Review Module Split
+
+Observed 2026-05-26.
+
+- Evidence/review CLI module: `../../crates/capo-cli/src/evidence.rs`
+- Adapter fixture replay evidence chaining imports: `../../crates/capo-cli/src/adapter_replay.rs`
+- CLI routing, session status rendering, dogfood readiness artifacts, permission commands, and shared helpers retained in: `../../crates/capo-cli/src/main.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 1,181 lines; `../../crates/capo-cli/src/evidence.rs` 618 lines.
+- No new third-party dependencies were added for CLI15.
