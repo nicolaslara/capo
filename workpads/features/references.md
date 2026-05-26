@@ -1262,3 +1262,12 @@ Observed 2026-05-26.
 - CLI tests module: `../../crates/capo-cli/src/tests.rs`
 - Resulting file sizes: `../../crates/capo-cli/src/main.rs` 8,806 lines; `../../crates/capo-cli/src/tests.rs` 5,405 lines.
 - No new third-party dependencies were added for CLI1.
+
+## F9/CLI2 CLI Surface Parsing Module Split
+
+Observed 2026-05-26.
+
+- CLI surface parsing/help module: `../../crates/capo-cli/src/cli_surface.rs`
+- CLI command routing and command implementation retained in: `../../crates/capo-cli/src/main.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 8,690 lines; `../../crates/capo-cli/src/cli_surface.rs` 122 lines; `../../crates/capo-cli/src/tests.rs` 5,405 lines.
+- No new third-party dependencies were added for CLI2.

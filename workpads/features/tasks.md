@@ -570,10 +570,12 @@ Acceptance:
 Progress:
 
 - CLI1 test module split is completed. The large inline `capo-cli` test module now lives in `crates/capo-cli/src/tests.rs`, while runtime CLI command routing and helper functions remain in `main.rs`.
+- CLI2 surface parsing module split is completed. Help text, global `--state` parsing, and generic option/flag helpers now live in `crates/capo-cli/src/cli_surface.rs`, while command routing and command-family implementation remain in `main.rs`.
 
 Evidence:
 
 - `crates/capo-cli/src/main.rs`
+- `crates/capo-cli/src/cli_surface.rs`
 - `crates/capo-cli/src/tests.rs`
 - `cargo test -p capo-cli`
 - `cargo fmt --check`

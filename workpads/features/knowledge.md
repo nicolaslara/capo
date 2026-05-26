@@ -2512,6 +2512,25 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F9/CLI2 - CLI Surface Parsing Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move help text, global `--state` parsing, and generic flag/option helpers into `cli_surface.rs`.
+- Keep command routing and command-family implementations in `main.rs` for this slice. This separates the common CLI surface from command behavior without forcing a broad command-module refactor.
+- Expose `ParsedArgs` and argument helpers as `pub(crate)` only. They are internal CLI implementation details, not library APIs.
+- Preserve the existing `capo --help`, `--state`, and command output contract.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-cli`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.
