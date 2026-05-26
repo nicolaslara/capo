@@ -199,3 +199,25 @@ Evidence:
 Decision:
 
 - Treat the next-workpad selection rule as dashboard/query state, not a CLI convenience. This keeps CLI, voice, web, mobile, and future TUI surfaces aligned on the same source-of-truth read model.
+
+### DS8 - Shared Tool Activity Summary
+
+Status: completed
+
+Acceptance:
+
+- Move compact project and agent tool-activity counts into the shared query surface.
+- Keep voice rendering on the shared query contract instead of counting tool calls and tool observations in CLI-only code.
+- Preserve the existing detailed dashboard/session rows for consumers that need per-tool records.
+
+Evidence:
+
+- `ProjectDashboard::tool_activity_summary(...)` and `ToolActivitySummary` in `../../crates/capo-query/src/lib.rs`.
+- CLI voice tool-activity rendering consumes the shared summary in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query project_dashboard_aggregates_agents_sessions_runs_evidence_and_events -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_recent_work -- --nocapture`: passed.
+
+Decision:
+
+- Treat compact tool activity counts as query contract data because voice, dashboard, mobile, and future web/TUI surfaces should agree on project and agent-level totals.
+- Keep detailed governed tool calls and observed-only native tool observations in session rows. The summary only counts them; it does not replace detailed rows.

@@ -200,6 +200,7 @@ Progress:
 - DS5 project evidence visibility is completed with shared query rows and CLI dashboard rendering for project-level evidence artifacts.
 - DS6 dogfood readiness dashboard summary is completed with shared query computation and CLI dashboard rendering of the overall readiness verdict.
 - DS7 shared next workpad selection is completed with CLI workpad next/plan/start paths routed through the shared dashboard query helper.
+- DS8 shared tool activity summary is completed with compact project/agent tool counts exposed by `capo-query` and consumed by voice tool-activity rendering.
 
 Evidence:
 
@@ -219,6 +220,8 @@ Evidence:
 - `cargo test -p capo-query next_actionable_workpad -- --nocapture`
 - `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`
 - `cargo test -p capo-cli voice_confirmed_start_next_work -- --nocapture`
+- `cargo test -p capo-query project_dashboard_aggregates_agents_sessions_runs_evidence_and_events -- --nocapture`
+- `cargo test -p capo-cli voice_recent_work -- --nocapture`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`

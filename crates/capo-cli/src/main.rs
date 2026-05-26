@@ -3841,7 +3841,7 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
             }
         }
         VoiceReadScope::ProjectToolActivity => {
-            append_voice_tool_activity_summary(&mut output, dashboard.agents.iter());
+            append_voice_tool_activity_summary(&mut output, &dashboard.tool_activity_summary(None));
             for row in &dashboard.agents {
                 append_voice_agent_tool_activity(&mut output, row);
             }
@@ -3914,7 +3914,10 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
                 .iter()
                 .find(|row| row.agent.name == *agent_name)
             {
-                append_voice_tool_activity_summary(&mut output, std::iter::once(row));
+                append_voice_tool_activity_summary(
+                    &mut output,
+                    &dashboard.tool_activity_summary(Some(agent_name)),
+                );
                 append_voice_agent_tool_activity(&mut output, row);
             } else {
                 output.push_str(&format!("spoken_agent_missing={agent_name}\n"));
@@ -4032,22 +4035,16 @@ fn append_voice_agent_row(output: &mut String, row: &capo_query::AgentDashboardR
     }
 }
 
-fn append_voice_tool_activity_summary<'a, I>(output: &mut String, rows: I)
-where
-    I: Iterator<Item = &'a capo_query::AgentDashboardRow>,
-{
-    let mut agents = 0;
-    let mut tool_calls = 0;
-    let mut tool_observations = 0;
-    for row in rows {
-        agents += 1;
-        if let Some(session_row) = &row.session {
-            tool_calls += session_row.tool_calls.len();
-            tool_observations += session_row.tool_observations.len();
-        }
-    }
+fn append_voice_tool_activity_summary(
+    output: &mut String,
+    summary: &capo_query::ToolActivitySummary,
+) {
     output.push_str(&format!(
-        "spoken_tool_activity_agents={agents}\nspoken_tool_calls={tool_calls}\nspoken_tool_observations={tool_observations}\n"
+        "spoken_tool_activity_agents={}\nspoken_tool_activity_active_sessions={}\nspoken_tool_calls={}\nspoken_tool_observations={}\n",
+        summary.agent_count,
+        summary.active_session_count,
+        summary.tool_call_count,
+        summary.tool_observation_count
     ));
 }
 

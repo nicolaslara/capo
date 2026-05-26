@@ -50,6 +50,28 @@ impl ProjectDashboard {
         project_dogfood_readiness(self)
     }
 
+    pub fn tool_activity_summary(&self, agent_name: Option<&str>) -> ToolActivitySummary {
+        let mut summary = ToolActivitySummary {
+            agent_count: 0,
+            active_session_count: 0,
+            tool_call_count: 0,
+            tool_observation_count: 0,
+        };
+        for row in self.agents.iter().filter(|row| {
+            agent_name
+                .map(|name| row.agent.name == name)
+                .unwrap_or(true)
+        }) {
+            summary.agent_count += 1;
+            if let Some(session_row) = &row.session {
+                summary.active_session_count += 1;
+                summary.tool_call_count += session_row.tool_calls.len();
+                summary.tool_observation_count += session_row.tool_observations.len();
+            }
+        }
+        summary
+    }
+
     pub fn next_workpad_task(&self) -> Option<&WorkpadTaskProjection> {
         self.workpad_tasks
             .iter()
@@ -278,6 +300,14 @@ pub struct SessionDashboardRow {
     pub review_findings: Vec<ReviewFindingProjection>,
     pub task_outcome_reports: Vec<TaskOutcomeReportProjection>,
     pub recent_events: Vec<EventRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolActivitySummary {
+    pub agent_count: usize,
+    pub active_session_count: usize,
+    pub tool_call_count: usize,
+    pub tool_observation_count: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -764,6 +794,26 @@ mod tests {
         assert_eq!(row.agent.name, "demo");
         let session = row.session.as_ref().expect("session row");
         assert_eq!(session.session.current_goal, "prove query");
+        let tool_activity = dashboard.tool_activity_summary(None);
+        assert_eq!(
+            tool_activity,
+            ToolActivitySummary {
+                agent_count: 1,
+                active_session_count: 1,
+                tool_call_count: 1,
+                tool_observation_count: 1,
+            }
+        );
+        assert_eq!(dashboard.tool_activity_summary(Some("demo")), tool_activity);
+        assert_eq!(
+            dashboard.tool_activity_summary(Some("missing-agent")),
+            ToolActivitySummary {
+                agent_count: 0,
+                active_session_count: 0,
+                tool_call_count: 0,
+                tool_observation_count: 0,
+            }
+        );
         assert_eq!(
             session.run.as_ref().map(|run| run.status.as_str()),
             Some("running")

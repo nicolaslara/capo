@@ -1851,3 +1851,19 @@ Verification:
 
 - `cargo test -p capo-voice tool_activity -- --nocapture`: passed.
 - `cargo test -p capo-cli voice_recent_work -- --nocapture`: passed.
+
+## F3/DS8 - Shared Tool Activity Summary
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move compact tool-activity totals into `capo-query` as `ProjectDashboard::tool_activity_summary(...)`.
+- The summary counts agents, active sessions, governed tool calls, and observed-only native tool observations for either the whole project or one named agent.
+- Voice tool-activity rendering now consumes the query summary instead of computing totals in CLI code. Detailed tool rows still come from the existing session dashboard rows.
+- Keep the summary read-model-derived and side-effect-free. It does not inspect providers, runtimes, credentials, prompt materialization, tunnels, or raw tool input/output.
+
+Verification:
+
+- `cargo test -p capo-query project_dashboard_aggregates_agents_sessions_runs_evidence_and_events -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_recent_work -- --nocapture`: passed.

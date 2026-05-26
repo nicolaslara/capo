@@ -858,3 +858,14 @@ Observed 2026-05-26.
 - Voice source workpad: `voice.md`
 - Tool observation architecture source: `../architecture/tool-exposure.md`
 - No new third-party dependencies were added for V13.
+
+## F3/DS8 Shared Tool Activity Summary
+
+Observed 2026-05-26.
+
+- Shared tool activity summary contract and query regression coverage: `../../crates/capo-query/src/lib.rs`
+- CLI voice tool-activity rendering consuming the shared summary: `../../crates/capo-cli/src/main.rs`
+- Dashboard source workpad: `dashboard.md`
+- Voice source workpad: `voice.md`
+- Tool observation architecture source: `../architecture/tool-exposure.md`
+- No new third-party dependencies were added for DS8.
