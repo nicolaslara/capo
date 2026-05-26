@@ -1985,6 +1985,27 @@ Verification:
 
 - `cargo test -p capo-cli tool_run_wrapper -- --nocapture`: passed.
 
+## F4/PT14 - Recorded Wrapper Tool Invocations
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `--record` to `capo tool run-wrapper` so direct operator wrapper executions can be persisted as Capo-governed tool activity.
+- Persist wrapper input/output artifacts with project/session/run ownership before appending the tool-call projection.
+- Project recorded wrapper runs under a Capo-owned synthetic `cli-wrapper` agent/session/run instead of attaching them to a provider agent. This keeps the existing dashboard/session/tool-activity query path useful without misattributing operator-invoked tools to Codex or Claude.
+- Render `recorded=true`, `tool_call`, `session_id`, `run_id`, and `recorded_sequence` in CLI output when recording succeeds.
+- Preserve unrecorded wrapper runs for quick diagnostics. Recording remains opt-in.
+- Keep the path provider-free and tunnel-free. It does not launch provider CLIs, inspect subscription credentials/sessions, materialize prompts, open tunnels, or persist raw provider output.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test -p capo-cli tool_run_wrapper -- --nocapture`: passed.
+- `cargo test`: passed.
+
 ## F7/RR11 - Runtime Target Inventory
 
 Status: completed on 2026-05-26.

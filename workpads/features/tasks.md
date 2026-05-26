@@ -271,6 +271,7 @@ Progress:
 - PT11 session status tool introspection is completed with governed tool calls and observed-only tool observations rendered in per-agent status.
 - PT12 git commit wrapper is completed with already-staged commits governed through the runtime wrapper/tool audit path.
 - PT13 wrapper tool CLI surface is completed with an explicit provider-free `capo tool run-wrapper` operator command.
+- PT14 recorded wrapper tool invocations are completed with opt-in `run-wrapper --record` persistence into artifact, session, run, and governed tool-call projections.
 
 Evidence:
 
@@ -302,6 +303,7 @@ Evidence:
 - `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence -- --nocapture`
 - `cargo test -p capo-tools git_commit -- --nocapture`
 - `cargo test -p capo-cli tool_run_wrapper -- --nocapture`
+- `cargo test -p capo-cli tool_run_wrapper -- --nocapture` verifies recorded wrapper tool-call dashboard visibility
 - Focused PT3 wrapper reviews: split authorization replay, arbitrary workpad reads, artifact path escaping, unredacted input artifacts, misleading permission status, same-tool replay, runtime run ID paths, and ambiguous context hashing blockers found and fixed
 
 ## F5 - Memory And Evaluation Reports

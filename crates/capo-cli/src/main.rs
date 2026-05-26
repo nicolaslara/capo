@@ -28,8 +28,8 @@ use capo_state::{
     AdapterDispatchGateProjection, AdapterDispatchPlanProjection,
     AdapterDispatchPromptMaterializationProjection, AdapterDispatchPromptSourceProjection,
     AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
-    ArtifactRecord, CapabilityGrantProjection, ConnectivityExposureProjection, EventKind,
-    EventRecord, EvidenceProjection, MemoryPacketProjection, MemoryRecordProjection,
+    AgentProjection, ArtifactRecord, CapabilityGrantProjection, ConnectivityExposureProjection,
+    EventKind, EventRecord, EvidenceProjection, MemoryPacketProjection, MemoryRecordProjection,
     MemorySourceProjection, NewEvent, PermissionApprovalProjection, ProjectionRecord,
     RedactionState, ReviewFindingProjection, RunProjection, RuntimeTargetProjection,
     SessionProjection, SqliteStateStore, ToolCallProjection, ToolObservationProjection,
@@ -111,7 +111,7 @@ Usage:
   capo evidence export --session SESSION_ID --out DIR [--state PATH]
   capo eval task-outcome --session SESSION_ID --out DIR [--state PATH]
   capo review record --session SESSION_ID --reviewer NAME --kind blocker|finding|no_blockers --summary TEXT --out DIR [--severity LEVEL] [--tool-call TOOL_CALL_ID] [--follow-up-workpad-task WORKPAD_TASK_ID] [--state PATH]
-  capo tool run-wrapper --tool TOOL --workspace PATH --artifacts PATH [--policy read-only|reviewer|trusted-local] [--path PATH] [--content TEXT] [--message TEXT] [--program PROGRAM] [--argv-json JSON] [--cwd PATH]
+  capo tool run-wrapper --tool TOOL --workspace PATH --artifacts PATH [--policy read-only|reviewer|trusted-local] [--path PATH] [--content TEXT] [--message TEXT] [--program PROGRAM] [--argv-json JSON] [--cwd PATH] [--record] [--state PATH]
 
 Prototype notes:
   The P4 CLI uses command envelopes, the fake controller, and SQLite read models.
@@ -309,7 +309,7 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             record_review_finding(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "tool" && command == "run-wrapper" => {
-            run_wrapper_tool(rest)
+            run_wrapper_tool(&parsed, rest)
         }
         [unknown, ..] => Err(format!("unknown command: {unknown}\nrun `capo --help`")),
     }
@@ -425,7 +425,7 @@ fn list_agents(parsed: &ParsedArgs) -> Result<String, String> {
     Ok(output)
 }
 
-fn run_wrapper_tool(args: &[String]) -> Result<String, String> {
+fn run_wrapper_tool(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     if let Some(unknown) = args.iter().find(|arg| {
         arg.starts_with("--")
             && !matches!(
@@ -440,10 +440,12 @@ fn run_wrapper_tool(args: &[String]) -> Result<String, String> {
                     | "--program"
                     | "--argv-json"
                     | "--cwd"
+                    | "--record"
             )
     }) {
         return Err(format!("unknown tool run-wrapper option: {unknown}"));
     }
+    let record = has_flag(args, "--record");
     let tool_id = normalize_wrapper_tool_id(&required_arg(args, "--tool")?)?;
     let workspace = PathBuf::from(required_arg(args, "--workspace")?);
     let artifacts = PathBuf::from(required_arg(args, "--artifacts")?);
@@ -456,20 +458,39 @@ fn run_wrapper_tool(args: &[String]) -> Result<String, String> {
     let request_hash = stable_cli_hash(&format!("{tool_id}:{input}:{workspace:?}:{artifacts:?}"));
     let request = WrapperToolRequest {
         tool_call_id: ToolCallId::new(format!("cli-wrapper-{request_hash}")),
-        session_id: SessionId::new("cli-wrapper-session"),
+        session_id: SessionId::new(format!("session-cli-wrapper-{request_hash}")),
         run_id: RunId::new(format!("cli-wrapper-run-{request_hash}")),
         tool_id,
         capability_profile_id: policy.default_profile_id().to_string(),
         input,
     };
+    let session_id = request.session_id.clone();
+    let run_id = request.run_id.clone();
     let result = wrappers.authorize_and_invoke(request, &policy);
+    let recorded_sequence = if record {
+        Some(record_wrapper_tool_result(
+            parsed,
+            &session_id,
+            &run_id,
+            &result,
+        )?)
+    } else {
+        None
+    };
     let mut output = format!(
-        "wrapper_tool_run=true\ntool={}\npolicy={}\nstatus={}\npermission_effect={}\npermission_source={}\ninput_artifact={}\noutput_artifacts={}\n",
+        "wrapper_tool_run=true\ntool={}\ntool_call={}\nsession_id={}\nrun_id={}\npolicy={}\nstatus={}\npermission_effect={}\npermission_source={}\nrecorded={}\nrecorded_sequence={}\ninput_artifact={}\noutput_artifacts={}\n",
         result.tool_id,
+        result.tool_call_id,
+        session_id,
+        run_id,
         result.permission_decision.capability_profile_id,
         result.status,
         result.permission_decision.effect,
         result.permission_decision.decision_source,
+        recorded_sequence.is_some(),
+        recorded_sequence
+            .map(|sequence| sequence.to_string())
+            .unwrap_or_else(|| "none".to_string()),
         result
             .input_artifact
             .as_ref()
@@ -492,6 +513,136 @@ fn run_wrapper_tool(args: &[String]) -> Result<String, String> {
     }
     output.push_str(&format!("summary={}\n", result.summary));
     Ok(output)
+}
+
+fn record_wrapper_tool_result(
+    parsed: &ParsedArgs,
+    session_id: &SessionId,
+    run_id: &RunId,
+    result: &capo_tools::WrapperToolResult,
+) -> Result<i64, String> {
+    let project_id = project_id();
+    let agent_id = AgentId::new("agent-cli-wrapper");
+    let state = state(parsed)?;
+    for artifact in result
+        .input_artifact
+        .iter()
+        .chain(result.output_artifacts.iter())
+    {
+        state
+            .record_artifact(wrapper_artifact_record(
+                artifact,
+                &project_id,
+                session_id,
+                run_id,
+            )?)
+            .map_err(debug_error)?;
+    }
+    let output_artifact_id = result
+        .output_artifacts
+        .first()
+        .map(|artifact| artifact.artifact_id.clone());
+    let event_id = format!(
+        "event-wrapper-tool-recorded-{}",
+        stable_cli_hash(&format!(
+            "{}:{}:{}",
+            result.tool_call_id, session_id, result.status
+        ))
+    );
+    let mut event = NewEvent::new(event_id, EventKind::ToolCallCompleted, "capo-cli");
+    event.project_id = Some(project_id.clone());
+    event.agent_id = Some(agent_id.clone());
+    event.session_id = Some(session_id.clone());
+    event.run_id = Some(run_id.clone());
+    event.item_id = Some(result.tool_call_id.to_string());
+    event.payload_json = format!(
+        "{{\"tool_call_id\":\"{}\",\"tool\":\"{}\",\"status\":\"{}\",\"permission_effect\":\"{}\",\"permission_source\":\"{}\",\"recorded_from\":\"tool.run_wrapper\"}}",
+        escape_json(result.tool_call_id.as_str()),
+        escape_json(&result.tool_id),
+        escape_json(&result.status),
+        escape_json(&result.permission_decision.effect),
+        escape_json(&result.permission_decision.decision_source)
+    );
+    event.idempotency_key = Some(format!("wrapper-tool-record:{}", result.tool_call_id));
+    event.redaction_state = RedactionState::Safe;
+    state
+        .append_event(
+            event,
+            &[
+                ProjectionRecord::Agent(AgentProjection {
+                    agent_id: agent_id.clone(),
+                    project_id: project_id.clone(),
+                    name: "cli-wrapper".to_string(),
+                    status: "active".to_string(),
+                    current_session_id: Some(session_id.clone()),
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Session(SessionProjection {
+                    session_id: session_id.clone(),
+                    project_id,
+                    task_id: None,
+                    agent_id,
+                    title: format!("CLI wrapper {}", result.tool_id),
+                    status: "completed".to_string(),
+                    current_goal: format!("Run governed wrapper {}", result.tool_id),
+                    latest_summary: Some(result.summary.clone()),
+                    latest_confidence: Some(if result.status == "denied" { 40 } else { 80 }),
+                    latest_blocker: (result.status == "denied").then(|| result.summary.clone()),
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Run(RunProjection {
+                    run_id: run_id.clone(),
+                    session_id: session_id.clone(),
+                    status: result.status.clone(),
+                    recovery_of_run_id: None,
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::ToolCall(ToolCallProjection {
+                    tool_call_id: result.tool_call_id.clone(),
+                    session_id: session_id.clone(),
+                    turn_id: Some("cli-wrapper".to_string()),
+                    tool_name: result.tool_id.clone(),
+                    tool_origin: "capo_wrapper".to_string(),
+                    status: result.status.clone(),
+                    input_artifact_id: result
+                        .input_artifact
+                        .as_ref()
+                        .map(|artifact| artifact.artifact_id.clone()),
+                    output_artifact_id,
+                    updated_sequence: 0,
+                }),
+            ],
+        )
+        .map_err(debug_error)
+}
+
+fn wrapper_artifact_record(
+    artifact: &WrapperArtifact,
+    project_id: &ProjectId,
+    session_id: &SessionId,
+    run_id: &RunId,
+) -> Result<ArtifactRecord, String> {
+    Ok(ArtifactRecord {
+        artifact_id: artifact.artifact_id.clone(),
+        project_id: Some(project_id.clone()),
+        session_id: Some(session_id.clone()),
+        run_id: Some(run_id.clone()),
+        kind: artifact.kind.clone(),
+        uri: artifact.uri.clone(),
+        content_hash: artifact.content_hash.clone(),
+        size_bytes: artifact.size_bytes,
+        redaction_state: wrapper_redaction_state(&artifact.redaction_state)?,
+    })
+}
+
+fn wrapper_redaction_state(value: &str) -> Result<RedactionState, String> {
+    match value {
+        "safe" => Ok(RedactionState::Safe),
+        "redacted" => Ok(RedactionState::Redacted),
+        other => Err(format!(
+            "wrapper artifact redaction state is not persistable: {other}"
+        )),
+    }
 }
 
 fn normalize_wrapper_tool_id(tool: &str) -> Result<String, String> {
@@ -7998,6 +8149,7 @@ mod tests {
     fn tool_run_wrapper_exposes_governed_runtime_wrappers_without_providers() {
         let workspace = temp_root("cli-tool-wrapper-workspace");
         let artifacts = temp_root("cli-tool-wrapper-artifacts");
+        let state_root = temp_root("cli-tool-wrapper-state");
         fs::create_dir_all(&workspace).expect("workspace");
         Command::new("git")
             .args(["init"])
@@ -8015,17 +8167,36 @@ mod tests {
             workspace.display().to_string(),
             "--artifacts".to_string(),
             artifacts.display().to_string(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
         ])
         .expect("read-only git status");
         assert!(read_only_status.contains("wrapper_tool_run=true"));
         assert!(read_only_status.contains("tool=capo.git_status"));
+        assert!(read_only_status.contains("tool_call=cli-wrapper-"));
+        assert!(read_only_status.contains("session_id=session-cli-wrapper-"));
         assert!(read_only_status.contains("policy=read-only-local"));
         assert!(read_only_status.contains("permission_effect=allow"));
+        assert!(read_only_status.contains("recorded=true"));
+        assert!(read_only_status.contains("recorded_sequence="));
         assert!(read_only_status.contains("input_artifact=artifact-wrapper-"));
         assert!(read_only_status.contains("output_artifacts=2"));
         assert!(read_only_status.contains("output_artifact="));
         assert!(read_only_status.contains("audit_event=tool.invocation_started"));
         assert!(!read_only_status.contains("provider_cli_executed=true"));
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard after recorded wrapper");
+        assert!(dashboard.contains("agent=cli-wrapper"));
+        assert!(dashboard.contains("tool_calls=1"));
+        assert!(dashboard.contains("tool_call=cli-wrapper-"));
+        assert!(dashboard.contains("tool=capo.git_status"));
+        assert!(dashboard.contains("tool_origin=capo_wrapper"));
+        assert!(dashboard.contains("input_artifact=artifact-wrapper-"));
 
         Command::new("git")
             .args(["add", "tracked.txt"])

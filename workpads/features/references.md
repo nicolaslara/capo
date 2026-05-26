@@ -1040,3 +1040,13 @@ Observed 2026-05-26.
 - Dashboard source workpad: `dashboard.md`
 - Agent connector source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for DS11.
+
+## F4/PT14 Recorded Wrapper Tool Invocations
+
+Observed 2026-05-26.
+
+- CLI `capo tool run-wrapper --record` recording path and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Runtime wrapper execution and artifact contract: `../../crates/capo-tools/src/lib.rs`
+- Artifact, agent, session, run, and governed tool-call projections: `../../crates/capo-state/src/lib.rs`
+- Permissions/tools source workpad: `permissions-tools.md`
+- No new third-party dependencies were added for PT14.

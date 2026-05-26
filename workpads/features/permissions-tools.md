@@ -370,3 +370,32 @@ Decision:
 - Default to `read-only-local` policy. Mutating or high-risk wrappers such as `capo.git_commit`, `capo.file_write`, and `capo.shell_run` require explicit `--policy trusted-local`.
 - Render permission effect/source, input artifact, output artifacts, audit events, and summary from the wrapper result.
 - Keep the surface provider-free and tunnel-free. It does not launch provider CLIs, inspect subscription credentials/sessions, materialize prompts, or persist raw agent/provider output in Capo state.
+
+### PT14 - Recorded Wrapper Tool Invocations
+
+Status: completed
+
+Acceptance:
+
+- Add an opt-in `--record` path to `capo tool run-wrapper` that persists governed wrapper execution into Capo state.
+- Record wrapper input/output artifacts in the artifact table with project/session/run ownership.
+- Project the wrapper invocation as a governed `ToolCallProjection` under a Capo-owned operator session so dashboard/session/tool-activity surfaces can introspect it.
+- Keep recording metadata-only and provider-free: no provider CLIs, subscription credentials/sessions, tunnels, prompt materialization, raw provider output, or hidden workspace paths.
+- Preserve non-recorded wrapper runs for quick local operator checks.
+
+Evidence:
+
+- CLI `capo tool run-wrapper --record` command and regression coverage in `../../crates/capo-cli/src/main.rs`.
+- Existing wrapper execution and artifact contract in `../../crates/capo-tools/src/lib.rs`.
+- Existing state artifact and tool-call projections in `../../crates/capo-state/src/lib.rs`.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test -p capo-cli tool_run_wrapper -- --nocapture`: passed.
+- `cargo test`: passed.
+
+Decision:
+
+- Treat recorded direct wrapper runs as Capo-governed tool activity with `tool_origin=capo_wrapper`, not as adapter/provider-native observations.
+- Use a synthetic `cli-wrapper` agent/session/run owned by Capo for operator-invoked wrapper tools. This keeps dashboard, session status, voice, and future web/mobile surfaces on the existing query path without pretending a provider agent executed the tool.
+- Keep `--record` opt-in so quick wrapper diagnostics do not write state unless the operator wants durable introspection.
