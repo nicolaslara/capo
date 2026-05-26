@@ -15,6 +15,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 mod apply;
 mod codec;
+mod codec_encode;
 mod error;
 mod event;
 mod projections;
@@ -28,7 +29,8 @@ pub use event::{
 pub use projections::*;
 
 use apply::{apply_projection_record, update_watermark};
-use codec::{projection_record_from_row, projection_record_to_row};
+use codec::projection_record_from_row;
+use codec_encode::projection_record_to_row;
 use schema::{clear_projection_tables, migrate};
 
 /// Name of the first durable local state backend.

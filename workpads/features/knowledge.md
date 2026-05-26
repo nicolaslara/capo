@@ -2493,6 +2493,25 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F8/SS2g - State Projection Codec Encoder Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move projection-log row encoding into `codec_encode.rs`, including `ProjectionRecordRow` and `projection_record_to_row`.
+- Keep decode, payload parsing, numeric parsing, and projection JSON validation in `codec.rs`.
+- Preserve projection kind strings, `a` through `h` column mapping, JSON payload contents, append behavior, rebuild behavior, and public store APIs.
+- Do not introduce typed projection descriptors yet. The encoder/decoder split is a lower-risk stepping stone that makes the current durable contract easier to audit before adding abstraction.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2f - State Query Module Split
 
 Status: completed on 2026-05-26.

@@ -538,6 +538,7 @@ Progress:
 - SS2d state projection codec module split is completed. Projection-log row encode/decode logic now lives in `codec.rs` while apply SQL, queries, and public APIs remain unchanged.
 - SS2e state projection apply module split is completed. Read-model apply SQL and projection watermark updates now live in `apply.rs` while event append, projection-log insertion, queries, and public APIs remain unchanged.
 - SS2f state query module split is completed. Read-only projection and event query methods now live in `queries.rs` while append, recovery, rebuild, projection-log insertion, and public APIs remain unchanged.
+- SS2g state projection codec encoder split is completed. Projection-log row encoding now lives in `codec_encode.rs` while decoding, validation, append, rebuild, and public APIs remain unchanged.
 
 Evidence:
 

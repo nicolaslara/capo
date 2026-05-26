@@ -246,3 +246,31 @@ Decision:
 
 - Keep query methods as a second inherent `impl SqliteStateStore` block rather than introducing a trait or wrapper. This preserves the current crate API while making the read-model query surface easier to inspect.
 - Leave event append, permission-decision mutation, recovery mutation, and rebuild logic in `lib.rs` for now because they share transaction sequencing and should move only with dedicated mutation-path evidence.
+
+### SS2g - State Projection Codec Encoder Split
+
+Status: completed
+
+Acceptance:
+
+- Move projection-log row encoding out of `codec.rs` into a focused module.
+- Preserve `ProjectionRecordRow` fields, persisted projection kind strings, `a` through `h` column mapping, `payload_json` contents, and projection-log insertion behavior.
+- Do not change projection decoding, schema, apply SQL, read queries, event append behavior, rebuild behavior, or crate-root public APIs.
+- Run focused `capo-state` tests and the standard workspace gate before completion.
+
+Evidence:
+
+- `../../crates/capo-state/src/codec_encode.rs` now owns `ProjectionRecordRow` and `projection_record_to_row`.
+- `../../crates/capo-state/src/codec.rs` keeps projection-log row decoding, decode errors, payload parsing, and projection JSON validation.
+- `../../crates/capo-state/src/lib.rs` imports encoder and decoder helpers privately while preserving the existing store API.
+- Resulting state crate file sizes: `../../crates/capo-state/src/lib.rs` 505 lines; `../../crates/capo-state/src/codec.rs` 1,558 lines; `../../crates/capo-state/src/codec_encode.rs` 513 lines; `../../crates/capo-state/src/queries.rs` 1,345 lines; `../../crates/capo-state/src/tests.rs` 1,876 lines.
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+Decision:
+
+- Split encoder and decoder modules before introducing typed projection descriptors. This keeps the current durable projection-log contract stable while making the highest-churn compatibility code smaller for review.
+- Keep `ProjectionRecordRow` with the encoder because it is the insertion-side row representation consumed by `insert_projection_record`.

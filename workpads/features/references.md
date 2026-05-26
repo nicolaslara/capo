@@ -1244,3 +1244,12 @@ Observed 2026-05-26.
 - Store implementation and mutation paths retained in: `../../crates/capo-state/src/lib.rs`
 - Resulting file sizes: `../../crates/capo-state/src/lib.rs` 503 lines; `../../crates/capo-state/src/queries.rs` 1,334 lines; `../../crates/capo-state/src/codec.rs` 2,067 lines; `../../crates/capo-state/src/apply.rs` 984 lines; `../../crates/capo-state/src/tests.rs` 1,876 lines.
 - No new third-party dependencies were added for SS2f.
+
+## F8/SS2g State Projection Codec Encoder Split
+
+Observed 2026-05-26.
+
+- Projection-log row encoder module: `../../crates/capo-state/src/codec_encode.rs`
+- Projection-log decoder and validation module retained in: `../../crates/capo-state/src/codec.rs`
+- Resulting file sizes: `../../crates/capo-state/src/lib.rs` 505 lines; `../../crates/capo-state/src/codec.rs` 1,558 lines; `../../crates/capo-state/src/codec_encode.rs` 513 lines; `../../crates/capo-state/src/queries.rs` 1,345 lines; `../../crates/capo-state/src/tests.rs` 1,876 lines.
+- No new third-party dependencies were added for SS2g.
