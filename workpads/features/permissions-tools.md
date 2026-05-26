@@ -179,3 +179,26 @@ Decision:
 - Keep ACP as an adapter boundary: session setup consumes `capo-tools` capability decisions rather than duplicating permission logic in the adapter.
 - Advertise only capabilities approved by the executable tool plan. Read-only policy advertises `filesystem.read_text_file` only; missing backing wrappers fail closed.
 - Keep MCP server configs at `mcp_server_count=0` for this setup scaffold until a user-approved MCP config path exists.
+
+### PT6 - ACP Client Handler Wrapper Routing
+
+Status: completed
+
+Acceptance:
+
+- Route ACP filesystem and terminal client handler calls into Capo wrapper requests only when the setup plan advertised the matching client capability.
+- Map `fs/read_text_file` to `capo.file_read`, `fs/write_text_file` to `capo.file_write`, and `terminal/run` to `capo.shell_run`.
+- Keep routing provider-free and execution-free: do not launch ACP agents, provider CLIs, runtimes, or tunnels.
+- Cover read-only denial of write/terminal calls and trusted-local terminal routing with tests.
+
+Evidence:
+
+- `AcpSessionSetupPlan::wrapper_request_for_client_call(...)` and `AcpClientCall` in `../../crates/capo-adapters/src/lib.rs`.
+- `cargo test -p capo-adapters acp_client -- --nocapture`: passed.
+- `cargo test -p capo-adapters acp_terminal -- --nocapture`: passed.
+
+Decision:
+
+- Treat ACP client handlers as transport adapters over Capo wrapper tools, not as direct filesystem or terminal execution.
+- Refuse handler calls when the setup plan did not advertise the capability, even if the raw method name is recognized.
+- Leave actual wrapper invocation to the controller/tool boundary so permission, artifacts, redaction, and audit lifecycle stay centralized.

@@ -8,13 +8,14 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use capo_core::{BoundaryBinding, BoundaryKind, RunId, SessionId, TurnId};
+use capo_core::{BoundaryBinding, BoundaryKind, RunId, SessionId, ToolCallId, TurnId};
 use capo_runtime::{
     LocalProcessConfig, LocalProcessOutcome, LocalProcessRequest, LocalProcessRunner,
     RedactionRule, RuntimeError,
 };
 use capo_tools::{
     AcpClientCapabilityDecision, AcpClientCapabilityPlan, PermissionPolicy, ToolDefinition,
+    WrapperToolRequest,
 };
 use serde_json::Value;
 
@@ -767,6 +768,65 @@ pub struct AcpSessionSetupPlan {
     pub provider_cli_executed: bool,
 }
 
+impl AcpSessionSetupPlan {
+    pub fn wrapper_request_for_client_call(
+        &self,
+        call: AcpClientCall,
+    ) -> Result<WrapperToolRequest, String> {
+        let (decision, tool_id, input) = match call.method.as_str() {
+            "fs/read_text_file" => (
+                &self.filesystem_read,
+                "capo.file_read",
+                serde_json::json!({
+                    "path": required_param(&call.params, "path")?,
+                }),
+            ),
+            "fs/write_text_file" => (
+                &self.filesystem_write,
+                "capo.file_write",
+                serde_json::json!({
+                    "path": required_param(&call.params, "path")?,
+                    "content": required_param(&call.params, "content")?,
+                }),
+            ),
+            "terminal/run" => (
+                &self.terminal,
+                "capo.shell_run",
+                serde_json::json!({
+                    "program": required_param(&call.params, "program")?,
+                    "argv": string_array_param(&call.params, "argv")?,
+                    "cwd": call.params.get("cwd").and_then(Value::as_str),
+                }),
+            ),
+            other => return Err(format!("unsupported ACP client call: {other}")),
+        };
+        if !decision.advertise {
+            return Err(format!(
+                "ACP client capability `{}` is not advertised: {}",
+                decision.acp_capability, decision.reason
+            ));
+        }
+        Ok(WrapperToolRequest {
+            tool_call_id: call.tool_call_id,
+            session_id: call.session_id,
+            run_id: call.run_id,
+            tool_id: tool_id.to_string(),
+            capability_profile_id: call.capability_profile_id,
+            input,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcpClientCall {
+    pub method: String,
+    pub params: Value,
+    pub tool_call_id: ToolCallId,
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    pub capability_profile_id: String,
+}
+
 fn parse_jsonl(
     input: &str,
     parser: fn(&Value) -> Vec<NormalizedAdapterEvent>,
@@ -788,6 +848,29 @@ fn parse_jsonl(
         raw_event_count,
         events,
     })
+}
+
+fn required_param(params: &Value, key: &str) -> Result<String, String> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| format!("missing ACP client call string param: {key}"))
+}
+
+fn string_array_param(params: &Value, key: &str) -> Result<Vec<String>, String> {
+    match params.get(key) {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("ACP client call param `{key}` must be string[]"))
+            })
+            .collect(),
+        Some(_) => Err(format!("ACP client call param `{key}` must be string[]")),
+        None => Ok(Vec::new()),
+    }
 }
 
 fn parse_codex_record(raw: &Value) -> Vec<NormalizedAdapterEvent> {
@@ -1310,6 +1393,68 @@ mod tests {
     }
 
     #[test]
+    fn acp_client_calls_route_only_when_capability_advertised() {
+        let wrappers =
+            capo_tools::RuntimeToolWrappers::new(capo_tools::RuntimeToolConfig::local_workspace(
+                PathBuf::from("/tmp/capo-acp-workspace"),
+                PathBuf::from("/tmp/capo-acp-artifacts"),
+            ));
+        let read_only_setup = AcpAdapter::session_setup_plan(
+            &wrappers.list_tools(),
+            &capo_tools::PermissionPolicy::static_read_only_local(),
+            SessionId::new("session-acp-client-read-only"),
+        );
+
+        let read = read_only_setup
+            .wrapper_request_for_client_call(acp_client_call(
+                "fs/read_text_file",
+                serde_json::json!({"path":"README.md"}),
+            ))
+            .expect("read advertised");
+        assert_eq!(read.tool_id, "capo.file_read");
+        assert_eq!(read.input["path"].as_str(), Some("README.md"));
+        assert_eq!(read.capability_profile_id, "read-only-local");
+
+        let write = read_only_setup.wrapper_request_for_client_call(acp_client_call(
+            "fs/write_text_file",
+            serde_json::json!({"path":"README.md","content":"changed"}),
+        ));
+        assert!(write.unwrap_err().contains("filesystem.write_text_file"));
+
+        let terminal = read_only_setup.wrapper_request_for_client_call(acp_client_call(
+            "terminal/run",
+            serde_json::json!({"program":"cargo","argv":["test"],"cwd":"."}),
+        ));
+        assert!(terminal.unwrap_err().contains("terminal"));
+    }
+
+    #[test]
+    fn acp_terminal_call_routes_to_shell_wrapper_for_trusted_profile() {
+        let wrappers =
+            capo_tools::RuntimeToolWrappers::new(capo_tools::RuntimeToolConfig::local_workspace(
+                PathBuf::from("/tmp/capo-acp-workspace"),
+                PathBuf::from("/tmp/capo-acp-artifacts"),
+            ));
+        let setup = AcpAdapter::session_setup_plan(
+            &wrappers.list_tools(),
+            &capo_tools::PermissionPolicy::allow_trusted_local(),
+            SessionId::new("session-acp-client-trusted"),
+        );
+
+        let request = setup
+            .wrapper_request_for_client_call(acp_client_call_with_profile(
+                "terminal/run",
+                serde_json::json!({"program":"cargo","argv":["test","-p","capo-adapters"],"cwd":"."}),
+                "trusted-local-dev",
+            ))
+            .expect("terminal advertised");
+
+        assert_eq!(request.tool_id, "capo.shell_run");
+        assert_eq!(request.input["program"].as_str(), Some("cargo"));
+        assert_eq!(request.input["argv"].as_array().expect("argv").len(), 3);
+    }
+
+    #[test]
     fn codex_launch_plan_builds_subscription_safe_runtime_request() {
         let workspace = temp_root("codex-launch-workspace");
         let artifacts = temp_root("codex-launch-artifacts");
@@ -1602,5 +1747,24 @@ mod tests {
             .expect("clock")
             .as_nanos();
         std::env::temp_dir().join(format!("capo-adapter-{name}-{nanos}"))
+    }
+
+    fn acp_client_call(method: &str, params: Value) -> AcpClientCall {
+        acp_client_call_with_profile(method, params, "read-only-local")
+    }
+
+    fn acp_client_call_with_profile(
+        method: &str,
+        params: Value,
+        capability_profile_id: &str,
+    ) -> AcpClientCall {
+        AcpClientCall {
+            method: method.to_string(),
+            params,
+            tool_call_id: ToolCallId::new(format!("tool-call-{}", method.replace(['/', '_'], "-"))),
+            session_id: SessionId::new("session-acp-client-call"),
+            run_id: RunId::new("run-acp-client-call"),
+            capability_profile_id: capability_profile_id.to_string(),
+        }
     }
 }

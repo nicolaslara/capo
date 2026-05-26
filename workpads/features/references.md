@@ -762,3 +762,13 @@ Observed 2026-05-26.
 - ACP session setup design source: `../architecture/protocol-provider.md`
 - Permissions source workpad: `permissions-tools.md`
 - No new third-party dependencies were added for PT5.
+
+## F4/PT6 ACP Client Handler Wrapper Routing
+
+Observed 2026-05-26.
+
+- ACP client handler routing and regression coverage: `../../crates/capo-adapters/src/lib.rs`
+- Wrapper request and execution boundary consumed by routing: `../../crates/capo-tools/src/lib.rs`
+- ACP tool/client handler design source: `../architecture/tool-exposure.md`
+- Permissions source workpad: `permissions-tools.md`
+- No new third-party dependencies were added for PT6.

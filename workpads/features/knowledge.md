@@ -1674,3 +1674,23 @@ Verification:
 Follow-up:
 
 - When the real ACP stdio client is added, use `AcpSessionSetupPlan` to construct the JSON-RPC initialize/session setup payload.
+
+## F4/PT6 - ACP Client Handler Wrapper Routing
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `AcpSessionSetupPlan::wrapper_request_for_client_call(...)` as the adapter-side routing seam from ACP client handler methods to Capo wrapper tool requests.
+- Map `fs/read_text_file` to `capo.file_read`, `fs/write_text_file` to `capo.file_write`, and `terminal/run` to `capo.shell_run`.
+- Refuse recognized methods when the setup plan did not advertise the matching capability. The advertised plan remains the authority for what the ACP agent may ask Capo to do.
+- Keep routing provider-free and execution-free. It does not launch ACP agents, provider CLIs, runtimes, or tunnels; actual execution remains in `capo-tools` wrappers through controller/tool authorization.
+
+Verification:
+
+- `cargo test -p capo-adapters acp_client -- --nocapture`: passed.
+- `cargo test -p capo-adapters acp_terminal -- --nocapture`: passed.
+
+Follow-up:
+
+- The future ACP stdio loop should call this routing seam for client handler requests, then invoke the returned wrapper request through the controller/tool boundary.
