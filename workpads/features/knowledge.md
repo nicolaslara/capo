@@ -2813,6 +2813,31 @@ Verification:
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - Focused read-only review subagent: no issues found; residual gap is that this slice preserves existing provider-free planning behavior and still does not run real subscription-backed provider CLIs.
 
+## F9/CLI12 - Workpad Command Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move the workpad command family into `workpad.rs`: index, next, plan-next, start-next, import, propose, apply guard, workpad projection conversion, deterministic task IDs, and proposal artifact rendering/writing.
+- Keep markdown source safety with the workpad commands. Proposal generation still writes only Capo-owned artifacts, refuses changed/non-Capo proposal overwrites, and leaves source markdown writeback disabled behind the explicit apply guard.
+- Keep `workpad_task_goal` in `workpad.rs` and export it for dispatch preparation/local-run code so workpad-derived prompt materialization uses the same canonical prompt text as `plan-next`.
+- Keep dashboard and voice rendering in `main.rs` for this slice; they aggregate multiple feature families but reuse exported workpad helpers.
+- Accept `workpad.rs` at 728 lines for now because it is one conceptual unit. A later split can separate proposal artifact writing from read-only index/next handling if this file grows further.
+
+Verification:
+
+- `cargo check -p capo-cli`: passed.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_confirmed_start_next_work -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-workpads -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- Focused read-only review subagent: no issues found; residual gap is that this split preserves existing fake/local start-next dispatch behavior and does not add real provider execution.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.

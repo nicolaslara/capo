@@ -20,7 +20,8 @@ use crate::adapter_dispatch_prepare::{
 };
 use crate::adapter_smoke::format_smoke_scan_error;
 use crate::cli_surface::{ParsedArgs, has_flag, required_arg};
-use crate::{debug_error, escape_json, project_id, stable_cli_hash, state, workpad_task_goal};
+use crate::workpad::workpad_task_goal;
+use crate::{debug_error, escape_json, project_id, stable_cli_hash, state};
 
 pub(crate) fn scan_dispatch_artifacts_or_delete<'a>(
     paths: impl IntoIterator<Item = &'a PathBuf>,

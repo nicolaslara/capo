@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::*;
 use crate::adapter_dispatch_run::scan_dispatch_artifacts_or_delete;
 use capo_adapters::LocalAdapterSmokeError;
-use capo_core::RunId;
-use capo_state::ConnectivityExposureProjection;
+use capo_core::{RunId, TaskId};
+use capo_state::{ConnectivityExposureProjection, WorkpadFileProjection, WorkpadTaskProjection};
 
 #[test]
 fn help_mentions_command_envelopes_and_no_credentials() {

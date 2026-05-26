@@ -1404,3 +1404,13 @@ Observed 2026-05-26.
 - CLI routing, replay, dogfood readiness, dashboard aggregation, and voice summaries retained in: `../../crates/capo-cli/src/main.rs`
 - Resulting file sizes: `../../crates/capo-cli/src/main.rs` 4,094 lines; `../../crates/capo-cli/src/adapter_launch.rs` 457 lines.
 - No new third-party dependencies were added for CLI11.
+
+## F9/CLI12 Workpad Command Module Split
+
+Observed 2026-05-26.
+
+- Workpad command module: `../../crates/capo-cli/src/workpad.rs`
+- Workpad scanner crate remains: `../../crates/capo-workpads/src/lib.rs`
+- CLI routing, dashboard rendering, voice summaries, evidence exports, and review/eval surfaces retained in: `../../crates/capo-cli/src/main.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 3,384 lines; `../../crates/capo-cli/src/workpad.rs` 728 lines.
+- No new third-party dependencies were added for CLI12.

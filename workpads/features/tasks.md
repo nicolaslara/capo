@@ -636,6 +636,7 @@ Progress:
 - CLI9 tool wrapper command module split is completed. Wrapper command parsing, wrapper input shaping, CLI policy selection, wrapper invocation, artifact rendering, and persisted wrapper result projections now live in `crates/capo-cli/src/tool_wrapper.rs`; routing and dashboard rendering remain in `main.rs`.
 - CLI10 adapter fixture replay module split is completed. Adapter fixture parsing, label normalization, generic fixture replay, dispatch fixture replay, replay event recording, and replay evidence chaining now live in `crates/capo-cli/src/adapter_replay.rs`; adapter smoke reports reuse the shared adapter label helper.
 - CLI11 adapter readiness/launch module split is completed. Adapter readiness status, launch-plan preview, dispatch-plan recording, prompt-source projection, local adapter validation, and launch/readiness rendering now live in `crates/capo-cli/src/adapter_launch.rs`; routing, replay, dashboard aggregation, and voice summaries remain in `main.rs`.
+- CLI12 workpad command module split is completed. Workpad indexing, next selection, plan-next composition, start-next dispatch, task import, proposal generation, apply guard, projection conversion, and proposal artifact safety now live in `crates/capo-cli/src/workpad.rs`; dashboard and voice rendering reuse exported workpad helpers from `main.rs`.
 
 Evidence:
 
@@ -654,6 +655,7 @@ Evidence:
 - `crates/capo-cli/src/runtime_target_evidence.rs`
 - `crates/capo-cli/src/tests.rs`
 - `crates/capo-cli/src/tool_wrapper.rs`
+- `crates/capo-cli/src/workpad.rs`
 - `cargo test -p capo-cli`
 - `cargo fmt --check`
 - `git diff --check`
