@@ -503,3 +503,28 @@ Decision:
 - Treat latest runtime target evidence as operator ergonomics over the shared runtime target selector. It selects the latest matching target, then writes the same Capo-owned runtime target evidence artifact as exact export.
 - Keep exact `--target` and latest `--latest` mutually exclusive; runner/status filters are only valid with `--latest`.
 - Keep the export read-model-derived and provider-free. It does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, prompt materialization, raw transcript retention, or target-state mutation.
+
+### RR21 - Runtime Target Control Readiness
+
+Status: completed
+
+Acceptance:
+
+- Add a shared query contract that combines one runtime target's placement status with its latest `control` connectivity exposure.
+- Expose a read-only operator command for checking whether a runtime target is ready for remote control.
+- Report target readiness, control exposure readiness, blockers, and next action.
+- Keep runtime target metadata and connectivity exposure rows separate; the readiness view may aggregate them but must not mutate either source model.
+- Do not launch runtimes, launch providers, inspect credentials, open tunnels, request approvals, activate grants, retain raw transcripts, or mutate state.
+
+Evidence:
+
+- `ProjectDashboard::runtime_target_control_readiness(...)` and `RuntimeTargetControlReadiness` in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo runtime target readiness --target TARGET_ID` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+
+Decision:
+
+- Treat control readiness as a read-model answer over existing projections: target status plus the latest runtime-target-owned `control` exposure.
+- A target is ready only when the target is `available` and the latest control exposure is `active` and reachable.
+- Keep readiness as operator guidance. It does not prove real tunnel reachability beyond the stored exposure health metadata, and it does not open tunnels, launch runtime processes, launch provider CLIs, inspect credentials, or mutate target/exposure state.

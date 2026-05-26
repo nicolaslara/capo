@@ -305,6 +305,81 @@ impl ProjectDashboard {
             })
     }
 
+    pub fn runtime_target_control_readiness(
+        &self,
+        runtime_target_id: &str,
+    ) -> Option<RuntimeTargetControlReadiness> {
+        let target = self.runtime_target_status(runtime_target_id)?;
+        let latest_control_exposure = self.latest_connectivity_exposure(
+            Some("runtime_target"),
+            Some(runtime_target_id),
+            Some("control"),
+        );
+        let exposure_ready = latest_control_exposure
+            .map(|exposure| exposure.status == "active" && exposure.reachable)
+            .unwrap_or(false);
+        let target_ready = target.status == "available";
+        let ready = target_ready && exposure_ready;
+        let mut blockers = Vec::new();
+        if !target_ready {
+            blockers.push(format!("runtime_target_status_{}", target.status));
+        }
+        match latest_control_exposure {
+            Some(exposure) if exposure.status != "active" => {
+                blockers.push(format!("control_exposure_status_{}", exposure.status));
+            }
+            Some(exposure) if !exposure.reachable => {
+                blockers.push("control_exposure_unreachable".to_string());
+            }
+            Some(_) => {}
+            None => blockers.push("control_exposure_missing".to_string()),
+        }
+        let next_action = if ready {
+            "use_runtime_target_for_remote_control"
+        } else if !target_ready {
+            "set_runtime_target_available"
+        } else if latest_control_exposure.is_none() {
+            "record_control_connectivity_exposure"
+        } else if latest_control_exposure
+            .map(|exposure| exposure.status == "blocked_pending_permission")
+            .unwrap_or(false)
+        {
+            "request_or_grant_control_exposure_permission"
+        } else {
+            "repair_or_replace_control_exposure"
+        };
+
+        Some(RuntimeTargetControlReadiness {
+            runtime_target_id: target.runtime_target_id.clone(),
+            runner_kind: target.runner_kind.clone(),
+            target_status: target.status.clone(),
+            target_ready,
+            control_exposure_ready: exposure_ready,
+            control_exposure_id: latest_control_exposure
+                .map(|exposure| exposure.exposure_id.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            control_exposure_status: latest_control_exposure
+                .map(|exposure| exposure.status.clone())
+                .unwrap_or_else(|| "missing".to_string()),
+            control_exposure_scope: latest_control_exposure
+                .map(|exposure| exposure.exposure.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            control_exposure_permission_scope: latest_control_exposure
+                .map(|exposure| exposure.permission_scope.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            control_exposure_reachable: latest_control_exposure
+                .map(|exposure| exposure.reachable)
+                .unwrap_or(false),
+            ready,
+            blockers: if blockers.is_empty() {
+                "none".to_string()
+            } else {
+                blockers.join(",")
+            },
+            next_action: next_action.to_string(),
+        })
+    }
+
     pub fn connectivity_exposure_status(
         &self,
         exposure_id: &str,
@@ -352,6 +427,23 @@ fn runtime_runner_kind_matches(stored: &str, requested: &str) -> bool {
 pub struct AgentDashboardRow {
     pub agent: AgentProjection,
     pub session: Option<SessionDashboardRow>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeTargetControlReadiness {
+    pub runtime_target_id: String,
+    pub runner_kind: String,
+    pub target_status: String,
+    pub target_ready: bool,
+    pub control_exposure_ready: bool,
+    pub control_exposure_id: String,
+    pub control_exposure_status: String,
+    pub control_exposure_scope: String,
+    pub control_exposure_permission_scope: String,
+    pub control_exposure_reachable: bool,
+    pub ready: bool,
+    pub blockers: String,
+    pub next_action: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1117,6 +1209,50 @@ mod tests {
                 .latest_runtime_target(Some("container"), Some("available"))
                 .is_none()
         );
+
+        let blocked_readiness = dashboard
+            .runtime_target_control_readiness("remote-target-1")
+            .expect("blocked runtime target control readiness");
+        assert!(!blocked_readiness.ready);
+        assert!(blocked_readiness.target_ready);
+        assert_eq!(blocked_readiness.control_exposure_status, "missing");
+        assert_eq!(blocked_readiness.blockers, "control_exposure_missing");
+        assert_eq!(
+            blocked_readiness.next_action,
+            "record_control_connectivity_exposure"
+        );
+        assert!(
+            dashboard
+                .runtime_target_control_readiness("missing-runtime-target")
+                .is_none()
+        );
+
+        append_connectivity_exposure_with_reachability(
+            &state,
+            &ProjectId::new("project-capo"),
+            "exposure-remote-control",
+            "runtime_target",
+            "remote-target-1",
+            "control",
+            "private",
+            "network:connect:private_tunnel",
+            "active",
+            true,
+        );
+        let dashboard = project_dashboard(
+            &state,
+            ProjectDashboardQuery::new(ProjectId::new("project-capo")),
+        )
+        .expect("updated dashboard");
+        let ready = dashboard
+            .runtime_target_control_readiness("remote-target-1")
+            .expect("ready runtime target control readiness");
+        assert!(ready.ready);
+        assert!(ready.control_exposure_ready);
+        assert_eq!(ready.control_exposure_id, "exposure-remote-control");
+        assert_eq!(ready.control_exposure_scope, "private");
+        assert_eq!(ready.blockers, "none");
+        assert_eq!(ready.next_action, "use_runtime_target_for_remote_control");
     }
 
     #[test]
@@ -2078,6 +2214,33 @@ mod tests {
         permission_scope: &str,
         status: &str,
     ) {
+        append_connectivity_exposure_with_reachability(
+            state,
+            project_id,
+            exposure_id,
+            owner_kind,
+            owner_id,
+            channel_kind,
+            exposure_scope,
+            permission_scope,
+            status,
+            false,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_connectivity_exposure_with_reachability(
+        state: &SqliteStateStore,
+        project_id: &ProjectId,
+        exposure_id: &str,
+        owner_kind: &str,
+        owner_id: &str,
+        channel_kind: &str,
+        exposure_scope: &str,
+        permission_scope: &str,
+        status: &str,
+        reachable: bool,
+    ) {
         state
             .append_event(
                 NewEvent {
@@ -2107,8 +2270,8 @@ mod tests {
                         permission_scope: permission_scope.to_string(),
                         status: status.to_string(),
                         capability_grant_id: None,
-                        health_status: "unknown".to_string(),
-                        reachable: false,
+                        health_status: if reachable { "healthy" } else { "unknown" }.to_string(),
+                        reachable,
                         revoked_at: None,
                         updated_sequence: 0,
                     },

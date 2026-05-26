@@ -1089,3 +1089,13 @@ Observed 2026-05-26.
 - Shared latest runtime target selector reused by evidence export: `../../crates/capo-query/src/lib.rs`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR20.
+
+## F7/RR21 Runtime Target Control Readiness
+
+Observed 2026-05-26.
+
+- Shared runtime target control readiness query contract and regression coverage: `../../crates/capo-query/src/lib.rs`
+- CLI `capo runtime target readiness` command, rendering, and transition regression coverage: `../../crates/capo-cli/src/main.rs`
+- Runtime target projections and connectivity exposure projections stored separately by state layer: `../../crates/capo-state/src/lib.rs`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR21.

@@ -17,7 +17,8 @@ use capo_core::{
 use capo_eval::TaskOutcomeReport;
 use capo_query::{
     AdapterDispatchStatus, AdapterDogfoodGate, ProjectDashboard, ProjectDashboardQuery,
-    ProjectDogfoodReadiness, project_dashboard, project_dogfood_readiness,
+    ProjectDogfoodReadiness, RuntimeTargetControlReadiness, project_dashboard,
+    project_dogfood_readiness,
 };
 use capo_runtime::{
     ChannelKind, ConnectivityEndpointConfig, ConnectivityTunnel, EndpointOwner, ExposureScope,
@@ -92,6 +93,7 @@ Usage:
   capo runtime target set-status --target TARGET_ID --status available|disabled|unhealthy [--state PATH]
   capo runtime target status --target TARGET_ID [--state PATH]
   capo runtime target status --latest [--runner local-process|remote-process|container] [--status available|disabled|unhealthy] [--state PATH]
+  capo runtime target readiness --target TARGET_ID [--state PATH]
   capo runtime target evidence --target TARGET_ID --out DIR [--state PATH]
   capo runtime target evidence --latest [--runner local-process|remote-process|container] [--status available|disabled|unhealthy] --out DIR [--state PATH]
   capo runtime target list [--state PATH]
@@ -253,6 +255,11 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             if area == "runtime" && command == "target" && action == "status" =>
         {
             runtime_target_status(&parsed, rest)
+        }
+        [area, command, action, rest @ ..]
+            if area == "runtime" && command == "target" && action == "readiness" =>
+        {
+            runtime_target_readiness(&parsed, rest)
         }
         [area, command, action, rest @ ..]
             if area == "runtime" && command == "target" && action == "evidence" =>
@@ -5305,6 +5312,40 @@ fn runtime_target_status(parsed: &ParsedArgs, args: &[String]) -> Result<String,
     Ok(output)
 }
 
+fn runtime_target_readiness(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--target"))
+    {
+        return Err(format!(
+            "unknown runtime target readiness option: {unknown}"
+        ));
+    }
+    let runtime_target_id = required_arg(args, "--target")?;
+    let project_id = project_id();
+    let command = envelope(
+        "runtime-target-readiness",
+        CommandTarget::Project(project_id.clone()),
+        CommandIntent::QueryStatus,
+        Some(runtime_target_id.clone()),
+    );
+    let state = state(parsed)?;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id)).map_err(debug_error)?;
+    let readiness = dashboard
+        .runtime_target_control_readiness(&runtime_target_id)
+        .ok_or_else(|| format!("missing runtime target: {runtime_target_id}"))?;
+    let mut output = format!(
+        "command_id={}\nruntime_target_control_readiness_found=true\n",
+        command.command_id
+    );
+    output.push_str(&render_runtime_target_control_readiness(&readiness));
+    output.push_str(
+        "provider_cli_executed=false tunnel_opened=false runtime_process_started=false state_mutated=false\n",
+    );
+    Ok(output)
+}
+
 fn runtime_target_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     if let Some(unknown) = args.iter().find(|arg| {
         arg.starts_with("--")
@@ -5529,6 +5570,25 @@ fn render_runtime_target_row(label: &str, target: &RuntimeTargetProjection) -> S
         target.connectivity_endpoint_id.as_deref().unwrap_or("none"),
         target.status,
         target.updated_sequence
+    )
+}
+
+fn render_runtime_target_control_readiness(readiness: &RuntimeTargetControlReadiness) -> String {
+    format!(
+        "runtime_target={} runner={} target_status={} target_ready={} control_exposure_ready={} control_exposure={} control_exposure_status={} control_exposure_scope={} control_exposure_permission_scope={} control_exposure_reachable={} ready={} blockers={} next_action={}\n",
+        readiness.runtime_target_id,
+        readiness.runner_kind,
+        readiness.target_status,
+        readiness.target_ready,
+        readiness.control_exposure_ready,
+        readiness.control_exposure_id,
+        readiness.control_exposure_status,
+        readiness.control_exposure_scope,
+        readiness.control_exposure_permission_scope,
+        readiness.control_exposure_reachable,
+        readiness.ready,
+        readiness.blockers,
+        readiness.next_action
     )
 }
 
@@ -11506,6 +11566,37 @@ mod tests {
         .unwrap_err();
         assert!(blocked.contains("missing allow grant for connectivity exposure"));
 
+        let readiness_before_grant = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "readiness".to_string(),
+            "--target".to_string(),
+            "remote-target-1".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("runtime target readiness before grant");
+        assert!(readiness_before_grant.contains("runtime_target_control_readiness_found=true"));
+        assert!(readiness_before_grant.contains("runtime_target=remote-target-1"));
+        assert!(readiness_before_grant.contains("target_ready=true"));
+        assert!(readiness_before_grant.contains("control_exposure_ready=false"));
+        assert!(
+            readiness_before_grant.contains("control_exposure_status=blocked_pending_permission")
+        );
+        assert!(readiness_before_grant.contains("ready=false"));
+        assert!(
+            readiness_before_grant
+                .contains("blockers=control_exposure_status_blocked_pending_permission")
+        );
+        assert!(
+            readiness_before_grant
+                .contains("next_action=request_or_grant_control_exposure_permission")
+        );
+        assert!(readiness_before_grant.contains("provider_cli_executed=false"));
+        assert!(readiness_before_grant.contains("tunnel_opened=false"));
+        assert!(readiness_before_grant.contains("runtime_process_started=false"));
+        assert!(readiness_before_grant.contains("state_mutated=false"));
+
         let approval = run_cli(vec![
             "connectivity".to_string(),
             "request-approval".to_string(),
@@ -11547,6 +11638,31 @@ mod tests {
         assert!(activated.contains("connectivity_exposure_activated=true"));
         assert!(activated.contains("status=active"));
         assert!(activated.contains("grant=grant-approval-"));
+
+        let readiness_after_grant = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "readiness".to_string(),
+            "--target".to_string(),
+            "remote-target-1".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("runtime target readiness after grant");
+        assert!(readiness_after_grant.contains("runtime_target_control_readiness_found=true"));
+        assert!(readiness_after_grant.contains("control_exposure_ready=true"));
+        assert!(readiness_after_grant.contains("control_exposure_status=active"));
+        assert!(readiness_after_grant.contains("control_exposure_scope=private"));
+        assert!(
+            readiness_after_grant
+                .contains("control_exposure_permission_scope=network:connect:private_tunnel")
+        );
+        assert!(readiness_after_grant.contains("control_exposure_reachable=true"));
+        assert!(readiness_after_grant.contains("ready=true"));
+        assert!(readiness_after_grant.contains("blockers=none"));
+        assert!(
+            readiness_after_grant.contains("next_action=use_runtime_target_for_remote_control")
+        );
 
         let dashboard = run_cli(vec![
             "dashboard".to_string(),
@@ -11639,6 +11755,22 @@ mod tests {
         assert!(revoked.contains("health=disabled"));
         assert!(revoked.contains("reachable=false"));
         assert!(revoked.contains("revoked_at=unix:"));
+
+        let readiness_after_revoke = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "readiness".to_string(),
+            "--target".to_string(),
+            "remote-target-1".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("runtime target readiness after revoke");
+        assert!(readiness_after_revoke.contains("control_exposure_status=revoked"));
+        assert!(readiness_after_revoke.contains("control_exposure_reachable=false"));
+        assert!(readiness_after_revoke.contains("ready=false"));
+        assert!(readiness_after_revoke.contains("blockers=control_exposure_status_revoked"));
+        assert!(readiness_after_revoke.contains("next_action=repair_or_replace_control_exposure"));
 
         let dashboard = run_cli(vec![
             "dashboard".to_string(),

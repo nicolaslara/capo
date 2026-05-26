@@ -2287,3 +2287,21 @@ Decisions:
 Verification:
 
 - `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+
+## F7/RR21 - Runtime Target Control Readiness
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `ProjectDashboard::runtime_target_control_readiness(...)` as the shared query contract for target control readiness.
+- Add `capo runtime target readiness --target TARGET_ID` as a read-only operator command.
+- Define readiness as target `available` plus latest runtime-target-owned `control` exposure `active` and reachable.
+- Report blockers and next actions from read models so operators can distinguish missing exposure, pending permission, revoked exposure, unhealthy target, and ready states.
+- Keep runtime target inventory and connectivity exposure rows separate. The readiness view aggregates them for operator ergonomics but does not mutate either source model.
+- Preserve the boundary split: the query does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, prompt materialization, raw transcript retention, or state mutation.
+
+Verification:
+
+- `cargo test -p capo-query runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
