@@ -742,3 +742,13 @@ Observed 2026-05-26.
 - Connectivity exposure source projections: `../../crates/capo-state/src/lib.rs`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR10.
+
+## F4/PT4 ACP Client Capability Gating
+
+Observed 2026-05-26.
+
+- ACP capability advertisement helper and regression coverage: `../../crates/capo-tools/src/lib.rs`
+- ACP capability design source: `../architecture/tool-exposure.md`
+- ACP provider/session setup design source: `../architecture/protocol-provider.md`
+- Permissions source workpad: `permissions-tools.md`
+- No new third-party dependencies were added for PT4.

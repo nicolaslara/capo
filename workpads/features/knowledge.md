@@ -1633,3 +1633,24 @@ Verification:
 Follow-up:
 
 - Future voice/web/mobile evidence export should use the same selector if those surfaces request reviewed connectivity artifacts.
+
+## F4/PT4 - ACP Client Capability Gating
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `AcpClientCapabilityPlan` in `capo-tools` as the executable gate for ACP filesystem and terminal client capability advertisement.
+- Require both a registered backing wrapper tool and an allowing `PermissionPolicy` decision before advertising `filesystem.read_text_file`, `filesystem.write_text_file`, or `terminal`.
+- Treat missing wrappers as fail-closed even when the selected profile is trusted-local.
+- Update static read-only/reviewer profiles to allow read-only wrapper invocation scopes for file read and git status/diff; continue denying file write and shell/terminal execution.
+- Keep the helper provider-free and setup-only: no ACP agent launch, provider CLI launch, runtime start, tunnel opening, or credential/session inspection.
+
+Verification:
+
+- `cargo test -p capo-tools acp_client_capabilities -- --nocapture`: passed.
+- `cargo test -p capo-tools static_read_only_policy_allows_read_tools_and_denies_writes -- --nocapture`: passed.
+
+Follow-up:
+
+- The ACP adapter/session setup path should consume this plan before advertising client capabilities.

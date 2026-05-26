@@ -133,3 +133,27 @@ Review:
 - Focused wrapper review found blockers in split authorization replay, `workpad_read` arbitrary file reads, unsanitized artifact path components, unredacted input artifacts, and misleading permission event status. All were fixed with regression tests.
 - Re-review found remaining blockers in same-tool authorization replay and unsanitized runtime run IDs. Both were fixed with regression tests.
 - Final re-review found one more Capo-owned registry replay issue: newline-concatenated context hashing was ambiguous. Context hashing now uses length-prefix encoding, with a regression test for ambiguous newline-bearing fields.
+
+### PT4 - ACP Client Capability Gating
+
+Status: completed
+
+Acceptance:
+
+- Add an executable policy helper that decides whether Capo may advertise ACP filesystem and terminal client capabilities.
+- Gate ACP filesystem read/write and terminal capability on both registered wrapper `ToolDefinition` rows and the selected permission policy.
+- Keep the helper provider-free: do not start ACP agents, provider CLIs, runtimes, tunnels, or read credential/session material.
+- Cover trusted-local, read-only, and missing-wrapper cases with tests.
+
+Evidence:
+
+- `AcpClientCapabilityPlan` and `AcpClientCapabilityDecision` in `../../crates/capo-tools/src/lib.rs`.
+- `cargo test -p capo-tools acp_client_capabilities -- --nocapture`: passed.
+- `cargo test -p capo-tools static_read_only_policy_allows_read_tools_and_denies_writes -- --nocapture`: passed.
+
+Decision:
+
+- Gate ACP `filesystem.read_text_file`, `filesystem.write_text_file`, and `terminal` advertisement through the Capo tool catalog plus `PermissionPolicy`.
+- Treat missing backing wrapper definitions as fail-closed, even for trusted-local policy.
+- Update static read-only/reviewer profiles to include read-only wrapper invocation scopes for `capo.file_read`, `capo.git_status`, and `capo.git_diff`; keep `capo.file_write` and `capo.shell_run` denied.
+- Keep the helper provider-free. It does not start ACP agents, provider CLIs, runtimes, tunnels, or inspect credential/session material.

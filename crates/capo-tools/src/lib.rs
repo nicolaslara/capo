@@ -295,6 +295,75 @@ pub struct ToolDefinition {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcpClientCapabilityPlan {
+    pub filesystem_read: AcpClientCapabilityDecision,
+    pub filesystem_write: AcpClientCapabilityDecision,
+    pub terminal: AcpClientCapabilityDecision,
+}
+
+impl AcpClientCapabilityPlan {
+    pub fn from_tool_definitions(
+        tool_definitions: &[ToolDefinition],
+        policy: &PermissionPolicy,
+        session_id: SessionId,
+    ) -> Self {
+        Self {
+            filesystem_read: acp_capability_decision(
+                tool_definitions,
+                policy,
+                &session_id,
+                "filesystem.read_text_file",
+                "capo.file_read",
+            ),
+            filesystem_write: acp_capability_decision(
+                tool_definitions,
+                policy,
+                &session_id,
+                "filesystem.write_text_file",
+                "capo.file_write",
+            ),
+            terminal: acp_capability_decision(
+                tool_definitions,
+                policy,
+                &session_id,
+                "terminal",
+                "capo.shell_run",
+            ),
+        }
+    }
+
+    pub fn from_runtime_wrappers(
+        wrappers: &RuntimeToolWrappers,
+        policy: &PermissionPolicy,
+        session_id: SessionId,
+    ) -> Self {
+        Self::from_tool_definitions(&wrappers.list_tools(), policy, session_id)
+    }
+
+    pub fn advertised_capabilities(&self) -> Vec<&str> {
+        [
+            &self.filesystem_read,
+            &self.filesystem_write,
+            &self.terminal,
+        ]
+        .into_iter()
+        .filter(|decision| decision.advertise)
+        .map(|decision| decision.acp_capability.as_str())
+        .collect()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcpClientCapabilityDecision {
+    pub acp_capability: String,
+    pub backing_tool_id: String,
+    pub advertise: bool,
+    pub reason: String,
+    pub required_scopes_json: Option<String>,
+    pub permission_effect: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapoToolContext {
     pub task_status: String,
     pub agent_status: String,
@@ -1032,6 +1101,9 @@ impl StaticPolicy {
                 "tool:invoke:capo.agent_status",
                 "tool:invoke:capo.session_summary",
                 "tool:invoke:capo.workpad_read",
+                "tool:invoke:capo.file_read",
+                "tool:invoke:capo.git_status",
+                "tool:invoke:capo.git_diff",
                 "state:read:task",
                 "state:read:agent",
                 "state:read:session",
@@ -1058,6 +1130,9 @@ impl StaticPolicy {
                 "tool:invoke:capo.agent_status",
                 "tool:invoke:capo.session_summary",
                 "tool:invoke:capo.workpad_read",
+                "tool:invoke:capo.file_read",
+                "tool:invoke:capo.git_status",
+                "tool:invoke:capo.git_diff",
                 "state:read:task",
                 "state:read:agent",
                 "state:read:session",
@@ -1158,6 +1233,46 @@ pub struct PermissionDecision {
     pub decision_source: String,
     pub persistence: String,
     pub explanation: String,
+}
+
+fn acp_capability_decision(
+    tool_definitions: &[ToolDefinition],
+    policy: &PermissionPolicy,
+    session_id: &SessionId,
+    acp_capability: &str,
+    backing_tool_id: &str,
+) -> AcpClientCapabilityDecision {
+    let Some(definition) = tool_definitions
+        .iter()
+        .find(|definition| definition.tool_id == backing_tool_id)
+    else {
+        return AcpClientCapabilityDecision {
+            acp_capability: acp_capability.to_string(),
+            backing_tool_id: backing_tool_id.to_string(),
+            advertise: false,
+            reason: "missing_backing_wrapper_tool".to_string(),
+            required_scopes_json: None,
+            permission_effect: None,
+        };
+    };
+    let permission = policy.decide(PermissionRequest {
+        session_id: session_id.clone(),
+        capability_profile_id: policy.default_profile_id().to_string(),
+        scope_json: definition.required_scopes_json.clone(),
+    });
+    let advertise = permission.effect == "allow";
+    AcpClientCapabilityDecision {
+        acp_capability: acp_capability.to_string(),
+        backing_tool_id: backing_tool_id.to_string(),
+        advertise,
+        reason: if advertise {
+            "backing_wrapper_tool_allowed".to_string()
+        } else {
+            format!("permission_policy_rejected:{}", permission.explanation)
+        },
+        required_scopes_json: Some(definition.required_scopes_json.clone()),
+        permission_effect: Some(permission.effect),
+    }
 }
 
 fn render_tool_output(tool_id: &str, context: &CapoToolContext) -> String {
@@ -1570,6 +1685,80 @@ mod tests {
                 .expect("file write tool")
                 .mutates_state
         );
+    }
+
+    #[test]
+    fn acp_client_capabilities_require_wrappers_and_policy_allow() {
+        let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+            PathBuf::from("/tmp/capo-workspace"),
+            PathBuf::from("/tmp/capo-artifacts"),
+        ));
+
+        let trusted = AcpClientCapabilityPlan::from_runtime_wrappers(
+            &wrappers,
+            &PermissionPolicy::allow_trusted_local(),
+            SessionId::new("session-acp-trusted"),
+        );
+        assert_eq!(
+            trusted.advertised_capabilities(),
+            vec![
+                "filesystem.read_text_file",
+                "filesystem.write_text_file",
+                "terminal"
+            ]
+        );
+        assert_eq!(
+            trusted.filesystem_read.reason,
+            "backing_wrapper_tool_allowed"
+        );
+        assert_eq!(trusted.terminal.permission_effect.as_deref(), Some("allow"));
+
+        let read_only = AcpClientCapabilityPlan::from_runtime_wrappers(
+            &wrappers,
+            &PermissionPolicy::static_read_only_local(),
+            SessionId::new("session-acp-read-only"),
+        );
+        assert!(read_only.filesystem_read.advertise);
+        assert!(!read_only.filesystem_write.advertise);
+        assert!(!read_only.terminal.advertise);
+        assert_eq!(
+            read_only.advertised_capabilities(),
+            vec!["filesystem.read_text_file"]
+        );
+        assert_eq!(
+            read_only.filesystem_write.permission_effect.as_deref(),
+            Some("deny")
+        );
+        assert!(
+            read_only
+                .terminal
+                .reason
+                .contains("permission_policy_rejected")
+        );
+    }
+
+    #[test]
+    fn acp_client_capabilities_fail_closed_without_backing_wrappers() {
+        let definitions = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+            PathBuf::from("/tmp/capo-workspace"),
+            PathBuf::from("/tmp/capo-artifacts"),
+        ))
+        .list_tools()
+        .into_iter()
+        .filter(|definition| definition.tool_id != "capo.shell_run")
+        .collect::<Vec<_>>();
+
+        let plan = AcpClientCapabilityPlan::from_tool_definitions(
+            &definitions,
+            &PermissionPolicy::allow_trusted_local(),
+            SessionId::new("session-acp-missing-wrapper"),
+        );
+
+        assert!(!plan.terminal.advertise);
+        assert_eq!(plan.terminal.reason, "missing_backing_wrapper_tool");
+        assert_eq!(plan.terminal.required_scopes_json, None);
+        assert_eq!(plan.terminal.permission_effect, None);
+        assert!(plan.filesystem_read.advertise);
     }
 
     #[test]
