@@ -581,6 +581,32 @@ Evidence:
 - `cargo test --workspace --all-targets`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 
+## F11 - Tools Maintainability
+
+Status: in_progress
+
+Source workpad: `permissions-tools.md` and cross-cutting tool wrapper implementation.
+
+Acceptance:
+
+- Reduce `capo-tools` file size where behavior-preserving splits are available.
+- Preserve tool registry, wrapper authorization, permission policies, and audit behavior.
+- Keep future tool-wrapper expansion easy to review by separating tests and then splitting production concerns.
+
+Progress:
+
+- T1 tools test module split is completed. Production tool registry, wrapper, and permission policy code remains in `crates/capo-tools/src/lib.rs`; tests now live in `crates/capo-tools/src/tests.rs` with the same private-module access pattern.
+
+Evidence:
+
+- `crates/capo-tools/src/lib.rs`
+- `crates/capo-tools/src/tests.rs`
+- `cargo test -p capo-tools`
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo test --workspace --all-targets`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+
 ## F9 - CLI Maintainability
 
 Status: in_progress

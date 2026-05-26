@@ -2602,6 +2602,24 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F11/T1 - Tools Test Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move the `capo-tools` test module from `lib.rs` into `tests.rs` using Rust's module-file convention.
+- Keep tests as a child module of `lib.rs`, not integration tests, so wrapper authorization and private helper behavior remain directly testable.
+- Defer production splitting until the wrapper, registry, and permission-policy boundaries can be separated without mixing behavior changes into this mechanical slice.
+
+Verification:
+
+- `cargo test -p capo-tools`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.

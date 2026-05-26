@@ -1308,3 +1308,12 @@ Observed 2026-05-26.
 - Query tests module: `../../crates/capo-query/src/tests.rs`
 - Resulting file sizes: `../../crates/capo-query/src/lib.rs` 880 lines; `../../crates/capo-query/src/tests.rs` 1,838 lines.
 - No new third-party dependencies were added for Q1.
+
+## F11/T1 Tools Test Module Split
+
+Observed 2026-05-26.
+
+- Tools production module: `../../crates/capo-tools/src/lib.rs`
+- Tools tests module: `../../crates/capo-tools/src/tests.rs`
+- Resulting file sizes: `../../crates/capo-tools/src/lib.rs` 1,642 lines; `../../crates/capo-tools/src/tests.rs` 896 lines.
+- No new third-party dependencies were added for T1.
