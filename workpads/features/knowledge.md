@@ -2271,3 +2271,19 @@ Verification:
 - `git diff --check`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - `cargo test`: passed.
+
+## F7/RR20 - Latest Runtime Target Evidence Export
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo runtime target evidence --latest [--runner ...] [--status ...] --out DIR` as a provider-free latest-selector evidence export.
+- Reuse `ProjectDashboard::latest_runtime_target(...)` so status, voice, and evidence surfaces resolve latest runtime targets consistently.
+- Reuse the existing Capo-marked runtime target evidence artifact and guarded writer instead of adding a second evidence format.
+- Keep exact target and latest selector modes mutually exclusive; runner/status filters are valid only with `--latest`.
+- Preserve the boundary split: the export records project evidence from read models and does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, prompt materialization, raw transcript retention, or target-state mutation.
+
+Verification:
+
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.

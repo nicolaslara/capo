@@ -1080,3 +1080,12 @@ Observed 2026-05-26.
 - Dogfood bridge source workpad: `dogfood-bridge.md`
 - Runtime target source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for DB9.
+
+## F7/RR20 Latest Runtime Target Evidence Export
+
+Observed 2026-05-26.
+
+- CLI latest runtime target evidence parser, renderer reuse, guarded evidence writer, project evidence record, and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared latest runtime target selector reused by evidence export: `../../crates/capo-query/src/lib.rs`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR20.

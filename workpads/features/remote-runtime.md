@@ -479,3 +479,27 @@ Decision:
 - Treat latest runtime target selection as query/read-model behavior. The selector uses the newest target projection sequence, with target ID as a deterministic tie breaker.
 - Keep exact `--target` lookup and latest `--latest` lookup mutually exclusive. Runner/status filters are only valid for latest lookup.
 - Keep the command read-only. It renders placement/status metadata and explicitly reports that provider CLIs, tunnels, runtime processes, and state mutation were not used.
+
+### RR20 - Latest Runtime Target Evidence Export
+
+Status: completed
+
+Acceptance:
+
+- Add a provider-free latest-selector path for runtime target evidence export.
+- Support the same optional runner/status filters as latest runtime target status.
+- Reuse the Capo-marked runtime target evidence artifact format and guarded writer.
+- Record exported markdown as project-level evidence for dashboard and dogfood-readiness inspection.
+- Do not launch runtimes, launch providers, inspect credentials, open tunnels, request approvals, activate grants, retain raw transcripts, or mutate runtime target state.
+
+Evidence:
+
+- CLI `capo runtime target evidence --latest [--runner local-process|remote-process|container] [--status available|disabled|unhealthy] --out DIR` in `../../crates/capo-cli/src/main.rs`.
+- Latest export reuses `ProjectDashboard::latest_runtime_target(...)` and the existing Capo-marked evidence renderer/writer.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+
+Decision:
+
+- Treat latest runtime target evidence as operator ergonomics over the shared runtime target selector. It selects the latest matching target, then writes the same Capo-owned runtime target evidence artifact as exact export.
+- Keep exact `--target` and latest `--latest` mutually exclusive; runner/status filters are only valid with `--latest`.
+- Keep the export read-model-derived and provider-free. It does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, prompt materialization, raw transcript retention, or target-state mutation.
