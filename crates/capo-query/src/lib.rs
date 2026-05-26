@@ -367,6 +367,10 @@ pub struct ProjectDogfoodReadiness {
     pub ready_dispatch_gate_count: usize,
     pub dispatch_replay_count: usize,
     pub dispatch_execution_count: usize,
+    pub connector_evidence_refs: Vec<String>,
+    pub workpad_task_refs: Vec<String>,
+    pub dispatch_chain_refs: Vec<String>,
+    pub project_evidence_refs: Vec<String>,
     pub blockers: Vec<String>,
     pub next_actions: Vec<String>,
 }
@@ -567,6 +571,38 @@ pub fn project_dogfood_readiness(dashboard: &ProjectDashboard) -> ProjectDogfood
         && (ready_dispatch_gate_count > 0
             || dispatch_replay_count > 0
             || dispatch_execution_count > 0);
+    let connector_evidence_refs = dashboard
+        .adapter_smoke_reports
+        .iter()
+        .map(|report| report.smoke_report_id.clone())
+        .collect::<Vec<_>>();
+    let workpad_task_refs = dashboard
+        .workpad_tasks
+        .iter()
+        .map(|task| task.workpad_task_id.clone())
+        .collect::<Vec<_>>();
+    let dispatch_chain_refs = dashboard
+        .adapter_dispatch_plans
+        .iter()
+        .map(|plan| plan.dispatch_plan_id.clone())
+        .chain(
+            dashboard
+                .adapter_dispatch_replays
+                .iter()
+                .map(|replay| replay.dispatch_replay_id.clone()),
+        )
+        .chain(
+            dashboard
+                .adapter_dispatch_executions
+                .iter()
+                .map(|execution| execution.dispatch_execution_id.clone()),
+        )
+        .collect::<Vec<_>>();
+    let project_evidence_refs = dashboard
+        .project_evidence
+        .iter()
+        .map(|evidence| evidence.evidence_id.to_string())
+        .collect::<Vec<_>>();
     let mut blockers = Vec::new();
     let mut next_actions = Vec::new();
     if !real_agent_connector_ready {
@@ -599,6 +635,10 @@ pub fn project_dogfood_readiness(dashboard: &ProjectDashboard) -> ProjectDogfood
         ready_dispatch_gate_count,
         dispatch_replay_count,
         dispatch_execution_count,
+        connector_evidence_refs,
+        workpad_task_refs,
+        dispatch_chain_refs,
+        project_evidence_refs,
         blockers,
         next_actions,
     }
@@ -1089,6 +1129,36 @@ mod tests {
         );
         append_adapter_dispatch_plan(&state, &project_id);
         append_adapter_dispatch_replay(&state, &project_id);
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-dogfood-readiness-evidence".to_string(),
+                    kind: EventKind::EvidenceRecorded,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some("evidence-dogfood-readiness".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::Evidence(EvidenceProjection {
+                    evidence_id: EvidenceId::new("evidence-dogfood-readiness"),
+                    project_id: project_id.clone(),
+                    task_id: None,
+                    session_id: None,
+                    run_id: None,
+                    kind: "dogfood_readiness".to_string(),
+                    artifact_id: Some("artifact-dogfood-readiness".to_string()),
+                    confidence: 90,
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append project evidence");
 
         let ready_dashboard =
             project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
@@ -1102,6 +1172,25 @@ mod tests {
         assert_eq!(ready.observed_workpad_task_count, 1);
         assert_eq!(ready.dispatch_plan_count, 1);
         assert_eq!(ready.dispatch_replay_count, 1);
+        assert_eq!(
+            ready.connector_evidence_refs,
+            vec!["adapter-smoke-codex-clean"]
+        );
+        assert_eq!(
+            ready.workpad_task_refs,
+            vec!["workpads:features:tasks.md#f1"]
+        );
+        assert_eq!(
+            ready.dispatch_chain_refs,
+            vec![
+                "adapter-dispatch-plan-codex",
+                "adapter-dispatch-replay-codex"
+            ]
+        );
+        assert_eq!(
+            ready.project_evidence_refs,
+            vec!["evidence-dogfood-readiness"]
+        );
         assert!(ready.blockers.is_empty());
         assert!(ready.next_actions.is_empty());
     }

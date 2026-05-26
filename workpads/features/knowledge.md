@@ -1881,3 +1881,20 @@ Decisions:
 Verification:
 
 - `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence -- --nocapture`: passed.
+
+## F2/DB8 - Dogfood Readiness Component Refs
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Extend `ProjectDogfoodReadiness` with component refs so the readiness answer points at persisted evidence instead of only counts and booleans.
+- Record four ref groups: connector smoke report IDs, workpad task IDs, dispatch chain IDs, and project evidence IDs.
+- Render refs in `capo dogfood readiness`, dogfood readiness evidence artifacts, and read-only voice readiness answers.
+- Keep refs metadata-only. Raw dispatch prompts, provider output, credential/session material, and source markdown bodies remain excluded.
+
+Verification:
+
+- `cargo test -p capo-query dogfood_readiness -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_dogfood_readiness -- --nocapture`: passed.

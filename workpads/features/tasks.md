@@ -152,6 +152,7 @@ Progress:
 - DB5 start-next dispatch is completed with explicit import plus fake-controller dispatch while preserving markdown.
 - DB6 dogfood readiness surface is completed with a shared query/CLI summary of connector, workpad, and dispatch-chain prerequisites.
 - DB7 dogfood readiness evidence export is completed with a Capo-marked markdown artifact and project-level evidence record.
+- DB8 dogfood readiness component refs is completed with connector, workpad, dispatch-chain, and project-evidence refs rendered through the shared readiness query.
 
 Evidence:
 
@@ -178,6 +179,8 @@ Evidence:
 - `cargo test -p capo-query dogfood_readiness -- --nocapture`
 - `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`
 - `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`
+- `cargo test -p capo-query dogfood_readiness -- --nocapture`
+- `cargo test -p capo-cli voice_dogfood_readiness -- --nocapture`
 
 ## F3 - Query Surface And Dashboard Upgrade
 

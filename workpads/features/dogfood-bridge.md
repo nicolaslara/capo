@@ -205,3 +205,26 @@ Decision:
 - Readiness evidence uses the marker `<!-- capo:dogfood-readiness -->` and an artifact ID based on the rendered content hash.
 - The report is project-level evidence. It records connector, workpad, and dispatch-chain readiness without pretending a provider CLI ran or a session produced the artifact.
 - The artifact explicitly states that it does not run provider CLIs, inspect credentials, materialize prompts, open tunnels, or edit markdown.
+
+### DB8 - Dogfood Readiness Component Refs
+
+Status: completed
+
+Acceptance:
+
+- Include component read-model refs in the shared dogfood readiness query.
+- Render connector evidence refs, workpad task refs, dispatch chain refs, and project evidence refs in CLI readiness output and readiness evidence artifacts.
+- Keep refs metadata-only and do not render raw prompts, provider output, credentials, or source markdown content.
+
+Evidence:
+
+- `ProjectDogfoodReadiness` component ref fields in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo dogfood readiness` and readiness evidence rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query dogfood_readiness -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_dogfood_readiness -- --nocapture`: passed.
+
+Decision:
+
+- Treat component refs as review breadcrumbs for the migration checkpoint. Operators can see which persisted rows support or block readiness without parsing raw events.
+- Use IDs only: smoke report IDs, workpad task IDs, dispatch plan/replay/execution IDs, and project evidence IDs. Raw prompts, provider fixture text, provider output, and markdown source bodies remain excluded.

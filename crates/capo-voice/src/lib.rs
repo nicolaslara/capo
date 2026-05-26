@@ -167,6 +167,7 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
                     "real_agent_connector_ready",
                     "workpad_bridge_ready",
                     "dispatch_chain_ready",
+                    "component_refs",
                     "blockers",
                     "next_actions",
                 ],

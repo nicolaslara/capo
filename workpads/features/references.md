@@ -879,3 +879,13 @@ Observed 2026-05-26.
 - Dashboard source workpad: `dashboard.md`
 - Tool observation architecture source: `../architecture/tool-exposure.md`
 - No new third-party dependencies were added for DS9.
+
+## F2/DB8 Dogfood Readiness Component Refs
+
+Observed 2026-05-26.
+
+- Shared readiness component refs: `../../crates/capo-query/src/lib.rs`
+- CLI and markdown readiness rendering: `../../crates/capo-cli/src/main.rs`
+- Voice readiness rendering of refs: `../../crates/capo-cli/src/main.rs`
+- Dogfood bridge source workpad: `dogfood-bridge.md`
+- No new third-party dependencies were added for DB8.
