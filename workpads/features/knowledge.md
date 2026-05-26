@@ -217,6 +217,25 @@ Follow-up:
 
 - Future richer dashboards can group project evidence by readiness checkpoint, migration gate, or review artifact without changing the state authority.
 
+## F3/DS6 - Dogfood Readiness Dashboard Summary
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `ProjectDashboard::dogfood_readiness()` so dashboard, voice, web, mobile, and CLI consumers can derive the same overall migration verdict from the shared dashboard model.
+- Render `project_dogfood_readiness`, status, component readiness booleans, blockers, and next actions in `capo dashboard`.
+- Keep `capo dogfood readiness` as the dedicated operator command for readiness/export workflows, while the dashboard shows the same decision alongside component rows.
+
+Verification:
+
+- `cargo test -p capo-query dogfood_readiness -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Follow-up:
+
+- When the dogfood gate finally clears, use the dashboard readiness row plus the project readiness artifact as the visible migration checkpoint.
+
 ## F1/AC1-AC2 - Local Connector Preflight
 
 Status: in progress on 2026-05-25.

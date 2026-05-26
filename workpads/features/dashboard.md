@@ -154,3 +154,26 @@ Decision:
 
 - Project evidence currently means evidence rows with `session_id IS NULL`. This avoids duplicating session evidence while making dogfood readiness and migration checkpoint reports visible from the shared operator dashboard.
 - Keep project evidence in `ProjectDashboard` rather than adding a CLI-only lookup so voice, web, mobile, and future TUI surfaces consume the same read contract.
+
+### DS6 - Dogfood Readiness Dashboard Summary
+
+Status: completed
+
+Acceptance:
+
+- Expose the overall dogfood readiness verdict from the shared dashboard query contract.
+- Render readiness status, component readiness booleans, blockers, and next actions in the CLI dashboard.
+- Reuse the same readiness rule as `capo dogfood readiness` instead of duplicating gate logic in CLI rendering.
+- Keep the dashboard read-only and derived from persisted projections.
+
+Evidence:
+
+- `ProjectDashboard::dogfood_readiness()` in `../../crates/capo-query/src/lib.rs`.
+- CLI dashboard readiness rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query dogfood_readiness -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Keep readiness computation in `capo-query` as a method over `ProjectDashboard`, with the existing `project_dogfood_readiness(...)` function still available for command-specific rendering.
+- The dashboard renders the project-level readiness verdict next to adapter, dispatch, workpad, and project-evidence rows so operators can see both component facts and the migration decision.

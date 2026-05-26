@@ -190,6 +190,7 @@ Progress:
 - DS3 workpad queue visibility is completed with shared query rows and CLI dashboard rendering.
 - DS4 workpad queue filters are completed with explicit `--workpad-path` and `--workpad-status` filters.
 - DS5 project evidence visibility is completed with shared query rows and CLI dashboard rendering for project-level evidence artifacts.
+- DS6 dogfood readiness dashboard summary is completed with shared query computation and CLI dashboard rendering of the overall readiness verdict.
 
 Evidence:
 
@@ -205,6 +206,7 @@ Evidence:
 - `cargo test -p capo-cli dashboard_rejects_malformed_filters -- --nocapture`
 - `cargo test -p capo-query project_dashboard_includes_project_level_evidence -- --nocapture`
 - `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`
+- `cargo test -p capo-query dogfood_readiness -- --nocapture`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`

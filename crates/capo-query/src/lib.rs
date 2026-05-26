@@ -42,6 +42,10 @@ impl ProjectDashboard {
             .filter(|agent| agent.session.is_some())
             .count()
     }
+
+    pub fn dogfood_readiness(&self) -> ProjectDogfoodReadiness {
+        project_dogfood_readiness(self)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -616,7 +620,7 @@ mod tests {
         let blocked_dashboard =
             project_dashboard(&state, ProjectDashboardQuery::new(project_id.clone()))
                 .expect("blocked dashboard");
-        let blocked = project_dogfood_readiness(&blocked_dashboard);
+        let blocked = blocked_dashboard.dogfood_readiness();
         assert!(!blocked.ready);
         assert_eq!(blocked.status, "blocked_pending_dogfood_prerequisites");
         assert_eq!(
@@ -650,7 +654,7 @@ mod tests {
 
         let ready_dashboard =
             project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
-        let ready = project_dogfood_readiness(&ready_dashboard);
+        let ready = ready_dashboard.dogfood_readiness();
         assert!(ready.ready);
         assert_eq!(ready.status, "ready_for_first_dogfood");
         assert!(ready.real_agent_connector_ready);

@@ -107,6 +107,15 @@ Observed 2026-05-26.
 - Dashboard source workpad: `dashboard.md`
 - No new third-party dependencies were added for DS5.
 
+## F3/DS6 Dogfood Readiness Dashboard Summary
+
+Observed 2026-05-26.
+
+- Shared dashboard readiness computation: `../../crates/capo-query/src/lib.rs`
+- CLI dashboard readiness rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Dashboard source workpad: `dashboard.md`
+- No new third-party dependencies were added for DS6.
+
 ## F1/AC1-AC2 Local Connector Preflight
 
 Observed 2026-05-25.

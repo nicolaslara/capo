@@ -2703,6 +2703,7 @@ fn dashboard_query(args: &[String]) -> Result<ProjectDashboardQuery, String> {
 }
 
 fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> String {
+    let dogfood_readiness = dashboard.dogfood_readiness();
     let mut output = format!(
         "command_id={}\nview=dashboard\nagents={}\n",
         command.command_id,
@@ -3000,6 +3001,16 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
     }
     output.push_str(&render_adapter_dogfood_gate(
         &dashboard.adapter_dogfood_gate,
+    ));
+    output.push_str(&format!(
+        "project_dogfood_readiness={} status={} real_agent_connector_ready={} workpad_bridge_ready={} dispatch_chain_ready={} blockers={} next_actions={}\n",
+        dogfood_readiness.ready,
+        dogfood_readiness.status,
+        dogfood_readiness.real_agent_connector_ready,
+        dogfood_readiness.workpad_bridge_ready,
+        dogfood_readiness.dispatch_chain_ready,
+        comma_or_none(&dogfood_readiness.blockers),
+        comma_or_none(&dogfood_readiness.next_actions)
     ));
     output.push_str(&format!(
         "workpad_tasks={}\n",
@@ -6902,6 +6913,12 @@ mod tests {
         assert!(dashboard_after_readiness.contains("project_evidence=1"));
         assert!(dashboard_after_readiness.contains("kind=dogfood_readiness"));
         assert!(dashboard_after_readiness.contains("artifact=artifact-dogfood-readiness-"));
+        assert!(dashboard_after_readiness.contains("project_dogfood_readiness=false"));
+        assert!(dashboard_after_readiness.contains("status=blocked_pending_dogfood_prerequisites"));
+        assert!(dashboard_after_readiness.contains("real_agent_connector_ready=true"));
+        assert!(dashboard_after_readiness.contains("workpad_bridge_ready=false"));
+        assert!(dashboard_after_readiness.contains("dispatch_chain_ready=true"));
+        assert!(dashboard_after_readiness.contains("blockers=workpad_index_missing"));
         assert_text_absent_in_tree(&state_root, "Do not render this dispatch prompt");
         assert_text_absent_in_tree(&state_root, "Codex fixture response.");
         assert_text_absent_in_tree(&state_root, "cargo test");
