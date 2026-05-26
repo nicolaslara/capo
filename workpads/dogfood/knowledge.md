@@ -61,3 +61,25 @@ Recommended first dogfood path:
 - D0 can now close using the checkpoint above.
 - D1 should import or otherwise bind the next Capo workpad task into Capo while preserving markdown fallback.
 - D2 should run the first Capo-managed project task. Start with the proven Codex dispatch path, keep explicit opt-in for real provider execution, and export reviewed evidence back to the markdown fallback.
+
+## D1 - Import Capo Workpads
+
+Status: completed on 2026-05-26.
+
+Decision:
+
+- Treat D1 as the non-destructive import/index gate, not source writeback. Capo can observe and bind project workpad refs, while markdown and git remain the source of truth.
+- Keep the indexed file set curated: top-level `TASKS.md`, top-level `project.md`, and selected Capo-owned workpad markdown. This avoids recursively ingesting scratch clones or unrelated references.
+- Preserve `content_hash`, objective text, source path, and source anchor in read models so later imports and proposal artifacts can detect drift before mutating or dispatching work.
+- Keep writeback disabled. Proposal artifacts and confirmed apply remain guarded; even confirmed apply reports `workpad_apply_supported=false` and `source_modified=false`.
+
+Evidence:
+
+- `capo-workpads::index_project_workpads` selects `TASKS.md`, `project.md`, and curated `workpads/` markdown.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed with top-level `TASKS.md`/`project.md` file assertions and a top-level `TASKS.md#f2` import using expected hash.
+- Live repo smoke with temporary state: `capo workpad index --root /Users/nicolas/devel/capo --state <tmp>` returned `files=44`, `tasks=211`.
+- Live repo smoke with temporary state: `capo workpad next --path workpads/dogfood/tasks.md --state <tmp>` selected `workpads:dogfood:tasks.md#d1`.
+
+Next:
+
+- D2 should create and track the first Capo-managed project task through Capo state while exporting enough markdown evidence for the fallback workflow.

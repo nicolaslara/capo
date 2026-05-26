@@ -9,8 +9,8 @@
 | **research** | Complete | Gate passed 2026-05-25 — ACP, prior art, stack, memory, subscription, tunnel, local-model, and voice research |
 | **architecture** | Complete | Gate passed 2026-05-25 — boundary definitions, data model, contracts, security model, and prototype plan |
 | **prototype** | Complete | Gate passed with constraints 2026-05-25 — local scaffold, fake-agent e2e, dashboard, voice contract, evidence export |
-| **features** | **Active** | Feature-specific workpads after architecture/prototype |
-| **dogfood** | Planned | Move Capo project execution into Capo |
+| **features** | Complete | Feature gate passed 2026-05-26 — real connectors, dogfood bridge, dashboard/query, permissions/tools, memory/eval, voice, remote runtime, and maintainability splits |
+| **dogfood** | **Active** | Move Capo project execution into Capo |
 
 ## research
 
@@ -138,6 +138,8 @@ workpads/architecture/knowledge.md
 
 ## features
 
+**Status:** Complete. Feature gate passed 2026-05-26.
+
 **Prerequisites:** Prototype gate passed with constraints on 2026-05-25.
 
 **Objective:** Split post-prototype product work into independently executable feature workpads with dependencies, evidence standards, and review gates.
@@ -179,7 +181,9 @@ workpads/prototype/knowledge.md
 
 ## dogfood
 
-**Prerequisites:** Prototype gate passed.
+**Status:** Active.
+
+**Prerequisites:** Prototype gate passed and feature gate passed.
 
 **Objective:** Move Capo's own project execution into Capo only after restart recovery, inspection, interruption, and markdown fallback are proven.
 

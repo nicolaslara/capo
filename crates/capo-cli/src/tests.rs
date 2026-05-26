@@ -1598,11 +1598,35 @@ fn workpad_index_imports_markdown_refs_without_modifying_sources() {
     let files = state.workpad_files(&project_id()).expect("workpad files");
     let tasks = state.workpad_tasks(&project_id()).expect("workpad tasks");
     assert_eq!(files.len(), 3);
-    assert!(files.iter().any(|file| file.path == "TASKS.md"));
+    let tasks_file = files
+        .iter()
+        .find(|file| file.path == "TASKS.md")
+        .expect("TASKS.md indexed");
+    assert_eq!(tasks_file.objective.as_deref(), Some("Route work."));
+    assert!(!tasks_file.content_hash.is_empty());
+    let project_file = files
+        .iter()
+        .find(|file| file.path == "project.md")
+        .expect("project.md indexed");
+    assert_eq!(project_file.objective.as_deref(), Some("Build Capo."));
+    assert!(!project_file.content_hash.is_empty());
     assert!(files.iter().any(|file| {
         file.path == "workpads/features/tasks.md"
             && file.objective.as_deref() == Some("Split work.")
     }));
+    assert_eq!(
+        tasks
+            .iter()
+            .find(|task| task.workpad_task_id == "TASKS.md#f2")
+            .map(|task| {
+                (
+                    task.path.as_str(),
+                    task.observed_status.as_str(),
+                    task.capo_execution_status.as_str(),
+                )
+            }),
+        Some(("TASKS.md", "pending", "observed_only"))
+    );
     assert_eq!(
         tasks
             .iter()
@@ -1655,6 +1679,37 @@ fn workpad_index_imports_markdown_refs_without_modifying_sources() {
     assert!(dashboard_by_workpad.contains("workpad_tasks=1"));
     assert!(dashboard_by_workpad.contains("workpad_task=workpads:features:tasks.md#f2"));
     assert!(!dashboard_by_workpad.contains("workpad_task=TASKS.md#f2"));
+    let tasks_source_hash = tasks_file.content_hash.clone();
+    let import_tasks_output = run_cli(vec![
+        "workpad".to_string(),
+        "import".to_string(),
+        "--workpad-task".to_string(),
+        "TASKS.md#f2".to_string(),
+        "--expected-hash".to_string(),
+        tasks_source_hash.clone(),
+        "--task".to_string(),
+        "task-dogfood-top-level-queue-f2".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("import top-level TASKS.md task");
+    assert!(import_tasks_output.contains("workpad_task_imported=true"));
+    assert!(import_tasks_output.contains("workpad_task_id=TASKS.md#f2"));
+    assert!(import_tasks_output.contains("source=TASKS.md#F2 - Workpad Dogfood Bridge"));
+    assert!(import_tasks_output.contains(&format!("source_hash={tasks_source_hash}")));
+    let imported_tasks_task = state
+        .task(&TaskId::new("task-dogfood-top-level-queue-f2"))
+        .expect("imported top-level task query")
+        .expect("imported top-level task");
+    assert!(
+        imported_tasks_task
+            .latest_summary
+            .as_deref()
+            .is_some_and(
+                |summary| summary.contains("source=TASKS.md#F2 - Workpad Dogfood Bridge")
+                    && summary.contains(&format!("hash={tasks_source_hash}"))
+            )
+    );
     let plan_next = run_cli(vec![
         "workpad".to_string(),
         "plan-next".to_string(),

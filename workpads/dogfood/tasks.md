@@ -27,7 +27,7 @@ Evidence:
 
 ## D1 - Import Capo Workpads
 
-Status: pending
+Status: completed
 
 Acceptance:
 
@@ -35,6 +35,12 @@ Acceptance:
 - No destructive writes without explicit confirmation.
 - Markdown remains the fallback source of truth.
 - Source anchors and file hashes are stored so re-import detects drift.
+
+Evidence:
+
+- `capo-workpads::index_project_workpads` selects `TASKS.md`, `project.md`, and the curated `workpads/` markdown set without writing source files.
+- `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed. The regression covers top-level `TASKS.md` and `project.md` file refs with objective/hash data, top-level `TASKS.md` task import, source-hash drift checks, guarded proposal/apply behavior, and unchanged source markdown.
+- Live repo smoke with temporary state: `capo workpad index --root /Users/nicolas/devel/capo --state <tmp>` returned `files=44`, `tasks=211`; `capo workpad next --path workpads/dogfood/tasks.md --state <tmp>` selected `workpads:dogfood:tasks.md#d1`.
 
 ## D2 - Run First Capo-Managed Task
 

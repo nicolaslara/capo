@@ -6,14 +6,14 @@ Read top to bottom. The **first unchecked** item is the active workpad unless No
 
 ## Active Now
 
-`features` -> turn prototype gate findings into real-agent connector, dogfood bridge, dashboard/query, permission/tool, memory/eval, voice, and remote-runtime feature slices.
+`dogfood` -> move Capo project execution into Capo while preserving markdown and git as the auditable fallback.
 
 ## Workpad Queue
 
 - [x] **research** - ACP, prior art, subscriptions, local models, memory systems, voice, tunnel/connectivity, and language stack (gate passed 2026-05-25)
 - [x] **architecture** - System boundaries, module contracts, data model, security model, and technical plan (gate passed 2026-05-25)
 - [x] **prototype** - Minimal e2e Capo that can spawn, track, and interact with at least one coding agent (gate passed with constraints 2026-05-25)
-- [ ] **features** - Product feature workpads derived from the architecture and prototype
+- [x] **features** - Product feature workpads derived from the architecture and prototype (feature gate passed 2026-05-26)
 - [ ] **dogfood** - Move Capo project execution into Capo itself once stable enough
 
 ## Notes
@@ -26,3 +26,4 @@ Read top to bottom. The **first unchecked** item is the active workpad unless No
 - Do not start dogfooding until the prototype can persist state, show active agent state, and recover from a restart without losing the task ledger.
 - Architecture gate passed 2026-05-25. Use `workpads/architecture/gate-review.md` and `workpads/architecture/prototype-plan.md` as prototype inputs.
 - Prototype gate passed with constraints 2026-05-25. The local scaffold is proven with fake agents; real Codex/Claude connector proof and workpad import/update safety remain feature/dogfood blockers.
+- Feature gate passed 2026-05-26. Real Codex connector proof, workpad indexing/import/proposals, dashboard/query, permissions/tools, memory/eval, voice, remote runtime, and maintainability splits are complete enough to start the dogfood workpad.
