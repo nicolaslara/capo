@@ -157,3 +157,25 @@ Decision:
 - Treat missing backing wrapper definitions as fail-closed, even for trusted-local policy.
 - Update static read-only/reviewer profiles to include read-only wrapper invocation scopes for `capo.file_read`, `capo.git_status`, and `capo.git_diff`; keep `capo.file_write` and `capo.shell_run` denied.
 - Keep the helper provider-free. It does not start ACP agents, provider CLIs, runtimes, tunnels, or inspect credential/session material.
+
+### PT5 - ACP Session Setup Capability Plan
+
+Status: completed
+
+Acceptance:
+
+- Add an ACP adapter setup plan that consumes the Capo tool capability gate before advertising filesystem or terminal client capabilities.
+- Keep setup planning separate from launching ACP agents, provider CLIs, runtimes, or tunnels.
+- Record setup safety metadata: protocol version, advertised capabilities, MCP server count, credential policy, runtime-started flag, and provider-executed flag.
+- Cover read-only and missing-wrapper cases with tests.
+
+Evidence:
+
+- `AcpAdapter::session_setup_plan(...)` and `AcpSessionSetupPlan` in `../../crates/capo-adapters/src/lib.rs`.
+- `cargo test -p capo-adapters acp_session_setup -- --nocapture`: passed.
+
+Decision:
+
+- Keep ACP as an adapter boundary: session setup consumes `capo-tools` capability decisions rather than duplicating permission logic in the adapter.
+- Advertise only capabilities approved by the executable tool plan. Read-only policy advertises `filesystem.read_text_file` only; missing backing wrappers fail closed.
+- Keep MCP server configs at `mcp_server_count=0` for this setup scaffold until a user-approved MCP config path exists.

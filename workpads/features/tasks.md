@@ -241,6 +241,7 @@ Progress:
 - PT2 user approval queue is completed with CLI request/list/decide commands and guarded durable grant/denial mapping.
 - PT3 wrapper expansion is completed with runtime/file/git/workpad wrappers and permission-bound artifact instrumentation.
 - PT4 ACP client capability gating is completed with advertisement decisions derived from registered wrapper tools and the selected permission policy.
+- PT5 ACP session setup capability plan is completed with adapter setup consuming the Capo tool capability gate before advertising filesystem or terminal capabilities.
 
 Evidence:
 
@@ -260,6 +261,7 @@ Evidence:
 - Focused PT2 permission reviews: concurrent decisions, durable `allow_always`, once-grant reuse, missing grant-created audit events, and state-layer JSON validation blockers found and fixed; re-review found no blockers
 - `cargo test -p capo-tools`
 - `cargo test -p capo-tools acp_client_capabilities -- --nocapture`
+- `cargo test -p capo-adapters acp_session_setup -- --nocapture`
 - Focused PT3 wrapper reviews: split authorization replay, arbitrary workpad reads, artifact path escaping, unredacted input artifacts, misleading permission status, same-tool replay, runtime run ID paths, and ambiguous context hashing blockers found and fixed
 
 ## F5 - Memory And Evaluation Reports

@@ -752,3 +752,13 @@ Observed 2026-05-26.
 - ACP provider/session setup design source: `../architecture/protocol-provider.md`
 - Permissions source workpad: `permissions-tools.md`
 - No new third-party dependencies were added for PT4.
+
+## F4/PT5 ACP Session Setup Capability Plan
+
+Observed 2026-05-26.
+
+- ACP adapter setup plan and regression coverage: `../../crates/capo-adapters/src/lib.rs`
+- Capability gate consumed by setup: `../../crates/capo-tools/src/lib.rs`
+- ACP session setup design source: `../architecture/protocol-provider.md`
+- Permissions source workpad: `permissions-tools.md`
+- No new third-party dependencies were added for PT5.

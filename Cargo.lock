@@ -20,6 +20,7 @@ version = "0.1.0"
 dependencies = [
  "capo-core",
  "capo-runtime",
+ "capo-tools",
  "serde",
  "serde_json",
 ]

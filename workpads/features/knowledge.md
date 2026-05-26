@@ -1654,3 +1654,23 @@ Verification:
 Follow-up:
 
 - The ACP adapter/session setup path should consume this plan before advertising client capabilities.
+
+## F4/PT5 - ACP Session Setup Capability Plan
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `AcpAdapter::session_setup_plan(...)` as the adapter-facing setup scaffold for ACP client capability advertisement.
+- Reuse `AcpClientCapabilityPlan` from `capo-tools`; the ACP adapter does not implement a parallel permission vocabulary.
+- Include setup safety metadata in `AcpSessionSetupPlan`: protocol version, advertised capability list, per-capability decisions, MCP server count, credential policy, runtime-started flag, and provider-executed flag.
+- Keep the setup plan provider-free and runtime-free. It does not launch ACP agents, provider CLIs, runtimes, or tunnels, and it does not inspect credential/session material.
+- Keep MCP at zero advertised configs until Capo has a user-approved MCP config path.
+
+Verification:
+
+- `cargo test -p capo-adapters acp_session_setup -- --nocapture`: passed.
+
+Follow-up:
+
+- When the real ACP stdio client is added, use `AcpSessionSetupPlan` to construct the JSON-RPC initialize/session setup payload.

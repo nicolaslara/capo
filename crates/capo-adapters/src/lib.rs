@@ -13,6 +13,9 @@ use capo_runtime::{
     LocalProcessConfig, LocalProcessOutcome, LocalProcessRequest, LocalProcessRunner,
     RedactionRule, RuntimeError,
 };
+use capo_tools::{
+    AcpClientCapabilityDecision, AcpClientCapabilityPlan, PermissionPolicy, ToolDefinition,
+};
 use serde_json::Value;
 
 /// Initial adapter variants named by the architecture.
@@ -723,6 +726,45 @@ impl AcpAdapter {
     pub fn parse_replay_jsonl(input: &str) -> AdapterParseResult<AdapterFixtureParse> {
         parse_jsonl(input, parse_acp_record)
     }
+
+    pub fn session_setup_plan(
+        tool_definitions: &[ToolDefinition],
+        policy: &PermissionPolicy,
+        session_id: SessionId,
+    ) -> AcpSessionSetupPlan {
+        let capability_plan =
+            AcpClientCapabilityPlan::from_tool_definitions(tool_definitions, policy, session_id);
+        AcpSessionSetupPlan {
+            protocol_version: 1,
+            client_kind: "capo".to_string(),
+            advertised_capabilities: capability_plan
+                .advertised_capabilities()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            filesystem_read: capability_plan.filesystem_read,
+            filesystem_write: capability_plan.filesystem_write,
+            terminal: capability_plan.terminal,
+            mcp_server_count: 0,
+            credential_policy: "not_inspected".to_string(),
+            runtime_started: false,
+            provider_cli_executed: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcpSessionSetupPlan {
+    pub protocol_version: i64,
+    pub client_kind: String,
+    pub advertised_capabilities: Vec<String>,
+    pub filesystem_read: AcpClientCapabilityDecision,
+    pub filesystem_write: AcpClientCapabilityDecision,
+    pub terminal: AcpClientCapabilityDecision,
+    pub mcp_server_count: usize,
+    pub credential_policy: String,
+    pub runtime_started: bool,
+    pub provider_cli_executed: bool,
 }
 
 fn parse_jsonl(
@@ -1209,6 +1251,62 @@ mod tests {
 
         assert_eq!(before, 2);
         assert_eq!(after, 1);
+    }
+
+    #[test]
+    fn acp_session_setup_uses_tool_capability_plan() {
+        let wrappers =
+            capo_tools::RuntimeToolWrappers::new(capo_tools::RuntimeToolConfig::local_workspace(
+                PathBuf::from("/tmp/capo-acp-workspace"),
+                PathBuf::from("/tmp/capo-acp-artifacts"),
+            ));
+
+        let setup = AcpAdapter::session_setup_plan(
+            &wrappers.list_tools(),
+            &capo_tools::PermissionPolicy::static_read_only_local(),
+            SessionId::new("session-acp-setup"),
+        );
+
+        assert_eq!(setup.protocol_version, 1);
+        assert_eq!(setup.client_kind, "capo");
+        assert_eq!(
+            setup.advertised_capabilities,
+            vec!["filesystem.read_text_file"]
+        );
+        assert!(setup.filesystem_read.advertise);
+        assert!(!setup.filesystem_write.advertise);
+        assert!(!setup.terminal.advertise);
+        assert_eq!(setup.credential_policy, "not_inspected");
+        assert_eq!(setup.mcp_server_count, 0);
+        assert!(!setup.runtime_started);
+        assert!(!setup.provider_cli_executed);
+    }
+
+    #[test]
+    fn acp_session_setup_fails_closed_when_backing_tool_missing() {
+        let definitions =
+            capo_tools::RuntimeToolWrappers::new(capo_tools::RuntimeToolConfig::local_workspace(
+                PathBuf::from("/tmp/capo-acp-workspace"),
+                PathBuf::from("/tmp/capo-acp-artifacts"),
+            ))
+            .list_tools()
+            .into_iter()
+            .filter(|definition| definition.tool_id != "capo.file_read")
+            .collect::<Vec<_>>();
+
+        let setup = AcpAdapter::session_setup_plan(
+            &definitions,
+            &capo_tools::PermissionPolicy::allow_trusted_local(),
+            SessionId::new("session-acp-missing-file-read"),
+        );
+
+        assert!(!setup.filesystem_read.advertise);
+        assert_eq!(setup.filesystem_read.reason, "missing_backing_wrapper_tool");
+        assert!(
+            !setup
+                .advertised_capabilities
+                .contains(&"filesystem.read_text_file".to_string())
+        );
     }
 
     #[test]
