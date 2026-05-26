@@ -3140,3 +3140,22 @@ Verification:
 - `git diff --check`: passed.
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+## F12/C2 - Controller Fake Session Orchestration Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move the fake session send-task path into `fake_session.rs` because it is one conceptual unit: start the fake runtime, open/send through the fake adapter, decide permissions, emit governed tool audit events, build memory packets, record artifacts, and append task/session/run/evidence projections.
+- Preserve the public `FakeBoundaryController::send_task`, `send_task_with_task_id`, and related behavior as inherent methods. CLI, voice, workpad start-next, and regression tests keep the same call surface while the crate root becomes easier to scan.
+- Keep denied permission handling with the fake session path for now. It emits the same task/session/run and denial projections as the allowed path, and splitting it away from the send-task flow would make the permission lifecycle harder to audit.
+- This is still behavior-preserving architecture work. `lib.rs` is now 756 lines, which is below the prior warning zone, but future slices can still split command wrappers, session control, shared helper functions, or public result types when a task touches those areas.
+
+Verification:
+
+- `cargo test -p capo-controller`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.

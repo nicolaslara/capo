@@ -1522,3 +1522,13 @@ Observed 2026-05-26.
 - Controller regression tests: `../../crates/capo-controller/src/tests.rs`
 - Resulting file sizes: `../../crates/capo-controller/src/lib.rs` 1,436 lines; `../../crates/capo-controller/src/adapter_replay.rs` 438 lines; `../../crates/capo-controller/src/local_dispatch.rs` 45 lines; `../../crates/capo-controller/src/tests.rs` 610 lines.
 - No new third-party dependencies were added for C1.
+
+## F12/C2 Controller Fake Session Orchestration Split
+
+Observed 2026-05-26.
+
+- Controller crate root after split: `../../crates/capo-controller/src/lib.rs`
+- Fake session orchestration module: `../../crates/capo-controller/src/fake_session.rs`
+- Existing focused modules retained: `../../crates/capo-controller/src/adapter_replay.rs`, `../../crates/capo-controller/src/local_dispatch.rs`, `../../crates/capo-controller/src/tests.rs`
+- Resulting file sizes: `../../crates/capo-controller/src/lib.rs` 756 lines; `../../crates/capo-controller/src/fake_session.rs` 684 lines; `../../crates/capo-controller/src/adapter_replay.rs` 438 lines; `../../crates/capo-controller/src/local_dispatch.rs` 45 lines; `../../crates/capo-controller/src/tests.rs` 610 lines.
+- No new third-party dependencies were added for C2.

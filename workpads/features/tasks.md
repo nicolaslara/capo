@@ -647,12 +647,14 @@ Acceptance:
 Progress:
 
 - C1 controller adapter replay, local dispatch, and test module split is completed. Adapter replay methods, replay projection mapping, and replay payload/id helpers now live in `crates/capo-controller/src/adapter_replay.rs`; local adapter dispatch planning lives in `crates/capo-controller/src/local_dispatch.rs`; controller tests now live in `crates/capo-controller/src/tests.rs`; crate-root public methods remain available on `FakeBoundaryController`.
-- `crates/capo-controller/src/lib.rs` is reduced to 1,436 lines, but remains above the desired LLM-friendly target. Future slices should split command handling, fake session orchestration, or permission/tool audit flow by responsibility.
+- C2 fake session orchestration split is completed. Fake runtime start, adapter turn, permission decision, governed tool audit lifecycle, memory packet creation, and evidence recording for `send_task*` now live in `crates/capo-controller/src/fake_session.rs`.
+- `crates/capo-controller/src/lib.rs` is reduced to 756 lines, which is within the near-term acceptable range but still above the ideal target. Future slices should split command handling, session control, shared helpers/types, or permission/tool audit details when those areas are next touched.
 
 Evidence:
 
 - `crates/capo-controller/src/lib.rs`
 - `crates/capo-controller/src/adapter_replay.rs`
+- `crates/capo-controller/src/fake_session.rs`
 - `crates/capo-controller/src/local_dispatch.rs`
 - `crates/capo-controller/src/tests.rs`
 - `cargo test -p capo-controller`
