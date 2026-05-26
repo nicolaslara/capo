@@ -1375,3 +1375,13 @@ Observed 2026-05-26.
 - CLI routing, dispatch replay, dashboard rendering, and voice summaries retained in: `../../crates/capo-cli/src/main.rs`
 - Resulting file sizes: `../../crates/capo-cli/src/main.rs` 5,085 lines; `../../crates/capo-cli/src/adapter_dispatch_prepare.rs` 552 lines; `../../crates/capo-cli/src/adapter_dispatch_run.rs` 384 lines; `../../crates/capo-cli/src/adapter_dispatch.rs` 542 lines.
 - No new third-party dependencies were added for CLI8.
+
+## F9/CLI9 Tool Wrapper Command Module Split
+
+Observed 2026-05-26.
+
+- Tool wrapper command module: `../../crates/capo-cli/src/tool_wrapper.rs`
+- Governed wrapper implementations remain in: `../../crates/capo-tools/src/runtime_wrappers.rs`
+- CLI routing and dashboard rendering retained in: `../../crates/capo-cli/src/main.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 4,772 lines; `../../crates/capo-cli/src/tool_wrapper.rs` 324 lines.
+- No new third-party dependencies were added for CLI9.

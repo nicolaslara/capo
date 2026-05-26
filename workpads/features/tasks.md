@@ -633,6 +633,7 @@ Progress:
 - CLI6 adapter dogfood gate module split is completed. Adapter dogfood gate status, gate evidence export, gate evidence rendering, confidence scoring, and guarded gate evidence writes now live in `crates/capo-cli/src/adapter_dogfood.rs`; dashboard rendering continues to reuse the exported gate renderer.
 - CLI7 adapter dispatch status/evidence module split is completed. Dispatch gate checks, latest/specific dispatch status, dispatch evidence export, gate projection, status rendering, evidence rendering, confidence scoring, and guarded dispatch evidence writes now live in `crates/capo-cli/src/adapter_dispatch.rs`; execution request, prompt materialization, preflight, local run, replay, dashboard, and voice summaries remain in `main.rs`.
 - CLI8 adapter dispatch preparation/local-run split is completed. Execution-request, prompt materialization, preflight checks, opt-in mapping, and prompt source validation now live in `crates/capo-cli/src/adapter_dispatch_prepare.rs`; local runtime execution, subscription-safe launch-plan construction, dispatch artifact scanning/deletion, and execution recording now live in `crates/capo-cli/src/adapter_dispatch_run.rs`; replay, dashboard, and voice summaries remain in `main.rs`.
+- CLI9 tool wrapper command module split is completed. Wrapper command parsing, wrapper input shaping, CLI policy selection, wrapper invocation, artifact rendering, and persisted wrapper result projections now live in `crates/capo-cli/src/tool_wrapper.rs`; routing and dashboard rendering remain in `main.rs`.
 
 Evidence:
 
@@ -648,6 +649,7 @@ Evidence:
 - `crates/capo-cli/src/runtime_target.rs`
 - `crates/capo-cli/src/runtime_target_evidence.rs`
 - `crates/capo-cli/src/tests.rs`
+- `crates/capo-cli/src/tool_wrapper.rs`
 - `cargo test -p capo-cli`
 - `cargo fmt --check`
 - `git diff --check`

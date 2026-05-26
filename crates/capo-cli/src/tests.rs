@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::*;
 use crate::adapter_dispatch_run::scan_dispatch_artifacts_or_delete;
 use capo_adapters::LocalAdapterSmokeError;
+use capo_core::RunId;
 use capo_state::ConnectivityExposureProjection;
 
 #[test]

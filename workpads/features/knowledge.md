@@ -2742,6 +2742,29 @@ Verification:
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - Focused read-only review subagent: no issues found; residual risk is that real provider CLI dispatch remains manually opt-in and not run by default gates.
 
+## F9/CLI9 - Tool Wrapper Command Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move the CLI-owned `tool run-wrapper` surface into `tool_wrapper.rs`: option validation, wrapper tool aliases, JSON input shaping, CLI policy selection, wrapper invocation, artifact rendering, and state projection recording.
+- Keep the lower-level wrapper implementations in `capo-tools`; this split only moves the CLI adapter surface that turns command-line input into governed wrapper requests.
+- Keep command routing and dashboard rendering in `main.rs`. The dashboard reads shared query state and should not own wrapper invocation behavior.
+- Preserve the `tool_origin=capo_wrapper` instrumentation and the `--record` gate for writing wrapper artifacts/events.
+- Add explicit test imports for `RunId` and dispatch artifact scan helpers now that tests no longer inherit those names through `main.rs` root imports.
+
+Verification:
+
+- `cargo check -p capo-cli`: passed.
+- `cargo test -p capo-cli tool_run_wrapper -- --nocapture`: passed.
+- `cargo test -p capo-tools -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- Focused read-only review subagent: no issues found; permission defaults, trusted-local requirement, `--record` behavior, artifact/event recording, and `tool_origin=capo_wrapper` were preserved.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.
