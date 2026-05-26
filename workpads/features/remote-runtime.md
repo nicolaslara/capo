@@ -12,7 +12,7 @@ Add remote execution and connectivity adapters without collapsing the separation
 
 ## Dependencies
 
-- Real local Codex/Claude semantics should be proven before remoteizing them.
+- Real local Codex semantics are proven for the first remote-runtime scaffold gate by `adapter-dispatch-execution-90ae27de1dd522ae-3390880dca5e76be`, which exited successfully, scanned clean, and ingested a real adapter stream into Capo state.
 - Public exposure requires explicit permission and audit events.
 
 ## Tasks
@@ -601,3 +601,27 @@ Decision:
 - Treat latest readiness evidence as operator ergonomics over the existing target selector and readiness contract. It does not introduce a second readiness artifact format.
 - Keep exact `--target` and latest `--latest` mutually exclusive; runner/status filters are only valid with `--latest`.
 - Keep the export read-model-derived and provider-free. It records a project evidence row, but does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, prompt materialization, raw transcript retention, or target/exposure state changes.
+
+### RR25 - Remote Runtime Scaffold Closure
+
+Status: completed
+
+Acceptance:
+
+- Close F7 only after the real local connector dependency is satisfied.
+- Keep the current remote runtime surface honest as loopback/stubbed metadata, not real SSH/Tailscale/cloud execution.
+- Record the next real remote-runtime step without weakening the runtime/connectivity/provider boundary separation.
+
+Evidence:
+
+- Real local connector dependency: `adapter-dispatch-execution-90ae27de1dd522ae-3390880dca5e76be` in ignored `.capo-dev` state recorded `status=exited`, `exit_code=0`, `credential_scan_status=clean`, and `adapter_stream_ingested=true`.
+- Runtime target inventory, connectivity exposure policy, approval/revocation, readiness, evidence, dashboard, and voice/query surfaces are implemented by RR1-RR24.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+- `cargo test -p capo-runtime remote_runtime -- --nocapture`: passed.
+- `cargo test -p capo-runtime tunnel -- --nocapture`: passed.
+
+Decision:
+
+- Treat F7 as complete for the scaffold: Capo has explicit remote-runtime and connectivity contracts, target inventory, permission gates, evidence surfaces, and read-only introspection without collapsing runtime ownership into tunnel mechanics.
+- Defer real SSH/Tailscale/cloud process execution to a future feature pass. That pass should add one concrete remote runner and one concrete tunnel adapter behind the existing `RuntimeRunner` and `ConnectivityTunnel` boundaries, with provider dispatch still flowing through adapter dispatch plans and runtime targets.

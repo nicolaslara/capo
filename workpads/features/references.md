@@ -1585,3 +1585,16 @@ Observed 2026-05-26.
 - Successful ignored-state Codex proof execution: `adapter-dispatch-execution-90ae27de1dd522ae-3390880dca5e76be`
 - Prompt-redacted dispatch evidence artifact: `.capo-dev/evidence/artifact-adapter-dispatch-evidence-90ae27de1dd522ae-46c4d8f77f57630e.md`
 - No new third-party dependencies were added for AC3b.
+
+## F7/RR25 Remote Runtime Scaffold Closure
+
+Observed 2026-05-26.
+
+- Remote runtime contract: `../../crates/capo-runtime/src/lib.rs`
+- Runtime target command surface: `../../crates/capo-cli/src/runtime_target.rs`
+- Runtime target evidence surface: `../../crates/capo-cli/src/runtime_target_evidence.rs`
+- Connectivity command surface: `../../crates/capo-cli/src/connectivity.rs`
+- Connectivity evidence surface: `../../crates/capo-cli/src/connectivity_evidence.rs`
+- Shared target/exposure readiness query: `../../crates/capo-query/src/lib.rs`
+- Real local connector dependency closure: `adapter-dispatch-execution-90ae27de1dd522ae-3390880dca5e76be`
+- No new third-party dependencies were added for RR25.

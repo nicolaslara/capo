@@ -35,14 +35,15 @@ Current checkpoint evidence:
 - Capo recorded a prompt-redacted Codex workpad dispatch plan: `adapter-dispatch-plan-codex_exec-2e26cf61ba2310e8-7463adb44145eaaf`.
 - Capo recorded a ready dispatch gate: `adapter-dispatch-gate-c1e061786ffdd9e6-e76900880ff59e82`.
 - Capo replayed the deterministic Codex fixture through the dispatch chain: `adapter-dispatch-replay-402f3ecd6c003a86`, with `provider_cli_executed=false`, `raw_content_policy=content_hashed_not_rendered`, `appended_events=6`, and `tool_events=2`.
+- Capo completed a bounded real Codex dispatch proof through the same dispatch chain: `adapter-dispatch-plan-codex_exec-b030193b63cd8c74-5600a749443fe93a` with execution `adapter-dispatch-execution-90ae27de1dd522ae-3390880dca5e76be`, `status=exited`, `exit_code=0`, `credential_scan_status=clean`, and `adapter_stream_ingested=true`.
 - `capo dogfood readiness` reports `ready=true`, `status=ready_for_first_dogfood`, all component booleans true, no blockers, and no next actions.
 - Project readiness evidence refs now include `evidence-artifact-dogfood-readiness-16a4b2dc9529b580` and `evidence-artifact-dogfood-readiness-38c286e1f2e30354`; these artifacts are local ignored runtime evidence, not committed source.
 - `capo dashboard` renders the runtime target, connector proof, workpad index rows, dispatch plan/gate/replay, observed-only adapter-native tool activity, and `project_dogfood_readiness=true`.
-- Provider-secret-shaped marker scans over local `.capo-dev` state/evidence returned no matches; raw `Codex fixture response` text was not retained in state/evidence.
+- Provider-secret-shaped marker scans over local `.capo-dev` state/evidence returned no matches; raw `Codex fixture response` text was not retained in state/evidence, and the real proof dispatch evidence is prompt-redacted.
 
 Risks before full migration:
 
-- The green checkpoint uses deterministic fixture replay, not a real provider execution for the selected AC3 task.
+- The green checkpoint now includes a real provider proof dispatch, but it still is not a full Capo-managed project task run.
 - Source markdown is still the human-authored task authority; Capo has indexed the queue but has not yet imported AC3 as the execution authority or edited source workpads.
 - The dashboard exposes enough text-state for first dogfood, but there is no richer web/mobile surface yet.
 - Runtime target readiness proves an available local placement record, not a live long-running Capo server or remote tunnel.
@@ -58,5 +59,5 @@ Rollback/fallback plan:
 Recommended first dogfood path:
 
 - D0 can now close using the checkpoint above.
-- D1 should import or otherwise bind `workpads:features:agent-connectors.md#ac3` into Capo while preserving markdown fallback.
-- D2 should run the first Capo-managed AC3 rehearsal. Start with fixture replay if reviewing the dispatch chain, or run real opt-in Codex only after confirming prompt/source and raw-output policy.
+- D1 should import or otherwise bind the next Capo workpad task into Capo while preserving markdown fallback.
+- D2 should run the first Capo-managed project task. Start with the proven Codex dispatch path, keep explicit opt-in for real provider execution, and export reviewed evidence back to the markdown fallback.

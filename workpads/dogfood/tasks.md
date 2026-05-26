@@ -23,7 +23,7 @@ Evidence:
 
 - `workpads/dogfood/knowledge.md` records the first dogfood readiness checkpoint, risks, rollback/fallback plan, and recommended first dogfood path.
 - `capo dogfood readiness`: `ready=true`, `status=ready_for_first_dogfood`, no blockers, no next actions.
-- First rehearsal should use the proven Codex connector path with deterministic fixture replay first, then real opt-in Codex only after prompt/source and raw-output policy review.
+- First rehearsal can use the proven Codex connector path. The dispatch chain has both deterministic fixture replay evidence and a bounded real Codex proof execution with clean artifact scanning.
 
 ## D1 - Import Capo Workpads
 

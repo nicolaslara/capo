@@ -3245,3 +3245,21 @@ Verification:
 - `cargo run -q -p capo-cli -- adapter smoke-report scan --artifact-root .capo-dev/adapter-proof/artifacts --state .capo-dev`: passed with `credential_scan_status=clean` after the redacted-line scanner hardening.
 - Provider-key-shaped marker scan over `.capo-dev`: no matches.
 - `cargo run -q -p capo-cli -- adapter dispatch-evidence --dispatch-plan adapter-dispatch-plan-codex_exec-b030193b63cd8c74-5600a749443fe93a --out .capo-dev/evidence --state .capo-dev`: exported prompt-redacted dispatch evidence.
+
+## F7/RR25 - Remote Runtime Scaffold Closure
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Close F7 now that F1 proved the local real-agent dependency with a successful Codex dispatch stream ingestion. The remote-runtime scaffold remains honest: it defines placement inventory, loopback remote process semantics, connectivity exposure metadata, permission gates, readiness, evidence, dashboard, and voice/query surfaces, but it does not claim real SSH/Tailscale/cloud execution yet.
+- Keep `RuntimeRunner` and `ConnectivityTunnel` as separate boundaries for the next remote pass. A concrete remote runner should own process lifecycle, while a concrete tunnel adapter should own reachability/exposure health and permission state.
+- Treat active control readiness as optional metadata until a real tunnel adapter exists. The current scaffold can report missing/blocked/active exposure rows, but it does not open tunnels or prove external reachability.
+
+Verification:
+
+- Real local dependency evidence: `adapter-dispatch-execution-90ae27de1dd522ae-3390880dca5e76be` recorded `status=exited`, `exit_code=0`, `credential_scan_status=clean`, and `adapter_stream_ingested=true` in ignored `.capo-dev` state.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+- `cargo test -p capo-runtime remote_runtime -- --nocapture`: passed.
+- `cargo test -p capo-runtime tunnel -- --nocapture`: passed.

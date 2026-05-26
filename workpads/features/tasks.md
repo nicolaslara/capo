@@ -457,7 +457,7 @@ Evidence:
 
 ## F7 - Remote Runtime And Tunnel
 
-Status: in_progress
+Status: completed
 
 Source workpad: `remote-runtime.md`
 
@@ -493,7 +493,7 @@ Progress:
 - RR22 runtime target control readiness evidence export is completed with a Capo-owned project evidence artifact for the aggregate target/control-exposure readiness state.
 - RR23 latest runtime target control readiness is completed with filtered latest-selector readiness through the shared runtime target query.
 - RR24 latest runtime target control readiness evidence export is completed with filtered latest-selector export through the shared runtime target query.
-- F7 remains `in_progress` until the real local-agent connector dependency is satisfied; remote execution semantics are still contract-level and loopback/stubbed.
+- F7 closure is completed after F1 real local Codex dispatch proof satisfied the local-agent dependency. Remote execution semantics remain contract-level and loopback/stubbed by design, with runtime target inventory, connectivity exposure policy, approval/revocation, readiness, evidence, dashboard, and voice/query surfaces in place before real SSH/Tailscale/cloud adapters.
 
 Evidence:
 
@@ -545,6 +545,7 @@ Evidence:
 - `git diff --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`
+- F1 real dispatch dependency closure: `adapter-dispatch-execution-90ae27de1dd522ae-3390880dca5e76be` recorded `status=exited`, `exit_code=0`, `credential_scan_status=clean`, and `adapter_stream_ingested=true` in ignored `.capo-dev` state.
 
 ## F8 - State Store Resilience
 
