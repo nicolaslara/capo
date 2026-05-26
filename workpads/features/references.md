@@ -1445,3 +1445,14 @@ Observed 2026-05-26.
 - CLI routing, session status rendering, dogfood readiness artifacts, permission commands, and shared helpers retained in: `../../crates/capo-cli/src/main.rs`
 - Resulting file sizes: `../../crates/capo-cli/src/main.rs` 1,181 lines; `../../crates/capo-cli/src/evidence.rs` 618 lines.
 - No new third-party dependencies were added for CLI15.
+
+## F9/CLI16 Permission Command Module Split
+
+Observed 2026-05-26.
+
+- Permission command/helper module: `../../crates/capo-cli/src/permission.rs`
+- Voice approval consumer: `../../crates/capo-cli/src/voice.rs`
+- Connectivity grant-matching consumer: `../../crates/capo-cli/src/connectivity.rs`
+- CLI routing and shared helpers retained in: `../../crates/capo-cli/src/main.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 843 lines; `../../crates/capo-cli/src/permission.rs` 354 lines.
+- No new third-party dependencies were added for CLI16.

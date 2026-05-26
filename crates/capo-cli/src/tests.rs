@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::*;
 use crate::adapter_dispatch_run::scan_dispatch_artifacts_or_delete;
 use capo_adapters::LocalAdapterSmokeError;
-use capo_core::{RunId, TaskId};
+use capo_core::{RunId, SessionId, TaskId, ToolCallId};
 use capo_state::{ConnectivityExposureProjection, WorkpadFileProjection, WorkpadTaskProjection};
 
 #[test]
@@ -2230,6 +2230,51 @@ fn permission_approval_queue_maps_decisions_to_scoped_grants() {
     ])
     .expect_err("broad remembered allow is rejected");
     assert!(broad_always.contains("allow_always is restricted"));
+
+    run_cli(vec![
+        "permission".to_string(),
+        "request".to_string(),
+        "--approval".to_string(),
+        "approval-read-always".to_string(),
+        "--scope-json".to_string(),
+        "[\"tool:invoke:capo.task_status\",\"state:read:session\"]".to_string(),
+        "--reason".to_string(),
+        "remember read-only Capo status access".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("request read allow-always approval");
+    let read_always = run_cli(vec![
+        "permission".to_string(),
+        "decide".to_string(),
+        "--approval".to_string(),
+        "approval-read-always".to_string(),
+        "--decision".to_string(),
+        "allow_always".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("read/status allow-always is accepted");
+    assert!(read_always.contains("permission_approval_decided=true"));
+    assert!(read_always.contains("effect=allow"));
+    assert!(read_always.contains("persistence=until_revoked"));
+    let read_always_grant_id = read_always
+        .lines()
+        .find_map(|line| line.strip_prefix("capability_grant_id="))
+        .expect("read allow-always grant id");
+    assert_ne!(read_always_grant_id, "none");
+    let read_always_grant = state
+        .capability_grants()
+        .expect("grant query")
+        .into_iter()
+        .find(|grant| grant.capability_grant_id == read_always_grant_id)
+        .expect("read allow-always grant");
+    assert_eq!(read_always_grant.effect, "allow");
+    assert_eq!(read_always_grant.persistence, "until_revoked");
+    assert_eq!(
+        read_always_grant.scope_json,
+        "[\"tool:invoke:capo.task_status\",\"state:read:session\"]"
+    );
 
     let bad_scope = run_cli(vec![
         "permission".to_string(),

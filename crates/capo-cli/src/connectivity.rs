@@ -10,7 +10,8 @@ use capo_state::{
 };
 
 use crate::cli_surface::{ParsedArgs, has_flag, optional_arg, required_arg};
-use crate::{debug_error, escape_json, project_id, scope_values, stable_cli_hash, state};
+use crate::permission::scope_values;
+use crate::{debug_error, escape_json, project_id, stable_cli_hash, state};
 
 pub(crate) fn expose_connectivity_stub(
     parsed: &ParsedArgs,

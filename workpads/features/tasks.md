@@ -640,6 +640,7 @@ Progress:
 - CLI13 dashboard module split is completed. Dashboard filter parsing, shared query execution, dashboard text rendering, latest smoke summaries, and cross-feature read-model display now live in `crates/capo-cli/src/dashboard.rs`; routing and voice summaries remain in `main.rs`.
 - CLI14 voice command/render split is completed. Voice transcript handling, visible approval, permission decisions, reviewed-summary memory ingestion, and controller mutations now live in `crates/capo-cli/src/voice.rs`; voice read-contract rendering and spoken status formatting live in `crates/capo-cli/src/voice_render.rs`.
 - CLI15 evidence/review module split is completed. Session evidence export, task-outcome report export, review finding recording, review outcome derivation, evidence/review markdown rendering, and guarded evidence/review artifact writes now live in `crates/capo-cli/src/evidence.rs`; session status rendering, dogfood readiness artifacts, permissions, and routing remain in `main.rs`.
+- CLI16 permission command module split is completed. Permission approval queue/list/decision commands, ACP-style decision mapping, durable-scope validation, approval subject shaping, and scope parsing now live in `crates/capo-cli/src/permission.rs`; voice approvals and connectivity grant matching import the shared permission helpers explicitly.
 
 Evidence:
 
@@ -656,6 +657,7 @@ Evidence:
 - `crates/capo-cli/src/connectivity_evidence.rs`
 - `crates/capo-cli/src/dashboard.rs`
 - `crates/capo-cli/src/evidence.rs`
+- `crates/capo-cli/src/permission.rs`
 - `crates/capo-cli/src/runtime_target.rs`
 - `crates/capo-cli/src/runtime_target_evidence.rs`
 - `crates/capo-cli/src/tests.rs`

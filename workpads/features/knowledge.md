@@ -2911,6 +2911,29 @@ Verification:
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - Focused read-only review subagent: no issues found; output strings, overwrite guards, idempotency keys, redaction states, and adapter replay evidence chaining were preserved.
 
+## F9/CLI16 - Permission Command Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move permission approval queue/list/decision commands into `permission.rs`.
+- Keep ACP-style decision mapping (`allow_once`, `allow_always`, `reject_once`, `reject_always`), durable `allow_always` scope validation, approval subject shaping, and JSON scope parsing together with the command surface.
+- Update voice approval handling to import `approval_decision_effect` and `approval_subject_json` from the permission module instead of depending on `main.rs`.
+- Update connectivity grant matching to import shared `scope_values` from the permission module.
+- Keep command routing in `main.rs`; the root no longer carries permission projection imports only for command implementation.
+- Add direct test imports for `SessionId` and `ToolCallId` so tests do not rely on root-module incidental imports.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-cli permission_approval_queue_maps_decisions_to_scoped_grants -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_confirmed_stop -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval_activates_only_with_matching_grant -- --nocapture`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- Focused read-only review subagent: no behavior regressions found; it identified missing positive coverage for restricted `allow_always`, which was fixed by extending the permission CLI regression test to accept durable Capo read/status scopes.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.

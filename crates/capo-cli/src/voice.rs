@@ -10,15 +10,13 @@ use capo_voice::{
 };
 
 use crate::cli_surface::{ParsedArgs, has_flag, optional_arg, required_arg};
+use crate::permission::{approval_decision_effect, approval_subject_json};
 use crate::voice_render::{
     render_voice_approval, render_voice_header, render_voice_memory_retention,
     render_voice_read_contract, voice_intent_label,
 };
 use crate::workpad::start_next_workpad_task;
-use crate::{
-    approval_decision_effect, approval_subject_json, controller, debug_error, escape_json,
-    project_id, stable_cli_hash, state,
-};
+use crate::{controller, debug_error, escape_json, project_id, stable_cli_hash, state};
 
 pub(crate) fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let transcript = required_arg(args, "--transcript")?;
