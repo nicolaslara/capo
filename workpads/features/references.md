@@ -655,6 +655,16 @@ Observed 2026-05-26.
 - Voice source workpad: `voice.md`
 - No new third-party dependencies were added for V8.
 
+## F6/V9 Dispatch Status Conversation
+
+Observed 2026-05-26.
+
+- Voice dispatch-status planning and unit coverage: `../../crates/capo-voice/src/lib.rs`
+- CLI voice dispatch-status rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared dispatch-status query consumed by voice: `../../crates/capo-query/src/lib.rs`
+- Voice source workpad: `voice.md`
+- No new third-party dependencies were added for V9.
+
 ## F3/DS7 Shared Next Workpad Selection
 
 Observed 2026-05-26.

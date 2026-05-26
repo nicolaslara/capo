@@ -185,3 +185,25 @@ Evidence:
 Decision:
 
 - Treat voice start-next as privileged because it mutates Capo task/session state. It requires `--confirm`, uses the same voice approval queue as stop/interrupt, and remains fake/local until real provider opt-in evidence exists.
+
+### V9 - Dispatch Status Conversation
+
+Status: completed
+
+Acceptance:
+
+- Recognize simple dispatch-chain status questions such as "What is dispatch status for DISPATCH_PLAN_ID?"
+- Answer from `ProjectDashboard::adapter_dispatch_status(...)` rather than duplicating plan/gate/replay/execution lookup in voice code.
+- Render plan metadata, dogfood gate status, latest gate/replay/execution status, provider execution flags, credential scan status, and next action.
+- Preserve raw transcript non-retention, avoid mutating state, and avoid provider CLI execution.
+
+Evidence:
+
+- `VoiceIntentKind::DispatchStatus` and `VoiceReadScope::ProjectDispatchStatus` in `../../crates/capo-voice/src/lib.rs`.
+- CLI voice dispatch-status rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-voice dispatch_status -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_dispatch_status -- --nocapture`: passed.
+
+Decision:
+
+- Keep dispatch-status voice handling read-only over `ProjectDashboard`. Voice can explain what Capo knows about a recorded dispatch chain, but it does not rerun gates, rematerialize prompts, launch providers, inspect credentials, edit workpads, or retain the raw transcript.

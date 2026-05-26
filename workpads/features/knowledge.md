@@ -297,6 +297,26 @@ Follow-up:
 
 - Future voice/web/mobile/TUI status surfaces should consume `AdapterDispatchStatus` instead of reimplementing dispatch-chain lookup.
 
+## F6/V9 - Dispatch Status Conversation
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add a read-only voice intent for dispatch-chain status questions keyed by dispatch plan ID.
+- Route the answer through `ProjectDashboard::adapter_dispatch_status(...)`, reusing the shared plan/gate/replay/execution summary contract from `capo-query`.
+- Render only status metadata: plan ID, adapter/provider metadata, dogfood gate, latest gate/replay/execution status, provider execution flags, credential scan status, and next action.
+- Preserve the voice and provider safety boundaries: no raw transcript retention, no mutation, no provider execution, no prompt materialization, no credential inspection, and no workpad edits.
+
+Verification:
+
+- `cargo test -p capo-voice dispatch_status -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_dispatch_status -- --nocapture`: passed.
+
+Follow-up:
+
+- Dogfood whether operators naturally refer to dispatch plan IDs directly or whether Capo needs a read-only voice helper for "latest dispatch for agent/task" once real dispatch traces exist.
+
 ## F1/AC1-AC2 - Local Connector Preflight
 
 Status: in progress on 2026-05-25.

@@ -3184,6 +3184,7 @@ fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> 
     let mut output = render_voice_header(&plan, plan.command.as_ref(), false, false);
     match plan.intent_kind {
         VoiceIntentKind::DashboardSummary
+        | VoiceIntentKind::DispatchStatus
         | VoiceIntentKind::DogfoodReadiness
         | VoiceIntentKind::NextWork
         | VoiceIntentKind::RecentWork
@@ -3568,6 +3569,7 @@ fn voice_session_id(
                 .map(|row| row.session.session_id.clone()))
         }
         VoiceReadScope::ProjectDashboard
+        | VoiceReadScope::ProjectDispatchStatus { .. }
         | VoiceReadScope::ProjectDogfoodReadiness
         | VoiceReadScope::ProjectNextWork
         | VoiceReadScope::ProjectRecentWork
@@ -3649,6 +3651,34 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
             ));
             for row in &dashboard.agents {
                 append_voice_agent_row(&mut output, row);
+            }
+        }
+        VoiceReadScope::ProjectDispatchStatus { dispatch_plan_id } => {
+            if let Some(status) = dashboard.adapter_dispatch_status(dispatch_plan_id) {
+                output.push_str(&format!(
+                    "spoken_dispatch_plan={} spoken_adapter={} spoken_agent={} spoken_plan_status={} spoken_provider_kind={} spoken_credential_scope={} spoken_provider_cli_executed={} spoken_dogfood_gate={} spoken_latest_gate_status={} spoken_latest_gate_provider_cli_execution_allowed={} spoken_latest_gate_reasons={} spoken_latest_dispatch_replay={} spoken_latest_replay_appended_events={} spoken_latest_execution_status={} spoken_latest_execution_provider_cli_executed={} spoken_latest_execution_credential_scan_status={} spoken_next_action={}\n",
+                    status.dispatch_plan_id,
+                    status.adapter_kind,
+                    status.agent_name,
+                    status.plan_status,
+                    status.provider_kind,
+                    status.credential_scope,
+                    status.provider_cli_executed,
+                    status.dogfood_gate_status,
+                    status.latest_gate_status,
+                    status.latest_gate_provider_cli_execution_allowed,
+                    status.latest_gate_reasons,
+                    status.latest_dispatch_replay_id,
+                    status.latest_replay_appended_events,
+                    status.latest_execution_status,
+                    status.latest_execution_provider_cli_executed,
+                    status.latest_execution_credential_scan_status,
+                    status.next_action
+                ));
+            } else {
+                output.push_str(&format!(
+                    "spoken_dispatch_plan_missing={dispatch_plan_id}\n"
+                ));
             }
         }
         VoiceReadScope::ProjectDogfoodReadiness => {
@@ -3807,6 +3837,7 @@ fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
     match intent {
         VoiceIntentKind::AgentStatus => "agent_status",
         VoiceIntentKind::DashboardSummary => "dashboard_summary",
+        VoiceIntentKind::DispatchStatus => "dispatch_status",
         VoiceIntentKind::DogfoodReadiness => "dogfood_readiness",
         VoiceIntentKind::NextWork => "next_work",
         VoiceIntentKind::RecentWork => "recent_work",
@@ -3822,6 +3853,7 @@ fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
 fn voice_scope_label(scope: &VoiceReadScope) -> &'static str {
     match scope {
         VoiceReadScope::ProjectDashboard => "project_dashboard",
+        VoiceReadScope::ProjectDispatchStatus { .. } => "project_dispatch_status",
         VoiceReadScope::ProjectDogfoodReadiness => "project_dogfood_readiness",
         VoiceReadScope::ProjectNextWork => "project_next_work",
         VoiceReadScope::ProjectRecentWork => "project_recent_work",
@@ -9337,6 +9369,69 @@ mod tests {
         assert!(output.contains("spoken_blockers=real_agent_connector_not_proven,workpad_index_missing,dispatch_chain_missing"));
         assert!(output.contains("spoken_next_actions=record_clean_codex_smoke_evidence,run_workpad_index,record_or_replay_workpad_dispatch_plan"));
         assert!(!output.contains("Are we ready to dogfood?"));
+        assert_eq!(
+            state.last_sequence().expect("after sequence"),
+            before_sequence
+        );
+    }
+
+    #[test]
+    fn voice_dispatch_status_reads_shared_query_without_mutating() {
+        let state_root = temp_root("cli-voice-dispatch-status");
+        let workspace = temp_root("cli-voice-dispatch-status-workspace");
+        let artifacts = temp_root("cli-voice-dispatch-status-artifacts");
+        run_cli(vec![
+            "adapter".to_string(),
+            "plan-launch".to_string(),
+            "--adapter".to_string(),
+            "codex".to_string(),
+            "--agent".to_string(),
+            "codex-worker".to_string(),
+            "--goal".to_string(),
+            "Do not render this voice dispatch prompt.".to_string(),
+            "--workspace".to_string(),
+            workspace.display().to_string(),
+            "--artifacts".to_string(),
+            artifacts.display().to_string(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record dispatch plan");
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        let dispatch_plan_id = state
+            .adapter_dispatch_plans(&project_id())
+            .expect("dispatch plans")[0]
+            .dispatch_plan_id
+            .clone();
+        let before_sequence = state.last_sequence().expect("before sequence");
+
+        let output = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            format!("What is dispatch status for {dispatch_plan_id}?"),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice dispatch status");
+
+        assert!(output.contains("voice_plan=dispatch_status"));
+        assert!(output.contains("mutation_applied=false"));
+        assert!(output.contains("raw_transcript_retained=false"));
+        assert!(output.contains("read_scope=project_dispatch_status"));
+        assert!(output.contains(&format!("spoken_dispatch_plan={dispatch_plan_id}")));
+        assert!(output.contains("spoken_adapter=codex_exec"));
+        assert!(output.contains("spoken_provider_kind=codex_subscription"));
+        assert!(output.contains("spoken_credential_scope=user_local_subscription"));
+        assert!(output.contains("spoken_provider_cli_executed=false"));
+        assert!(output.contains("spoken_dogfood_gate=blocked_pending_real_smoke"));
+        assert!(output.contains("spoken_latest_gate_status=missing"));
+        assert!(output.contains("spoken_latest_dispatch_replay=none"));
+        assert!(output.contains("spoken_latest_execution_status=missing"));
+        assert!(output.contains("spoken_next_action=record_clean_real_smoke_evidence"));
+        assert!(!output.contains("What is dispatch status"));
+        assert!(!output.contains("Do not render this voice dispatch prompt"));
         assert_eq!(
             state.last_sequence().expect("after sequence"),
             before_sequence

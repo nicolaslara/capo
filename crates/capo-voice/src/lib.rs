@@ -28,6 +28,7 @@ pub enum MemoryIngestionPolicy {
 pub enum VoiceIntentKind {
     AgentStatus,
     DashboardSummary,
+    DispatchStatus,
     DogfoodReadiness,
     NextWork,
     RecentWork,
@@ -68,6 +69,7 @@ pub struct VoiceReadContract {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VoiceReadScope {
     ProjectDashboard,
+    ProjectDispatchStatus { dispatch_plan_id: String },
     ProjectDogfoodReadiness,
     ProjectNextWork,
     ProjectRecentWork,
@@ -153,6 +155,44 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
             requires_visible_confirmation: false,
             assistant_reply_hint:
                 "Answer dogfood readiness from the shared project dashboard query.".to_string(),
+        };
+    }
+
+    if let Some(dispatch_plan_id) = dispatch_status_plan(&normalized) {
+        let mut command = voice_command(
+            "voice-dispatch-status",
+            &input,
+            CommandTarget::Project(input.project_id.clone()),
+            CommandIntent::QueryStatus,
+            None,
+        );
+        command
+            .structured_args
+            .push(("view".to_string(), "dispatch_status".to_string()));
+        command
+            .structured_args
+            .push(("dispatch_plan".to_string(), dispatch_plan_id.clone()));
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::DispatchStatus,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::ProjectDispatchStatus { dispatch_plan_id },
+                required_fields: vec![
+                    "dispatch_plan_id",
+                    "adapter_kind",
+                    "plan_status",
+                    "dogfood_gate_status",
+                    "latest_gate_status",
+                    "latest_replay_appended_events",
+                    "latest_execution_status",
+                    "provider_cli_executed",
+                    "next_action",
+                ],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: false,
+            assistant_reply_hint:
+                "Answer dispatch-chain status from the shared project dashboard query.".to_string(),
         };
     }
 
@@ -603,6 +643,17 @@ fn is_next_work_question(input: &str) -> bool {
     )
 }
 
+fn dispatch_status_plan(normalized: &str) -> Option<String> {
+    normalized
+        .strip_prefix("what is dispatch status for ")
+        .or_else(|| normalized.strip_prefix("what's dispatch status for "))
+        .or_else(|| normalized.strip_prefix("show dispatch status for "))
+        .or_else(|| normalized.strip_prefix("dispatch status for "))
+        .map(str::trim)
+        .filter(|plan| !plan.is_empty())
+        .map(ToString::to_string)
+}
+
 fn is_project_recent_work_question(input: &str) -> bool {
     matches!(
         input,
@@ -789,6 +840,46 @@ mod tests {
                 .find(|(key, _)| key == "view")
                 .map(|(_, value)| value.as_str()),
             Some("dogfood_readiness")
+        );
+    }
+
+    #[test]
+    fn dispatch_status_question_reads_dispatch_status_without_mutation() {
+        let plan = plan_dummy_transcript(input(
+            "What is dispatch status for adapter-dispatch-plan-codex?",
+        ));
+
+        assert_eq!(plan.intent_kind, VoiceIntentKind::DispatchStatus);
+        assert_eq!(
+            plan.read_contract.query_scope,
+            VoiceReadScope::ProjectDispatchStatus {
+                dispatch_plan_id: "adapter-dispatch-plan-codex".to_string()
+            }
+        );
+        assert!(plan.read_contract.required_fields.contains(&"next_action"));
+        assert!(!plan.requires_visible_confirmation);
+        assert!(!plan.transcript_policy.retain_raw_transcript);
+        let command = plan.command.expect("voice command");
+        assert_eq!(command.intent, CommandIntent::QueryStatus);
+        assert_eq!(
+            command.target,
+            CommandTarget::Project(ProjectId::new("project-capo"))
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "view")
+                .map(|(_, value)| value.as_str()),
+            Some("dispatch_status")
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "dispatch_plan")
+                .map(|(_, value)| value.as_str()),
+            Some("adapter-dispatch-plan-codex")
         );
     }
 
