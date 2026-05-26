@@ -44,13 +44,19 @@ Evidence:
 
 ## D2 - Run First Capo-Managed Task
 
-Status: pending
+Status: completed
 
 Acceptance:
 
 - A real Capo project task is created, assigned, tracked, and reviewed through Capo.
 - Evidence is recorded both in Capo state and markdown fallback.
 - If real provider execution is not used, label the run as a fixture or fake-agent rehearsal rather than full real-agent dogfood.
+
+Evidence:
+
+- First D2 pass is a labeled fake-agent dogfood rehearsal, not full real-agent dogfood.
+- Regression: `cargo test -p capo-cli dogfood_rehearsal_tracks_capo_managed_task_and_markdown_evidence -- --nocapture` passed. It indexes a project workpad, starts D2 through `capo workpad start-next`, stops the session, records a no-blockers review, exports session evidence, exports a task outcome report, checks dashboard visibility, and verifies source markdown is unchanged.
+- Live repo smoke with temporary Capo state selected `workpads:dogfood:tasks.md#d2`, created `task-workpad-workpads-dogfood-tasks-md-d2`, ran `session-dogfood-rehearsal`, recorded `review-finding-d8179ee3d36000bd`, exported `artifact-task-outcome-313ed4c2f4ccd1f6`, and rendered dashboard `review_findings=1` and `task_outcome_reports=1`.
 
 ## D3 - Dogfood Gate
 

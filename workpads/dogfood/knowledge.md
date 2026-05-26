@@ -83,3 +83,26 @@ Evidence:
 Next:
 
 - D2 should create and track the first Capo-managed project task through Capo state while exporting enough markdown evidence for the fallback workflow.
+
+## D2 - Run First Capo-Managed Task
+
+Status: completed on 2026-05-26.
+
+Decision:
+
+- Count the first D2 pass as a fake-agent dogfood rehearsal. It proves Capo can bind a real Capo project workpad task into Capo state, run the controller lifecycle, record review/evaluation artifacts, and preserve markdown fallback. It does not claim full real-agent dogfood.
+- Close the rehearsal by stopping the fake-agent session before task-outcome export. Outcome reports intentionally require completed, interrupted, or otherwise closed runs.
+- Keep source workpad markdown unchanged during the rehearsal. The fallback evidence is exported as Capo-owned markdown artifacts and summarized in committed workpad notes.
+
+Evidence:
+
+- Regression `dogfood_rehearsal_tracks_capo_managed_task_and_markdown_evidence` creates a project workpad D2 task, starts it through `capo workpad start-next`, stops the fake-agent session, records a no-blockers review, exports session evidence, exports a task outcome report, verifies dashboard visibility, and checks source markdown remains unchanged.
+- Live repo smoke with temporary state selected `workpads:dogfood:tasks.md#d2`, created task `task-workpad-workpads-dogfood-tasks-md-d2`, ran `session-dogfood-rehearsal`, stopped it, recorded review `review-finding-d8179ee3d36000bd`, exported `artifact-task-outcome-313ed4c2f4ccd1f6`, and dashboard rendered `review_findings=1` and `task_outcome_reports=1`.
+
+Risk:
+
+- The provider path was not used for this D2 pass. Real Codex dispatch is already proven separately, but this rehearsal only proves the Capo-managed project-task workflow with a fake agent.
+
+Next:
+
+- D3 should decide whether the current fake-agent rehearsal is enough to keep iterating inside Capo, and list any remaining manual workflow pieces before calling the dogfood gate complete.

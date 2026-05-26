@@ -2277,6 +2277,193 @@ fn workpad_index_imports_markdown_refs_without_modifying_sources() {
 }
 
 #[test]
+fn dogfood_rehearsal_tracks_capo_managed_task_and_markdown_evidence() {
+    let state_root = temp_root("dogfood-rehearsal-state");
+    let project_root = temp_root("dogfood-rehearsal-project");
+    let evidence_dir = temp_root("dogfood-rehearsal-evidence");
+    fs::create_dir_all(project_root.join("workpads/dogfood")).expect("dogfood dir");
+    fs::write(
+        project_root.join("TASKS.md"),
+        "# Project Task Queue\n\n## Objective\n\nRoute work.\n",
+    )
+    .expect("write tasks");
+    fs::write(
+        project_root.join("project.md"),
+        "# Capo\n\n## Objective\n\nBuild Capo.\n",
+    )
+    .expect("write project");
+    let dogfood_tasks = "\
+# Dogfood Tasks
+
+## Objective
+
+Move Capo project execution into Capo.
+
+## D0 - Dogfood Readiness Review
+
+Status: completed
+
+## D1 - Import Capo Workpads
+
+Status: completed
+
+## D2 - Run First Capo-Managed Task
+
+Status: pending
+";
+    fs::write(
+        project_root.join("workpads/dogfood/tasks.md"),
+        dogfood_tasks,
+    )
+    .expect("write dogfood tasks");
+
+    run_cli(vec![
+        "workpad".to_string(),
+        "index".to_string(),
+        "--root".to_string(),
+        project_root.display().to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("index dogfood workpads");
+    run_cli(vec![
+        "agent".to_string(),
+        "register".to_string(),
+        "--name".to_string(),
+        "dogfood-rehearsal".to_string(),
+        "--adapter".to_string(),
+        "fake".to_string(),
+        "--runtime".to_string(),
+        "fake".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("register dogfood rehearsal agent");
+
+    let started = run_cli(vec![
+        "workpad".to_string(),
+        "start-next".to_string(),
+        "--agent".to_string(),
+        "dogfood-rehearsal".to_string(),
+        "--path".to_string(),
+        "workpads/dogfood/tasks.md".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("start dogfood rehearsal");
+    assert!(started.contains("workpad_next_started=true"));
+    assert!(started.contains("workpad_task_id=workpads:dogfood:tasks.md#d2"));
+    assert!(started.contains("task_id=task-workpad-workpads-dogfood-tasks-md-d2"));
+    assert!(started.contains("capo_execution_status=active"));
+    let session_id = output_value(&started, "session_id");
+
+    let stopped = run_cli(vec![
+        "session".to_string(),
+        "stop".to_string(),
+        "--agent".to_string(),
+        "dogfood-rehearsal".to_string(),
+        "--reason".to_string(),
+        "close fake-agent dogfood rehearsal before outcome review".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("stop dogfood rehearsal");
+    assert!(stopped.contains("stop=true"));
+    assert!(stopped.contains("status=completed"));
+
+    let review = run_cli(vec![
+        "review".to_string(),
+        "record".to_string(),
+        "--session".to_string(),
+        session_id.clone(),
+        "--reviewer".to_string(),
+        "dogfood-rehearsal-review".to_string(),
+        "--kind".to_string(),
+        "no_blockers".to_string(),
+        "--summary".to_string(),
+        "No blockers in fake-agent dogfood rehearsal evidence; this is not full real-agent dogfood.".to_string(),
+        "--out".to_string(),
+        evidence_dir.display().to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("record dogfood rehearsal review");
+    assert!(review.contains("review_finding_recorded=true"));
+    let review_path = PathBuf::from(output_value(&review, "path"));
+    let review_markdown = fs::read_to_string(review_path).expect("read review artifact");
+    assert!(review_markdown.starts_with("<!-- capo:review-finding -->"));
+    assert!(review_markdown.contains("fake-agent dogfood rehearsal"));
+
+    let evidence = run_cli(vec![
+        "evidence".to_string(),
+        "export".to_string(),
+        "--session".to_string(),
+        session_id.clone(),
+        "--out".to_string(),
+        evidence_dir.display().to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("export dogfood rehearsal evidence");
+    assert!(evidence.contains("evidence_exported=true"));
+
+    let outcome = run_cli(vec![
+        "eval".to_string(),
+        "task-outcome".to_string(),
+        "--session".to_string(),
+        session_id.clone(),
+        "--out".to_string(),
+        evidence_dir.display().to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("export dogfood rehearsal outcome");
+    assert!(outcome.contains("task_outcome_report_exported=true"));
+    let outcome_path = PathBuf::from(output_value(&outcome, "path"));
+    let outcome_markdown = fs::read_to_string(outcome_path).expect("read outcome artifact");
+    assert!(outcome_markdown.starts_with("<!-- capo:task-outcome-report -->"));
+    assert!(outcome_markdown.contains("Review outcome: `reviewed_no_blockers`"));
+
+    let state = SqliteStateStore::open(&state_root).expect("state");
+    let imported_task = state
+        .task(&TaskId::new("task-workpad-workpads-dogfood-tasks-md-d2"))
+        .expect("dogfood task query")
+        .expect("dogfood task");
+    assert_eq!(imported_task.capo_execution_status, "completed");
+    assert!(imported_task.active_session_id.is_some());
+    let workpad_task = state
+        .workpad_task(&project_id(), "workpads:dogfood:tasks.md#d2")
+        .expect("dogfood workpad task query")
+        .expect("dogfood workpad task");
+    assert_eq!(workpad_task.capo_execution_status, "imported");
+    let findings = state
+        .review_findings_for_session(&SessionId::new(session_id.clone()))
+        .expect("review findings");
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].finding_kind, "no_blockers");
+    let reports = state
+        .task_outcome_reports_for_task(&TaskId::new("task-workpad-workpads-dogfood-tasks-md-d2"))
+        .expect("task outcome reports");
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].review_outcome, "reviewed_no_blockers");
+
+    let dashboard = run_cli(vec![
+        "dashboard".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("dashboard after dogfood rehearsal");
+    assert!(dashboard.contains("task_outcome_reports=1"));
+    assert!(dashboard.contains("review_findings=1"));
+    assert!(dashboard.contains("workpad_task=workpads:dogfood:tasks.md#d2"));
+    assert_eq!(
+        fs::read_to_string(project_root.join("workpads/dogfood/tasks.md"))
+            .expect("read source dogfood tasks"),
+        dogfood_tasks
+    );
+}
+
+#[test]
 fn permission_approval_queue_maps_decisions_to_scoped_grants() {
     let state_root = temp_root("permission-approval-state");
 
