@@ -1852,6 +1852,27 @@ Verification:
 - `cargo test -p capo-voice tool_activity -- --nocapture`: passed.
 - `cargo test -p capo-cli voice_recent_work -- --nocapture`: passed.
 
+## F6/V14 - Adapter Smoke Status Conversation
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add a voice intent for connector smoke-report status so Capo can answer whether Codex/Claude connector proof is recorded, blocked, or still missing.
+- Support exact smoke-report IDs and latest smoke-report selection, with optional adapter filtering for Codex or Claude.
+- Answer from shared `ProjectDashboard` selectors instead of adding voice-specific state reads.
+- Render connector readiness metadata and no-side-effect markers only. The voice answer does not render smoke stdout/stderr, raw prompts, provider output, tokens, cookies, or subscription session material.
+- Preserve the provider boundary: the voice query does not launch provider CLIs, materialize prompts, open tunnels, inspect credentials, request approvals, activate grants, retain raw transcripts, or mutate connector state.
+
+Verification:
+
+- `cargo test -p capo-voice adapter_smoke -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_adapter_smoke -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
 ## F3/DS8 - Shared Tool Activity Summary
 
 Status: completed on 2026-05-26.

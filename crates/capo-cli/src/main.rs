@@ -3707,7 +3707,8 @@ fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> 
 
     let mut output = render_voice_header(&plan, plan.command.as_ref(), false, false);
     match plan.intent_kind {
-        VoiceIntentKind::ConnectivityStatus
+        VoiceIntentKind::AdapterSmokeStatus
+        | VoiceIntentKind::ConnectivityStatus
         | VoiceIntentKind::DashboardSummary
         | VoiceIntentKind::DispatchStatus
         | VoiceIntentKind::DogfoodReadiness
@@ -4098,6 +4099,8 @@ fn voice_session_id(
         VoiceReadScope::ProjectDashboard
         | VoiceReadScope::ProjectLatestConnectivityExposure { .. }
         | VoiceReadScope::ProjectRuntimeTargetStatus { .. }
+        | VoiceReadScope::ProjectAdapterSmokeReportStatus { .. }
+        | VoiceReadScope::ProjectLatestAdapterSmokeReport { .. }
         | VoiceReadScope::ProjectDispatchStatus { .. }
         | VoiceReadScope::ProjectLatestDispatchStatus { .. }
         | VoiceReadScope::ProjectDogfoodReadiness
@@ -4203,6 +4206,24 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
                 ));
             } else {
                 output.push_str("spoken_latest_dispatch_missing=true\n");
+            }
+        }
+        VoiceReadScope::ProjectAdapterSmokeReportStatus { smoke_report_id } => {
+            if let Some(report) = dashboard.adapter_smoke_report_status(smoke_report_id) {
+                append_voice_adapter_smoke_report_status(&mut output, report);
+            } else {
+                output.push_str(&format!("spoken_smoke_report_missing={smoke_report_id}\n"));
+            }
+        }
+        VoiceReadScope::ProjectLatestAdapterSmokeReport { adapter_kind } => {
+            if let Some(report) = dashboard.latest_adapter_smoke_report(adapter_kind.as_deref()) {
+                append_voice_adapter_smoke_report_status(&mut output, report);
+            } else if let Some(adapter_kind) = adapter_kind {
+                output.push_str(&format!(
+                    "spoken_latest_smoke_report_missing_for_adapter={adapter_kind}\n"
+                ));
+            } else {
+                output.push_str("spoken_latest_smoke_report_missing=true\n");
             }
         }
         VoiceReadScope::ProjectLatestConnectivityExposure {
@@ -4394,6 +4415,23 @@ fn append_voice_dispatch_status(output: &mut String, status: &AdapterDispatchSta
     ));
 }
 
+fn append_voice_adapter_smoke_report_status(
+    output: &mut String,
+    report: &AdapterSmokeReportProjection,
+) {
+    output.push_str(&format!(
+        "spoken_smoke_report={} spoken_adapter={} spoken_smoke_status={} spoken_credential_scan_status={} spoken_marker_found={} spoken_dogfood_readiness_effect={} spoken_artifact_root={} spoken_reason={} spoken_provider_cli_executed=false spoken_credential_material_rendered=false spoken_state_mutated=false\n",
+        report.smoke_report_id,
+        report.adapter_kind,
+        report.smoke_status,
+        report.credential_scan_status,
+        report.marker_found,
+        report.dogfood_readiness_effect,
+        report.artifact_root.as_deref().unwrap_or("none"),
+        report.reason
+    ));
+}
+
 fn append_voice_connectivity_exposure_status(
     output: &mut String,
     exposure: &ConnectivityExposureProjection,
@@ -4548,6 +4586,7 @@ fn append_voice_agent_tool_activity(output: &mut String, row: &capo_query::Agent
 fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
     match intent {
         VoiceIntentKind::AgentStatus => "agent_status",
+        VoiceIntentKind::AdapterSmokeStatus => "adapter_smoke_status",
         VoiceIntentKind::ConnectivityStatus => "connectivity_status",
         VoiceIntentKind::DashboardSummary => "dashboard_summary",
         VoiceIntentKind::DispatchStatus => "dispatch_status",
@@ -4572,6 +4611,12 @@ fn voice_scope_label(scope: &VoiceReadScope) -> &'static str {
             "project_latest_connectivity_exposure"
         }
         VoiceReadScope::ProjectRuntimeTargetStatus { .. } => "project_runtime_target_status",
+        VoiceReadScope::ProjectAdapterSmokeReportStatus { .. } => {
+            "project_adapter_smoke_report_status"
+        }
+        VoiceReadScope::ProjectLatestAdapterSmokeReport { .. } => {
+            "project_latest_adapter_smoke_report"
+        }
         VoiceReadScope::ProjectDispatchStatus { .. } => "project_dispatch_status",
         VoiceReadScope::ProjectLatestDispatchStatus { .. } => "project_latest_dispatch_status",
         VoiceReadScope::ProjectDogfoodReadiness => "project_dogfood_readiness",
@@ -11856,6 +11901,81 @@ mod tests {
         assert!(latest_agent_output.contains(&format!("spoken_dispatch_plan={dispatch_plan_id}")));
         assert!(latest_agent_output.contains("spoken_agent=codex-worker"));
         assert!(!latest_agent_output.contains("What is the latest dispatch status"));
+        assert_eq!(
+            state.last_sequence().expect("after latest sequence"),
+            before_sequence
+        );
+    }
+
+    #[test]
+    fn voice_adapter_smoke_status_reads_shared_query_without_mutating() {
+        let state_root = temp_root("cli-voice-adapter-smoke-status");
+        let record = run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "record".to_string(),
+            "--adapter".to_string(),
+            "codex".to_string(),
+            "--status".to_string(),
+            "skipped".to_string(),
+            "--credential-scan".to_string(),
+            "not_run".to_string(),
+            "--reason".to_string(),
+            "voice status check no provider execution".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record smoke report");
+        let smoke_report_id = output_value(&record, "smoke_report_id");
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        let before_sequence = state.last_sequence().expect("before sequence");
+
+        let output = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            format!("What is smoke report status for {smoke_report_id}?"),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice smoke report status");
+
+        assert!(output.contains("voice_plan=adapter_smoke_status"));
+        assert!(output.contains("mutation_applied=false"));
+        assert!(output.contains("raw_transcript_retained=false"));
+        assert!(output.contains("read_scope=project_adapter_smoke_report_status"));
+        assert!(output.contains(&format!("spoken_smoke_report={smoke_report_id}")));
+        assert!(output.contains("spoken_adapter=codex_exec"));
+        assert!(output.contains("spoken_smoke_status=skipped"));
+        assert!(output.contains("spoken_credential_scan_status=not_run"));
+        assert!(output.contains("spoken_marker_found=false"));
+        assert!(
+            output.contains("spoken_dogfood_readiness_effect=real_subscription_smoke_not_recorded")
+        );
+        assert!(output.contains("spoken_provider_cli_executed=false"));
+        assert!(output.contains("spoken_credential_material_rendered=false"));
+        assert!(output.contains("spoken_state_mutated=false"));
+        assert!(!output.contains("What is smoke report status"));
+        assert_eq!(
+            state.last_sequence().expect("after sequence"),
+            before_sequence
+        );
+
+        let latest = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What is the latest smoke report status for Codex?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice latest smoke report status");
+
+        assert!(latest.contains("voice_plan=adapter_smoke_status"));
+        assert!(latest.contains("read_scope=project_latest_adapter_smoke_report"));
+        assert!(latest.contains(&format!("spoken_smoke_report={smoke_report_id}")));
+        assert!(latest.contains("spoken_adapter=codex_exec"));
+        assert!(!latest.contains("What is the latest smoke report status"));
         assert_eq!(
             state.last_sequence().expect("after latest sequence"),
             before_sequence

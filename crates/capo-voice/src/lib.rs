@@ -27,6 +27,7 @@ pub enum MemoryIngestionPolicy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VoiceIntentKind {
     AgentStatus,
+    AdapterSmokeStatus,
     ConnectivityStatus,
     DashboardSummary,
     DispatchStatus,
@@ -79,6 +80,12 @@ pub enum VoiceReadScope {
     },
     ProjectRuntimeTargetStatus {
         runtime_target_id: String,
+    },
+    ProjectAdapterSmokeReportStatus {
+        smoke_report_id: String,
+    },
+    ProjectLatestAdapterSmokeReport {
+        adapter_kind: Option<String>,
     },
     ProjectDispatchStatus {
         dispatch_plan_id: String,
@@ -218,6 +225,85 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
             requires_visible_confirmation: false,
             assistant_reply_hint:
                 "Answer dispatch-chain status from the shared project dashboard query.".to_string(),
+        };
+    }
+
+    if let Some(smoke_report_id) = adapter_smoke_report_status_plan(&normalized) {
+        let mut command = voice_command(
+            "voice-adapter-smoke-status",
+            &input,
+            CommandTarget::Project(input.project_id.clone()),
+            CommandIntent::QueryStatus,
+            None,
+        );
+        command
+            .structured_args
+            .push(("view".to_string(), "adapter_smoke_status".to_string()));
+        command
+            .structured_args
+            .push(("smoke_report".to_string(), smoke_report_id.clone()));
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::AdapterSmokeStatus,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::ProjectAdapterSmokeReportStatus { smoke_report_id },
+                required_fields: vec![
+                    "smoke_report_id",
+                    "adapter_kind",
+                    "smoke_status",
+                    "credential_scan_status",
+                    "marker_found",
+                    "dogfood_readiness_effect",
+                    "provider_cli_executed",
+                ],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: false,
+            assistant_reply_hint:
+                "Answer adapter smoke-report status from the shared project dashboard query."
+                    .to_string(),
+        };
+    }
+
+    if let Some(adapter_kind) = latest_adapter_smoke_report_filter(&normalized) {
+        let mut command = voice_command(
+            "voice-latest-adapter-smoke-status",
+            &input,
+            CommandTarget::Project(input.project_id.clone()),
+            CommandIntent::QueryStatus,
+            None,
+        );
+        command
+            .structured_args
+            .push(("view".to_string(), "adapter_smoke_status".to_string()));
+        command
+            .structured_args
+            .push(("smoke_selector".to_string(), "latest".to_string()));
+        if let Some(adapter_kind) = &adapter_kind {
+            command
+                .structured_args
+                .push(("adapter".to_string(), adapter_kind.clone()));
+        }
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::AdapterSmokeStatus,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::ProjectLatestAdapterSmokeReport { adapter_kind },
+                required_fields: vec![
+                    "smoke_report_id",
+                    "adapter_kind",
+                    "smoke_status",
+                    "credential_scan_status",
+                    "marker_found",
+                    "dogfood_readiness_effect",
+                    "provider_cli_executed",
+                ],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: false,
+            assistant_reply_hint:
+                "Answer latest adapter smoke-report status from the shared project dashboard query."
+                    .to_string(),
         };
     }
 
@@ -904,6 +990,65 @@ fn latest_dispatch_status_agent(normalized: &str) -> Option<Option<String>> {
         .map(Some)
 }
 
+fn adapter_smoke_report_status_plan(normalized: &str) -> Option<String> {
+    normalized
+        .strip_prefix("what is adapter smoke report status for ")
+        .or_else(|| normalized.strip_prefix("what's adapter smoke report status for "))
+        .or_else(|| normalized.strip_prefix("show adapter smoke report status for "))
+        .or_else(|| normalized.strip_prefix("adapter smoke report status for "))
+        .or_else(|| normalized.strip_prefix("what is smoke report status for "))
+        .or_else(|| normalized.strip_prefix("what's smoke report status for "))
+        .or_else(|| normalized.strip_prefix("show smoke report status for "))
+        .or_else(|| normalized.strip_prefix("smoke report status for "))
+        .map(str::trim)
+        .filter(|report| !report.is_empty())
+        .map(ToString::to_string)
+}
+
+fn latest_adapter_smoke_report_filter(normalized: &str) -> Option<Option<String>> {
+    if matches!(
+        normalized,
+        "what is latest adapter smoke report status"
+            | "what is the latest adapter smoke report status"
+            | "what's latest adapter smoke report status"
+            | "what's the latest adapter smoke report status"
+            | "show latest adapter smoke report status"
+            | "latest adapter smoke report status"
+            | "what is latest smoke report status"
+            | "what is the latest smoke report status"
+            | "what's latest smoke report status"
+            | "what's the latest smoke report status"
+            | "show latest smoke report status"
+            | "latest smoke report status"
+    ) {
+        return Some(None);
+    }
+
+    normalized
+        .strip_prefix("what is latest adapter smoke report status for ")
+        .or_else(|| normalized.strip_prefix("what is the latest adapter smoke report status for "))
+        .or_else(|| normalized.strip_prefix("what's latest adapter smoke report status for "))
+        .or_else(|| normalized.strip_prefix("what's the latest adapter smoke report status for "))
+        .or_else(|| normalized.strip_prefix("show latest adapter smoke report status for "))
+        .or_else(|| normalized.strip_prefix("latest adapter smoke report status for "))
+        .or_else(|| normalized.strip_prefix("what is latest smoke report status for "))
+        .or_else(|| normalized.strip_prefix("what is the latest smoke report status for "))
+        .or_else(|| normalized.strip_prefix("what's latest smoke report status for "))
+        .or_else(|| normalized.strip_prefix("what's the latest smoke report status for "))
+        .or_else(|| normalized.strip_prefix("show latest smoke report status for "))
+        .or_else(|| normalized.strip_prefix("latest smoke report status for "))
+        .and_then(adapter_kind_slug)
+        .map(Some)
+}
+
+fn adapter_kind_slug(value: &str) -> Option<String> {
+    match agent_slug(value).as_str() {
+        "codex" | "codex-exec" | "codex-exec-adapter" => Some("codex_exec".to_string()),
+        "claude" | "claude-code" | "claude-code-adapter" => Some("claude_code".to_string()),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ConnectivityExposureVoiceFilter {
     pub owner_kind: Option<String>,
@@ -1275,6 +1420,71 @@ mod tests {
                 .find(|(key, _)| key == "agent")
                 .map(|(_, value)| value.as_str()),
             Some("codex-worker")
+        );
+    }
+
+    #[test]
+    fn adapter_smoke_status_questions_read_smoke_reports_without_mutation() {
+        let plan = plan_dummy_transcript(input(
+            "What is smoke report status for adapter-smoke-codex?",
+        ));
+
+        assert_eq!(plan.intent_kind, VoiceIntentKind::AdapterSmokeStatus);
+        assert_eq!(
+            plan.read_contract.query_scope,
+            VoiceReadScope::ProjectAdapterSmokeReportStatus {
+                smoke_report_id: "adapter-smoke-codex".to_string()
+            }
+        );
+        assert!(
+            plan.read_contract
+                .required_fields
+                .contains(&"credential_scan_status")
+        );
+        assert!(!plan.requires_visible_confirmation);
+        assert!(!plan.transcript_policy.retain_raw_transcript);
+        let command = plan.command.expect("voice command");
+        assert_eq!(command.intent, CommandIntent::QueryStatus);
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "view")
+                .map(|(_, value)| value.as_str()),
+            Some("adapter_smoke_status")
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "smoke_report")
+                .map(|(_, value)| value.as_str()),
+            Some("adapter-smoke-codex")
+        );
+
+        let latest = plan_dummy_transcript(input("What is the latest smoke report status?"));
+        assert_eq!(latest.intent_kind, VoiceIntentKind::AdapterSmokeStatus);
+        assert_eq!(
+            latest.read_contract.query_scope,
+            VoiceReadScope::ProjectLatestAdapterSmokeReport { adapter_kind: None }
+        );
+        let command = latest.command.expect("voice command");
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "smoke_selector")
+                .map(|(_, value)| value.as_str()),
+            Some("latest")
+        );
+
+        let latest_codex =
+            plan_dummy_transcript(input("What is the latest smoke report status for Codex?"));
+        assert_eq!(
+            latest_codex.read_contract.query_scope,
+            VoiceReadScope::ProjectLatestAdapterSmokeReport {
+                adapter_kind: Some("codex_exec".to_string())
+            }
         );
     }
 

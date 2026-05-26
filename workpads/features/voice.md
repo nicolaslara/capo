@@ -301,3 +301,31 @@ Decision:
 - Keep explicit tool-activity questions separate from recent-work questions so operators can ask specifically what tools agents used without also getting full progress/status summaries.
 - Reuse `ProjectDashboard` session rows for both project and agent-scoped answers. Voice remains read-only and does not add a separate state lookup path.
 - Render governed `spoken_tool_call` rows separately from observed-only `spoken_tool_observation` rows.
+
+### V14 - Adapter Smoke Status Conversation
+
+Status: completed
+
+Acceptance:
+
+- Recognize simple exact smoke-report questions such as "What is smoke report status for ADAPTER_SMOKE_REPORT_ID?"
+- Recognize latest smoke-report questions, optionally scoped to Codex or Claude.
+- Answer from `ProjectDashboard::adapter_smoke_report_status(...)` and `ProjectDashboard::latest_adapter_smoke_report(...)` rather than duplicating connector-status lookup in voice code.
+- Render smoke status, credential scan status, marker flag, dogfood readiness effect, artifact-root reference, reason, and explicit no-side-effect markers.
+- Preserve raw transcript non-retention, avoid mutating state, and avoid launching providers, inspecting credentials, opening tunnels, approving grants, materializing prompts, or rendering smoke stdout/stderr.
+
+Evidence:
+
+- `VoiceIntentKind::AdapterSmokeStatus`, `VoiceReadScope::ProjectAdapterSmokeReportStatus`, and `VoiceReadScope::ProjectLatestAdapterSmokeReport` in `../../crates/capo-voice/src/lib.rs`.
+- CLI voice smoke-status rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-voice adapter_smoke -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_adapter_smoke -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Decision:
+
+- Keep connector smoke-status voice handling read-only over the shared dashboard query. Voice can answer what Capo knows about connector proof or blockers without running provider CLIs or asking the user to copy smoke-report IDs when the latest selector is enough.
+- Normalize voice adapter filters to stored adapter kinds: `codex_exec` and `claude_code`.
