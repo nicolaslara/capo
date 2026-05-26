@@ -1289,3 +1289,13 @@ Observed 2026-05-26.
 - Workflow guidance: `../../WORKING.md`
 - Working target: source modules should usually stay around 300-500 LOC when practical; 800-1,000+ LOC is a refactor-soon warning zone; 1,500+ LOC is reserved for generated, mechanical, fixture, or temporary test files.
 - Split rule: split by responsibility and edit surface, not arbitrary file length.
+
+## F9/CLI4 Connectivity Command Module Split
+
+Observed 2026-05-26.
+
+- Connectivity command module: `../../crates/capo-cli/src/connectivity.rs`
+- Connectivity evidence module: `../../crates/capo-cli/src/connectivity_evidence.rs`
+- CLI routing, dashboard rendering, and voice summaries retained in: `../../crates/capo-cli/src/main.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 7,033 lines; `../../crates/capo-cli/src/connectivity.rs` 701 lines; `../../crates/capo-cli/src/connectivity_evidence.rs` 217 lines; `../../crates/capo-cli/src/runtime_target.rs` 407 lines; `../../crates/capo-cli/src/runtime_target_evidence.rs` 422 lines; `../../crates/capo-cli/src/cli_surface.rs` 122 lines; `../../crates/capo-cli/src/tests.rs` 5,405 lines.
+- No new third-party dependencies were added for CLI4.

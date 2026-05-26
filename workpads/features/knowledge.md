@@ -2565,6 +2565,25 @@ Decisions:
 - Keep active workpads short and cockpit-like. Move accumulated background, canonical decisions, invariants, and open questions into layered linked docs when markdown grows past comfortable working size.
 - Test files may be larger than source modules, but split them by scenario or command family when they stop being locally navigable.
 
+## F9/CLI4 - Connectivity Command Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move connectivity exposure command handling into `connectivity.rs`: exposure planning, runtime-target owner validation, approval request, activation, revocation, status queries, grant matching, subject/scope helpers, and channel/exposure parsing.
+- Move connectivity exposure evidence export into `connectivity_evidence.rs`: latest/exact evidence selection, artifact/evidence persistence, markdown rendering, and guarded Capo-owned evidence writes.
+- Keep dashboard and voice connectivity rendering in `main.rs` for this slice because those functions belong to broader dashboard/voice command surfaces and already format multiple feature families.
+- Reuse the existing shared `scope_values` helper from `main.rs` rather than introducing a second parser in the connectivity module.
+
+Verification:
+
+- `cargo test -p capo-cli connectivity_exposure -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.
