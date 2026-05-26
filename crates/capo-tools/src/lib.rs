@@ -30,6 +30,7 @@ pub const CAPO_WRAPPER_TOOLS: &[&str] = &[
     "capo.shell_run",
     "capo.git_status",
     "capo.git_diff",
+    "capo.git_commit",
     "capo.file_read",
     "capo.file_write",
     "capo.workpad_read",
@@ -474,6 +475,13 @@ impl RuntimeToolWrappers {
                 vec!["tool:invoke:capo.git_diff", "git:diff:workspace"],
                 "{\"input\":{\"path\":\"string?\"}}",
             ),
+            "capo.git_commit" => (
+                "Git Commit",
+                true,
+                "high",
+                vec!["tool:invoke:capo.git_commit", "git:commit:workspace"],
+                "{\"input\":{\"message\":\"string\"}}",
+            ),
             "capo.file_read" => (
                 "File Read",
                 false,
@@ -642,6 +650,7 @@ impl RuntimeToolWrappers {
             "capo.shell_run" => self.shell_run(request),
             "capo.git_status" => self.git_command(request, "status", &["status", "--short"]),
             "capo.git_diff" => self.git_command(request, "diff", &["diff", "--"]),
+            "capo.git_commit" => self.git_commit(request),
             "capo.file_read" => self.file_read(request, "file_read"),
             "capo.file_write" => self.file_write(request),
             "capo.workpad_read" => self.workpad_read(request),
@@ -720,6 +729,48 @@ impl RuntimeToolWrappers {
             output_artifacts: vec![
                 wrapper_artifact("git_stdout", outcome.stdout),
                 wrapper_artifact("git_stderr", outcome.stderr),
+            ],
+        })
+    }
+
+    fn git_commit(&self, request: &WrapperToolRequest) -> Result<WrapperExecution, String> {
+        let message = required_input(request, "message")?;
+        if message.trim().is_empty() {
+            return Err("git_commit requires a non-empty message".to_string());
+        }
+        if message.chars().any(char::is_control) {
+            return Err("git_commit message must not contain control characters".to_string());
+        }
+        let outcome = self
+            .runtime_runner()
+            .start_process(LocalProcessRequest {
+                run_id: sanitized_run_id(&request.run_id),
+                program: "git".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    "user.name=Capo Wrapper".to_string(),
+                    "-c".to_string(),
+                    "user.email=capo@example.invalid".to_string(),
+                    "commit".to_string(),
+                    "-m".to_string(),
+                    message,
+                ],
+                cwd: self.config.workspace_root.clone(),
+                env: HashMap::new(),
+            })
+            .map_err(runtime_error)?;
+        Ok(WrapperExecution {
+            status: outcome.process.status,
+            summary: format!(
+                "git commit completed with {}",
+                outcome
+                    .exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "signal".to_string())
+            ),
+            output_artifacts: vec![
+                wrapper_artifact("git_commit_stdout", outcome.stdout),
+                wrapper_artifact("git_commit_stderr", outcome.stderr),
             ],
         })
     }
@@ -1660,7 +1711,7 @@ mod tests {
         ));
         let tools = wrappers.list_tools();
 
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
         for tool_id in CAPO_WRAPPER_TOOLS {
             let definition = wrappers.describe_tool(tool_id).expect("wrapper definition");
             assert_eq!(definition.origin, "runtime");
@@ -1676,6 +1727,19 @@ mod tests {
             wrappers
                 .describe_tool("capo.shell_run")
                 .expect("shell tool")
+                .risk,
+            "high"
+        );
+        assert!(
+            wrappers
+                .describe_tool("capo.git_commit")
+                .expect("git commit tool")
+                .mutates_state
+        );
+        assert_eq!(
+            wrappers
+                .describe_tool("capo.git_commit")
+                .expect("git commit tool")
                 .risk,
             "high"
         );
@@ -2049,6 +2113,117 @@ mod tests {
                 .join("run-shell-escape")
                 .exists()
         );
+    }
+
+    #[test]
+    fn git_commit_wrapper_commits_staged_changes_and_denies_static_profiles() {
+        let workspace = temp_root("tool-wrapper-git-commit-workspace");
+        let artifacts = temp_root("tool-wrapper-git-commit-artifacts");
+        fs::create_dir_all(&workspace).expect("workspace");
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&workspace)
+            .output()
+            .expect("git init");
+        fs::write(workspace.join("tracked.txt"), "tracked\n").expect("write tracked");
+        Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(&workspace)
+            .output()
+            .expect("git add");
+
+        let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+            workspace.clone(),
+            artifacts,
+        ));
+
+        let commit = wrappers.authorize_and_invoke(
+            wrapper_request(
+                "call-git-commit",
+                "run-git-commit",
+                "capo.git_commit",
+                serde_json::json!({"message":"Capo wrapper commit"}),
+            ),
+            &PermissionPolicy::allow_trusted_local(),
+        );
+        assert_eq!(commit.status, "exited");
+        assert!(commit.input_artifact.is_some());
+        assert_eq!(commit.output_artifacts.len(), 2);
+        assert!(
+            commit
+                .output_artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "git_commit_stdout")
+        );
+        assert!(
+            commit
+                .events
+                .iter()
+                .any(|event| event.kind == "tool.invocation_started")
+        );
+        let log = Command::new("git")
+            .args(["log", "--oneline", "-1"])
+            .current_dir(&workspace)
+            .output()
+            .expect("git log");
+        assert!(
+            String::from_utf8_lossy(&log.stdout).contains("Capo wrapper commit"),
+            "git log should show wrapper commit"
+        );
+
+        fs::write(workspace.join("denied.txt"), "denied\n").expect("write denied");
+        Command::new("git")
+            .args(["add", "denied.txt"])
+            .current_dir(&workspace)
+            .output()
+            .expect("git add denied");
+        let denied = wrappers.authorize_and_invoke(
+            wrapper_request(
+                "call-git-commit-denied",
+                "run-git-commit-denied",
+                "capo.git_commit",
+                serde_json::json!({"message":"Denied commit"}),
+            ),
+            &PermissionPolicy::static_read_only_local(),
+        );
+        assert_eq!(denied.status, "denied");
+        assert!(denied.output_artifacts.is_empty());
+        assert!(denied.summary.contains("git:commit:workspace"));
+        assert!(
+            !denied
+                .events
+                .iter()
+                .any(|event| event.kind == "tool.invocation_started")
+        );
+
+        let reviewer_denied = wrappers.authorize_and_invoke(
+            wrapper_request(
+                "call-git-commit-reviewer-denied",
+                "run-git-commit-reviewer-denied",
+                "capo.git_commit",
+                serde_json::json!({"message":"Reviewer denied commit"}),
+            ),
+            &PermissionPolicy::static_reviewer(),
+        );
+        assert_eq!(reviewer_denied.status, "denied");
+        assert!(reviewer_denied.summary.contains("git:commit:workspace"));
+
+        let missing_message = wrappers.authorize_and_invoke(
+            wrapper_request(
+                "call-git-commit-empty",
+                "run-git-commit-empty",
+                "capo.git_commit",
+                serde_json::json!({"message":"   "}),
+            ),
+            &PermissionPolicy::allow_trusted_local(),
+        );
+        assert_eq!(missing_message.status, "failed");
+        assert!(
+            missing_message
+                .summary
+                .contains("git_commit requires a non-empty message")
+        );
+        assert!(missing_message.output_artifacts.is_empty());
     }
 
     #[test]

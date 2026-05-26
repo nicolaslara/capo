@@ -260,6 +260,7 @@ Progress:
 - PT9 query and evidence visibility is completed with observed-only tool observations surfaced through the shared session dashboard row and CLI/evidence views.
 - PT10 adapter replay observation ingestion is completed with normalized adapter tool events automatically appending observed-only tool observation rows.
 - PT11 session status tool introspection is completed with governed tool calls and observed-only tool observations rendered in per-agent status.
+- PT12 git commit wrapper is completed with already-staged commits governed through the runtime wrapper/tool audit path.
 
 Evidence:
 
@@ -289,6 +290,7 @@ Evidence:
 - `cargo test -p capo-controller fixture_replay -- --nocapture`
 - `cargo test -p capo-cli adapter_fixture_replay_cli_exports_evidence_without_raw_provider_text -- --nocapture`
 - `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence -- --nocapture`
+- `cargo test -p capo-tools git_commit -- --nocapture`
 - Focused PT3 wrapper reviews: split authorization replay, arbitrary workpad reads, artifact path escaping, unredacted input artifacts, misleading permission status, same-tool replay, runtime run ID paths, and ambiguous context hashing blockers found and fixed
 
 ## F5 - Memory And Evaluation Reports

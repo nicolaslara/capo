@@ -898,3 +898,12 @@ Observed 2026-05-26.
 - Shared readiness ref source: `../../crates/capo-query/src/lib.rs`
 - Dashboard source workpad: `dashboard.md`
 - No new third-party dependencies were added for DS10.
+
+## F4/PT12 Git Commit Wrapper
+
+Observed 2026-05-26.
+
+- Governed `capo.git_commit` wrapper definition, execution path, permission coverage, and tests: `../../crates/capo-tools/src/lib.rs`
+- Tool wrapper architecture source: `../architecture/tool-exposure.md`
+- Permissions source workpad: `permissions-tools.md`
+- No new third-party dependencies were added for PT12.

@@ -209,7 +209,7 @@ Filesystem wrappers start as workspace-bound text operations:
 Git wrappers are separate from generic shell:
 
 - `capo.git_status` and `capo.git_diff` are read-only and low risk.
-- `capo.git_commit` is deferred until the prototype has commit-message/evidence policy.
+- `capo.git_commit` commits already-staged changes only, requires an explicit commit message, runs through `RuntimeRunner`, and is high risk.
 - `git push` stays out of prototype scope.
 
 ### State And Workpad Tools

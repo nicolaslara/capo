@@ -321,3 +321,27 @@ Decision:
 - Extend session status with projection-backed tool-call and observed-only tool-observation rows so per-agent introspection no longer requires switching to dashboard or evidence export.
 - Keep the output shape aligned with dashboard: governed tool calls are rendered as `tool_call=...`, while adapter/provider-native facts are rendered as `tool_observation=...` with `instrumentation=observed_only`.
 - Keep status read-only. It reads persisted state only and does not launch providers, runtimes, tunnels, prompt materialization, or credential/session inspection.
+
+### PT12 - Git Commit Wrapper
+
+Status: completed
+
+Acceptance:
+
+- Add `capo.git_commit` as a governed runtime wrapper for committing already-staged workspace changes.
+- Require explicit trusted-local style permission scopes and deny the wrapper under static read-only/reviewer profiles.
+- Run through `LocalProcessRunner`, record input/stdout/stderr artifacts, and reject missing commit messages before invoking git.
+- Keep `git push` out of scope and do not inspect provider credentials, subscription sessions, tunnels, or raw agent output.
+
+Evidence:
+
+- `capo.git_commit` wrapper definition and runtime execution path in `../../crates/capo-tools/src/lib.rs`.
+- `cargo test -p capo-tools git_commit -- --nocapture`: passed.
+
+Decision:
+
+- Treat `capo.git_commit` as a governed high-risk runtime wrapper rather than a generic shell command.
+- Commit only already-staged workspace changes. Staging remains a separate operator/tool concern, and `git push` stays out of scope.
+- Require a non-empty single-line message before reaching `LocalProcessRunner`.
+- Trusted-local can invoke the wrapper; static read-only/reviewer profiles deny `git:commit:workspace`.
+- Preserve the existing wrapper audit lifecycle and artifacts: input artifact plus git stdout/stderr runtime artifacts, with no provider CLI execution, credential/session inspection, tunnel use, or raw agent output persistence.

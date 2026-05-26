@@ -1912,3 +1912,19 @@ Decisions:
 Verification:
 
 - `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+## F4/PT12 - Git Commit Wrapper
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo.git_commit` to the governed runtime wrapper catalog as a high-risk wrapper for committing already-staged workspace changes.
+- Keep staging and push out of scope. The wrapper only runs `git commit` with an explicit message through `LocalProcessRunner`.
+- Reject empty or control-character commit messages before invoking the runtime.
+- Keep static read-only/reviewer profiles denied because they do not include `git:commit:workspace`; trusted-local remains the broad local prototype profile that can invoke it.
+- Preserve the existing wrapper audit/artifact path: input artifact, runtime stdout/stderr artifacts, permission decision, grant use, invocation started, output observed, completion, and delivery events.
+
+Verification:
+
+- `cargo test -p capo-tools git_commit -- --nocapture`: passed.
