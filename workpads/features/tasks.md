@@ -17,6 +17,7 @@ Feature work starts after the prototype gate. Dedicated feature files hold the d
 | `memory-eval.md` | Source-linked memory records, performance reports, review outcomes | Prototype P9/P11 |
 | `voice.md` | Conversational Capo loop from P14 contract | Prototype P14 |
 | `remote-runtime.md` | Remote runtime/tunnel adapters | Local real-agent semantics |
+| `state-store.md` | State persistence resilience and ORM/typed projection strategy | Prototype P2 state store |
 
 ## F0 - Split Feature Workpads
 
@@ -514,3 +515,29 @@ Evidence:
 - `git diff --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`
+
+## F8 - State Store Resilience
+
+Status: in_progress
+
+Source workpad: `state-store.md`
+
+Acceptance:
+
+- Decide whether continued manual `rusqlite` projection expansion is acceptable.
+- Compare current Rust database options against Capo's event-log/projection architecture.
+- Queue concrete hardening or migration tasks before adding another broad state-model surface.
+
+Progress:
+
+- SS1 state store library decision is completed. Manual `rusqlite` SQL is acceptable as the current implementation, but no longer the preferred path for broad projection growth. Diesel is the first migration candidate to spike; SQLx remains the second candidate for an async/server-oriented path; SeaORM is deferred for the controller core; a typed in-house `rusqlite` projection registry remains the shortest safe hardening option.
+
+Evidence:
+
+- `workpads/features/state-store.md`
+- `crates/capo-state/src/lib.rs`
+- Diesel docs: https://docs.diesel.rs/main/diesel/index.html
+- Diesel migrations docs: https://docs.diesel.rs/main/diesel_migrations/index.html
+- SQLx repository/docs: https://github.com/launchbadge/sqlx
+- SeaORM docs: https://www.sea-ql.org/SeaORM/docs/index/
+- rusqlite repository/docs: https://github.com/rusqlite/rusqlite

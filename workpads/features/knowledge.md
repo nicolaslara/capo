@@ -2416,3 +2416,21 @@ Decisions:
 Verification:
 
 - `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+
+## F8/SS1 - State Store Library Decision
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Manual `rusqlite` SQL was appropriate for the first SQLite event-store scaffold, but it is now a resilience risk because each projection family repeats schema DDL, upsert SQL, row mapping, projection-log encoding/decoding, read queries, and rebuild coverage.
+- Do not keep adding broad state-model surfaces with ad hoc SQL before a hardening pass.
+- Keep `rusqlite` in place for now so ongoing feature work is not blocked by an abrupt persistence migration.
+- Evaluate Diesel first for a contained projection-family spike because Capo is currently sync, local SQLite-first, schema-sensitive, and Rust-first. Diesel's schema-aware query builder and migration tooling fit those constraints better than an async-first library at this point.
+- Keep SQLx as the second candidate if Capo's server/Postgres path becomes async-first. SQLx keeps SQL visible and supports compile-time checked queries, but it would force an async-state discussion earlier.
+- Defer SeaORM for the controller core because Capo's state shape is append-only events plus rebuildable projections, not primarily active-record CRUD.
+- Keep a typed in-house `rusqlite` projection registry as the fallback if Diesel proves too invasive. The registry should centralize projection descriptors, DDL/upsert/read mapping, projection-log codecs, and rebuild tests.
+
+Verification:
+
+- Documentation-only decision. `git diff --check`: passed.

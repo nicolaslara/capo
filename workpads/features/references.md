@@ -1166,3 +1166,16 @@ Observed 2026-05-26.
 - Shared latest runtime target selector and control-readiness query consumed by evidence export: `../../crates/capo-query/src/lib.rs`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR24.
+
+## F8/SS1 State Store Library Decision
+
+Observed 2026-05-26.
+
+- Current manual SQLite state/projection implementation pressure point: `../../crates/capo-state/src/lib.rs`
+- State store resilience workpad: `state-store.md`
+- rusqlite official repository/docs: https://github.com/rusqlite/rusqlite
+- Diesel official docs: https://docs.diesel.rs/main/diesel/index.html
+- Diesel migrations docs: https://docs.diesel.rs/main/diesel_migrations/index.html
+- SQLx official repository/docs: https://github.com/launchbadge/sqlx
+- SeaORM official docs: https://www.sea-ql.org/SeaORM/docs/index/
+- No new third-party dependencies were added for SS1.

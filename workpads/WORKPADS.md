@@ -158,6 +158,7 @@ workpads/features/permissions-tools.md
 workpads/features/memory-eval.md
 workpads/features/voice.md
 workpads/features/remote-runtime.md
+workpads/features/state-store.md
 workpads/architecture/boundaries.md
 workpads/architecture/state-model.md
 workpads/architecture/acp-replay-dedupe.md
