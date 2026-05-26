@@ -267,6 +267,22 @@ Verification:
 
 - `cargo test -p capo-cli adapter_dogfood -- --nocapture`: passed.
 
+## F7/RR23 - Latest Runtime Target Control Readiness
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add latest-selector ergonomics to `capo runtime target readiness`, matching the latest-selector shape already used by runtime target status.
+- Reuse `ProjectDashboard::latest_runtime_target(...)` for runner/status filtering, then derive control readiness through `ProjectDashboard::runtime_target_control_readiness(...)`.
+- Keep exact `--target` and latest `--latest` mutually exclusive. `--runner` and `--status` filters are valid only with `--latest`.
+- Render selector and filter fields before the readiness row so operator surfaces can explain which target Capo selected.
+- Keep the command read-only and provider-free: it does not launch runtimes, provider CLIs, tunnels, approvals, grants, credential inspection, raw transcript retention, or state mutation.
+
+Verification:
+
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+
 ## F6/V4 - Dogfood Readiness Conversation
 
 Status: completed on 2026-05-26.

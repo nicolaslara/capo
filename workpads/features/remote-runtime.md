@@ -553,3 +553,26 @@ Decision:
 - Treat runtime target readiness evidence as an operator review artifact over the shared target/exposure readiness contract.
 - Keep readiness evidence separate from runtime target placement evidence and connectivity exposure evidence. Placement evidence reviews the target record, exposure evidence reviews the channel record, and readiness evidence reviews the aggregate control-readiness answer.
 - Keep the export read-model-derived and provider-free. It records a project evidence row, but does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, prompt materialization, raw transcript retention, or target/exposure state changes.
+
+### RR23 - Latest Runtime Target Control Readiness
+
+Status: completed
+
+Acceptance:
+
+- Add a latest-selector path for runtime target control readiness so operators do not need to know a target ID.
+- Support the same optional runner/status filters as latest runtime target status.
+- Reuse the shared runtime target selector before deriving target/control-exposure readiness.
+- Keep readiness read-model-derived and provider-free: do not launch runtimes, launch providers, inspect credentials, open tunnels, request approvals, activate grants, retain raw transcripts, or mutate state.
+
+Evidence:
+
+- CLI `capo runtime target readiness --latest [--runner local-process|remote-process|container] [--status available|disabled|unhealthy]` in `../../crates/capo-cli/src/main.rs`.
+- Latest readiness reuses `ProjectDashboard::latest_runtime_target(...)` before calling `ProjectDashboard::runtime_target_control_readiness(...)`.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+
+Decision:
+
+- Treat latest readiness as operator ergonomics over the existing target selector and readiness contract. It does not introduce a second readiness model.
+- Keep exact `--target` and latest `--latest` mutually exclusive; runner/status filters are only valid with `--latest`.
+- Keep the output explicit about selector and filters so voice/web/mobile clients can show which target Capo selected.

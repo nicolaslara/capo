@@ -196,6 +196,15 @@ Observed 2026-05-26.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC33.
 
+## F7/RR23 Latest Runtime Target Control Readiness
+
+Observed 2026-05-26.
+
+- CLI latest runtime target readiness selector and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared latest runtime target selector and control-readiness query: `../../crates/capo-query/src/lib.rs`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR23.
+
 ## F1/AC12 Workpad Next Adapter Plan
 
 Observed 2026-05-25.
