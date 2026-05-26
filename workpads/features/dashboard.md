@@ -290,3 +290,27 @@ Decision:
 
 - Treat latest smoke-report rows as operator shortcuts, not replacements for the full report list or evidence exports.
 - Render `latest_adapter_smoke_report_any`, `latest_adapter_smoke_report_codex`, and `latest_adapter_smoke_report_claude` so dashboards can show the most relevant connector blocker/proof without requiring report IDs.
+
+### DS12 - Dashboard Runtime Target Control Readiness
+
+Status: completed
+
+Acceptance:
+
+- Render runtime target control-readiness rows in `capo dashboard`.
+- Source each row from `ProjectDashboard::runtime_target_control_readiness(...)` so dashboard, CLI status, and voice use the same readiness contract.
+- Include target readiness, control exposure readiness, exposure status/reachability, blockers, and next action.
+- Keep runtime target metadata and connectivity exposure rows visible separately for audit.
+- Keep the dashboard read-only and metadata-only: no provider CLIs, credentials, prompt materialization, tunnels, approvals, grants, raw provider output, raw prompts, or state mutation.
+
+Evidence:
+
+- Dashboard runtime target readiness rendering in `../../crates/capo-cli/src/main.rs`.
+- Shared readiness source in `../../crates/capo-query/src/lib.rs`.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+
+Decision:
+
+- Render one readiness row next to each runtime target row so operators can see placement metadata, latest control exposure state, blockers, and next action in the main dashboard.
+- Keep the separate runtime target and connectivity exposure sections unchanged. The readiness row is an aggregate view, not a replacement for source projections.

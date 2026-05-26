@@ -1110,3 +1110,13 @@ Observed 2026-05-26.
 - Voice source workpad: `voice.md`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for V16.
+
+## F3/DS12 Dashboard Runtime Target Control Readiness
+
+Observed 2026-05-26.
+
+- Dashboard runtime target control-readiness rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared runtime target control-readiness query consumed by dashboard rendering: `../../crates/capo-query/src/lib.rs`
+- Dashboard source workpad: `dashboard.md`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for DS12.

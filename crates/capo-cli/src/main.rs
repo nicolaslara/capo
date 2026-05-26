@@ -3463,6 +3463,11 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
     ));
     for target in &dashboard.runtime_targets {
         output.push_str(&render_runtime_target_row("runtime_target", target));
+        if let Some(readiness) =
+            dashboard.runtime_target_control_readiness(&target.runtime_target_id)
+        {
+            output.push_str(&render_runtime_target_control_readiness(&readiness));
+        }
     }
 
     output.push_str(&format!(
@@ -11341,6 +11346,10 @@ mod tests {
         assert!(dashboard.contains("runtime_targets=1"));
         assert!(dashboard.contains("runtime_target=runtime-target-local-1"));
         assert!(dashboard.contains("runner=local-process"));
+        assert!(dashboard.contains("target_ready=true"));
+        assert!(dashboard.contains("control_exposure_status=missing"));
+        assert!(dashboard.contains("ready=false"));
+        assert!(dashboard.contains("next_action=record_control_connectivity_exposure"));
         assert!(dashboard.contains("project_evidence=1"));
         assert!(dashboard.contains("kind=runtime_target_evidence"));
     }
@@ -11746,6 +11755,11 @@ mod tests {
         assert!(dashboard.contains("connectivity_exposures=1"));
         assert!(dashboard.contains("exposure_status=active"));
         assert!(dashboard.contains("grant=grant-approval-"));
+        assert!(dashboard.contains("runtime_target=remote-target-1"));
+        assert!(dashboard.contains("control_exposure_status=active"));
+        assert!(dashboard.contains("control_exposure_reachable=true"));
+        assert!(dashboard.contains("ready=true"));
+        assert!(dashboard.contains("next_action=use_runtime_target_for_remote_control"));
 
         let exact_status = run_cli(vec![
             "connectivity".to_string(),
@@ -11856,6 +11870,10 @@ mod tests {
         assert!(dashboard.contains("health=disabled"));
         assert!(dashboard.contains("reachable=false"));
         assert!(dashboard.contains("revoked_at=unix:"));
+        assert!(dashboard.contains("control_exposure_status=revoked"));
+        assert!(dashboard.contains("control_exposure_reachable=false"));
+        assert!(dashboard.contains("ready=false"));
+        assert!(dashboard.contains("next_action=repair_or_replace_control_exposure"));
 
         let latest_status_after_revoke = run_cli(vec![
             "connectivity".to_string(),

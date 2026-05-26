@@ -2322,3 +2322,19 @@ Verification:
 
 - `cargo test -p capo-voice runtime_target -- --nocapture`: passed.
 - `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+
+## F3/DS12 - Dashboard Runtime Target Control Readiness
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Render runtime target control-readiness rows in `capo dashboard` next to each runtime target row.
+- Source each row from `ProjectDashboard::runtime_target_control_readiness(...)` so dashboard, CLI status, and voice share the same target/exposure readiness contract.
+- Keep runtime target rows and connectivity exposure rows visible separately for audit. The readiness row is an aggregate operator shortcut, not a replacement for source projections.
+- Preserve the boundary split: dashboard rendering does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, prompt materialization, raw transcript retention, or state mutation.
+
+Verification:
+
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
