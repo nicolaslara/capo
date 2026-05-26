@@ -2338,3 +2338,18 @@ Verification:
 
 - `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
 - `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+
+## F7/RR22 - Runtime Target Control Readiness Evidence Export
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo runtime target readiness-evidence --target TARGET_ID --out DIR` as a provider-free evidence export for the aggregate target/control-exposure readiness state.
+- Write a Capo-marked markdown artifact with guarded overwrite behavior and record it as project-level evidence.
+- Use `kind=runtime_target_readiness_evidence` for both artifact and evidence rows so dashboards and future readiness checkpoints can distinguish aggregate readiness artifacts from runtime target placement evidence and connectivity exposure evidence.
+- Preserve the boundary split: the export records project evidence from read models and does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, prompt materialization, raw transcript retention, or target/exposure state changes.
+
+Verification:
+
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.

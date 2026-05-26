@@ -94,6 +94,7 @@ Usage:
   capo runtime target status --target TARGET_ID [--state PATH]
   capo runtime target status --latest [--runner local-process|remote-process|container] [--status available|disabled|unhealthy] [--state PATH]
   capo runtime target readiness --target TARGET_ID [--state PATH]
+  capo runtime target readiness-evidence --target TARGET_ID --out DIR [--state PATH]
   capo runtime target evidence --target TARGET_ID --out DIR [--state PATH]
   capo runtime target evidence --latest [--runner local-process|remote-process|container] [--status available|disabled|unhealthy] --out DIR [--state PATH]
   capo runtime target list [--state PATH]
@@ -260,6 +261,11 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             if area == "runtime" && command == "target" && action == "readiness" =>
         {
             runtime_target_readiness(&parsed, rest)
+        }
+        [area, command, action, rest @ ..]
+            if area == "runtime" && command == "target" && action == "readiness-evidence" =>
+        {
+            runtime_target_readiness_evidence(&parsed, rest)
         }
         [area, command, action, rest @ ..]
             if area == "runtime" && command == "target" && action == "evidence" =>
@@ -5388,6 +5394,103 @@ fn runtime_target_readiness(parsed: &ParsedArgs, args: &[String]) -> Result<Stri
     Ok(output)
 }
 
+fn runtime_target_readiness_evidence(
+    parsed: &ParsedArgs,
+    args: &[String],
+) -> Result<String, String> {
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--target" | "--out"))
+    {
+        return Err(format!(
+            "unknown runtime target readiness-evidence option: {unknown}"
+        ));
+    }
+    let runtime_target_id = required_arg(args, "--target")?;
+    let out = PathBuf::from(required_arg(args, "--out")?);
+    let project_id = project_id();
+    let command = envelope(
+        "runtime-target-readiness-evidence",
+        CommandTarget::Project(project_id.clone()),
+        CommandIntent::ExportEvidence,
+        Some(runtime_target_id.clone()),
+    );
+    let state = state(parsed)?;
+    let dashboard = project_dashboard(&state, ProjectDashboardQuery::new(project_id.clone()))
+        .map_err(debug_error)?;
+    let readiness = dashboard
+        .runtime_target_control_readiness(&runtime_target_id)
+        .ok_or_else(|| format!("missing runtime target: {runtime_target_id}"))?;
+    let markdown = render_runtime_target_readiness_evidence(&project_id, &readiness);
+    fs::create_dir_all(&out).map_err(|error| error.to_string())?;
+    let content_hash = stable_cli_hash(&markdown);
+    let artifact_id = format!("artifact-runtime-target-readiness-evidence-{content_hash}");
+    let path = out.join(format!("{artifact_id}.md"));
+    write_runtime_target_readiness_evidence_file(&path, &markdown)?;
+    state
+        .record_artifact(ArtifactRecord {
+            artifact_id: artifact_id.clone(),
+            project_id: Some(project_id.clone()),
+            session_id: None,
+            run_id: None,
+            kind: "runtime_target_readiness_evidence".to_string(),
+            uri: path.display().to_string(),
+            content_hash: content_hash.clone(),
+            size_bytes: markdown.len() as i64,
+            redaction_state: RedactionState::Safe,
+        })
+        .map_err(debug_error)?;
+    let evidence_id = format!("evidence-{artifact_id}");
+    let sequence = state
+        .append_event(
+            NewEvent {
+                event_id: format!("event-{evidence_id}"),
+                kind: EventKind::EvidenceRecorded,
+                actor: "cli".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: None,
+                run_id: None,
+                turn_id: None,
+                item_id: Some(evidence_id.clone()),
+                payload_json: format!(
+                    "{{\"artifact_id\":\"{}\",\"content_hash\":\"{}\",\"runtime_target_id\":\"{}\",\"ready\":{},\"control_exposure_status\":\"{}\"}}",
+                    escape_json(&artifact_id),
+                    escape_json(&content_hash),
+                    escape_json(&readiness.runtime_target_id),
+                    readiness.ready,
+                    escape_json(&readiness.control_exposure_status)
+                ),
+                idempotency_key: Some(format!(
+                    "runtime-target-readiness-evidence:{}:{}:{content_hash}",
+                    project_id, readiness.runtime_target_id
+                )),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Evidence(EvidenceProjection {
+                evidence_id: capo_core::EvidenceId::new(evidence_id.clone()),
+                project_id: project_id.clone(),
+                task_id: None,
+                session_id: None,
+                run_id: None,
+                kind: "runtime_target_readiness_evidence".to_string(),
+                artifact_id: Some(artifact_id.clone()),
+                confidence: runtime_target_readiness_evidence_confidence(&readiness),
+                updated_sequence: 0,
+            })],
+        )
+        .map_err(debug_error)?;
+
+    Ok(format!(
+        "runtime_target_readiness_evidence_exported=true\nruntime_target={}\nready={}\nevidence_id={evidence_id}\nartifact_id={artifact_id}\npath={}\ncontent_hash={content_hash}\nsequence={sequence}\ncommand_id={}\nprovider_cli_executed=false tunnel_opened=false runtime_process_started=false\n",
+        readiness.runtime_target_id,
+        readiness.ready,
+        path.display(),
+        command.command_id
+    ))
+}
+
 fn runtime_target_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     if let Some(unknown) = args.iter().find(|arg| {
         arg.starts_with("--")
@@ -5634,6 +5737,16 @@ fn render_runtime_target_control_readiness(readiness: &RuntimeTargetControlReadi
     )
 }
 
+fn runtime_target_readiness_evidence_confidence(readiness: &RuntimeTargetControlReadiness) -> i64 {
+    if readiness.ready {
+        85
+    } else if readiness.target_ready {
+        70
+    } else {
+        60
+    }
+}
+
 fn runtime_target_evidence_confidence(target: &RuntimeTargetProjection) -> i64 {
     match target.status.as_str() {
         "available" => 80,
@@ -5661,6 +5774,30 @@ fn render_runtime_target_evidence(
         target.connectivity_endpoint_id.as_deref().unwrap_or("none"),
         target.status,
         target.updated_sequence
+    )
+}
+
+fn render_runtime_target_readiness_evidence(
+    project_id: &ProjectId,
+    readiness: &RuntimeTargetControlReadiness,
+) -> String {
+    format!(
+        "<!-- capo:runtime-target-readiness-evidence -->\n# Capo Runtime Target Control Readiness Evidence - {}\n\n## Objective\n\nReview whether a runtime target is ready for remote control from persisted Capo read models, without opening tunnels or launching runtime/provider processes.\n\n## Runtime Target Control Readiness\n\n- Project: `{}`\n- Runtime target: `{}`\n- Runner: `{}`\n- Target status: `{}`\n- Target ready: `{}`\n- Control exposure ready: `{}`\n- Control exposure: `{}`\n- Control exposure status: `{}`\n- Control exposure scope: `{}`\n- Control exposure permission scope: `{}`\n- Control exposure reachable: `{}`\n- Ready for control: `{}`\n- Blockers: `{}`\n- Next action: `{}`\n\n## Review Notes\n\n- Runtime target control readiness is an aggregate over runtime target metadata and the latest runtime-target-owned `control` connectivity exposure.\n- A target is ready only when the target is `available` and the latest control exposure is `active` and reachable.\n- This report is operator guidance. It does not prove live network reachability beyond the stored exposure health/reachability projection.\n\n## Evidence Policy\n\n- This report is derived from persisted Capo runtime target and connectivity exposure read models only.\n- It does not launch runtimes, launch provider CLIs, open tunnels, inspect credentials, materialize prompts, request approvals, activate grants, retain raw transcripts, or mutate runtime target/connectivity state.\n- Credential material, tokens, cookies, subscription sessions, raw prompts, and provider output are not rendered.\n",
+        readiness.runtime_target_id,
+        project_id,
+        readiness.runtime_target_id,
+        readiness.runner_kind,
+        readiness.target_status,
+        readiness.target_ready,
+        readiness.control_exposure_ready,
+        readiness.control_exposure_id,
+        readiness.control_exposure_status,
+        readiness.control_exposure_scope,
+        readiness.control_exposure_permission_scope,
+        readiness.control_exposure_reachable,
+        readiness.ready,
+        readiness.blockers,
+        readiness.next_action
     )
 }
 
@@ -8096,6 +8233,24 @@ fn write_runtime_target_evidence_file(path: &Path, markdown: &str) -> Result<(),
         if existing != markdown {
             return Err(format!(
                 "refusing to overwrite changed Capo runtime target evidence file: {}",
+                path.display()
+            ));
+        }
+    }
+    fs::write(path, markdown).map_err(|error| error.to_string())
+}
+
+fn write_runtime_target_readiness_evidence_file(path: &Path, markdown: &str) -> Result<(), String> {
+    if let Ok(existing) = fs::read_to_string(path) {
+        if !existing.starts_with("<!-- capo:runtime-target-readiness-evidence -->") {
+            return Err(format!(
+                "refusing to overwrite non-Capo runtime target readiness evidence file: {}",
+                path.display()
+            ));
+        }
+        if existing != markdown {
+            return Err(format!(
+                "refusing to overwrite changed Capo runtime target readiness evidence file: {}",
                 path.display()
             ));
         }
@@ -11761,6 +11916,39 @@ mod tests {
         assert!(dashboard.contains("ready=true"));
         assert!(dashboard.contains("next_action=use_runtime_target_for_remote_control"));
 
+        let readiness_evidence_dir = temp_root("cli-runtime-target-readiness-evidence");
+        let readiness_evidence = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "readiness-evidence".to_string(),
+            "--target".to_string(),
+            "remote-target-1".to_string(),
+            "--out".to_string(),
+            readiness_evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("runtime target readiness evidence");
+        assert!(readiness_evidence.contains("runtime_target_readiness_evidence_exported=true"));
+        assert!(readiness_evidence.contains("runtime_target=remote-target-1"));
+        assert!(readiness_evidence.contains("ready=true"));
+        assert!(
+            readiness_evidence
+                .contains("evidence_id=evidence-artifact-runtime-target-readiness-evidence-")
+        );
+        assert!(readiness_evidence.contains("provider_cli_executed=false"));
+        assert!(readiness_evidence.contains("tunnel_opened=false"));
+        assert!(readiness_evidence.contains("runtime_process_started=false"));
+        let readiness_evidence_path = output_value(&readiness_evidence, "path");
+        let readiness_markdown =
+            fs::read_to_string(&readiness_evidence_path).expect("read readiness evidence");
+        assert!(readiness_markdown.starts_with("<!-- capo:runtime-target-readiness-evidence -->"));
+        assert!(readiness_markdown.contains("## Runtime Target Control Readiness"));
+        assert!(readiness_markdown.contains("- Runtime target: `remote-target-1`"));
+        assert!(readiness_markdown.contains("- Ready for control: `true`"));
+        assert!(readiness_markdown.contains("- Blockers: `none`"));
+        assert!(readiness_markdown.contains("does not launch runtimes"));
+
         let exact_status = run_cli(vec![
             "connectivity".to_string(),
             "exposure-status".to_string(),
@@ -11942,7 +12130,8 @@ mod tests {
             state_root.display().to_string(),
         ])
         .expect("dashboard after exposure evidence");
-        assert!(dashboard.contains("project_evidence=1"));
+        assert!(dashboard.contains("project_evidence=2"));
+        assert!(dashboard.contains("kind=runtime_target_readiness_evidence"));
         assert!(dashboard.contains("kind=connectivity_exposure_evidence"));
     }
 

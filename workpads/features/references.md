@@ -1120,3 +1120,13 @@ Observed 2026-05-26.
 - Dashboard source workpad: `dashboard.md`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for DS12.
+
+## F7/RR22 Runtime Target Control Readiness Evidence Export
+
+Observed 2026-05-26.
+
+- CLI `capo runtime target readiness-evidence` command, markdown renderer, guarded writer, project evidence record, and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared runtime target control-readiness query consumed by evidence export: `../../crates/capo-query/src/lib.rs`
+- Runtime target projections and connectivity exposure projections stored separately by state layer: `../../crates/capo-state/src/lib.rs`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR22.

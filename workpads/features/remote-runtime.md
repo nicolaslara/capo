@@ -528,3 +528,28 @@ Decision:
 - Treat control readiness as a read-model answer over existing projections: target status plus the latest runtime-target-owned `control` exposure.
 - A target is ready only when the target is `available` and the latest control exposure is `active` and reachable.
 - Keep readiness as operator guidance. It does not prove real tunnel reachability beyond the stored exposure health metadata, and it does not open tunnels, launch runtime processes, launch provider CLIs, inspect credentials, or mutate target/exposure state.
+
+### RR22 - Runtime Target Control Readiness Evidence Export
+
+Status: completed
+
+Acceptance:
+
+- Add a provider-free command that exports a Capo-owned evidence artifact for one runtime target's control-readiness state.
+- Include target readiness, control exposure readiness, exposure status/reachability, blockers, and next action.
+- Record the exported markdown as project-level evidence so dashboards and future dogfood checkpoints can inspect it.
+- Use guarded overwrite behavior so Capo does not overwrite user-authored files.
+- Do not launch runtimes, launch providers, inspect credentials, open tunnels, request approvals, activate grants, retain raw transcripts, or mutate runtime target/connectivity state beyond recording the evidence artifact.
+
+Evidence:
+
+- CLI `capo runtime target readiness-evidence --target TARGET_ID --out DIR` in `../../crates/capo-cli/src/main.rs`.
+- Exported artifacts use the `<!-- capo:runtime-target-readiness-evidence -->` marker and guarded overwrite behavior.
+- Artifact records use `kind=runtime_target_readiness_evidence`; evidence projections use `kind=runtime_target_readiness_evidence`.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+
+Decision:
+
+- Treat runtime target readiness evidence as an operator review artifact over the shared target/exposure readiness contract.
+- Keep readiness evidence separate from runtime target placement evidence and connectivity exposure evidence. Placement evidence reviews the target record, exposure evidence reviews the channel record, and readiness evidence reviews the aggregate control-readiness answer.
+- Keep the export read-model-derived and provider-free. It records a project evidence row, but does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, prompt materialization, raw transcript retention, or target/exposure state changes.

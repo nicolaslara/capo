@@ -455,6 +455,7 @@ Progress:
 - RR19 latest runtime target status is completed with a shared latest selector and read-only `runtime target status --latest` filters.
 - RR20 latest runtime target evidence export is completed with filtered latest-selector export through the shared runtime target query.
 - RR21 runtime target control readiness is completed with a shared query and read-only CLI command combining target availability with latest control exposure state.
+- RR22 runtime target control readiness evidence export is completed with a Capo-owned project evidence artifact for the aggregate target/control-exposure readiness state.
 - F7 remains `in_progress` until the real local-agent connector dependency is satisfied; remote execution semantics are still contract-level and loopback/stubbed.
 
 Evidence:
@@ -496,6 +497,8 @@ Evidence:
 - `capo runtime target readiness --target TARGET_ID [--state PATH]`
 - `cargo test -p capo-query runtime_target -- --nocapture`
 - `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture` verifies runtime target control readiness before activation, after activation, and after revocation
+- `capo runtime target readiness-evidence --target TARGET_ID --out DIR [--state PATH]`
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture` verifies runtime target readiness evidence export and dashboard project evidence visibility
 - `cargo test`
 - `cargo fmt --check`
 - `git diff --check`
