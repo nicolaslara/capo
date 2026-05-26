@@ -4895,6 +4895,12 @@ fn ensure_runtime_target_owner_exists(
             exposure.owner_id
         ));
     };
+    if target.status != "available" {
+        return Err(format!(
+            "runtime target is not available for recorded connectivity exposure: target={} status={}",
+            exposure.owner_id, target.status
+        ));
+    }
     if let Some(expected_endpoint) = &target.connectivity_endpoint_id
         && expected_endpoint != &exposure.connectivity_endpoint_id
     {
@@ -10043,6 +10049,48 @@ mod tests {
         ])
         .expect_err("record private exposure with mismatched registered endpoint");
         assert!(mismatched_endpoint.contains("runtime target endpoint mismatch"));
+
+        run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "register".to_string(),
+            "--target".to_string(),
+            "remote-target-disabled".to_string(),
+            "--name".to_string(),
+            "disabled remote target".to_string(),
+            "--runner".to_string(),
+            "remote-process".to_string(),
+            "--workspace".to_string(),
+            "/tmp/capo-disabled-workspace".to_string(),
+            "--artifacts".to_string(),
+            "/tmp/capo-disabled-artifacts".to_string(),
+            "--endpoint".to_string(),
+            "endpoint-disabled-1".to_string(),
+            "--status".to_string(),
+            "disabled".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("register disabled runtime target");
+        let disabled_target = run_cli(vec![
+            "connectivity".to_string(),
+            "expose-stub".to_string(),
+            "--endpoint".to_string(),
+            "endpoint-disabled-1".to_string(),
+            "--owner-kind".to_string(),
+            "runtime_target".to_string(),
+            "--owner-id".to_string(),
+            "remote-target-disabled".to_string(),
+            "--channel".to_string(),
+            "control".to_string(),
+            "--exposure".to_string(),
+            "private".to_string(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("record private exposure for disabled target");
+        assert!(disabled_target.contains("runtime target is not available"));
 
         let planned = run_cli(vec![
             "connectivity".to_string(),

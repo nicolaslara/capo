@@ -420,6 +420,7 @@ Progress:
 - RR11 runtime target inventory is completed with first-class runtime target metadata persisted separately from connectivity exposures and provider dispatch plans.
 - RR12 runtime target exposure validation is completed: recorded runtime-target exposures fail closed unless the target is registered.
 - RR13 runtime target endpoint consistency is completed: recorded runtime-target exposures fail closed when they use a different endpoint than the target's configured endpoint.
+- RR14 runtime target availability guard is completed: recorded runtime-target exposures fail closed unless the target is available.
 - F7 remains `in_progress` until the real local-agent connector dependency is satisfied; remote execution semantics are still contract-level and loopback/stubbed.
 
 Evidence:
@@ -444,6 +445,7 @@ Evidence:
 - `cargo test -p capo-cli connectivity_expose_stub -- --nocapture`
 - `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`
 - `cargo test -p capo-cli connectivity_expose_stub -- --nocapture` verifies runtime target endpoint consistency
+- `cargo test -p capo-cli connectivity_expose_stub -- --nocapture` verifies disabled target exposure rejection
 - `cargo fmt --check`
 - `git diff --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`

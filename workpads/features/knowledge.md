@@ -1981,10 +1981,6 @@ Decisions:
 Verification:
 
 - `cargo test -p capo-cli connectivity_expose_stub -- --nocapture`: passed.
-- `cargo fmt --check`: passed.
-- `git diff --check`: passed.
-- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
-- `cargo test`: passed.
 - `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
 - `cargo fmt --check`: passed.
 - `git diff --check`: passed.
@@ -2005,3 +2001,26 @@ Decisions:
 Verification:
 
 - `cargo test -p capo-cli connectivity_expose_stub -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+## F7/RR14 - Runtime Target Availability Guard
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Treat runtime target status as an exposure precondition for recorded `runtime_target` connectivity exposure rows.
+- Fail closed for disabled or unhealthy runtime targets while keeping those targets visible in the inventory and dashboard.
+- Keep target status update mechanics as future metadata work; this slice only enforces the status already stored on the target.
+- Preserve the boundary split: this validates metadata before writing exposure rows and does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, or prompt materialization.
+
+Verification:
+
+- `cargo test -p capo-cli connectivity_expose_stub -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
