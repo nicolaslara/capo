@@ -1397,3 +1397,25 @@ Verification:
 Follow-up:
 
 - After more dogfood traces, decide whether review-needs responses should group findings by agent/session or stay project-level by default.
+
+## F6/V7 - Next Work Conversation
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add a read-only voice intent for next-work questions such as "What should we do next?"
+- Move the next-workpad selection rule into `ProjectDashboard` so CLI, voice, web, mobile, and future TUI surfaces can share the same workpad queue semantics.
+- Select only workpad rows with actionable observed markdown statuses and `capo_execution_status=observed_only`, then use deterministic path, anchor, and task ID ordering.
+- Render candidate count, selected source, title, observed status, Capo execution status, and default Capo task ID in the voice read contract.
+- Preserve the existing voice safety boundary: no raw transcript retention, no mutation, no provider execution, no credential inspection, and no workpad edits.
+
+Verification:
+
+- `cargo test -p capo-query next_actionable_workpad -- --nocapture`: passed.
+- `cargo test -p capo-voice next_work -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_next_work -- --nocapture`: passed.
+
+Follow-up:
+
+- A future voice steering slice can explicitly lower "start the next task" into the existing `workpad start-next` command path, with confirmation and provider gating.

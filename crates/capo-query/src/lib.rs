@@ -49,6 +49,28 @@ impl ProjectDashboard {
     pub fn dogfood_readiness(&self) -> ProjectDogfoodReadiness {
         project_dogfood_readiness(self)
     }
+
+    pub fn next_workpad_task(&self) -> Option<&WorkpadTaskProjection> {
+        self.workpad_tasks
+            .iter()
+            .filter(|task| actionable_workpad_status_rank(&task.observed_status).is_some())
+            .filter(|task| task.capo_execution_status == "observed_only")
+            .min_by(|left, right| {
+                actionable_workpad_status_rank(&left.observed_status)
+                    .cmp(&actionable_workpad_status_rank(&right.observed_status))
+                    .then_with(|| left.path.cmp(&right.path))
+                    .then_with(|| left.source_anchor.cmp(&right.source_anchor))
+                    .then_with(|| left.workpad_task_id.cmp(&right.workpad_task_id))
+            })
+    }
+
+    pub fn next_workpad_candidate_count(&self) -> usize {
+        self.workpad_tasks
+            .iter()
+            .filter(|task| actionable_workpad_status_rank(&task.observed_status).is_some())
+            .filter(|task| task.capo_execution_status == "observed_only")
+            .count()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -327,6 +349,16 @@ pub fn project_dogfood_readiness(dashboard: &ProjectDashboard) -> ProjectDogfood
         dispatch_execution_count,
         blockers,
         next_actions,
+    }
+}
+
+fn actionable_workpad_status_rank(status: &str) -> Option<u8> {
+    match status {
+        "in_progress" => Some(0),
+        "pending" => Some(1),
+        "ready" => Some(2),
+        "waiting_on_opt_in" => Some(3),
+        _ => None,
     }
 }
 
@@ -872,6 +904,54 @@ mod tests {
             imported_dashboard.workpad_tasks[0].workpad_task_id,
             "workpads:features:dashboard.md#ds3"
         );
+    }
+
+    #[test]
+    fn project_dashboard_selects_next_actionable_workpad_task() {
+        let root = temp_root("query-dashboard-next-workpad-task");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        append_workpad_task(
+            &state,
+            &project_id,
+            "workpads:features:remote-runtime.md#rr7",
+            "workpads/features/remote-runtime.md",
+            "waiting_on_opt_in",
+            "observed_only",
+        );
+        append_workpad_task(
+            &state,
+            &project_id,
+            "workpads:features:voice.md#v7",
+            "workpads/features/voice.md",
+            "pending",
+            "observed_only",
+        );
+        append_workpad_task(
+            &state,
+            &project_id,
+            "workpads:features:tasks.md#f1",
+            "workpads/features/tasks.md",
+            "in_progress",
+            "imported",
+        );
+        append_workpad_task(
+            &state,
+            &project_id,
+            "workpads:features:tasks.md#f6",
+            "workpads/features/tasks.md",
+            "completed",
+            "observed_only",
+        );
+
+        let dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+
+        assert_eq!(dashboard.next_workpad_candidate_count(), 2);
+        let next = dashboard.next_workpad_task().expect("next workpad task");
+        assert_eq!(next.workpad_task_id, "workpads:features:voice.md#v7");
+        assert_eq!(next.observed_status, "pending");
+        assert_eq!(next.capo_execution_status, "observed_only");
     }
 
     #[test]

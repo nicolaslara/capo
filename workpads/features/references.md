@@ -623,3 +623,14 @@ Observed 2026-05-26.
 - Review finding and task outcome source projections: `../../crates/capo-state/src/lib.rs`
 - Voice source workpad: `voice.md`
 - No new third-party dependencies were added for V6.
+
+## F6/V7 Next Work Conversation
+
+Observed 2026-05-26.
+
+- Shared next-workpad selection helper and unit coverage: `../../crates/capo-query/src/lib.rs`
+- Voice next-work planning and unit coverage: `../../crates/capo-voice/src/lib.rs`
+- CLI voice read-contract rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Workpad task source projections: `../../crates/capo-state/src/lib.rs`
+- Voice source workpad: `voice.md`
+- No new third-party dependencies were added for V7.

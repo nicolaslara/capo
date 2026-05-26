@@ -3279,6 +3279,7 @@ fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> 
     match plan.intent_kind {
         VoiceIntentKind::DashboardSummary
         | VoiceIntentKind::DogfoodReadiness
+        | VoiceIntentKind::NextWork
         | VoiceIntentKind::RecentWork
         | VoiceIntentKind::ReviewNeeds
         | VoiceIntentKind::AgentStatus => {
@@ -3642,6 +3643,7 @@ fn voice_session_id(
         }
         VoiceReadScope::ProjectDashboard
         | VoiceReadScope::ProjectDogfoodReadiness
+        | VoiceReadScope::ProjectNextWork
         | VoiceReadScope::ProjectRecentWork
         | VoiceReadScope::ProjectReviewNeeds
         | VoiceReadScope::None => Ok(None),
@@ -3735,6 +3737,29 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
                 comma_or_none(&readiness.blockers),
                 comma_or_none(&readiness.next_actions)
             ));
+        }
+        VoiceReadScope::ProjectNextWork => {
+            output.push_str(&format!(
+                "spoken_workpad_tasks={}\nspoken_next_work_candidates={}\n",
+                dashboard.workpad_tasks.len(),
+                dashboard.next_workpad_candidate_count()
+            ));
+            if let Some(next) = dashboard.next_workpad_task() {
+                output.push_str(&format!(
+                    "spoken_next_workpad_task={} default_task_id={} path={} source_anchor={} source={}#{} title={} observed_status={} capo_execution_status={}\n",
+                    next.workpad_task_id,
+                    default_workpad_task_id(&next.workpad_task_id),
+                    next.path,
+                    next.source_anchor,
+                    next.path,
+                    next.source_anchor,
+                    next.title,
+                    next.observed_status,
+                    next.capo_execution_status
+                ));
+            } else {
+                output.push_str("spoken_next_workpad_task=none\n");
+            }
         }
         VoiceReadScope::ProjectRecentWork => {
             output.push_str(&format!(
@@ -3857,6 +3882,7 @@ fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
         VoiceIntentKind::AgentStatus => "agent_status",
         VoiceIntentKind::DashboardSummary => "dashboard_summary",
         VoiceIntentKind::DogfoodReadiness => "dogfood_readiness",
+        VoiceIntentKind::NextWork => "next_work",
         VoiceIntentKind::RecentWork => "recent_work",
         VoiceIntentKind::ReviewNeeds => "review_needs",
         VoiceIntentKind::RedirectSession => "redirect_session",
@@ -3870,6 +3896,7 @@ fn voice_scope_label(scope: &VoiceReadScope) -> &'static str {
     match scope {
         VoiceReadScope::ProjectDashboard => "project_dashboard",
         VoiceReadScope::ProjectDogfoodReadiness => "project_dogfood_readiness",
+        VoiceReadScope::ProjectNextWork => "project_next_work",
         VoiceReadScope::ProjectRecentWork => "project_recent_work",
         VoiceReadScope::ProjectReviewNeeds => "project_review_needs",
         VoiceReadScope::Agent { .. } => "agent",
@@ -9052,6 +9079,100 @@ mod tests {
         assert!(agent_output.contains("current_goal=Inspect the project"));
         assert!(agent_output.contains("latest_summary=Fake adapter processed goal for fake-codex"));
         assert!(!agent_output.contains("What has fake-codex done?"));
+        assert_eq!(
+            state.last_sequence().expect("after sequence"),
+            before_sequence
+        );
+    }
+
+    #[test]
+    fn voice_next_work_reads_workpad_queue_without_mutating() {
+        let state_root = temp_root("cli-voice-next-work");
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-cli-voice-next-work-pending".to_string(),
+                    kind: EventKind::WorkpadIndexed,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some("workpads:features:voice.md#v7".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::WorkpadTask(WorkpadTaskProjection {
+                    workpad_task_id: "workpads:features:voice.md#v7".to_string(),
+                    project_id: project_id(),
+                    path: "workpads/features/voice.md".to_string(),
+                    source_anchor: "v7".to_string(),
+                    title: "Next Work Conversation".to_string(),
+                    observed_status: "pending".to_string(),
+                    capo_execution_status: "observed_only".to_string(),
+                    observed_unix: 1,
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append pending workpad task");
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-cli-voice-next-work-imported".to_string(),
+                    kind: EventKind::WorkpadIndexed,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some("workpads:features:tasks.md#f1".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::WorkpadTask(WorkpadTaskProjection {
+                    workpad_task_id: "workpads:features:tasks.md#f1".to_string(),
+                    project_id: project_id(),
+                    path: "workpads/features/tasks.md".to_string(),
+                    source_anchor: "f1".to_string(),
+                    title: "Real Local Agent Connector Proof".to_string(),
+                    observed_status: "in_progress".to_string(),
+                    capo_execution_status: "imported".to_string(),
+                    observed_unix: 1,
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append imported workpad task");
+        let before_sequence = state.last_sequence().expect("before sequence");
+
+        let output = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What should we do next?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice next work");
+
+        assert!(output.contains("voice_plan=next_work"));
+        assert!(output.contains("mutation_applied=false"));
+        assert!(output.contains("raw_transcript_retained=false"));
+        assert!(output.contains("read_scope=project_next_work"));
+        assert!(output.contains("spoken_workpad_tasks=2"));
+        assert!(output.contains("spoken_next_work_candidates=1"));
+        assert!(output.contains("spoken_next_workpad_task=workpads:features:voice.md#v7"));
+        assert!(output.contains("default_task_id=task-workpad-workpads-features-voice-md-v7"));
+        assert!(output.contains("title=Next Work Conversation"));
+        assert!(output.contains("observed_status=pending"));
+        assert!(output.contains("capo_execution_status=observed_only"));
+        assert!(!output.contains("What should we do next?"));
         assert_eq!(
             state.last_sequence().expect("after sequence"),
             before_sequence

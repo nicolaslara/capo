@@ -310,6 +310,7 @@ Progress:
 - V4 dogfood readiness conversation is completed with a read-only voice intent over the shared dashboard readiness query.
 - V5 recent work conversation is completed with read-only project and agent recent-work questions over the shared dashboard query.
 - V6 review needs conversation is completed with a read-only project review/outcome question over the shared dashboard query.
+- V7 next work conversation is completed with a read-only project workpad-queue question over the shared dashboard query.
 
 Evidence:
 
@@ -323,6 +324,9 @@ Evidence:
 - `cargo test -p capo-cli voice_recent_work -- --nocapture`
 - `cargo test -p capo-voice review_needs -- --nocapture`
 - `cargo test -p capo-cli voice_review_needs -- --nocapture`
+- `cargo test -p capo-query next_actionable_workpad -- --nocapture`
+- `cargo test -p capo-voice next_work -- --nocapture`
+- `cargo test -p capo-cli voice_next_work -- --nocapture`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`

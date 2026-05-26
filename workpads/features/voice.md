@@ -137,3 +137,28 @@ Evidence:
 Decision:
 
 - Keep review-needs voice handling read-only over `ProjectDashboard`. Voice summarizes persisted review findings and task outcome reports, but does not create review state, infer hidden blockers, run providers, inspect credentials, edit workpads, or retain the raw transcript.
+
+### V7 - Next Work Conversation
+
+Status: completed
+
+Acceptance:
+
+- Recognize simple next-work questions such as "What should we do next?"
+- Answer from shared dashboard/query workpad task rows.
+- Reuse the same workpad priority semantics as the operator next-work path: actionable observed markdown status, `observed_only` Capo execution status, then deterministic path/anchor/task ordering.
+- Render candidate count, selected workpad task, source ref, title, observed markdown status, Capo execution status, and default Capo task ID.
+- Preserve raw transcript non-retention and avoid mutating state.
+
+Evidence:
+
+- `ProjectDashboard::next_workpad_task()` and `ProjectDashboard::next_workpad_candidate_count()` in `../../crates/capo-query/src/lib.rs`.
+- `VoiceIntentKind::NextWork` and `VoiceReadScope::ProjectNextWork` in `../../crates/capo-voice/src/lib.rs`.
+- CLI voice next-work rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query next_actionable_workpad -- --nocapture`: passed.
+- `cargo test -p capo-voice next_work -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_next_work -- --nocapture`: passed.
+
+Decision:
+
+- Keep next-work voice handling read-only over `ProjectDashboard`. Voice can tell the operator what Capo sees as next, but it does not import tasks, start agents, edit workpads, run providers, or retain the raw transcript.

@@ -29,6 +29,7 @@ pub enum VoiceIntentKind {
     AgentStatus,
     DashboardSummary,
     DogfoodReadiness,
+    NextWork,
     RecentWork,
     ReviewNeeds,
     RedirectSession,
@@ -67,6 +68,7 @@ pub struct VoiceReadContract {
 pub enum VoiceReadScope {
     ProjectDashboard,
     ProjectDogfoodReadiness,
+    ProjectNextWork,
     ProjectRecentWork,
     ProjectReviewNeeds,
     Agent { agent_name: String },
@@ -150,6 +152,40 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
             requires_visible_confirmation: false,
             assistant_reply_hint:
                 "Answer dogfood readiness from the shared project dashboard query.".to_string(),
+        };
+    }
+
+    if is_next_work_question(&normalized) {
+        let mut command = voice_command(
+            "voice-next-work",
+            &input,
+            CommandTarget::Project(input.project_id.clone()),
+            CommandIntent::QueryStatus,
+            None,
+        );
+        command
+            .structured_args
+            .push(("view".to_string(), "next_work".to_string()));
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::NextWork,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::ProjectNextWork,
+                required_fields: vec![
+                    "workpad_tasks",
+                    "next_workpad_task",
+                    "candidate_count",
+                    "source_anchor",
+                    "observed_status",
+                    "capo_execution_status",
+                    "default_task_id",
+                ],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: false,
+            assistant_reply_hint:
+                "Answer the next workpad task from shared dashboard workpad read models."
+                    .to_string(),
         };
     }
 
@@ -497,6 +533,18 @@ fn is_dogfood_readiness_question(input: &str) -> bool {
     )
 }
 
+fn is_next_work_question(input: &str) -> bool {
+    matches!(
+        input,
+        "what should we do next"
+            | "what is next"
+            | "what's next"
+            | "what is the next task"
+            | "what should capo do next"
+            | "show next work"
+    )
+}
+
 fn is_project_recent_work_question(input: &str) -> bool {
     matches!(
         input,
@@ -683,6 +731,43 @@ mod tests {
                 .find(|(key, _)| key == "view")
                 .map(|(_, value)| value.as_str()),
             Some("dogfood_readiness")
+        );
+    }
+
+    #[test]
+    fn next_work_question_reads_project_workpad_queue_without_mutation() {
+        let plan = plan_dummy_transcript(input("What should we do next?"));
+
+        assert_eq!(plan.intent_kind, VoiceIntentKind::NextWork);
+        assert_eq!(
+            plan.read_contract.query_scope,
+            VoiceReadScope::ProjectNextWork
+        );
+        assert!(
+            plan.read_contract
+                .required_fields
+                .contains(&"next_workpad_task")
+        );
+        assert!(
+            plan.read_contract
+                .required_fields
+                .contains(&"candidate_count")
+        );
+        assert!(!plan.requires_visible_confirmation);
+        assert!(!plan.transcript_policy.retain_raw_transcript);
+        let command = plan.command.expect("voice command");
+        assert_eq!(command.intent, CommandIntent::QueryStatus);
+        assert_eq!(
+            command.target,
+            CommandTarget::Project(ProjectId::new("project-capo"))
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "view")
+                .map(|(_, value)| value.as_str()),
+            Some("next_work")
         );
     }
 
