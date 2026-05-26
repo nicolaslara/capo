@@ -1594,3 +1594,23 @@ Verification:
 Follow-up:
 
 - Voice and future mobile/web surfaces should use this selector for "latest remote-control exposure" questions instead of requiring exposure IDs.
+
+## F6/V11 - Latest Connectivity Exposure Conversation
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add a read-only voice intent for latest connectivity exposure questions so Capo can answer remote-control status questions conversationally.
+- Support unscoped latest exposure questions plus scoped runtime-target, Capo-server, and channel filters using `ProjectDashboard::latest_connectivity_exposure(...)`.
+- Render only connectivity metadata: exposure ID, endpoint, owner, channel, exposure scope, permission scope, status, health, reachability, linked grant, and revocation time.
+- Preserve voice and connectivity safety boundaries: no raw transcript retention, no mutation, no tunnel opening, no runtime/provider launch, no credential inspection, no approval/activation/revocation, and no workpad edits.
+
+Verification:
+
+- `cargo test -p capo-voice latest_connectivity -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+
+Follow-up:
+
+- Once real tunnel adapters exist, add a separate voice path for reachability evidence rather than overloading exposure metadata.

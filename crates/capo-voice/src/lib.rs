@@ -27,6 +27,7 @@ pub enum MemoryIngestionPolicy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VoiceIntentKind {
     AgentStatus,
+    ConnectivityStatus,
     DashboardSummary,
     DispatchStatus,
     DogfoodReadiness,
@@ -69,14 +70,27 @@ pub struct VoiceReadContract {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VoiceReadScope {
     ProjectDashboard,
-    ProjectDispatchStatus { dispatch_plan_id: String },
-    ProjectLatestDispatchStatus { agent_name: Option<String> },
+    ProjectLatestConnectivityExposure {
+        owner_kind: Option<String>,
+        owner_id: Option<String>,
+        channel_kind: Option<String>,
+    },
+    ProjectDispatchStatus {
+        dispatch_plan_id: String,
+    },
+    ProjectLatestDispatchStatus {
+        agent_name: Option<String>,
+    },
     ProjectDogfoodReadiness,
     ProjectNextWork,
     ProjectRecentWork,
     ProjectReviewNeeds,
-    Agent { agent_name: String },
-    SessionForAgent { agent_name: String },
+    Agent {
+        agent_name: String,
+    },
+    SessionForAgent {
+        agent_name: String,
+    },
     None,
 }
 
@@ -238,6 +252,67 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
             requires_visible_confirmation: false,
             assistant_reply_hint:
                 "Answer latest dispatch-chain status from the shared project dashboard query."
+                    .to_string(),
+        };
+    }
+
+    if let Some(filter) = latest_connectivity_exposure_filter(&normalized) {
+        let mut command = voice_command(
+            "voice-latest-connectivity-exposure",
+            &input,
+            CommandTarget::Project(input.project_id.clone()),
+            CommandIntent::QueryStatus,
+            None,
+        );
+        command.structured_args.push((
+            "view".to_string(),
+            "connectivity_exposure_status".to_string(),
+        ));
+        command
+            .structured_args
+            .push(("connectivity_selector".to_string(), "latest".to_string()));
+        if let Some(owner_kind) = &filter.owner_kind {
+            command
+                .structured_args
+                .push(("owner_kind".to_string(), owner_kind.clone()));
+        }
+        if let Some(owner_id) = &filter.owner_id {
+            command
+                .structured_args
+                .push(("owner_id".to_string(), owner_id.clone()));
+        }
+        if let Some(channel_kind) = &filter.channel_kind {
+            command
+                .structured_args
+                .push(("channel".to_string(), channel_kind.clone()));
+        }
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::ConnectivityStatus,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::ProjectLatestConnectivityExposure {
+                    owner_kind: filter.owner_kind,
+                    owner_id: filter.owner_id,
+                    channel_kind: filter.channel_kind,
+                },
+                required_fields: vec![
+                    "exposure_id",
+                    "endpoint",
+                    "owner",
+                    "channel",
+                    "exposure_scope",
+                    "permission_scope",
+                    "status",
+                    "health",
+                    "reachable",
+                    "grant",
+                    "revoked_at",
+                ],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: false,
+            assistant_reply_hint:
+                "Answer latest connectivity exposure status from shared dashboard read models."
                     .to_string(),
         };
     }
@@ -721,6 +796,73 @@ fn latest_dispatch_status_agent(normalized: &str) -> Option<Option<String>> {
         .map(Some)
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ConnectivityExposureVoiceFilter {
+    pub owner_kind: Option<String>,
+    pub owner_id: Option<String>,
+    pub channel_kind: Option<String>,
+}
+
+fn latest_connectivity_exposure_filter(
+    normalized: &str,
+) -> Option<ConnectivityExposureVoiceFilter> {
+    if matches!(
+        normalized,
+        "what is latest connectivity exposure status"
+            | "what is the latest connectivity exposure status"
+            | "what's latest connectivity exposure status"
+            | "what's the latest connectivity exposure status"
+            | "show latest connectivity exposure status"
+            | "latest connectivity exposure status"
+            | "what is latest remote control exposure"
+            | "what is the latest remote control exposure"
+            | "show latest remote control exposure"
+            | "latest remote control exposure"
+    ) {
+        return Some(ConnectivityExposureVoiceFilter::default());
+    }
+
+    let rest = normalized
+        .strip_prefix("what is latest connectivity exposure status for ")
+        .or_else(|| normalized.strip_prefix("what is the latest connectivity exposure status for "))
+        .or_else(|| normalized.strip_prefix("what's latest connectivity exposure status for "))
+        .or_else(|| normalized.strip_prefix("what's the latest connectivity exposure status for "))
+        .or_else(|| normalized.strip_prefix("show latest connectivity exposure status for "))
+        .or_else(|| normalized.strip_prefix("latest connectivity exposure status for "))
+        .or_else(|| normalized.strip_prefix("what is latest remote control exposure for "))
+        .or_else(|| normalized.strip_prefix("what is the latest remote control exposure for "))
+        .or_else(|| normalized.strip_prefix("show latest remote control exposure for "))
+        .or_else(|| normalized.strip_prefix("latest remote control exposure for "))?
+        .trim();
+
+    if let Some(owner_id) = rest.strip_prefix("runtime target ") {
+        return Some(ConnectivityExposureVoiceFilter {
+            owner_kind: Some("runtime_target".to_string()),
+            owner_id: Some(agent_slug(owner_id)),
+            channel_kind: None,
+        });
+    }
+    if let Some(owner_id) = rest.strip_prefix("capo server ") {
+        return Some(ConnectivityExposureVoiceFilter {
+            owner_kind: Some("capo_server".to_string()),
+            owner_id: Some(agent_slug(owner_id)),
+            channel_kind: None,
+        });
+    }
+    if matches!(
+        rest,
+        "control" | "stdio" | "logs" | "dashboard" | "artifact"
+    ) {
+        return Some(ConnectivityExposureVoiceFilter {
+            owner_kind: None,
+            owner_id: None,
+            channel_kind: Some(rest.to_string()),
+        });
+    }
+
+    None
+}
+
 fn is_project_recent_work_question(input: &str) -> bool {
     matches!(
         input,
@@ -988,6 +1130,79 @@ mod tests {
                 .find(|(key, _)| key == "agent")
                 .map(|(_, value)| value.as_str()),
             Some("codex-worker")
+        );
+    }
+
+    #[test]
+    fn latest_connectivity_status_question_reads_latest_exposure_without_mutation() {
+        let plan = plan_dummy_transcript(input("What is the latest connectivity exposure status?"));
+
+        assert_eq!(plan.intent_kind, VoiceIntentKind::ConnectivityStatus);
+        assert_eq!(
+            plan.read_contract.query_scope,
+            VoiceReadScope::ProjectLatestConnectivityExposure {
+                owner_kind: None,
+                owner_id: None,
+                channel_kind: None,
+            }
+        );
+        assert!(plan.read_contract.required_fields.contains(&"status"));
+        assert!(
+            plan.read_contract
+                .required_fields
+                .contains(&"permission_scope")
+        );
+        assert!(!plan.requires_visible_confirmation);
+        assert!(!plan.transcript_policy.retain_raw_transcript);
+        let command = plan.command.expect("voice command");
+        assert_eq!(command.intent, CommandIntent::QueryStatus);
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "connectivity_selector")
+                .map(|(_, value)| value.as_str()),
+            Some("latest")
+        );
+
+        let owner_plan = plan_dummy_transcript(input(
+            "What is the latest connectivity exposure status for runtime target remote-target-1?",
+        ));
+        assert_eq!(
+            owner_plan.read_contract.query_scope,
+            VoiceReadScope::ProjectLatestConnectivityExposure {
+                owner_kind: Some("runtime_target".to_string()),
+                owner_id: Some("remote-target-1".to_string()),
+                channel_kind: None,
+            }
+        );
+        let command = owner_plan.command.expect("voice command");
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "owner_kind")
+                .map(|(_, value)| value.as_str()),
+            Some("runtime_target")
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "owner_id")
+                .map(|(_, value)| value.as_str()),
+            Some("remote-target-1")
+        );
+
+        let channel_plan =
+            plan_dummy_transcript(input("Latest remote control exposure for dashboard"));
+        assert_eq!(
+            channel_plan.read_contract.query_scope,
+            VoiceReadScope::ProjectLatestConnectivityExposure {
+                owner_kind: None,
+                owner_id: None,
+                channel_kind: Some("dashboard".to_string()),
+            }
         );
     }
 

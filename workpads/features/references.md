@@ -721,3 +721,14 @@ Observed 2026-05-26.
 - Connectivity exposure source projections: `../../crates/capo-state/src/lib.rs`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR9.
+
+## F6/V11 Latest Connectivity Exposure Conversation
+
+Observed 2026-05-26.
+
+- Voice latest-connectivity planning and unit coverage: `../../crates/capo-voice/src/lib.rs`
+- CLI voice latest connectivity exposure rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared latest connectivity exposure selector consumed by voice: `../../crates/capo-query/src/lib.rs`
+- Voice source workpad: `voice.md`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for V11.

@@ -229,3 +229,25 @@ Evidence:
 Decision:
 
 - Keep latest dispatch-status voice handling read-only over the shared dashboard query. This makes voice usable without copying dispatch-plan IDs while preserving the same prompt/output redaction and provider-safety boundary as exact dispatch-status questions.
+
+### V11 - Latest Connectivity Exposure Conversation
+
+Status: completed
+
+Acceptance:
+
+- Recognize simple latest connectivity exposure questions such as "What is the latest connectivity exposure status?"
+- Recognize scoped questions for runtime targets, Capo servers, or channels such as "latest connectivity exposure status for runtime target remote-target-1" and "latest remote control exposure for dashboard".
+- Answer from `ProjectDashboard::latest_connectivity_exposure(...)` instead of duplicating connectivity lookup in voice code.
+- Preserve raw transcript non-retention, avoid mutating state, and avoid opening tunnels, launching runtimes/providers, inspecting credentials, approving/activating/revoking exposure, or editing workpads.
+
+Evidence:
+
+- `VoiceIntentKind::ConnectivityStatus` and `VoiceReadScope::ProjectLatestConnectivityExposure` in `../../crates/capo-voice/src/lib.rs`.
+- CLI voice latest connectivity exposure rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-voice latest_connectivity -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+
+Decision:
+
+- Keep remote-control voice questions read-only over shared connectivity exposure read models. Voice can explain the latest exposure status and filters, but cannot request approvals, activate grants, revoke exposure, open tunnels, or claim real tunnel reachability.

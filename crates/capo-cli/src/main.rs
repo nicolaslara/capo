@@ -3245,7 +3245,8 @@ fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> 
 
     let mut output = render_voice_header(&plan, plan.command.as_ref(), false, false);
     match plan.intent_kind {
-        VoiceIntentKind::DashboardSummary
+        VoiceIntentKind::ConnectivityStatus
+        | VoiceIntentKind::DashboardSummary
         | VoiceIntentKind::DispatchStatus
         | VoiceIntentKind::DogfoodReadiness
         | VoiceIntentKind::NextWork
@@ -3631,6 +3632,7 @@ fn voice_session_id(
                 .map(|row| row.session.session_id.clone()))
         }
         VoiceReadScope::ProjectDashboard
+        | VoiceReadScope::ProjectLatestConnectivityExposure { .. }
         | VoiceReadScope::ProjectDispatchStatus { .. }
         | VoiceReadScope::ProjectLatestDispatchStatus { .. }
         | VoiceReadScope::ProjectDogfoodReadiness
@@ -3734,6 +3736,21 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
                 ));
             } else {
                 output.push_str("spoken_latest_dispatch_missing=true\n");
+            }
+        }
+        VoiceReadScope::ProjectLatestConnectivityExposure {
+            owner_kind,
+            owner_id,
+            channel_kind,
+        } => {
+            if let Some(exposure) = dashboard.latest_connectivity_exposure(
+                owner_kind.as_deref(),
+                owner_id.as_deref(),
+                channel_kind.as_deref(),
+            ) {
+                append_voice_connectivity_exposure_status(&mut output, exposure);
+            } else {
+                output.push_str("spoken_latest_connectivity_exposure_missing=true\n");
             }
         }
         VoiceReadScope::ProjectDogfoodReadiness => {
@@ -3873,6 +3890,27 @@ fn append_voice_dispatch_status(output: &mut String, status: &AdapterDispatchSta
     ));
 }
 
+fn append_voice_connectivity_exposure_status(
+    output: &mut String,
+    exposure: &ConnectivityExposureProjection,
+) {
+    output.push_str(&format!(
+        "spoken_connectivity_exposure={} spoken_endpoint={} spoken_owner={}:{} spoken_channel={} spoken_exposure_scope={} spoken_permission_scope={} spoken_exposure_status={} spoken_health={} spoken_reachable={} spoken_grant={} spoken_revoked_at={}\n",
+        exposure.exposure_id,
+        exposure.connectivity_endpoint_id,
+        exposure.owner_kind,
+        exposure.owner_id,
+        exposure.channel_kind,
+        exposure.exposure,
+        exposure.permission_scope,
+        exposure.status,
+        exposure.health_status,
+        exposure.reachable,
+        exposure.capability_grant_id.as_deref().unwrap_or("none"),
+        exposure.revoked_at.as_deref().unwrap_or("none")
+    ));
+}
+
 fn append_voice_agent_row(output: &mut String, row: &capo_query::AgentDashboardRow) {
     output.push_str(&format!(
         "spoken_agent={} agent_status={}\n",
@@ -3914,6 +3952,7 @@ fn append_voice_agent_row(output: &mut String, row: &capo_query::AgentDashboardR
 fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
     match intent {
         VoiceIntentKind::AgentStatus => "agent_status",
+        VoiceIntentKind::ConnectivityStatus => "connectivity_status",
         VoiceIntentKind::DashboardSummary => "dashboard_summary",
         VoiceIntentKind::DispatchStatus => "dispatch_status",
         VoiceIntentKind::DogfoodReadiness => "dogfood_readiness",
@@ -3931,6 +3970,9 @@ fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
 fn voice_scope_label(scope: &VoiceReadScope) -> &'static str {
     match scope {
         VoiceReadScope::ProjectDashboard => "project_dashboard",
+        VoiceReadScope::ProjectLatestConnectivityExposure { .. } => {
+            "project_latest_connectivity_exposure"
+        }
         VoiceReadScope::ProjectDispatchStatus { .. } => "project_dispatch_status",
         VoiceReadScope::ProjectLatestDispatchStatus { .. } => "project_latest_dispatch_status",
         VoiceReadScope::ProjectDogfoodReadiness => "project_dogfood_readiness",
@@ -9269,6 +9311,37 @@ mod tests {
         assert_eq!(
             output_value(&latest_status, "exposure"),
             output_value(&activated, "exposure")
+        );
+        let before_voice_sequence = SqliteStateStore::open(&state_root)
+            .expect("state")
+            .last_sequence()
+            .expect("sequence before voice");
+        let voice_latest = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What is the latest connectivity exposure status for runtime target remote-target-1?"
+                .to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice latest connectivity exposure status");
+        assert!(voice_latest.contains("voice_plan=connectivity_status"));
+        assert!(voice_latest.contains("mutation_applied=false"));
+        assert!(voice_latest.contains("raw_transcript_retained=false"));
+        assert!(voice_latest.contains("read_scope=project_latest_connectivity_exposure"));
+        assert!(voice_latest.contains("spoken_connectivity_exposure="));
+        assert!(voice_latest.contains("spoken_owner=runtime_target:remote-target-1"));
+        assert!(voice_latest.contains("spoken_channel=control"));
+        assert!(voice_latest.contains("spoken_exposure_status=active"));
+        assert!(voice_latest.contains("spoken_permission_scope=network:connect:private_tunnel"));
+        assert!(!voice_latest.contains("What is the latest connectivity exposure status"));
+        assert_eq!(
+            SqliteStateStore::open(&state_root)
+                .expect("state")
+                .last_sequence()
+                .expect("sequence after voice"),
+            before_voice_sequence
         );
 
         let revoked = run_cli(vec![
