@@ -15,6 +15,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 mod apply;
 mod codec;
+mod codec_adapter;
 mod codec_encode;
 mod error;
 mod event;

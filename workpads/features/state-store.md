@@ -274,3 +274,32 @@ Decision:
 
 - Split encoder and decoder modules before introducing typed projection descriptors. This keeps the current durable projection-log contract stable while making the highest-churn compatibility code smaller for review.
 - Keep `ProjectionRecordRow` with the encoder because it is the insertion-side row representation consumed by `insert_projection_record`.
+
+### SS2h - State Adapter Decoder Module Split
+
+Status: completed
+
+Acceptance:
+
+- Move adapter-related projection-log row decoding out of `codec.rs` into a focused module.
+- Preserve persisted projection kind strings, `a` through `h` column mapping, payload JSON decoding, decode error behavior, and rebuild behavior for adapter readiness, smoke, dispatch plan/gate/replay/request/execution, prompt source, and prompt materialization rows.
+- Do not change schema, encoding, apply SQL, read queries, event append behavior, rebuild behavior, or crate-root public APIs.
+- Run focused `capo-state` tests and the standard workspace gate before completion.
+
+Evidence:
+
+- `../../crates/capo-state/src/codec_adapter.rs` now owns adapter readiness, smoke report, dispatch plan/gate/replay/request/execution, prompt source, and prompt materialization projection-log row decoding.
+- `../../crates/capo-state/src/codec.rs` delegates `adapter_*` projection kinds to the adapter decoder while keeping non-adapter row decoding and shared decode helpers.
+- `../../crates/capo-state/src/lib.rs` registers the private `codec_adapter` module without changing crate-root public APIs.
+- Resulting state crate file sizes: `../../crates/capo-state/src/codec.rs` 839 lines; `../../crates/capo-state/src/codec_adapter.rs` 763 lines; `../../crates/capo-state/src/codec_encode.rs` 511 lines; `../../crates/capo-state/src/lib.rs` 506 lines.
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+Decision:
+
+- Split adapter projection decoding as the next state maintainability slice because adapter rows are a coherent projection family and dominate the remaining decoder size.
+- Keep shared decode helpers in `codec.rs` for now because non-adapter and adapter decoders both rely on the same missing-field, payload, optional string, and numeric parsing behavior. This preserves decode error wording and avoids introducing a helper module until another decoder family split proves the stable helper boundary.
+- Keep the `adapter_*` dispatch inside the top-level projection decoder so unknown non-adapter projection kinds still fail through the original unknown-kind path.

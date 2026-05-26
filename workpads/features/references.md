@@ -1488,3 +1488,13 @@ Observed 2026-05-26.
 - CLI routing and shared helpers retained in: `../../crates/capo-cli/src/main.rs`
 - Resulting file sizes: `../../crates/capo-cli/src/main.rs` 843 lines; `../../crates/capo-cli/src/permission.rs` 354 lines.
 - No new third-party dependencies were added for CLI16.
+
+## F8/SS2h State Adapter Decoder Module Split
+
+Observed 2026-05-26.
+
+- Adapter projection decoder module: `../../crates/capo-state/src/codec_adapter.rs`
+- Non-adapter decoder and shared decode helpers retained in: `../../crates/capo-state/src/codec.rs`
+- State crate module registration retained in: `../../crates/capo-state/src/lib.rs`
+- Resulting file sizes: `../../crates/capo-state/src/codec.rs` 839 lines; `../../crates/capo-state/src/codec_adapter.rs` 763 lines; `../../crates/capo-state/src/codec_encode.rs` 511 lines; `../../crates/capo-state/src/lib.rs` 506 lines.
+- No new third-party dependencies were added for SS2h.

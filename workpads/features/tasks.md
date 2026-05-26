@@ -549,11 +549,13 @@ Progress:
 - SS2e state projection apply module split is completed. Read-model apply SQL and projection watermark updates now live in `apply.rs` while event append, projection-log insertion, queries, and public APIs remain unchanged.
 - SS2f state query module split is completed. Read-only projection and event query methods now live in `queries.rs` while append, recovery, rebuild, projection-log insertion, and public APIs remain unchanged.
 - SS2g state projection codec encoder split is completed. Projection-log row encoding now lives in `codec_encode.rs` while decoding, validation, append, rebuild, and public APIs remain unchanged.
+- SS2h state adapter decoder split is completed. Adapter-related projection-log row decoding now lives in `codec_adapter.rs` while non-adapter decoding, shared decode helpers, schema, encoding, apply SQL, queries, rebuild, and public APIs remain unchanged.
 
 Evidence:
 
 - `workpads/features/state-store.md`
 - `crates/capo-state/src/lib.rs`
+- `crates/capo-state/src/codec_adapter.rs`
 - Diesel docs: https://docs.diesel.rs/main/diesel/index.html
 - Diesel migrations docs: https://docs.diesel.rs/main/diesel_migrations/index.html
 - SQLx repository/docs: https://github.com/launchbadge/sqlx

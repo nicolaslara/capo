@@ -3019,6 +3019,25 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F8/SS2h - State Adapter Decoder Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move adapter projection-log decoding into `codec_adapter.rs` because adapter readiness, smoke, dispatch, prompt-source, and prompt-materialization rows form a coherent projection family and were the largest remaining part of `codec.rs`.
+- Keep shared decode helpers in `codec.rs` instead of creating a helper module in this slice. Both adapter and non-adapter decoders still need the same missing-field, payload, optional-string, and numeric parsing behavior, and preserving those helpers in place avoids changing error wording.
+- Preserve top-level dispatch in `projection_record_from_row`: `adapter_*` rows delegate to the adapter decoder, while unknown non-adapter rows keep the existing unknown-kind behavior.
+- Keep the split private to the state crate and preserve crate-root public APIs.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2d - State Projection Codec Module Split
 
 Status: completed on 2026-05-26.
