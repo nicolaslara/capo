@@ -9,10 +9,9 @@ use capo_state::{
     ProjectionRecord, RedactionState,
 };
 
+use crate::adapter_replay::adapter_label;
 use crate::cli_surface::{ParsedArgs, has_flag, optional_arg, required_arg};
-use crate::{
-    adapter_label, debug_error, envelope, escape_json, project_id, stable_cli_hash, state,
-};
+use crate::{debug_error, envelope, escape_json, project_id, stable_cli_hash, state};
 
 pub(crate) fn record_adapter_smoke_report(
     parsed: &ParsedArgs,

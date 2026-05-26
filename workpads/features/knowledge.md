@@ -2765,6 +2765,30 @@ Verification:
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - Focused read-only review subagent: no issues found; permission defaults, trusted-local requirement, `--record` behavior, artifact/event recording, and `tool_origin=capo_wrapper` were preserved.
 
+## F9/CLI10 - Adapter Fixture Replay Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move adapter fixture replay into `adapter_replay.rs`: generic adapter fixture replay, dispatch fixture replay, adapter fixture parsing, parse-error rendering, and adapter label normalization.
+- Keep replay provider-safe by preserving fixture-only execution. Replay applies normalized fixture events through the controller and records dispatch replay metadata with `provider_cli_executed=false` and `raw_content_policy=content_hashed_not_rendered`.
+- Make `adapter_label` crate-visible because adapter smoke reports already share the same adapter normalization vocabulary. This avoids duplicating Codex/Claude/ACP label aliases across modules.
+- Make `controller` and `export_evidence` crate-visible so replay can chain into existing controller and evidence surfaces without duplicating those workflows.
+- Review noted that importing `adapter_label` from `adapter_replay.rs` into `adapter_smoke.rs` is acceptable for this slice but could become a cohesion smell if adapter normalization spreads further. A future adapter/common helper split should move shared label normalization if another module needs it.
+
+Verification:
+
+- `cargo check -p capo-cli`: passed.
+- `cargo test -p capo-cli adapter_fixture_replay -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-adapters -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- Focused read-only review subagent: no issues found; provider execution stays false, raw content policy stays `content_hashed_not_rendered`, and replay outputs counts/hashes rather than raw provider text.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.

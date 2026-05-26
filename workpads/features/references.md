@@ -1385,3 +1385,13 @@ Observed 2026-05-26.
 - CLI routing and dashboard rendering retained in: `../../crates/capo-cli/src/main.rs`
 - Resulting file sizes: `../../crates/capo-cli/src/main.rs` 4,772 lines; `../../crates/capo-cli/src/tool_wrapper.rs` 324 lines.
 - No new third-party dependencies were added for CLI9.
+
+## F9/CLI10 Adapter Fixture Replay Module Split
+
+Observed 2026-05-26.
+
+- Adapter replay module: `../../crates/capo-cli/src/adapter_replay.rs`
+- Adapter smoke report module consuming shared adapter labels: `../../crates/capo-cli/src/adapter_smoke.rs`
+- CLI routing, readiness, launch planning, dashboard, and voice summaries retained in: `../../crates/capo-cli/src/main.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 4,540 lines; `../../crates/capo-cli/src/adapter_replay.rs` 252 lines.
+- No new third-party dependencies were added for CLI10.
