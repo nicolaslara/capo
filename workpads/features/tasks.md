@@ -554,3 +554,29 @@ Evidence:
 - `cargo fmt --check`
 - `cargo test --workspace --all-targets`
 - `cargo clippy --all-targets --all-features -- -D warnings`
+
+## F9 - CLI Maintainability
+
+Status: in_progress
+
+Source workpad: cross-cutting CLI implementation and feature workpads.
+
+Acceptance:
+
+- Reduce `capo-cli` file size where behavior-preserving splits are available.
+- Preserve CLI command routing, command output, test behavior, and provider-safety guards.
+- Keep splits aligned with existing feature boundaries before introducing new command abstractions.
+
+Progress:
+
+- CLI1 test module split is completed. The large inline `capo-cli` test module now lives in `crates/capo-cli/src/tests.rs`, while runtime CLI command routing and helper functions remain in `main.rs`.
+
+Evidence:
+
+- `crates/capo-cli/src/main.rs`
+- `crates/capo-cli/src/tests.rs`
+- `cargo test -p capo-cli`
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo test --workspace --all-targets`
+- `cargo clippy --all-targets --all-features -- -D warnings`

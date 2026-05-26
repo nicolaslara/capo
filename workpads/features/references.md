@@ -1253,3 +1253,12 @@ Observed 2026-05-26.
 - Projection-log decoder and validation module retained in: `../../crates/capo-state/src/codec.rs`
 - Resulting file sizes: `../../crates/capo-state/src/lib.rs` 505 lines; `../../crates/capo-state/src/codec.rs` 1,558 lines; `../../crates/capo-state/src/codec_encode.rs` 513 lines; `../../crates/capo-state/src/queries.rs` 1,345 lines; `../../crates/capo-state/src/tests.rs` 1,876 lines.
 - No new third-party dependencies were added for SS2g.
+
+## F9/CLI1 CLI Test Module Split
+
+Observed 2026-05-26.
+
+- CLI runtime implementation: `../../crates/capo-cli/src/main.rs`
+- CLI tests module: `../../crates/capo-cli/src/tests.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 8,806 lines; `../../crates/capo-cli/src/tests.rs` 5,405 lines.
+- No new third-party dependencies were added for CLI1.

@@ -2493,6 +2493,25 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F9/CLI1 - CLI Test Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move the large inline `capo-cli` test module into `src/tests.rs`.
+- Keep `main.rs` as the runtime CLI implementation for this slice. Command routing, provider-safety guards, renderers, and helper functions remain unchanged.
+- Use this as the first CLI maintainability slice before deeper command-family extraction. The test split is behavior-preserving and gives future command splits a smaller runtime file to inspect.
+- Keep the tests as a sibling module using `super::*` so existing private helper coverage remains intact.
+
+Verification:
+
+- `cargo test -p capo-cli`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.
