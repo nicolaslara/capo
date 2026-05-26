@@ -1898,3 +1898,17 @@ Verification:
 - `cargo test -p capo-query dogfood_readiness -- --nocapture`: passed.
 - `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
 - `cargo test -p capo-cli voice_dogfood_readiness -- --nocapture`: passed.
+
+## F3/DS10 - Dashboard Dogfood Readiness Component Refs
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Render dogfood readiness component refs in `capo dashboard` from the same shared readiness query used by the readiness command and voice.
+- Include connector evidence refs, workpad task refs, dispatch chain refs, and project evidence refs in the project readiness summary line.
+- Keep dashboard refs metadata-only. Raw dispatch prompts, provider output, credential/session material, tunnel details, and source markdown bodies remain excluded.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.

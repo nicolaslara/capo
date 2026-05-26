@@ -242,3 +242,25 @@ Decision:
 
 - Put compact tool activity totals at the top of the operator dashboard so users can quickly see project-wide governed and observed-only tool activity before reading per-session rows.
 - Keep the detailed rows unchanged so audit and evidence review still have tool IDs, origins, statuses, confidence, artifacts, and hashes.
+
+### DS10 - Dashboard Dogfood Readiness Component Refs
+
+Status: completed
+
+Acceptance:
+
+- Render dogfood readiness component refs in `capo dashboard` from the shared readiness query.
+- Include connector evidence refs, workpad task refs, dispatch chain refs, and project evidence refs.
+- Keep the dashboard read-only and metadata-only: no provider CLIs, prompt materialization, tunnels, credentials, raw provider output, raw prompts, or source markdown bodies.
+
+Evidence:
+
+- Dashboard readiness ref rendering in `../../crates/capo-cli/src/main.rs`.
+- Shared readiness ref source in `../../crates/capo-query/src/lib.rs`.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Render the same component ref groups in `capo dashboard` that `capo dogfood readiness`, readiness evidence, and voice already expose.
+- Keep the dashboard read-only over the shared readiness query. The refs are review breadcrumbs only: connector smoke report IDs, workpad task IDs, dispatch plan/replay/execution IDs, and project evidence IDs.
+- Do not render raw prompts, provider output, credential/session material, tunnel data, or source markdown bodies.

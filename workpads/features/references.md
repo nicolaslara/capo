@@ -889,3 +889,12 @@ Observed 2026-05-26.
 - Voice readiness rendering of refs: `../../crates/capo-cli/src/main.rs`
 - Dogfood bridge source workpad: `dogfood-bridge.md`
 - No new third-party dependencies were added for DB8.
+
+## F3/DS10 Dashboard Dogfood Readiness Component Refs
+
+Observed 2026-05-26.
+
+- CLI dashboard readiness ref rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared readiness ref source: `../../crates/capo-query/src/lib.rs`
+- Dashboard source workpad: `dashboard.md`
+- No new third-party dependencies were added for DS10.

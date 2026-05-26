@@ -3096,12 +3096,16 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
         &dashboard.adapter_dogfood_gate,
     ));
     output.push_str(&format!(
-        "project_dogfood_readiness={} status={} real_agent_connector_ready={} workpad_bridge_ready={} dispatch_chain_ready={} blockers={} next_actions={}\n",
+        "project_dogfood_readiness={} status={} real_agent_connector_ready={} workpad_bridge_ready={} dispatch_chain_ready={} connector_evidence_refs={} workpad_task_refs={} dispatch_chain_refs={} project_evidence_refs={} blockers={} next_actions={}\n",
         dogfood_readiness.ready,
         dogfood_readiness.status,
         dogfood_readiness.real_agent_connector_ready,
         dogfood_readiness.workpad_bridge_ready,
         dogfood_readiness.dispatch_chain_ready,
+        comma_or_none(&dogfood_readiness.connector_evidence_refs),
+        comma_or_none(&dogfood_readiness.workpad_task_refs),
+        comma_or_none(&dogfood_readiness.dispatch_chain_refs),
+        comma_or_none(&dogfood_readiness.project_evidence_refs),
         comma_or_none(&dogfood_readiness.blockers),
         comma_or_none(&dogfood_readiness.next_actions)
     ));
@@ -7803,6 +7807,15 @@ mod tests {
         assert!(dashboard_after_readiness.contains("real_agent_connector_ready=true"));
         assert!(dashboard_after_readiness.contains("workpad_bridge_ready=false"));
         assert!(dashboard_after_readiness.contains("dispatch_chain_ready=true"));
+        assert!(dashboard_after_readiness.contains("connector_evidence_refs=adapter-smoke-codex"));
+        assert!(dashboard_after_readiness.contains("workpad_task_refs=none"));
+        assert!(dashboard_after_readiness.contains("dispatch_chain_refs=adapter-dispatch-plan-"));
+        assert!(dashboard_after_readiness.contains("adapter-dispatch-replay-"));
+        assert!(dashboard_after_readiness.contains("adapter-dispatch-execution-"));
+        assert!(
+            dashboard_after_readiness
+                .contains("project_evidence_refs=evidence-artifact-dogfood-readiness-")
+        );
         assert!(dashboard_after_readiness.contains("blockers=workpad_index_missing"));
         assert_text_absent_in_tree(&state_root, "Do not render this dispatch prompt");
         assert_text_absent_in_tree(&state_root, "Codex fixture response.");
