@@ -1050,3 +1050,12 @@ Observed 2026-05-26.
 - Artifact, agent, session, run, and governed tool-call projections: `../../crates/capo-state/src/lib.rs`
 - Permissions/tools source workpad: `permissions-tools.md`
 - No new third-party dependencies were added for PT14.
+
+## F7/RR19 Latest Runtime Target Status
+
+Observed 2026-05-26.
+
+- Shared latest runtime target selector: `../../crates/capo-query/src/lib.rs`
+- CLI exact/latest runtime target status rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR19.

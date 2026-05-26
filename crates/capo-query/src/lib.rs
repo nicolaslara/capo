@@ -285,6 +285,26 @@ impl ProjectDashboard {
             .find(|target| target.runtime_target_id == runtime_target_id)
     }
 
+    pub fn latest_runtime_target(
+        &self,
+        runner_kind: Option<&str>,
+        status: Option<&str>,
+    ) -> Option<&RuntimeTargetProjection> {
+        self.runtime_targets
+            .iter()
+            .filter(|target| {
+                runner_kind
+                    .map(|kind| runtime_runner_kind_matches(&target.runner_kind, kind))
+                    .unwrap_or(true)
+            })
+            .filter(|target| status.map(|value| target.status == value).unwrap_or(true))
+            .max_by(|left, right| {
+                left.updated_sequence
+                    .cmp(&right.updated_sequence)
+                    .then_with(|| left.runtime_target_id.cmp(&right.runtime_target_id))
+            })
+    }
+
     pub fn connectivity_exposure_status(
         &self,
         exposure_id: &str,
@@ -320,6 +340,12 @@ impl ProjectDashboard {
                     .then_with(|| left.exposure_id.cmp(&right.exposure_id))
             })
     }
+}
+
+fn runtime_runner_kind_matches(stored: &str, requested: &str) -> bool {
+    stored == requested
+        || stored.replace('_', "-") == requested
+        || stored.replace('-', "_") == requested
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1053,9 +1079,18 @@ mod tests {
             .expect("runtime target status");
         assert_eq!(target.runtime_target_id, "remote-target-1");
         assert_eq!(target.status, "available");
+        let latest = dashboard
+            .latest_runtime_target(Some("remote-process"), Some("available"))
+            .expect("latest available remote target");
+        assert_eq!(latest.runtime_target_id, "remote-target-1");
         assert!(
             dashboard
                 .runtime_target_status("missing-runtime-target")
+                .is_none()
+        );
+        assert!(
+            dashboard
+                .latest_runtime_target(Some("container"), Some("available"))
                 .is_none()
         );
     }

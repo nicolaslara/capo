@@ -451,3 +451,31 @@ Decision:
 - Treat runtime target evidence as an operator review artifact over placement/status metadata, not proof that a runtime process is live.
 - Keep runtime target evidence separate from connectivity exposure evidence: target status answers whether Capo can select a placement, while exposure evidence answers whether a channel was opened/approved/revoked.
 - Keep the export read-model-derived and provider-free. It records target metadata only, without launching runtimes, launching provider CLIs, opening tunnels, inspecting credentials, materializing prompts, requesting approvals, activating grants, retaining raw transcripts, or mutating target state.
+
+### RR19 - Latest Runtime Target Status
+
+Status: completed
+
+Acceptance:
+
+- Add a shared query helper that selects the latest recorded runtime target without requiring the operator to know a target ID.
+- Support optional runner-kind and runtime-status filters so remote-control clients can ask for the latest local, remote, container, available, disabled, or unhealthy placement.
+- Expose exact and latest runtime target status through the same read-only operator command.
+- Keep status read-model-derived and provider-free: do not launch runtimes, launch providers, inspect credentials, open tunnels, request approvals, activate grants, retain raw transcripts, or mutate state.
+
+Evidence:
+
+- `ProjectDashboard::latest_runtime_target(...)` in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo runtime target status --latest [--runner local-process|remote-process|container] [--status available|disabled|unhealthy]` in `../../crates/capo-cli/src/main.rs`.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test -p capo-query runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo test`: passed.
+
+Decision:
+
+- Treat latest runtime target selection as query/read-model behavior. The selector uses the newest target projection sequence, with target ID as a deterministic tie breaker.
+- Keep exact `--target` lookup and latest `--latest` lookup mutually exclusive. Runner/status filters are only valid for latest lookup.
+- Keep the command read-only. It renders placement/status metadata and explicitly reports that provider CLIs, tunnels, runtime processes, and state mutation were not used.

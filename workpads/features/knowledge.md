@@ -2006,6 +2006,26 @@ Verification:
 - `cargo test -p capo-cli tool_run_wrapper -- --nocapture`: passed.
 - `cargo test`: passed.
 
+## F7/RR19 - Latest Runtime Target Status
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `ProjectDashboard::latest_runtime_target(...)` so CLI, voice, web, and mobile clients can reuse one latest-target selector instead of duplicating target ordering and filters.
+- Extend `capo runtime target status` with `--latest`, plus optional `--runner` and `--status` filters. Exact `--target` lookup remains available and mutually exclusive with latest lookup.
+- Keep the selector read-model-derived and metadata-only. It does not launch runtimes, launch provider CLIs, open tunnels, inspect credentials, request approvals, activate grants, retain raw transcripts, or mutate runtime target state.
+- Allow the query selector to match legacy underscore runner labels and current hyphenated CLI labels so older target rows remain inspectable.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test -p capo-query runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo test`: passed.
+
 ## F7/RR11 - Runtime Target Inventory
 
 Status: completed on 2026-05-26.

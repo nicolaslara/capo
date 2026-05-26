@@ -91,6 +91,7 @@ Usage:
   capo runtime target register --target TARGET_ID --name NAME --runner local-process|remote-process|container --workspace PATH --artifacts PATH [--cwd PATH] [--capability-profile PROFILE] [--endpoint ENDPOINT_ID] [--status available|disabled|unhealthy] [--state PATH]
   capo runtime target set-status --target TARGET_ID --status available|disabled|unhealthy [--state PATH]
   capo runtime target status --target TARGET_ID [--state PATH]
+  capo runtime target status --latest [--runner local-process|remote-process|container] [--status available|disabled|unhealthy] [--state PATH]
   capo runtime target evidence --target TARGET_ID --out DIR [--state PATH]
   capo runtime target list [--state PATH]
   capo connectivity expose-stub --endpoint ENDPOINT_ID --owner-kind runtime_target|capo_server --owner-id OWNER_ID --channel control|stdio|logs|dashboard|artifact --exposure loopback|private|public [--address REF] [--record] [--state PATH]
@@ -5190,14 +5191,33 @@ fn list_runtime_targets(parsed: &ParsedArgs) -> Result<String, String> {
 }
 
 fn runtime_target_status(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
-    if let Some(unknown) = args
-        .iter()
-        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--target"))
-    {
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--")
+            && !matches!(
+                arg.as_str(),
+                "--target" | "--latest" | "--runner" | "--status"
+            )
+    }) {
         return Err(format!("unknown runtime target status option: {unknown}"));
     }
-    let runtime_target_id = required_arg(args, "--target")?;
-    let command_slug = format!("runtime-target-status-{runtime_target_id}");
+    let latest = has_flag(args, "--latest");
+    let runtime_target_id = optional_arg(args, "--target");
+    let runner_kind = optional_arg(args, "--runner")
+        .map(|runner| parse_runtime_runner_kind(&runner))
+        .transpose()?;
+    let status = optional_arg(args, "--status")
+        .map(|status| parse_runtime_target_status(&status))
+        .transpose()?;
+    if latest && runtime_target_id.is_some() {
+        return Err("runtime target status accepts either --target or --latest".to_string());
+    }
+    if !latest && (runner_kind.is_some() || status.is_some()) {
+        return Err("runtime target status --runner/--status filters require --latest".to_string());
+    }
+    let command_slug = runtime_target_id
+        .as_ref()
+        .map(|target| format!("runtime-target-status-{target}"))
+        .unwrap_or_else(|| "runtime-target-status-latest".to_string());
     let command = envelope(
         &command_slug,
         CommandTarget::Project(project_id()),
@@ -5207,13 +5227,44 @@ fn runtime_target_status(parsed: &ParsedArgs, args: &[String]) -> Result<String,
     let state = state(parsed)?;
     let dashboard =
         project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
-    let target = dashboard
-        .runtime_target_status(&runtime_target_id)
-        .ok_or_else(|| format!("missing runtime target: {runtime_target_id}"))?;
+    let target = if latest {
+        dashboard
+            .latest_runtime_target(runner_kind.as_deref(), status.as_deref())
+            .ok_or_else(|| {
+                let mut filters = Vec::new();
+                if let Some(runner_kind) = &runner_kind {
+                    filters.push(format!("runner={runner_kind}"));
+                }
+                if let Some(status) = &status {
+                    filters.push(format!("status={status}"));
+                }
+                if filters.is_empty() {
+                    "no recorded runtime targets".to_string()
+                } else {
+                    format!("no recorded runtime targets matching {}", filters.join(" "))
+                }
+            })?
+    } else {
+        let runtime_target_id = runtime_target_id
+            .ok_or_else(|| "runtime target status requires --target or --latest".to_string())?;
+        dashboard
+            .runtime_target_status(&runtime_target_id)
+            .ok_or_else(|| format!("missing runtime target: {runtime_target_id}"))?
+    };
     let mut output = format!(
         "command_id={}\nruntime_target_status_found=true\n",
         command.command_id
     );
+    if latest {
+        output.push_str("runtime_target_selector=latest\n");
+        output.push_str(&format!(
+            "runtime_target_filter_runner={}\nruntime_target_filter_status={}\n",
+            runner_kind.as_deref().unwrap_or("any"),
+            status.as_deref().unwrap_or("any")
+        ));
+    } else {
+        output.push_str("runtime_target_selector=exact\n");
+    }
     output.push_str(&render_runtime_target_row("runtime_target", target));
     output.push_str(
         "provider_cli_executed=false tunnel_opened=false runtime_process_started=false state_mutated=false\n",
@@ -10827,6 +10878,45 @@ mod tests {
         assert!(status.contains("tunnel_opened=false"));
         assert!(status.contains("runtime_process_started=false"));
         assert!(status.contains("state_mutated=false"));
+        assert!(status.contains("runtime_target_selector=exact"));
+
+        let latest_status = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "status".to_string(),
+            "--latest".to_string(),
+            "--runner".to_string(),
+            "local-process".to_string(),
+            "--status".to_string(),
+            "available".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("latest runtime target status");
+        assert!(latest_status.contains("runtime_target_status_found=true"));
+        assert!(latest_status.contains("runtime_target_selector=latest"));
+        assert!(latest_status.contains("runtime_target_filter_runner=local-process"));
+        assert!(latest_status.contains("runtime_target_filter_status=available"));
+        assert!(latest_status.contains("runtime_target=runtime-target-local-1"));
+        assert!(latest_status.contains("provider_cli_executed=false"));
+        assert!(latest_status.contains("tunnel_opened=false"));
+        assert!(latest_status.contains("runtime_process_started=false"));
+        assert!(latest_status.contains("state_mutated=false"));
+
+        let latest_missing = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "status".to_string(),
+            "--latest".to_string(),
+            "--runner".to_string(),
+            "remote-process".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("missing latest runtime target status");
+        assert!(
+            latest_missing.contains("no recorded runtime targets matching runner=remote-process")
+        );
 
         let voice_status = run_cli(vec![
             "voice".to_string(),
@@ -10872,6 +10962,21 @@ mod tests {
         ])
         .expect_err("missing runtime target status");
         assert!(missing_status.contains("missing runtime target: missing-runtime-target"));
+
+        let malformed_status_filter = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "status".to_string(),
+            "--status".to_string(),
+            "available".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("status filter without latest");
+        assert!(
+            malformed_status_filter
+                .contains("runtime target status --runner/--status filters require --latest")
+        );
 
         let evidence_dir = temp_root("runtime-target-evidence");
         let evidence = run_cli(vec![
