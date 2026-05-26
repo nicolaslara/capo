@@ -791,3 +791,14 @@ Observed 2026-05-26.
 - Tool observation architecture source: `../architecture/tool-exposure.md`
 - Permissions source workpad: `permissions-tools.md`
 - No new third-party dependencies were added for PT8.
+
+## F4/PT9 Query And Evidence Visibility For Tool Observations
+
+Observed 2026-05-26.
+
+- Shared session dashboard observation field and regression coverage: `../../crates/capo-query/src/lib.rs`
+- CLI dashboard and session evidence observation rendering: `../../crates/capo-cli/src/main.rs`
+- Observed-only tool observation source projection: `../../crates/capo-state/src/lib.rs`
+- Tool observation architecture source: `../architecture/tool-exposure.md`
+- Permissions source workpad: `permissions-tools.md`
+- No new third-party dependencies were added for PT9.

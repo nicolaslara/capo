@@ -13,7 +13,7 @@ use capo_state::{
     AgentProjection, ConnectivityExposureProjection, EventRecord, EvidenceProjection,
     MemoryPacketProjection, ReviewFindingProjection, RunProjection, SessionProjection,
     SqliteStateStore, StateResult, TaskOutcomeReportProjection, ToolCallProjection,
-    WorkpadTaskProjection,
+    ToolObservationProjection, WorkpadTaskProjection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -273,6 +273,7 @@ pub struct SessionDashboardRow {
     pub run: Option<RunProjection>,
     pub evidence: Vec<EvidenceProjection>,
     pub tool_calls: Vec<ToolCallProjection>,
+    pub tool_observations: Vec<ToolObservationProjection>,
     pub memory_packets: Vec<MemoryPacketProjection>,
     pub review_findings: Vec<ReviewFindingProjection>,
     pub task_outcome_reports: Vec<TaskOutcomeReportProjection>,
@@ -599,6 +600,7 @@ fn session_dashboard(
         run: state.run_for_session(session_id)?,
         evidence: state.evidence_for_session(session_id)?,
         tool_calls: state.tool_calls_for_session(session_id)?,
+        tool_observations: state.tool_observations_for_session(session_id)?,
         memory_packets: state.memory_packets_for_session(session_id)?,
         review_findings: state.review_findings_for_session(session_id)?,
         task_outcome_reports: state.task_outcome_reports_for_session(session_id)?,
@@ -631,7 +633,7 @@ mod tests {
         AdapterSmokeReportProjection, AgentProjection, ConnectivityExposureProjection, EventKind,
         EvidenceProjection, MemoryPacketProjection, NewEvent, ProjectionRecord, RedactionState,
         RunProjection, SessionProjection, TaskProjection, ToolCallProjection,
-        WorkpadTaskProjection,
+        ToolObservationProjection, WorkpadTaskProjection,
     };
 
     #[test]
@@ -723,6 +725,20 @@ mod tests {
                         output_artifact_id: Some("artifact-tool-demo".to_string()),
                         updated_sequence: 0,
                     }),
+                    ProjectionRecord::ToolObservation(ToolObservationProjection {
+                        tool_observation_id: "tool-observation-demo".to_string(),
+                        session_id: session_id.clone(),
+                        tool_call_id: Some(ToolCallId::new("tool-demo")),
+                        source: "adapter_event".to_string(),
+                        external_tool_ref: Some("provider-tool-1".to_string()),
+                        tool_name: "provider.native_search".to_string(),
+                        observed_status: "completed".to_string(),
+                        instrumentation_level: "observed_only".to_string(),
+                        confidence: "high".to_string(),
+                        raw_event_hash: "hash-demo".to_string(),
+                        artifact_id: Some("artifact-observation-demo".to_string()),
+                        updated_sequence: 0,
+                    }),
                     ProjectionRecord::MemoryPacketRef(MemoryPacketProjection {
                         memory_packet_id: MemoryPacketId::new("packet-demo"),
                         project_id: project_id.clone(),
@@ -756,6 +772,14 @@ mod tests {
         assert_eq!(
             session.tool_calls[0].tool_call_id,
             ToolCallId::new("tool-demo")
+        );
+        assert_eq!(
+            session.tool_observations[0].tool_observation_id,
+            "tool-observation-demo"
+        );
+        assert_eq!(
+            session.tool_observations[0].instrumentation_level,
+            "observed_only"
         );
         assert_eq!(
             session.memory_packets[0].memory_packet_id,

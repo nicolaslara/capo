@@ -1733,3 +1733,25 @@ Verification:
 Follow-up:
 
 - Surface `tool_observations` through `capo-query` and dashboard/session evidence views.
+
+## F4/PT9 - Query And Evidence Visibility For Tool Observations
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add observed-only native tool observations to `SessionDashboardRow` in `capo-query`, keeping CLI/dashboard/voice/web/mobile consumers on one query contract.
+- Render tool observations separately from governed tool calls in `capo dashboard` and session evidence exports. This preserves the distinction between Capo-executed wrapper tools and provider/adapter-native tool facts that Capo only observed.
+- Keep the operator-visible fields sufficient for review and future evaluation: source, external ref, tool name, observed status, instrumentation level, confidence, raw event hash, and artifact ref.
+- Keep the slice provider-free and execution-free. It reads existing projections and writes only evidence artifacts through the existing export path.
+
+Verification:
+
+- `cargo test -p capo-query project_dashboard_aggregates_agents_sessions_runs_evidence_and_events -- --nocapture`: passed.
+- `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+
+Follow-up:
+
+- Future adapter fixture replay should append `ToolObservationProjection` rows automatically when normalized adapter events contain observed native tool updates.

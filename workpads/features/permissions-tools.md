@@ -247,3 +247,28 @@ Decision:
 - Persist observed-only native tool facts in a dedicated `tool_observations` projection instead of overloading `tool_calls`.
 - Add `tool.observation_recorded` as the event kind for projection append/rebuild evidence.
 - Keep the projection generic enough for ACP, Codex, Claude, provider-native, runtime-output, or manual observations while still requiring explicit instrumentation level and confidence.
+
+### PT9 - Query And Evidence Visibility For Tool Observations
+
+Status: completed
+
+Acceptance:
+
+- Surface observed-only native tool observations through shared query/session dashboard rows.
+- Render observed-only tool observations in CLI dashboard and session evidence exports without treating them as governed tool calls.
+- Preserve source, external ref, tool name, observed status, instrumentation level, confidence, raw event hash, and artifact ref in operator-visible output.
+- Keep the slice provider-free and execution-free.
+- Cover shared query and CLI rendering with regression tests.
+
+Evidence:
+
+- `SessionDashboardRow::tool_observations` in `../../crates/capo-query/src/lib.rs`.
+- CLI dashboard and evidence rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query project_dashboard_aggregates_agents_sessions_runs_evidence_and_events -- --nocapture`: passed.
+- `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence -- --nocapture`: passed.
+
+Decision:
+
+- Surface observations through the existing session dashboard row so CLI, voice, web, and mobile consumers can use the same query contract.
+- Render observed-only native tool facts in a separate CLI/evidence section rather than merging them into governed `tool_call` rows.
+- Preserve source, external ref, status, instrumentation level, confidence, raw event hash, and artifact ref so future evaluation work can distinguish partial provider visibility from Capo-executed wrapper tools.

@@ -32,7 +32,8 @@ use capo_state::{
     EventRecord, EvidenceProjection, MemoryPacketProjection, MemoryRecordProjection,
     MemorySourceProjection, NewEvent, PermissionApprovalProjection, ProjectionRecord,
     RedactionState, ReviewFindingProjection, RunProjection, SessionProjection, SqliteStateStore,
-    ToolCallProjection, WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
+    ToolCallProjection, ToolObservationProjection, WorkpadFileProjection,
+    WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
 use capo_voice::{
     MemoryIngestionPolicy, TranscriptRetentionPolicy, VOICE_TRANSCRIPT_RETENTION_DEFAULT,
@@ -2779,6 +2780,24 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
                 tool_call.status,
                 tool_call.input_artifact_id.as_deref().unwrap_or("none"),
                 tool_call.output_artifact_id.as_deref().unwrap_or("none")
+            ));
+        }
+        output.push_str(&format!(
+            "tool_observations={}\n",
+            session_row.tool_observations.len()
+        ));
+        for observation in &session_row.tool_observations {
+            output.push_str(&format!(
+                "tool_observation={} tool={} source={} observed_status={} instrumentation={} confidence={} external_ref={} artifact={} raw_event_hash={}\n",
+                observation.tool_observation_id,
+                observation.tool_name,
+                observation.source,
+                observation.observed_status,
+                observation.instrumentation_level,
+                observation.confidence,
+                observation.external_tool_ref.as_deref().unwrap_or("none"),
+                observation.artifact_id.as_deref().unwrap_or("none"),
+                observation.raw_event_hash
             ));
         }
         for packet in &session_row.memory_packets {
@@ -5709,6 +5728,9 @@ fn export_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, Strin
     let tool_calls = state
         .tool_calls_for_session(&session_id)
         .map_err(debug_error)?;
+    let tool_observations = state
+        .tool_observations_for_session(&session_id)
+        .map_err(debug_error)?;
     let memory_packets = state
         .memory_packets_for_session(&session_id)
         .map_err(debug_error)?;
@@ -5721,6 +5743,7 @@ fn export_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, Strin
             &run,
             &evidence,
             &tool_calls,
+            &tool_observations,
             &memory_packets,
             &events,
         ),
@@ -6204,6 +6227,7 @@ fn render_evidence(
     run: &RunProjection,
     evidence: &[EvidenceProjection],
     tool_calls: &[ToolCallProjection],
+    tool_observations: &[ToolObservationProjection],
     memory_packets: &[MemoryPacketProjection],
     events: &[EventRecord],
 ) -> String {
@@ -6255,6 +6279,25 @@ fn render_evidence(
                 tool_call.status,
                 tool_call.input_artifact_id.as_deref().unwrap_or("none"),
                 tool_call.output_artifact_id.as_deref().unwrap_or("none")
+            ));
+        }
+    }
+    markdown.push_str("\n## Tool Observations\n\n");
+    if tool_observations.is_empty() {
+        markdown.push_str("- none\n");
+    } else {
+        for observation in tool_observations {
+            markdown.push_str(&format!(
+                "- `{}` name=`{}` source=`{}` observed_status=`{}` instrumentation=`{}` confidence=`{}` external_ref=`{}` artifact=`{}` raw_event_hash=`{}`\n",
+                observation.tool_observation_id,
+                observation.tool_name,
+                observation.source,
+                observation.observed_status,
+                observation.instrumentation_level,
+                observation.confidence,
+                observation.external_tool_ref.as_deref().unwrap_or("none"),
+                observation.artifact_id.as_deref().unwrap_or("none"),
+                observation.raw_event_hash
             ));
         }
     }
@@ -10548,6 +10591,44 @@ mod tests {
             "tool-memory",
         ]);
         assert!(codex_send.contains("session_id=session-fake-codex"));
+        SqliteStateStore::open(&state_root)
+            .expect("state for observed tool")
+            .append_event(
+                NewEvent {
+                    event_id: "event-observed-provider-tool".to_string(),
+                    kind: EventKind::ToolObservationRecorded,
+                    actor: "test".to_string(),
+                    project_id: Some(ProjectId::new(DEFAULT_PROJECT_ID)),
+                    task_id: Some(TaskId::new(
+                        "task-inspect-the-project-and-write-a-short-status-summary",
+                    )),
+                    agent_id: Some(AgentId::new("agent-fake-codex")),
+                    session_id: Some(SessionId::new("session-fake-codex")),
+                    run_id: Some(RunId::new("run-fake-codex")),
+                    turn_id: Some("turn-fake-codex".to_string()),
+                    item_id: None,
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::ToolObservation(
+                    ToolObservationProjection {
+                        tool_observation_id: "tool-observation-fake-codex".to_string(),
+                        session_id: SessionId::new("session-fake-codex"),
+                        tool_call_id: Some(ToolCallId::new("tool-fake-codex")),
+                        source: "adapter_event".to_string(),
+                        external_tool_ref: Some("provider-tool-fake-codex".to_string()),
+                        tool_name: "provider.native_search".to_string(),
+                        observed_status: "completed".to_string(),
+                        instrumentation_level: "observed_only".to_string(),
+                        confidence: "high".to_string(),
+                        raw_event_hash: "hash-observed-provider-tool".to_string(),
+                        artifact_id: Some("artifact-observed-provider-tool".to_string()),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append observed tool");
         let reviewer_send = run(vec![
             "task",
             "send",
@@ -10575,6 +10656,13 @@ mod tests {
         assert!(dashboard.contains("evidence_refs=evidence-fake-codex"));
         assert!(dashboard.contains("tool_calls=1"));
         assert!(dashboard.contains("tool_call=tool-fake-codex tool=capo.session_summary"));
+        assert!(dashboard.contains("tool_observations=1"));
+        assert!(
+            dashboard.contains(
+                "tool_observation=tool-observation-fake-codex tool=provider.native_search"
+            )
+        );
+        assert!(dashboard.contains("instrumentation=observed_only confidence=high"));
         assert!(dashboard.contains("memory_packet_refs=1"));
         assert!(dashboard.contains("memory_packet=packet-fake-codex purpose=turn_context"));
         assert!(dashboard.contains("kind=tool.result_delivered"));
@@ -10685,6 +10773,11 @@ mod tests {
         assert!(codex_evidence.contains("- Session status: `canceled`"));
         assert!(codex_evidence.contains("- Run status: `exited_unknown`"));
         assert!(codex_evidence.contains("tool.result_delivered"));
+        assert!(codex_evidence.contains("## Tool Observations"));
+        assert!(
+            codex_evidence.contains("`tool-observation-fake-codex` name=`provider.native_search`")
+        );
+        assert!(codex_evidence.contains("instrumentation=`observed_only` confidence=`high`"));
         assert!(codex_evidence.contains("artifact=`artifact-memory-packet-packet-fake-codex`"));
         assert!(reviewer_evidence.contains("- Session status: `completed`"));
         assert!(reviewer_evidence.contains("Focus only on evidence export blockers"));
@@ -10735,6 +10828,13 @@ mod tests {
             reopened
                 .tool_calls_for_session(&SessionId::new("session-fake-codex"))
                 .expect("codex tool calls")
+                .len(),
+            1
+        );
+        assert_eq!(
+            reopened
+                .tool_observations_for_session(&SessionId::new("session-fake-codex"))
+                .expect("codex tool observations")
                 .len(),
             1
         );
