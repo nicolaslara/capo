@@ -208,7 +208,7 @@ Local observation on 2026-05-25:
 
 - `codex` path: `/Users/nicolas/.nvm/versions/node/v24.10.0/bin/codex`
 - `codex --version`: `codex-cli 0.133.0`
-- `codex exec --help` exposes `--json`, `--sandbox read-only|workspace-write|danger-full-access`, `--ephemeral`, `--ignore-user-config`, `--ignore-rules`, `--output-schema`, `--profile-v2`, and `--cd`.
+- `codex exec --help` exposes `--json`, `--sandbox read-only|workspace-write|danger-full-access`, `--ephemeral`, `--ignore-user-config`, `--ignore-rules`, `--skip-git-repo-check`, `--output-schema`, `--profile-v2`, and `--cd`.
 
 Absolute paths above are diagnostic observations only. The scaffold should resolve `codex` from configured program name/PATH unless the user explicitly pins a path.
 
@@ -220,6 +220,7 @@ Mapping:
 - Codex usage data, if present, maps to evaluation/usage artifacts and provider usage snapshots.
 - Codex sandbox mode is adapter/runtime metadata and must also be reflected in Capo capability decisions.
 - Capo should default Codex runs to read-only for analysis/review and workspace-write for implementation tasks only when the capability profile allows it.
+- Isolated temporary smoke workspaces should include `--skip-git-repo-check` so Codex does not reject non-repository scratch directories. This bypasses only the repository trust check for a Capo-created isolated workspace; it does not relax Capo's runtime sandbox, prompt, credential, environment, or artifact-scan policy.
 
 Auth/provider connector:
 

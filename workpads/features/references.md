@@ -206,6 +206,18 @@ Observed 2026-05-26.
 - Reference style from aget mock tests: `../../../aget/tests/support/mock_site.rs`, `../../../aget/tests/support/mock_tools.rs`, `../../../aget/tests/fixtures/mock-tools/`
 - No new third-party dependencies were added for AC34.
 
+## F1/AC1 Codex Opt-In Smoke
+
+Observed 2026-05-26.
+
+- Codex CLI version: `codex-cli 0.133.0`.
+- Codex help confirmed `--skip-git-repo-check`, `--sandbox`, `--ephemeral`, `--ignore-user-config`, `--ignore-rules`, and `--cd`.
+- Codex launch/smoke plan compatibility fix: `../../crates/capo-adapters/src/lib.rs`.
+- Generated local Capo state root ignored in git: `../../.gitignore`.
+- Passing smoke artifact root: `<local-temp-codex-smoke-artifacts>`; exact machine-local path intentionally not committed.
+- Recorded passed smoke report: `adapter-smoke-codex_exec-b2e582887f9c0820`.
+- No new third-party dependencies were added for AC1.
+
 ## F7/RR23 Latest Runtime Target Control Readiness
 
 Observed 2026-05-26.

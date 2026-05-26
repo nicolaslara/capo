@@ -288,6 +288,32 @@ Verification:
 - `cargo test -p capo-adapters scripted_mock_agent -- --nocapture`: passed.
 - `cargo test -p capo-controller scripted_mock_agent_drives_multi_turn_controller_state -- --nocapture`: passed.
 
+## F1/AC1 - Codex Opt-In Smoke
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Run the real local Codex smoke only after explicit user authorization and only through the existing restrictive local harness.
+- Add `--skip-git-repo-check` only to the Codex smoke plan because the smoke workspace is intentionally an isolated temporary directory. This addresses Codex's repo trust check for Capo-owned smoke workspaces without relaxing sandboxing, credential handling, artifact scanning, or normal dispatch trust behavior.
+- Treat the first approved smoke run as useful evidence even though it failed: Codex executed through the harness, artifacts were created, the marker was absent, and the blocker was the missing `--skip-git-repo-check` compatibility flag.
+- Treat the second approved run as the accepted Codex connector proof: marker present, scanner clean, passed smoke report recorded, and adapter dogfood gate ready for first real-agent dogfood.
+- Do not claim full Capo dogfood readiness from Codex proof alone. `capo dogfood readiness` still reports missing available runtime target, missing workpad index, and missing dispatch-chain evidence.
+- Ignore `.capo-dev/` in git because it is generated local Capo state. Durable task evidence belongs in the workpad docs and explicit artifacts, not in committed SQLite runtime state.
+
+Verification:
+
+- `codex --version`: `codex-cli 0.133.0`.
+- `codex exec --help | rg "skip-git|sandbox|ephemeral|ignore"` confirmed `--skip-git-repo-check`, `--sandbox`, `--ephemeral`, `--ignore-user-config`, and `--ignore-rules`.
+- First `CAPO_RUN_CODEX_LOCAL_SMOKE=1 cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture`: failed with missing `CAPO_CODEX_SMOKE_OK` marker because Codex refused the untrusted temp workspace.
+- `cargo test -p capo-adapters codex -- --nocapture`: passed after adding the smoke-only flag.
+- Second `CAPO_RUN_CODEX_LOCAL_SMOKE=1 cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture`: passed.
+- `capo adapter smoke-report scan --artifact-root <local-temp-codex-smoke-artifacts>`: `credential_scan_status=clean`, `files_scanned=2`.
+- `rg -a` over `.capo-dev` for credential/session marker names returned no matches.
+- Recorded passed smoke report `adapter-smoke-codex_exec-b2e582887f9c0820` with `dogfood_readiness_effect=real_agent_connector_proven`.
+- `capo adapter dogfood-gate`: `ready_for_first_real_agent_dogfood=true`.
+- `capo dogfood readiness`: `real_agent_connector_ready=true`, still overall blocked on runtime target, workpad index, and dispatch chain.
+
 ## F7/RR23 - Latest Runtime Target Control Readiness
 
 Status: completed on 2026-05-26.
@@ -453,7 +479,7 @@ Decisions:
 - Installed Codex is `codex-cli 0.133.0`; `codex exec --help` currently supports the planned safe smoke flags: JSONL output, read-only sandbox, ephemeral mode, ignored user config/rules, and isolated `--cd`.
 - Installed Claude Code is `2.1.150`; its help currently supports the restricted noninteractive stream path.
 - Tighten the Claude smoke plan with `--no-session-persistence`, `--disable-slash-commands`, and `--tools ""` in addition to plan permission mode, disallowed tools, empty MCP config, and strict MCP config.
-- Treat Codex as still unproven for dogfood until the real opt-in smoke runs and artifact/state scans pass.
+- Codex was later proven by AC1 on 2026-05-26 with a clean passed smoke report; this earlier preflight note is retained as historical context.
 - Treat Claude restricted args as verified enough for a future opt-in smoke, but do not run Claude without explicit authorization.
 
 Verification:

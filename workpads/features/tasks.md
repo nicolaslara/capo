@@ -56,7 +56,7 @@ Acceptance:
 
 Progress:
 
-- AC1 Codex smoke is approved and pending execution/evidence. The local Codex CLI exists and the non-secret harness/preflight tests pass; explicit user opt-in was granted on 2026-05-26, but an accepted real subscription-backed smoke report has not been recorded.
+- AC1 Codex smoke is completed. The approved real local Codex smoke initially exposed a trust-check compatibility gap, then passed after adding smoke-only `--skip-git-repo-check` to the isolated temporary workspace plan. The passed report is `adapter-smoke-codex_exec-b2e582887f9c0820` with clean credential scan, marker present, and `real_agent_connector_proven`.
 - AC2 Claude Code restricted-args verification is completed for installed `claude 2.1.150`.
 - AC3 deterministic normalized adapter replay through controller/state is completed for Codex and Claude fixtures, but the real-agent controller path remains pending until at least one approved real local adapter stream is run and accepted as evidence.
 - AC4 connector readiness surface is completed. `capo adapter readiness` reports configured Codex/Claude opt-in gates and smoke-plan safety metadata without launching provider CLIs or inspecting credentials.
@@ -146,7 +146,12 @@ Evidence:
 - `capo adapter dogfood-gate evidence --out DIR [--state PATH]`
 - `cargo test -p capo-adapters scripted_mock_agent -- --nocapture`
 - `cargo test -p capo-controller scripted_mock_agent_drives_multi_turn_controller_state -- --nocapture`
-- Focused F1 connector safety reviews: provider-artifact cleanup blocker found and fixed; real-agent readiness remains unclaimed pending opt-in smoke
+- `CAPO_RUN_CODEX_LOCAL_SMOKE=1 cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture`
+- `capo adapter smoke-report scan --artifact-root <local-temp-codex-smoke-artifacts>`
+- `rg -a` over `.capo-dev` for credential/session marker names
+- `capo adapter smoke-report record --adapter codex --status passed --credential-scan clean --marker-found --artifact-root <local-temp-codex-smoke-artifacts>`
+- `capo adapter dogfood-gate`
+- Focused F1 connector safety reviews: provider-artifact cleanup blocker found and fixed; Codex real-agent connector proof is now recorded, while full dogfood readiness remains blocked on runtime target, workpad index, and dispatch-chain evidence.
 
 ## F2 - Workpad Dogfood Bridge
 

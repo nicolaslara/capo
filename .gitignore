@@ -4,6 +4,7 @@ workpads/**/references/repos/
 
 # Local runtime state
 .capo/
+.capo-dev/
 target/
 .venv/
 __pycache__/

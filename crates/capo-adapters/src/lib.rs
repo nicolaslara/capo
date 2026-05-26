@@ -445,11 +445,13 @@ impl CodexExecAdapter {
             artifact_root,
             "Reply with exactly CAPO_CODEX_SMOKE_OK and do not inspect files.",
         );
+        let mut argv = launch_plan.argv;
+        argv.insert(7, "--skip-git-repo-check".to_string());
         LocalAdapterSmokePlan {
             adapter_kind: NormalizedAdapterKind::CodexExec,
             opt_in_env: "CAPO_RUN_CODEX_LOCAL_SMOKE",
             program: launch_plan.program,
-            argv: launch_plan.argv,
+            argv,
             workspace_root: launch_plan.workspace_root,
             artifact_root: launch_plan.artifact_root,
             env_allowlist: launch_plan.env_allowlist,
@@ -1607,6 +1609,12 @@ mod tests {
         assert!(
             request
                 .argv
+                .iter()
+                .all(|arg| arg != "--skip-git-repo-check")
+        );
+        assert!(
+            request
+                .argv
                 .windows(2)
                 .any(|args| args == ["--cd", workspace.to_string_lossy().as_ref()])
         );
@@ -1710,6 +1718,7 @@ mod tests {
         assert!(plan.argv.iter().any(|arg| arg == "--ephemeral"));
         assert!(plan.argv.iter().any(|arg| arg == "--ignore-user-config"));
         assert!(plan.argv.iter().any(|arg| arg == "--ignore-rules"));
+        assert!(plan.argv.iter().any(|arg| arg == "--skip-git-repo-check"));
         assert!(
             plan.argv
                 .windows(2)
