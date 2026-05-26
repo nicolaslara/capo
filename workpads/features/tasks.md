@@ -590,7 +590,7 @@ Evidence:
 
 ## F10 - Query Maintainability
 
-Status: in_progress
+Status: completed
 
 Source workpad: cross-cutting query/read-model implementation.
 
@@ -603,10 +603,18 @@ Acceptance:
 Progress:
 
 - Q1 query test module split is completed. The production dashboard query implementation remains in `crates/capo-query/src/lib.rs`; tests now live in `crates/capo-query/src/tests.rs` with the same private-module access pattern.
+- Q2 query production module split is completed. Public query types live in `crates/capo-query/src/types.rs`; dashboard assembly lives in `crates/capo-query/src/dashboard.rs`; adapter smoke/dispatch status helpers live in `crates/capo-query/src/adapter_status.rs`; runtime/connectivity status helpers live in `crates/capo-query/src/runtime_status.rs`; dogfood readiness lives in `crates/capo-query/src/dogfood.rs`; dashboard summaries and workpad next-task selection live in `crates/capo-query/src/summary.rs`.
+- `crates/capo-query/src/lib.rs` is reduced from 880 lines to 23 lines. The remaining large `tests.rs` file is test-only and can be split later if it becomes an active edit surface.
 
 Evidence:
 
 - `crates/capo-query/src/lib.rs`
+- `crates/capo-query/src/types.rs`
+- `crates/capo-query/src/dashboard.rs`
+- `crates/capo-query/src/adapter_status.rs`
+- `crates/capo-query/src/runtime_status.rs`
+- `crates/capo-query/src/dogfood.rs`
+- `crates/capo-query/src/summary.rs`
 - `crates/capo-query/src/tests.rs`
 - `cargo test -p capo-query`
 - `cargo fmt --check`

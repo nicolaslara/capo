@@ -1,12 +1,18 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
-use capo_core::{AgentId, EvidenceId, MemoryPacketId, RunId, TaskId, ToolCallId};
+use capo_core::{
+    AgentId, EvidenceId, MemoryPacketId, ProjectId, RunId, SessionId, TaskId, ToolCallId,
+};
 use capo_state::{
-    AdapterSmokeReportProjection, AgentProjection, ConnectivityExposureProjection, EventKind,
-    EvidenceProjection, MemoryPacketProjection, NewEvent, ProjectionRecord, RedactionState,
-    RunProjection, SessionProjection, TaskProjection, ToolCallProjection,
-    ToolObservationProjection, WorkpadTaskProjection,
+    AdapterDispatchExecutionProjection, AdapterDispatchExecutionRequestProjection,
+    AdapterDispatchGateProjection, AdapterDispatchPlanProjection,
+    AdapterDispatchPromptMaterializationProjection, AdapterDispatchPromptSourceProjection,
+    AdapterDispatchReplayProjection, AdapterSmokeReportProjection, AgentProjection,
+    ConnectivityExposureProjection, EventKind, EvidenceProjection, MemoryPacketProjection,
+    NewEvent, ProjectionRecord, RedactionState, ReviewFindingProjection, RunProjection,
+    RuntimeTargetProjection, SessionProjection, SqliteStateStore, TaskOutcomeReportProjection,
+    TaskProjection, ToolCallProjection, ToolObservationProjection, WorkpadTaskProjection,
 };
 
 #[test]

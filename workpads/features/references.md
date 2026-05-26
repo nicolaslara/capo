@@ -1341,6 +1341,21 @@ Observed 2026-05-26.
 - Resulting file sizes: `../../crates/capo-query/src/lib.rs` 880 lines; `../../crates/capo-query/src/tests.rs` 1,838 lines.
 - No new third-party dependencies were added for Q1.
 
+## F10/Q2 Query Production Module Split
+
+Observed 2026-05-26.
+
+- Query crate root after split: `../../crates/capo-query/src/lib.rs`
+- Public query types: `../../crates/capo-query/src/types.rs`
+- Dashboard aggregation: `../../crates/capo-query/src/dashboard.rs`
+- Adapter smoke and dispatch status helpers: `../../crates/capo-query/src/adapter_status.rs`
+- Runtime target and connectivity status helpers: `../../crates/capo-query/src/runtime_status.rs`
+- Dogfood readiness helpers: `../../crates/capo-query/src/dogfood.rs`
+- Dashboard summary and next-workpad helpers: `../../crates/capo-query/src/summary.rs`
+- Query regression tests: `../../crates/capo-query/src/tests.rs`
+- Resulting file sizes: `../../crates/capo-query/src/lib.rs` 23 lines; `../../crates/capo-query/src/types.rs` 190 lines; `../../crates/capo-query/src/dashboard.rs` 141 lines; `../../crates/capo-query/src/adapter_status.rs` 185 lines; `../../crates/capo-query/src/runtime_status.rs` 152 lines; `../../crates/capo-query/src/dogfood.rs` 165 lines; `../../crates/capo-query/src/summary.rs` 72 lines; `../../crates/capo-query/src/tests.rs` 1,844 lines.
+- No new third-party dependencies were added for Q2.
+
 ## F11/T1 Tools Test Module Split
 
 Observed 2026-05-26.

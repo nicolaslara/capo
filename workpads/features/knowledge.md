@@ -3000,6 +3000,30 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F10/Q2 - Query Production Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Keep the public `capo_query::...` API stable while turning `lib.rs` into a small map of read-model query concerns.
+- Move public query/read-model structs into `types.rs` so surfaces can inspect the data contract without reading aggregation logic.
+- Move `project_dashboard` and session row assembly into `dashboard.rs`. This module now owns state-store reads and project/workpad filters.
+- Move adapter dispatch status, latest dispatch selection, and smoke-report selectors into `adapter_status.rs`. These helpers share dispatch activity ordering and should evolve together.
+- Move runtime target and connectivity exposure selectors into `runtime_status.rs`, preserving the runner-kind normalization behavior used by CLI and voice.
+- Move dogfood gate/readiness derivation into `dogfood.rs`, and keep lightweight dashboard summaries plus next-workpad selection in `summary.rs`.
+- Make query tests import `capo_core` and `capo_state` types explicitly instead of relying on private imports from `lib.rs`. This keeps future root-file changes from accidentally changing test scope.
+- Remove duplicate query expressions encountered during the split: a repeated `adapter_dispatch_executions` fetch and a repeated replay filter in dispatch activity ordering. The existing query tests cover the resulting behavior.
+- Leave `tests.rs` as a future test-only maintainability candidate. It is large, but this slice focused on production query readability and avoided mixing a second mechanical test split into the same commit.
+
+Verification:
+
+- `cargo test -p capo-query -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2f - State Query Module Split
 
 Status: completed on 2026-05-26.
