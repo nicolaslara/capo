@@ -1327,3 +1327,14 @@ Observed 2026-05-26.
 - Tools tests module: `../../crates/capo-tools/src/tests.rs`
 - Resulting file sizes: `../../crates/capo-tools/src/lib.rs` 1,362 lines; `../../crates/capo-tools/src/permission.rs` 285 lines; `../../crates/capo-tools/src/tests.rs` 896 lines.
 - No new third-party dependencies were added for T2.
+
+## F11/T3 Tools Runtime Wrapper Module Split
+
+Observed 2026-05-26.
+
+- Tools crate root: `../../crates/capo-tools/src/lib.rs`
+- Runtime wrapper module: `../../crates/capo-tools/src/runtime_wrappers.rs`
+- Permission policy module: `../../crates/capo-tools/src/permission.rs`
+- Tools tests module: `../../crates/capo-tools/src/tests.rs`
+- Resulting file sizes: `../../crates/capo-tools/src/lib.rs` 594 lines; `../../crates/capo-tools/src/runtime_wrappers.rs` 775 lines; `../../crates/capo-tools/src/permission.rs` 285 lines; `../../crates/capo-tools/src/tests.rs` 900 lines.
+- No new third-party dependencies were added for T3.

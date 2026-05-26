@@ -2639,6 +2639,25 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F11/T3 - Tools Runtime Wrapper Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move runtime wrapper config, wrapper executor, wrapper request/result/artifact records, workspace path guards, redaction, runtime artifact conversion, and wrapper input hashing into `runtime_wrappers.rs`.
+- Re-export the wrapper API from the crate root so adapters, controller, CLI, and tests keep the same import surface.
+- Keep shared `ToolDefinition`, `ToolAuthorization`, `ToolAuditEvent`, Capo registry behavior, ACP capability planning, and the wrapper tool catalog in `lib.rs` for this slice because they are used across registry and wrapper concerns.
+- Keep `runtime_wrappers.rs` as a single wrapper concern for now even though it is above the ideal range. A later split can separate wrapper request/result types from execution helpers without changing behavior.
+
+Verification:
+
+- `cargo test -p capo-tools`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.
