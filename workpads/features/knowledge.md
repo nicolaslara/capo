@@ -2677,6 +2677,25 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F9/CLI6 - Adapter Dogfood Gate Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move adapter dogfood gate command handling into `adapter_dogfood.rs`: status rendering, gate evidence export, evidence markdown rendering, confidence scoring, and guarded Capo-owned evidence writes.
+- Keep the gate renderer exported for dashboard reuse, so the CLI dashboard and `adapter dogfood-gate` command continue sharing one output contract.
+- Leave project-wide dogfood readiness and adapter dispatch gating in `main.rs` for now. They compose additional readiness, workpad, runtime target, and dispatch-chain concepts beyond connector gate evidence.
+- Reuse crate-root helpers for command envelopes, project IDs, state access, stable hashes, escaping, list formatting, and debug errors.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_dogfood -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.

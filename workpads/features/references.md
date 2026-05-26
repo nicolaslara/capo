@@ -1347,3 +1347,12 @@ Observed 2026-05-26.
 - CLI routing, adapter readiness, adapter dogfood gate, dispatch execution, dashboard, and voice rendering retained in: `../../crates/capo-cli/src/main.rs`
 - Resulting file sizes: `../../crates/capo-cli/src/main.rs` 6,615 lines; `../../crates/capo-cli/src/adapter_smoke.rs` 449 lines.
 - No new third-party dependencies were added for CLI5.
+
+## F9/CLI6 Adapter Dogfood Gate Module Split
+
+Observed 2026-05-26.
+
+- Adapter dogfood gate module: `../../crates/capo-cli/src/adapter_dogfood.rs`
+- CLI routing, project dogfood readiness, adapter dispatch gating, dashboard, and voice rendering retained in: `../../crates/capo-cli/src/main.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 6,457 lines; `../../crates/capo-cli/src/adapter_dogfood.rs` 179 lines.
+- No new third-party dependencies were added for CLI6.
