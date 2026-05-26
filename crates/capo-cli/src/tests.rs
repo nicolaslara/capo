@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5,7 +7,10 @@ use super::*;
 use crate::adapter_dispatch_run::scan_dispatch_artifacts_or_delete;
 use capo_adapters::LocalAdapterSmokeError;
 use capo_core::{RunId, SessionId, TaskId, ToolCallId};
-use capo_state::{ConnectivityExposureProjection, WorkpadFileProjection, WorkpadTaskProjection};
+use capo_state::{
+    ConnectivityExposureProjection, EventKind, NewEvent, ProjectionRecord, RedactionState,
+    WorkpadFileProjection, WorkpadTaskProjection,
+};
 
 #[test]
 fn help_mentions_command_envelopes_and_no_credentials() {

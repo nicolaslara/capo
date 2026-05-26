@@ -205,6 +205,16 @@ Observed 2026-05-26.
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR23.
 
+## F9/CLI17 Dogfood Readiness Module Split
+
+Observed 2026-05-26.
+
+- Dogfood readiness command and evidence export module: `../../crates/capo-cli/src/dogfood.rs`
+- CLI routing and shared helpers retained in: `../../crates/capo-cli/src/main.rs`
+- Test imports made explicit after the split: `../../crates/capo-cli/src/tests.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 652 lines; `../../crates/capo-cli/src/dogfood.rs` 203 lines.
+- No new third-party dependencies were added for CLI17.
+
 ## F1/AC12 Workpad Next Adapter Plan
 
 Observed 2026-05-25.
