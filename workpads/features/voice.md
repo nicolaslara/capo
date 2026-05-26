@@ -162,3 +162,26 @@ Evidence:
 Decision:
 
 - Keep next-work voice handling read-only over `ProjectDashboard`. Voice can tell the operator what Capo sees as next, but it does not import tasks, start agents, edit workpads, run providers, or retain the raw transcript.
+
+### V8 - Confirmed Start Next Work Conversation
+
+Status: completed
+
+Acceptance:
+
+- Recognize simple start-next commands such as "Start next task with fake-codex."
+- Require visible confirmation before importing a workpad task or dispatching work.
+- Reuse the existing `workpad start-next` semantics after confirmation: select the next observed-only workpad task, import it, and dispatch it through the fake/local controller path to the named registered agent.
+- Audit the voice-origin approval and once-scoped grant before mutation.
+- Preserve raw transcript non-retention and avoid provider CLI execution.
+
+Evidence:
+
+- `VoiceIntentKind::StartNextWork` in `../../crates/capo-voice/src/lib.rs`.
+- Confirmed voice start-next execution path in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-voice start_next_work -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_confirmed_start_next_work -- --nocapture`: passed.
+
+Decision:
+
+- Treat voice start-next as privileged because it mutates Capo task/session state. It requires `--confirm`, uses the same voice approval queue as stop/interrupt, and remains fake/local until real provider opt-in evidence exists.

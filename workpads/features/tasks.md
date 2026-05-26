@@ -311,6 +311,7 @@ Progress:
 - V5 recent work conversation is completed with read-only project and agent recent-work questions over the shared dashboard query.
 - V6 review needs conversation is completed with a read-only project review/outcome question over the shared dashboard query.
 - V7 next work conversation is completed with a read-only project workpad-queue question over the shared dashboard query.
+- V8 confirmed start-next conversation is completed with visible approval before importing and dispatching the next workpad task through the fake/local controller path.
 
 Evidence:
 
@@ -327,6 +328,8 @@ Evidence:
 - `cargo test -p capo-query next_actionable_workpad -- --nocapture`
 - `cargo test -p capo-voice next_work -- --nocapture`
 - `cargo test -p capo-cli voice_next_work -- --nocapture`
+- `cargo test -p capo-voice start_next_work -- --nocapture`
+- `cargo test -p capo-cli voice_confirmed_start_next_work -- --nocapture`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`

@@ -33,6 +33,7 @@ pub enum VoiceIntentKind {
     RecentWork,
     ReviewNeeds,
     RedirectSession,
+    StartNextWork,
     InterruptSession,
     StopSession,
     Unknown,
@@ -185,6 +186,50 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
             requires_visible_confirmation: false,
             assistant_reply_hint:
                 "Answer the next workpad task from shared dashboard workpad read models."
+                    .to_string(),
+        };
+    }
+
+    if let Some(agent_name) = start_next_work_agent(&normalized) {
+        let mut command = voice_command(
+            "voice-start-next-work",
+            &input,
+            CommandTarget::Agent(AgentId::new(format!("agent-{agent_name}"))),
+            CommandIntent::SendTask,
+            Some("voice start next work requested".to_string()),
+        );
+        command
+            .structured_args
+            .push(("agent".to_string(), agent_name.clone()));
+        command
+            .structured_args
+            .push(("action".to_string(), "start_next_workpad".to_string()));
+        command
+            .structured_args
+            .push(("view".to_string(), "next_work".to_string()));
+        command.risk = RiskLevel::Medium;
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::StartNextWork,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::ProjectNextWork,
+                required_fields: vec![
+                    "agent",
+                    "workpad_tasks",
+                    "next_workpad_task",
+                    "candidate_count",
+                    "source_anchor",
+                    "observed_status",
+                    "capo_execution_status",
+                    "default_task_id",
+                    "session_id",
+                    "run_id",
+                ],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: true,
+            assistant_reply_hint:
+                "Ask for visible confirmation before importing and starting the next workpad task."
                     .to_string(),
         };
     }
@@ -497,6 +542,19 @@ fn recent_work_agent(normalized: &str) -> Option<String> {
         .map(agent_slug)
 }
 
+fn start_next_work_agent(normalized: &str) -> Option<String> {
+    normalized
+        .strip_prefix("start next task with ")
+        .or_else(|| normalized.strip_prefix("start the next task with "))
+        .or_else(|| normalized.strip_prefix("start next work with "))
+        .or_else(|| {
+            normalized
+                .strip_prefix("have ")
+                .and_then(|rest| rest.strip_suffix(" start next task"))
+        })
+        .map(agent_slug)
+}
+
 fn redirect_agent(normalized: &str) -> Option<(String, String)> {
     let rest = normalized.strip_prefix("steer ")?;
     let (agent, goal) = rest.split_once(" to ")?;
@@ -768,6 +826,45 @@ mod tests {
                 .find(|(key, _)| key == "view")
                 .map(|(_, value)| value.as_str()),
             Some("next_work")
+        );
+    }
+
+    #[test]
+    fn start_next_work_requires_confirmation_and_uses_agent_target() {
+        let plan = plan_dummy_transcript(input("Start next task with fake-codex."));
+
+        assert_eq!(plan.intent_kind, VoiceIntentKind::StartNextWork);
+        assert_eq!(
+            plan.read_contract.query_scope,
+            VoiceReadScope::ProjectNextWork
+        );
+        assert!(plan.requires_visible_confirmation);
+        assert!(!plan.transcript_policy.retain_raw_transcript);
+        let command = plan.command.expect("voice command");
+        assert_eq!(command.intent, CommandIntent::SendTask);
+        assert_eq!(
+            command.target,
+            CommandTarget::Agent(AgentId::new("agent-fake-codex"))
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "agent")
+                .map(|(_, value)| value.as_str()),
+            Some("fake-codex")
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "action")
+                .map(|(_, value)| value.as_str()),
+            Some("start_next_workpad")
+        );
+        assert_eq!(
+            command.text.as_deref(),
+            Some("voice start next work requested")
         );
     }
 

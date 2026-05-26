@@ -1419,3 +1419,23 @@ Verification:
 Follow-up:
 
 - A future voice steering slice can explicitly lower "start the next task" into the existing `workpad start-next` command path, with confirmation and provider gating.
+
+## F6/V8 - Confirmed Start Next Work Conversation
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add a voice intent for commands such as "Start next task with fake-codex."
+- Treat start-next as privileged because it imports a workpad task and starts a controller session. It requires visible confirmation and records a voice approval plus once-scoped grant before mutation.
+- Reuse the existing `workpad start-next` semantics after confirmation instead of adding a new workpad mutation path.
+- Keep execution fake/local. The command registers no provider readiness claim, does not run Codex or Claude, does not inspect credentials, and does not retain the raw transcript.
+
+Verification:
+
+- `cargo test -p capo-voice start_next_work -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_confirmed_start_next_work -- --nocapture`: passed.
+
+Follow-up:
+
+- Once real connector opt-in evidence is recorded, add an explicit voice path for planning or requesting provider-backed dispatch without bypassing the dispatch gate.

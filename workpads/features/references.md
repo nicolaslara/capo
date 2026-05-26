@@ -634,3 +634,14 @@ Observed 2026-05-26.
 - Workpad task source projections: `../../crates/capo-state/src/lib.rs`
 - Voice source workpad: `voice.md`
 - No new third-party dependencies were added for V7.
+
+## F6/V8 Confirmed Start Next Work Conversation
+
+Observed 2026-05-26.
+
+- Voice start-next planning and unit coverage: `../../crates/capo-voice/src/lib.rs`
+- CLI confirmed voice start-next execution and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Workpad import/start-next semantics reused by the voice path: `../../crates/capo-cli/src/main.rs`
+- Voice approval and capability grant projections reused from `../../crates/capo-state/src/lib.rs`
+- Voice source workpad: `voice.md`
+- No new third-party dependencies were added for V8.

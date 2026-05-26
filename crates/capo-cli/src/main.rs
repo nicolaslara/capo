@@ -3298,6 +3298,26 @@ fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> 
             let dashboard = voice_dashboard(parsed, &plan)?;
             output.push_str(&render_voice_read_contract(&plan, &dashboard));
         }
+        VoiceIntentKind::StartNextWork => {
+            let command = plan
+                .command
+                .as_ref()
+                .ok_or_else(|| "voice start-next plan missing command".to_string())?;
+            let approval = decide_voice_permission_approval(parsed, &plan, "allow_once")?;
+            let agent = structured_arg_value(command, "agent")
+                .ok_or_else(|| "voice start-next plan missing agent".to_string())?
+                .to_string();
+            let started = start_next_workpad_task(parsed, &["--agent".to_string(), agent.clone()])?;
+            output = render_voice_header(&plan, Some(command), true, true);
+            output.push_str(&render_voice_approval(
+                &approval,
+                approval.decision.as_deref(),
+            ));
+            output.push_str(&format!("controlled_agent={agent}\n"));
+            output.push_str(&started);
+            let dashboard = voice_dashboard(parsed, &plan)?;
+            output.push_str(&render_voice_read_contract(&plan, &dashboard));
+        }
         VoiceIntentKind::InterruptSession | VoiceIntentKind::StopSession => {
             let command = plan
                 .command
@@ -3886,6 +3906,7 @@ fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
         VoiceIntentKind::RecentWork => "recent_work",
         VoiceIntentKind::ReviewNeeds => "review_needs",
         VoiceIntentKind::RedirectSession => "redirect_session",
+        VoiceIntentKind::StartNextWork => "start_next_work",
         VoiceIntentKind::InterruptSession => "interrupt_session",
         VoiceIntentKind::StopSession => "stop_session",
         VoiceIntentKind::Unknown => "unknown",
@@ -9177,6 +9198,136 @@ mod tests {
             state.last_sequence().expect("after sequence"),
             before_sequence
         );
+    }
+
+    #[test]
+    fn voice_confirmed_start_next_work_imports_and_dispatches_after_approval() {
+        let state_root = temp_root("cli-voice-start-next-work");
+        run_cli(vec![
+            "agent".to_string(),
+            "register".to_string(),
+            "--name".to_string(),
+            "fake-codex".to_string(),
+            "--adapter".to_string(),
+            "fake".to_string(),
+            "--runtime".to_string(),
+            "fake".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("register fake-codex");
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-cli-voice-start-next-work-index".to_string(),
+                    kind: EventKind::WorkpadIndexed,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: None,
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some("workpads:features:voice.md#v8".to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[
+                    ProjectionRecord::WorkpadFile(WorkpadFileProjection {
+                        path: "workpads/features/voice.md".to_string(),
+                        project_id: project_id(),
+                        content_hash: "hash-voice-workpad".to_string(),
+                        headings: "V8 - Start Next Work Conversation".to_string(),
+                        objective: Some("Voice workpad".to_string()),
+                        observed_unix: 1,
+                        updated_sequence: 0,
+                    }),
+                    ProjectionRecord::WorkpadTask(WorkpadTaskProjection {
+                        workpad_task_id: "workpads:features:voice.md#v8".to_string(),
+                        project_id: project_id(),
+                        path: "workpads/features/voice.md".to_string(),
+                        source_anchor: "v8".to_string(),
+                        title: "Start Next Work Conversation".to_string(),
+                        observed_status: "pending".to_string(),
+                        capo_execution_status: "observed_only".to_string(),
+                        observed_unix: 1,
+                        updated_sequence: 0,
+                    }),
+                ],
+            )
+            .expect("append workpad file and task");
+        let before_unconfirmed = state.last_sequence().expect("before unconfirmed");
+
+        let unconfirmed = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "Start next task with fake-codex.".to_string(),
+            "--voice-session".to_string(),
+            "voice-session-start-next".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice start next requires confirmation");
+
+        assert!(unconfirmed.contains("voice_plan=start_next_work"));
+        assert!(unconfirmed.contains("confirmation_required=true"));
+        assert!(unconfirmed.contains("mutation_applied=false"));
+        assert!(unconfirmed.contains("permission_status=pending"));
+        assert!(!unconfirmed.contains("workpad_next_started=true"));
+        assert!(!unconfirmed.contains("Start next task with fake-codex"));
+        assert_eq!(
+            state.last_sequence().expect("after unconfirmed"),
+            before_unconfirmed + 1
+        );
+
+        let confirmed = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "Start next task with fake-codex.".to_string(),
+            "--voice-session".to_string(),
+            "voice-session-start-next".to_string(),
+            "--confirm".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice confirmed start next");
+
+        assert!(confirmed.contains("voice_plan=start_next_work"));
+        assert!(confirmed.contains("confirmation_required=true"));
+        assert!(confirmed.contains("mutation_applied=true"));
+        assert!(confirmed.contains("permission_status=decided"));
+        assert!(confirmed.contains("permission_decision=allow_once"));
+        assert!(confirmed.contains("controlled_agent=fake-codex"));
+        assert!(confirmed.contains("workpad_next_started=true"));
+        assert!(confirmed.contains("workpad_task_id=workpads:features:voice.md#v8"));
+        assert!(confirmed.contains("task_id=task-workpad-workpads-features-voice-md-v8"));
+        assert!(confirmed.contains("session_id=session-fake-codex"));
+        assert!(confirmed.contains("spoken_next_workpad_task=none"));
+        assert!(!confirmed.contains("Start next task with fake-codex"));
+
+        let imported = state
+            .workpad_task(&project_id(), "workpads:features:voice.md#v8")
+            .expect("workpad task query")
+            .expect("imported workpad task");
+        assert_eq!(imported.capo_execution_status, "imported");
+        let session = state
+            .session(&SessionId::new("session-fake-codex"))
+            .expect("session query")
+            .expect("started session");
+        assert_eq!(
+            session.task_id.as_ref().map(ToString::to_string).as_deref(),
+            Some("task-workpad-workpads-features-voice-md-v8")
+        );
+        let grants = state.capability_grants().expect("capability grants");
+        assert!(grants.iter().any(|grant| {
+            grant.decision_source == "user_visible_voice_confirmation"
+                && grant.subject_json.contains("voice-session-start-next")
+                && grant.subject_json.contains("start_next_work")
+        }));
     }
 
     #[test]
