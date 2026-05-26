@@ -1385,6 +1385,88 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    pub fn task_outcome_reports(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<TaskOutcomeReportProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT task_outcome_report_id, project_id, task_id, session_id, run_id,
+                    outcome_status, started_sequence, completed_sequence,
+                    duration_sequence_span, action_count, tool_call_count, evidence_count,
+                    memory_packet_count, confidence, blocker, review_outcome, report_artifact_id,
+                    updated_sequence
+             FROM task_outcome_reports
+             WHERE project_id = ?1
+             ORDER BY updated_sequence ASC, task_outcome_report_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(TaskOutcomeReportProjection {
+                task_outcome_report_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                task_id: TaskId::new(row.get::<_, String>(2)?),
+                session_id: SessionId::new(row.get::<_, String>(3)?),
+                run_id: RunId::new(row.get::<_, String>(4)?),
+                outcome_status: row.get(5)?,
+                started_sequence: row.get(6)?,
+                completed_sequence: row.get(7)?,
+                duration_sequence_span: row.get(8)?,
+                action_count: row.get(9)?,
+                tool_call_count: row.get(10)?,
+                evidence_count: row.get(11)?,
+                memory_packet_count: row.get(12)?,
+                confidence: row.get(13)?,
+                blocker: row.get(14)?,
+                review_outcome: row.get(15)?,
+                report_artifact_id: row.get(16)?,
+                updated_sequence: row.get(17)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    pub fn task_outcome_reports_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> StateResult<Vec<TaskOutcomeReportProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT task_outcome_report_id, project_id, task_id, session_id, run_id,
+                    outcome_status, started_sequence, completed_sequence,
+                    duration_sequence_span, action_count, tool_call_count, evidence_count,
+                    memory_packet_count, confidence, blocker, review_outcome, report_artifact_id,
+                    updated_sequence
+             FROM task_outcome_reports
+             WHERE session_id = ?1
+             ORDER BY updated_sequence ASC, task_outcome_report_id ASC",
+        )?;
+        let rows = statement.query_map(params![session_id.as_str()], |row| {
+            Ok(TaskOutcomeReportProjection {
+                task_outcome_report_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                task_id: TaskId::new(row.get::<_, String>(2)?),
+                session_id: SessionId::new(row.get::<_, String>(3)?),
+                run_id: RunId::new(row.get::<_, String>(4)?),
+                outcome_status: row.get(5)?,
+                started_sequence: row.get(6)?,
+                completed_sequence: row.get(7)?,
+                duration_sequence_span: row.get(8)?,
+                action_count: row.get(9)?,
+                tool_call_count: row.get(10)?,
+                evidence_count: row.get(11)?,
+                memory_packet_count: row.get(12)?,
+                confidence: row.get(13)?,
+                blocker: row.get(14)?,
+                review_outcome: row.get(15)?,
+                report_artifact_id: row.get(16)?,
+                updated_sequence: row.get(17)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn review_findings_for_session(
         &self,
         session_id: &SessionId,

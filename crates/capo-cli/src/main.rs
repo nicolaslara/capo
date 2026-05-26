@@ -2776,6 +2776,31 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
                 finding.summary
             ));
         }
+        output.push_str(&format!(
+            "session_task_outcome_reports={}\n",
+            session_row.task_outcome_reports.len()
+        ));
+        for report in &session_row.task_outcome_reports {
+            output.push_str(&format!(
+                "task_outcome_report={} session={} task={} run={} outcome_status={} review_outcome={} actions={} tool_calls={} evidence={} memory_packets={} confidence={} blocker={} artifact={}\n",
+                report.task_outcome_report_id,
+                report.session_id,
+                report.task_id,
+                report.run_id,
+                report.outcome_status,
+                report.review_outcome,
+                report.action_count,
+                report.tool_call_count,
+                report.evidence_count,
+                report.memory_packet_count,
+                report
+                    .confidence
+                    .map(|confidence| confidence.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                report.blocker.as_deref().unwrap_or("none"),
+                report.report_artifact_id.as_deref().unwrap_or("none")
+            ));
+        }
         for tool_call in &session_row.tool_calls {
             output.push_str(&format!(
                 "tool_call={} tool={} tool_origin={} tool_status={} input_artifact={} output_artifact={}\n",
@@ -2830,6 +2855,32 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
             finding.evidence_artifact_id.as_deref().unwrap_or("none"),
             finding.follow_up.as_deref().unwrap_or("none"),
             finding.summary
+        ));
+    }
+
+    output.push_str(&format!(
+        "task_outcome_reports={}\n",
+        dashboard.task_outcome_reports.len()
+    ));
+    for report in &dashboard.task_outcome_reports {
+        output.push_str(&format!(
+            "project_task_outcome_report={} session={} task={} run={} outcome_status={} review_outcome={} actions={} tool_calls={} evidence={} memory_packets={} confidence={} blocker={} artifact={}\n",
+            report.task_outcome_report_id,
+            report.session_id,
+            report.task_id,
+            report.run_id,
+            report.outcome_status,
+            report.review_outcome,
+            report.action_count,
+            report.tool_call_count,
+            report.evidence_count,
+            report.memory_packet_count,
+            report
+                .confidence
+                .map(|confidence| confidence.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            report.blocker.as_deref().unwrap_or("none"),
+            report.report_artifact_id.as_deref().unwrap_or("none")
         ));
     }
 
@@ -8515,6 +8566,71 @@ mod tests {
         assert!(dashboard.contains("status=open"));
         assert!(dashboard.contains("reviewer=focused-review"));
         assert!(dashboard.contains("summary=Dashboard must expose review blockers."));
+    }
+
+    #[test]
+    fn dashboard_renders_task_outcome_reports_from_shared_query() {
+        let state_root = temp_root("cli-dashboard-task-outcome");
+        seed_running_agent(&state_root, "fake-codex", "Inspect the project");
+        let report_id = "task-outcome-report-dashboard";
+        let artifact_id = "artifact-task-outcome-dashboard";
+        SqliteStateStore::open(&state_root)
+            .expect("state")
+            .append_event(
+                NewEvent {
+                    event_id: "event-cli-dashboard-task-outcome".to_string(),
+                    kind: EventKind::TaskOutcomeReportGenerated,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id()),
+                    task_id: Some(TaskId::new("task-inspect-the-project")),
+                    agent_id: Some(AgentId::new("agent-fake-codex")),
+                    session_id: Some(SessionId::new("session-fake-codex")),
+                    run_id: Some(RunId::new("run-fake-codex")),
+                    turn_id: None,
+                    item_id: Some(report_id.to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::TaskOutcomeReport(
+                    capo_state::TaskOutcomeReportProjection {
+                        task_outcome_report_id: report_id.to_string(),
+                        project_id: project_id(),
+                        task_id: TaskId::new("task-inspect-the-project"),
+                        session_id: SessionId::new("session-fake-codex"),
+                        run_id: RunId::new("run-fake-codex"),
+                        outcome_status: "completed".to_string(),
+                        started_sequence: 1,
+                        completed_sequence: 10,
+                        duration_sequence_span: 9,
+                        action_count: 5,
+                        tool_call_count: 1,
+                        evidence_count: 2,
+                        memory_packet_count: 1,
+                        confidence: Some(82),
+                        blocker: None,
+                        review_outcome: "not_reviewed".to_string(),
+                        report_artifact_id: Some(artifact_id.to_string()),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append task outcome report");
+
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard with task outcome report");
+
+        assert!(dashboard.contains("task_outcome_reports=1"));
+        assert!(dashboard.contains("session_task_outcome_reports=1"));
+        assert!(dashboard.contains(&format!("project_task_outcome_report={report_id}")));
+        assert!(dashboard.contains(&format!("task_outcome_report={report_id}")));
+        assert!(dashboard.contains("outcome_status=completed"));
+        assert!(dashboard.contains("review_outcome=not_reviewed"));
+        assert!(dashboard.contains(&format!("artifact={artifact_id}")));
     }
 
     #[test]

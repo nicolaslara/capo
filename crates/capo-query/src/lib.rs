@@ -12,7 +12,8 @@ use capo_state::{
     AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
     AgentProjection, ConnectivityExposureProjection, EventRecord, EvidenceProjection,
     MemoryPacketProjection, ReviewFindingProjection, RunProjection, SessionProjection,
-    SqliteStateStore, StateResult, ToolCallProjection, WorkpadTaskProjection,
+    SqliteStateStore, StateResult, TaskOutcomeReportProjection, ToolCallProjection,
+    WorkpadTaskProjection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +22,7 @@ pub struct ProjectDashboard {
     pub agents: Vec<AgentDashboardRow>,
     pub project_evidence: Vec<EvidenceProjection>,
     pub review_findings: Vec<ReviewFindingProjection>,
+    pub task_outcome_reports: Vec<TaskOutcomeReportProjection>,
     pub connectivity_exposures: Vec<ConnectivityExposureProjection>,
     pub adapter_readiness: Vec<AdapterReadinessProjection>,
     pub adapter_smoke_reports: Vec<AdapterSmokeReportProjection>,
@@ -63,6 +65,7 @@ pub struct SessionDashboardRow {
     pub tool_calls: Vec<ToolCallProjection>,
     pub memory_packets: Vec<MemoryPacketProjection>,
     pub review_findings: Vec<ReviewFindingProjection>,
+    pub task_outcome_reports: Vec<TaskOutcomeReportProjection>,
     pub recent_events: Vec<EventRecord>,
 }
 
@@ -166,6 +169,7 @@ pub fn project_dashboard(
     let connectivity_exposures = state.connectivity_exposures(&query.project_id)?;
     let project_evidence = state.project_evidence(&query.project_id)?;
     let review_findings = state.review_findings(&query.project_id)?;
+    let task_outcome_reports = state.task_outcome_reports(&query.project_id)?;
     let adapter_readiness = state.adapter_readiness(&query.project_id)?;
     let adapter_smoke_reports = state.adapter_smoke_reports(&query.project_id)?;
     let adapter_dispatch_plans = state.adapter_dispatch_plans(&query.project_id)?;
@@ -204,6 +208,7 @@ pub fn project_dashboard(
         agents: rows,
         project_evidence,
         review_findings,
+        task_outcome_reports,
         connectivity_exposures,
         adapter_readiness,
         adapter_smoke_reports,
@@ -343,6 +348,7 @@ fn session_dashboard(
         tool_calls: state.tool_calls_for_session(session_id)?,
         memory_packets: state.memory_packets_for_session(session_id)?,
         review_findings: state.review_findings_for_session(session_id)?,
+        task_outcome_reports: state.task_outcome_reports_for_session(session_id)?,
         recent_events: state.recent_events_for_session(session_id, recent_event_limit)?,
         session,
     })
@@ -575,6 +581,32 @@ mod tests {
         let session = dashboard.agents[0].session.as_ref().expect("session row");
         assert_eq!(session.review_findings.len(), 1);
         assert_eq!(session.review_findings[0].severity, "high");
+    }
+
+    #[test]
+    fn project_dashboard_includes_task_outcome_reports() {
+        let root = temp_root("query-dashboard-task-outcome-reports");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        append_agent(&state, &project_id, "agent-active", Some("session-active"));
+        append_minimal_session(&state, &project_id, "agent-active", "session-active");
+        append_task_outcome_report(&state, &project_id, "task-outcome-report-demo");
+
+        let dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+
+        assert_eq!(dashboard.task_outcome_reports.len(), 1);
+        assert_eq!(
+            dashboard.task_outcome_reports[0].task_outcome_report_id,
+            "task-outcome-report-demo"
+        );
+        assert_eq!(
+            dashboard.task_outcome_reports[0].review_outcome,
+            "reviewed_with_findings"
+        );
+        let session = dashboard.agents[0].session.as_ref().expect("session row");
+        assert_eq!(session.task_outcome_reports.len(), 1);
+        assert_eq!(session.task_outcome_reports[0].tool_call_count, 2);
     }
 
     #[test]
@@ -1124,6 +1156,54 @@ mod tests {
                 })],
             )
             .expect("append review finding");
+    }
+
+    fn append_task_outcome_report(
+        state: &SqliteStateStore,
+        project_id: &ProjectId,
+        report_id: &str,
+    ) {
+        state
+            .append_event(
+                NewEvent {
+                    event_id: format!("event-{report_id}"),
+                    kind: EventKind::TaskOutcomeReportGenerated,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: Some(TaskId::new("task-agent-active")),
+                    agent_id: Some(AgentId::new("agent-active")),
+                    session_id: Some(SessionId::new("session-active")),
+                    run_id: Some(RunId::new("run-agent-active")),
+                    turn_id: None,
+                    item_id: Some(report_id.to_string()),
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::TaskOutcomeReport(
+                    TaskOutcomeReportProjection {
+                        task_outcome_report_id: report_id.to_string(),
+                        project_id: project_id.clone(),
+                        task_id: TaskId::new("task-agent-active"),
+                        session_id: SessionId::new("session-active"),
+                        run_id: RunId::new("run-agent-active"),
+                        outcome_status: "completed".to_string(),
+                        started_sequence: 10,
+                        completed_sequence: 20,
+                        duration_sequence_span: 10,
+                        action_count: 7,
+                        tool_call_count: 2,
+                        evidence_count: 3,
+                        memory_packet_count: 1,
+                        confidence: Some(82),
+                        blocker: None,
+                        review_outcome: "reviewed_with_findings".to_string(),
+                        report_artifact_id: Some("artifact-task-outcome-report-demo".to_string()),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append task outcome report");
     }
 
     fn append_connectivity_exposure(state: &SqliteStateStore, project_id: &ProjectId) {

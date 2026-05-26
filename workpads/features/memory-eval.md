@@ -102,3 +102,26 @@ Evidence:
 Decision:
 
 - Treat review findings as first-class dashboard facts beside evidence, tools, memory packets, dispatch state, and workpad refs. Markdown artifacts remain reviewable evidence, not the only operator surface for blockers.
+
+### ME5 - Task Outcome Dashboard Visibility
+
+Status: completed
+
+Acceptance:
+
+- Expose task outcome reports through the shared dashboard/query contract.
+- Render project-level and session-level task outcome reports in the CLI dashboard.
+- Include outcome status, review outcome, counts, confidence, blocker, and report artifact refs.
+- Keep report visibility read-only and derived from persisted projections.
+
+Evidence:
+
+- `crates/capo-state/src/lib.rs`
+- `crates/capo-query/src/lib.rs`
+- `crates/capo-cli/src/main.rs`
+- `cargo test -p capo-query task_outcome_reports -- --nocapture`: passed.
+- `cargo test -p capo-cli dashboard_renders_task_outcome_reports -- --nocapture`: passed.
+
+Decision:
+
+- Treat task outcome reports as first-class dashboard facts so operators can inspect performance/review summaries from the shared query surface instead of opening markdown artifacts for every session.

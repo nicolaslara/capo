@@ -819,6 +819,26 @@ Follow-up:
 
 - Future workpad writeback can use these review-finding rows as the durable source for creating or resolving follow-up tasks.
 
+## F5/ME5 - Task Outcome Dashboard Visibility
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add project-scoped and session-scoped task outcome report lookups to the state boundary.
+- Add `task_outcome_reports` to `ProjectDashboard` and per-session `task_outcome_reports` to `SessionDashboardRow`.
+- Render project-level and session-level task outcome reports in `capo dashboard`, including outcome status, review outcome, action/tool/evidence/memory counts, confidence, blocker, and report artifact.
+- Keep dashboard outcome visibility read-only and projection-derived. Markdown reports remain durable evidence, not the only operator surface for performance/review summaries.
+
+Verification:
+
+- `cargo test -p capo-query task_outcome_reports -- --nocapture`: passed.
+- `cargo test -p capo-cli dashboard_renders_task_outcome_reports -- --nocapture`: passed.
+
+Follow-up:
+
+- Future voice/web/mobile surfaces can use the same dashboard fields to answer outcome and performance questions without reading report markdown.
+
 ## F4/PT1 - Static Policy Variant
 
 Status: completed on 2026-05-25.

@@ -385,6 +385,16 @@ Observed 2026-05-26.
 - Memory/evaluation source workpad: `memory-eval.md`
 - No new third-party dependencies were added for ME4.
 
+## F5/ME5 Task Outcome Dashboard Visibility
+
+Observed 2026-05-26.
+
+- Project/session task outcome report state lookups: `../../crates/capo-state/src/lib.rs`
+- Shared dashboard task outcome report contract: `../../crates/capo-query/src/lib.rs`
+- CLI dashboard task outcome rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Memory/evaluation source workpad: `memory-eval.md`
+- No new third-party dependencies were added for ME5.
+
 ## F6/V1 Voice Controller Integration
 
 Observed 2026-05-25.
