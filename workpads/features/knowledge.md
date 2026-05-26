@@ -2474,6 +2474,25 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F8/SS2c - State Schema Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move SQLite migration DDL, compatibility column backfills, and projection-table clearing into `schema.rs`.
+- Treat schema DDL and projection reset table coverage as one physical-store concern for now. Keeping them together makes it easier to audit which tables exist and which read models are rebuildable.
+- Keep projection watermark updates, projection record encoding/decoding, and `apply_projection_record` in `lib.rs` until a dedicated projection-runtime split. Moving them separately would mix a mechanical file-size change with higher-risk rebuild semantics.
+- The move preserved the local SQLite source of truth and did not introduce an ORM/runtime dependency.
+
+Verification:
+
+- `git diff --check`: passed.
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2b - State Projection Type Module Split
 
 Status: completed on 2026-05-26.

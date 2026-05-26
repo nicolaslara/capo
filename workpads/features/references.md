@@ -1208,3 +1208,12 @@ Observed 2026-05-26.
 - Crate-root projection re-exports preserving downstream imports: `../../crates/capo-state/src/lib.rs`
 - Resulting file sizes: `../../crates/capo-state/src/lib.rs` 5,379 lines; `../../crates/capo-state/src/projections.rs` 503 lines; `../../crates/capo-state/src/event.rs` 207 lines; `../../crates/capo-state/src/error.rs` 37 lines; `../../crates/capo-state/src/tests.rs` 1,876 lines.
 - No new third-party dependencies were added for SS2b.
+
+## F8/SS2c State Schema Module Split
+
+Observed 2026-05-26.
+
+- SQLite schema and projection-table reset helper module: `../../crates/capo-state/src/schema.rs`
+- Private schema helper imports from store implementation: `../../crates/capo-state/src/lib.rs`
+- Resulting file sizes: `../../crates/capo-state/src/lib.rs` 4,848 lines; `../../crates/capo-state/src/schema.rs` 537 lines; `../../crates/capo-state/src/projections.rs` 503 lines; `../../crates/capo-state/src/event.rs` 207 lines; `../../crates/capo-state/src/error.rs` 37 lines; `../../crates/capo-state/src/tests.rs` 1,876 lines.
+- No new third-party dependencies were added for SS2c.

@@ -534,6 +534,7 @@ Progress:
 - SS2 state crate test module split is completed. The first maintainability slice moved the large inline `capo-state` test module into its own file before deeper state/query/projection splits.
 - SS2a state event/error module split is completed. Stable event envelope, redaction, artifact, recovery, and error/result types now live in focused modules with crate-root re-exports preserved.
 - SS2b state projection type module split is completed. Projection/read-model type definitions now live in `projections.rs` with crate-root re-exports preserved, while SQL codec/rebuild behavior remains unchanged.
+- SS2c state schema module split is completed. SQLite migration DDL, compatibility column backfills, and projection-table reset helpers now live in `schema.rs` without changing schema or rebuild behavior.
 
 Evidence:
 

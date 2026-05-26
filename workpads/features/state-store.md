@@ -136,3 +136,30 @@ Decision:
 
 - Keep projection data structures separate from projection persistence code. This makes the public state read-model vocabulary easier to inspect while leaving the higher-risk SQL, projection log codec, and rebuild code in place for a later dedicated split.
 - Preserve `MemoryRecordProjection::is_packet_eligible` with the type definition because it is a read-model invariant used by consumers, not a SQLite codec concern.
+
+### SS2c - State Schema Module Split
+
+Status: completed
+
+Acceptance:
+
+- Move SQLite migration and projection-table reset helpers out of `src/lib.rs`.
+- Preserve SQLite schema DDL, compatibility column backfills, projection reset table list, and rebuild semantics.
+- Do not change projection row encoding/decoding, read queries, event append behavior, or crate-root public APIs.
+- Run focused `capo-state` tests and the standard workspace gate before completion.
+
+Evidence:
+
+- `../../crates/capo-state/src/schema.rs` now owns `migrate`, compatibility `add_missing_column`, and `clear_projection_tables`.
+- `../../crates/capo-state/src/lib.rs` imports schema helpers privately and keeps the public API unchanged.
+- Resulting state crate file sizes: `../../crates/capo-state/src/lib.rs` 4,848 lines; `../../crates/capo-state/src/schema.rs` 537 lines; `../../crates/capo-state/src/projections.rs` 503 lines; `../../crates/capo-state/src/event.rs` 207 lines; `../../crates/capo-state/src/error.rs` 37 lines; `../../crates/capo-state/src/tests.rs` 1,876 lines.
+- `git diff --check`: passed.
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+Decision:
+
+- Keep schema and projection-table reset together for now because both define the physical SQLite table set. This makes later projection codec extraction safer by leaving the table lifecycle in one place.
+- Leave `update_watermark`, projection row encoding/decoding, and `apply_projection_record` in `lib.rs` for this slice. Those functions are part of the projection runtime path and should move together in a dedicated codec/apply split with rebuild-focused regression evidence.
