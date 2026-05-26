@@ -286,3 +286,27 @@ Decision:
 
 - Treat runtime target registration as the durable execution-machine inventory. Connectivity exposure rows for runtime owners must point at known targets so later SSH/Tailscale/cloud adapters and dashboards are not built on opaque strings.
 - Keep the validation at the CLI/operator write surface for now because runtime targets and connectivity exposures are still metadata-only feature scaffolding. A future service/controller write path should enforce the same invariant closer to the command handler.
+
+### RR13 - Runtime Target Endpoint Consistency
+
+Status: completed
+
+Acceptance:
+
+- Fail closed before recording a `runtime_target` connectivity exposure when the registered runtime target has a configured connectivity endpoint and the requested exposure uses a different endpoint.
+- Allow targets without a configured endpoint to remain flexible for early metadata scaffolding.
+- Keep the validation metadata-only and do not open tunnels, launch runtimes, launch providers, inspect credentials, request approvals, activate grants, or mutate runtime target state.
+
+Evidence:
+
+- Recorded `capo connectivity expose-stub --owner-kind runtime_target ... --record` compares the requested endpoint against the registered runtime target endpoint when present in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-cli connectivity_expose_stub -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Decision:
+
+- Treat a runtime target's configured connectivity endpoint as a binding constraint once present. This prevents operator dashboards and future remote adapters from mixing execution-machine metadata with unrelated tunnel endpoints.
+- Keep endpoint-less targets valid for now because remote target discovery and real tunnel adapters are still deferred behind local real-agent proof.

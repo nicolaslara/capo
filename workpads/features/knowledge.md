@@ -1981,8 +1981,27 @@ Decisions:
 Verification:
 
 - `cargo test -p capo-cli connectivity_expose_stub -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
 - `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
 - `cargo fmt --check`: passed.
 - `git diff --check`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - `cargo test`: passed.
+
+## F7/RR13 - Runtime Target Endpoint Consistency
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Treat a runtime target's configured `connectivity_endpoint_id` as a binding constraint for recorded `runtime_target` connectivity exposures.
+- Fail closed if an operator tries to record a runtime-target exposure against a different endpoint.
+- Keep targets without a configured endpoint flexible for now because real remote target discovery and concrete tunnel adapters are still deferred.
+- Preserve the boundary split: this connects persisted runtime-target metadata to connectivity exposure metadata only; it does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, or prompt materialization.
+
+Verification:
+
+- `cargo test -p capo-cli connectivity_expose_stub -- --nocapture`: passed.
