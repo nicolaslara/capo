@@ -86,6 +86,7 @@ Usage:
   capo permission list [--state PATH]
   capo permission decide --approval APPROVAL_ID --decision allow_once|allow_always|reject_once|reject_always [--state PATH]
   capo runtime target register --target TARGET_ID --name NAME --runner local-process|remote-process|container --workspace PATH --artifacts PATH [--cwd PATH] [--capability-profile PROFILE] [--endpoint ENDPOINT_ID] [--status available|disabled|unhealthy] [--state PATH]
+  capo runtime target set-status --target TARGET_ID --status available|disabled|unhealthy [--state PATH]
   capo runtime target list [--state PATH]
   capo connectivity expose-stub --endpoint ENDPOINT_ID --owner-kind runtime_target|capo_server --owner-id OWNER_ID --channel control|stdio|logs|dashboard|artifact --exposure loopback|private|public [--address REF] [--record] [--state PATH]
   capo connectivity request-approval --exposure EXPOSURE_ID [--approval APPROVAL_ID] [--state PATH]
@@ -225,6 +226,11 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             if area == "runtime" && command == "target" && action == "register" =>
         {
             register_runtime_target(&parsed, rest)
+        }
+        [area, command, action, rest @ ..]
+            if area == "runtime" && command == "target" && action == "set-status" =>
+        {
+            set_runtime_target_status(&parsed, rest)
         }
         [area, command, action] if area == "runtime" && command == "target" && action == "list" => {
             list_runtime_targets(&parsed)
@@ -4706,6 +4712,54 @@ fn list_runtime_targets(parsed: &ParsedArgs) -> Result<String, String> {
     Ok(output)
 }
 
+fn set_runtime_target_status(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--target" | "--status"))
+    {
+        return Err(format!(
+            "unknown runtime target set-status option: {unknown}"
+        ));
+    }
+    let runtime_target_id = required_arg(args, "--target")?;
+    let status = parse_runtime_target_status(&required_arg(args, "--status")?)?;
+    let state = state(parsed)?;
+    let mut target = state
+        .runtime_targets(&project_id())
+        .map_err(debug_error)?
+        .into_iter()
+        .find(|target| target.runtime_target_id == runtime_target_id)
+        .ok_or_else(|| format!("missing runtime target: {runtime_target_id}"))?;
+    target.status = status;
+    target.updated_sequence = 0;
+    let mut event = NewEvent::new(
+        format!(
+            "event-runtime-target-status-{}",
+            stable_cli_hash(&format!("{}:{}", target.runtime_target_id, target.status))
+        ),
+        EventKind::RuntimeTargetStatusChanged,
+        "capo-cli",
+    );
+    event.project_id = Some(target.project_id.clone());
+    event.item_id = Some(target.runtime_target_id.clone());
+    event.payload_json = serde_json::json!({
+        "runtime_target_id": target.runtime_target_id.clone(),
+        "status": target.status.clone(),
+        "provider_cli_executed": false,
+        "tunnel_opened": false,
+        "runtime_process_started": false,
+    })
+    .to_string();
+    event.redaction_state = RedactionState::Safe;
+    let sequence = state
+        .append_event(event, &[ProjectionRecord::RuntimeTarget(target.clone())])
+        .map_err(debug_error)?;
+    Ok(format!(
+        "runtime_target_status_updated=true\nruntime_target={} status={} provider_cli_executed=false tunnel_opened=false runtime_process_started=false sequence={sequence}\n",
+        target.runtime_target_id, target.status
+    ))
+}
+
 fn render_runtime_target_registration(target: &RuntimeTargetProjection, sequence: i64) -> String {
     format!(
         "runtime_target_registered=true\nruntime_target={} name={} runner={} workspace={} artifacts={} default_cwd={} capability_profile={} endpoint={} status={} provider_cli_executed=false tunnel_opened=false sequence={sequence}\n",
@@ -7404,6 +7458,7 @@ mod tests {
         assert!(HELP.contains("adapter dogfood-gate"));
         assert!(HELP.contains("dogfood readiness"));
         assert!(HELP.contains("runtime target register"));
+        assert!(HELP.contains("runtime target set-status"));
         assert!(HELP.contains("runtime target list"));
         assert!(HELP.contains("connectivity expose-stub"));
         assert!(HELP.contains("connectivity request-approval"));
@@ -10092,6 +10147,43 @@ mod tests {
         .expect_err("record private exposure for disabled target");
         assert!(disabled_target.contains("runtime target is not available"));
 
+        let enabled_target = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "set-status".to_string(),
+            "--target".to_string(),
+            "remote-target-disabled".to_string(),
+            "--status".to_string(),
+            "available".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("enable runtime target");
+        assert!(enabled_target.contains("runtime_target_status_updated=true"));
+        assert!(enabled_target.contains("status=available"));
+        assert!(enabled_target.contains("provider_cli_executed=false"));
+        assert!(enabled_target.contains("tunnel_opened=false"));
+        let enabled_exposure = run_cli(vec![
+            "connectivity".to_string(),
+            "expose-stub".to_string(),
+            "--endpoint".to_string(),
+            "endpoint-disabled-1".to_string(),
+            "--owner-kind".to_string(),
+            "runtime_target".to_string(),
+            "--owner-id".to_string(),
+            "remote-target-disabled".to_string(),
+            "--channel".to_string(),
+            "control".to_string(),
+            "--exposure".to_string(),
+            "private".to_string(),
+            "--record".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("record private exposure after enabling target");
+        assert!(enabled_exposure.contains("connectivity_exposure_planned=true"));
+        assert!(enabled_exposure.contains("recorded=true"));
+
         let planned = run_cli(vec![
             "connectivity".to_string(),
             "expose-stub".to_string(),
@@ -10123,9 +10215,11 @@ mod tests {
             state_root.display().to_string(),
         ])
         .expect("dashboard");
-        assert!(dashboard.contains("connectivity_exposures=1"));
+        assert!(dashboard.contains("connectivity_exposures=2"));
         assert!(dashboard.contains("endpoint=endpoint-private-1"));
+        assert!(dashboard.contains("endpoint=endpoint-disabled-1"));
         assert!(dashboard.contains("owner=runtime_target:remote-target-1"));
+        assert!(dashboard.contains("owner=runtime_target:remote-target-disabled"));
         assert!(dashboard.contains("exposure_status=blocked_pending_permission"));
         assert!(dashboard.contains("permission_scope=network:connect:private_tunnel"));
 

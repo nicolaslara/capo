@@ -2024,3 +2024,24 @@ Verification:
 - `git diff --check`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - `cargo test`: passed.
+
+## F7/RR15 - Runtime Target Status Update Surface
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo runtime target set-status` as a provider-free metadata command over the runtime target inventory.
+- Record status changes as `runtime.target_status_changed` events while projecting into the existing `RuntimeTargetProjection` row.
+- Preserve all target placement metadata during status changes; only `status` changes.
+- Keep this separate from runtime lifecycle and connectivity exposure. The command does not start processes, open tunnels, inspect credentials, request approvals, activate grants, or mutate exposure rows.
+- Use the existing exposure guard as the behavioral proof: a disabled target cannot be exposed until `set-status --status available` updates the target row.
+
+Verification:
+
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_expose_stub -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.

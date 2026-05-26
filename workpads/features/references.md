@@ -957,3 +957,13 @@ Observed 2026-05-26.
 - Runtime/connectivity architecture source: `../architecture/runtime-tunnel.md`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR14.
+
+## F7/RR15 Runtime Target Status Update Surface
+
+Observed 2026-05-26.
+
+- CLI runtime target status update command and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Runtime target status event kind and projection path: `../../crates/capo-state/src/lib.rs`
+- Runtime/connectivity architecture source: `../architecture/runtime-tunnel.md`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR15.

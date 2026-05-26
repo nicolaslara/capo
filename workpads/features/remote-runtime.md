@@ -334,3 +334,30 @@ Decision:
 
 - Treat runtime target status as an exposure precondition. If a target is disabled or unhealthy, Capo should not create new connectivity exposure records for it even when endpoint metadata matches.
 - Keep target status changes as future metadata work; this slice only enforces the status already stored in the runtime target inventory.
+
+### RR15 - Runtime Target Status Update Surface
+
+Status: completed
+
+Acceptance:
+
+- Add a provider-free operator command for changing runtime target status between `available`, `disabled`, and `unhealthy`.
+- Preserve all other runtime target metadata while updating status.
+- Keep the status update in the runtime target read model and event log, separate from connectivity exposure state.
+- Prove the updated status affects the recorded connectivity exposure guard without launching runtimes, launching providers, opening tunnels, inspecting credentials, requesting approvals, or activating grants.
+
+Evidence:
+
+- CLI `capo runtime target set-status --target TARGET_ID --status available|disabled|unhealthy` in `../../crates/capo-cli/src/main.rs`.
+- `EventKind::RuntimeTargetStatusChanged` in `../../crates/capo-state/src/lib.rs`.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_expose_stub -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Decision:
+
+- Treat runtime target status changes as metadata transitions over the target inventory, not runtime lifecycle operations.
+- Reuse the existing `RuntimeTargetProjection` upsert path so dashboards and exposure validation see the latest target state through the same read model.
