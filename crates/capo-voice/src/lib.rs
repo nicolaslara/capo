@@ -416,6 +416,8 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
                     "sessions",
                     "latest_summary",
                     "evidence_refs",
+                    "tool_calls",
+                    "tool_observations",
                     "recent_events",
                     "project_evidence",
                 ],
@@ -487,6 +489,8 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
                     "current_goal",
                     "latest_summary",
                     "evidence_refs",
+                    "tool_calls",
+                    "tool_observations",
                     "recent_events",
                 ],
             },
@@ -1301,6 +1305,11 @@ mod tests {
                 .required_fields
                 .contains(&"project_evidence")
         );
+        assert!(
+            plan.read_contract
+                .required_fields
+                .contains(&"tool_observations")
+        );
         assert!(!plan.requires_visible_confirmation);
         assert!(!plan.transcript_policy.retain_raw_transcript);
         let command = plan.command.expect("voice command");
@@ -1334,6 +1343,11 @@ mod tests {
             plan.read_contract
                 .required_fields
                 .contains(&"latest_summary")
+        );
+        assert!(
+            plan.read_contract
+                .required_fields
+                .contains(&"tool_observations")
         );
         assert!(!plan.requires_visible_confirmation);
         assert!(!plan.transcript_policy.retain_raw_transcript);

@@ -825,3 +825,14 @@ Observed 2026-05-26.
 - Tool observation architecture source: `../architecture/tool-exposure.md`
 - Permissions source workpad: `permissions-tools.md`
 - No new third-party dependencies were added for PT11.
+
+## F6/V12 Recent Work Tool Activity Conversation
+
+Observed 2026-05-26.
+
+- Voice recent-work read contract fields and planning tests: `../../crates/capo-voice/src/lib.rs`
+- CLI voice recent-work rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared dashboard session rows consumed by voice: `../../crates/capo-query/src/lib.rs`
+- Voice source workpad: `voice.md`
+- Tool observation architecture source: `../architecture/tool-exposure.md`
+- No new third-party dependencies were added for V12.

@@ -1795,3 +1795,23 @@ Verification:
 Follow-up:
 
 - Consider moving per-session status assembly into `capo-query` once another consumer besides CLI needs the exact compact status contract.
+
+## F6/V12 - Recent Work Tool Activity Conversation
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Extend project-level and agent-level recent-work voice answers with governed tool-call and observed-only native tool-observation activity from `ProjectDashboard`.
+- Keep voice output terminology aligned with dashboard/status/evidence: `spoken_tool_call` means Capo-governed tool timeline state, while `spoken_tool_observation` means adapter/provider-native activity with observed-only instrumentation.
+- Add `tool_calls` and `tool_observations` to the voice read contract so future voice clients know the recent-work answer depends on tool activity fields.
+- Preserve the voice safety boundary. Recent-work questions remain read-only, do not retain raw transcripts, do not mutate state, and do not launch providers, runtimes, tunnels, prompt materialization, or credential/session inspection.
+
+Verification:
+
+- `cargo test -p capo-voice recent_work -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_recent_work -- --nocapture`: passed.
+
+Follow-up:
+
+- If recent-work answers become too verbose, add a query-level compact activity summary instead of making voice apply its own filtering rules.

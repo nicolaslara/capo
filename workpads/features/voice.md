@@ -251,3 +251,28 @@ Evidence:
 Decision:
 
 - Keep remote-control voice questions read-only over shared connectivity exposure read models. Voice can explain the latest exposure status and filters, but cannot request approvals, activate grants, revoke exposure, open tunnels, or claim real tunnel reachability.
+
+### V12 - Recent Work Tool Activity Conversation
+
+Status: completed
+
+Acceptance:
+
+- Include governed tool-call counts/details and observed-only native tool observation counts/details in project-level and agent-level recent-work voice answers.
+- Answer from the shared dashboard/query contract rather than adding voice-specific state reads.
+- Preserve the distinction between Capo-governed tool calls and adapter/provider-native observed-only tool facts.
+- Preserve raw transcript non-retention and avoid mutating state.
+- Cover voice planning and CLI rendering with regression tests.
+
+Evidence:
+
+- Voice recent-work read contract fields in `../../crates/capo-voice/src/lib.rs`.
+- CLI voice recent-work rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-voice recent_work -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_recent_work -- --nocapture`: passed.
+
+Decision:
+
+- Extend recent-work answers with `tool_calls` and `tool_observations` from the shared `ProjectDashboard` session rows.
+- Render `spoken_tool_call` separately from `spoken_tool_observation` so voice answers preserve the same governed-vs-observed-only distinction as dashboard, status, and evidence exports.
+- Keep the path read-only and transcript-safe. It does not mutate state, retain raw transcripts, launch providers/runtimes/tunnels, or inspect credentials.

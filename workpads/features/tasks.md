@@ -344,6 +344,7 @@ Progress:
 - V9 dispatch status conversation is completed with a read-only dispatch-chain status question over `ProjectDashboard::adapter_dispatch_status(...)`.
 - V10 latest dispatch status conversation is completed with read-only project and agent-scoped questions over `ProjectDashboard::latest_adapter_dispatch_status(...)`.
 - V11 latest connectivity exposure conversation is completed with read-only remote-control exposure questions over `ProjectDashboard::latest_connectivity_exposure(...)`.
+- V12 recent-work tool activity conversation is completed with governed tool calls and observed-only tool observations included in project/agent recent-work answers.
 
 Evidence:
 
@@ -367,6 +368,8 @@ Evidence:
 - `cargo test -p capo-voice latest_connectivity -- --nocapture`
 - `cargo test -p capo-cli voice_dispatch_status -- --nocapture`
 - `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`
+- `cargo test -p capo-voice recent_work -- --nocapture`
+- `cargo test -p capo-cli voice_recent_work -- --nocapture`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`

@@ -3951,7 +3951,7 @@ fn append_voice_agent_row(output: &mut String, row: &capo_query::AgentDashboardR
     ));
     if let Some(session_row) = &row.session {
         output.push_str(&format!(
-            "spoken_session={} session_status={} run_status={} current_goal={} latest_summary={} blocker={} confidence={} evidence_refs={} recent_events={}\n",
+            "spoken_session={} session_status={} run_status={} current_goal={} latest_summary={} blocker={} confidence={} evidence_refs={} tool_calls={} tool_observations={} recent_events={}\n",
             session_row.session.session_id,
             session_row.session.status,
             session_row
@@ -3977,8 +3977,33 @@ fn append_voice_agent_row(output: &mut String, row: &capo_query::AgentDashboardR
                 .map(|item| item.evidence_id.to_string())
                 .collect::<Vec<_>>()
                 .join(","),
+            session_row.tool_calls.len(),
+            session_row.tool_observations.len(),
             session_row.recent_events.len()
         ));
+        for tool_call in &session_row.tool_calls {
+            output.push_str(&format!(
+                "spoken_tool_call={} tool={} origin={} status={} output_artifact={}\n",
+                tool_call.tool_call_id,
+                tool_call.tool_name,
+                tool_call.tool_origin,
+                tool_call.status,
+                tool_call.output_artifact_id.as_deref().unwrap_or("none")
+            ));
+        }
+        for observation in &session_row.tool_observations {
+            output.push_str(&format!(
+                "spoken_tool_observation={} tool={} source={} observed_status={} instrumentation={} confidence={} external_ref={} artifact={}\n",
+                observation.tool_observation_id,
+                observation.tool_name,
+                observation.source,
+                observation.observed_status,
+                observation.instrumentation_level,
+                observation.confidence,
+                observation.external_tool_ref.as_deref().unwrap_or("none"),
+                observation.artifact_id.as_deref().unwrap_or("none")
+            ));
+        }
     }
 }
 
@@ -9688,6 +9713,52 @@ mod tests {
         seed_running_agent(&state_root, "fake-codex", "Inspect the project");
         seed_running_agent(&state_root, "fake-reviewer", "Review the summary");
         let state = SqliteStateStore::open(&state_root).expect("state");
+        state
+            .append_event(
+                NewEvent {
+                    event_id: "event-voice-recent-tool-activity".to_string(),
+                    kind: EventKind::ToolObservationRecorded,
+                    actor: "test".to_string(),
+                    project_id: Some(project_id()),
+                    task_id: Some(TaskId::new("task-inspect-the-project")),
+                    agent_id: Some(AgentId::new("agent-fake-codex")),
+                    session_id: Some(SessionId::new("session-fake-codex")),
+                    run_id: Some(RunId::new("run-fake-codex")),
+                    turn_id: Some("turn-voice-recent-work".to_string()),
+                    item_id: None,
+                    payload_json: "{}".to_string(),
+                    idempotency_key: None,
+                    redaction_state: RedactionState::Safe,
+                },
+                &[
+                    ProjectionRecord::ToolCall(ToolCallProjection {
+                        tool_call_id: ToolCallId::new("tool-voice-recent-work"),
+                        session_id: SessionId::new("session-fake-codex"),
+                        turn_id: Some("turn-voice-recent-work".to_string()),
+                        tool_name: "capo.session_summary".to_string(),
+                        tool_origin: "capo".to_string(),
+                        status: "completed".to_string(),
+                        input_artifact_id: None,
+                        output_artifact_id: Some("artifact-voice-tool-output".to_string()),
+                        updated_sequence: 0,
+                    }),
+                    ProjectionRecord::ToolObservation(ToolObservationProjection {
+                        tool_observation_id: "tool-observation-voice-recent-work".to_string(),
+                        session_id: SessionId::new("session-fake-codex"),
+                        tool_call_id: Some(ToolCallId::new("tool-voice-recent-work")),
+                        source: "adapter_event:codex_exec".to_string(),
+                        external_tool_ref: Some("provider-tool-voice".to_string()),
+                        tool_name: "exec_command".to_string(),
+                        observed_status: "completed".to_string(),
+                        instrumentation_level: "observed_only".to_string(),
+                        confidence: "high".to_string(),
+                        raw_event_hash: "hash-voice-tool-observation".to_string(),
+                        artifact_id: Some("artifact-voice-observed-tool".to_string()),
+                        updated_sequence: 0,
+                    }),
+                ],
+            )
+            .expect("append tool activity");
         let before_sequence = state.last_sequence().expect("before sequence");
 
         let project_output = run_cli(vec![
@@ -9708,6 +9779,12 @@ mod tests {
         assert!(project_output.contains("spoken_active_sessions=2"));
         assert!(project_output.contains("spoken_agent=fake-codex agent_status=running"));
         assert!(project_output.contains("spoken_agent=fake-reviewer agent_status=running"));
+        assert!(project_output.contains("tool_observations=1"));
+        assert!(project_output.contains("spoken_tool_call=tool-voice-recent-work"));
+        assert!(project_output.contains(
+            "spoken_tool_observation=tool-observation-voice-recent-work tool=exec_command"
+        ));
+        assert!(project_output.contains("instrumentation=observed_only confidence=high"));
         assert!(
             project_output.contains("latest_summary=Fake adapter processed goal for fake-codex")
         );
@@ -9730,6 +9807,11 @@ mod tests {
         assert!(agent_output.contains("spoken_agent=fake-codex agent_status=running"));
         assert!(agent_output.contains("current_goal=Inspect the project"));
         assert!(agent_output.contains("latest_summary=Fake adapter processed goal for fake-codex"));
+        assert!(agent_output.contains("tool_observations=1"));
+        assert!(agent_output.contains("spoken_tool_call=tool-voice-recent-work"));
+        assert!(
+            agent_output.contains("spoken_tool_observation=tool-observation-voice-recent-work")
+        );
         assert!(!agent_output.contains("What has fake-codex done?"));
         assert_eq!(
             state.last_sequence().expect("after sequence"),
