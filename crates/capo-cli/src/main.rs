@@ -3503,6 +3503,7 @@ fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> 
         | VoiceIntentKind::NextWork
         | VoiceIntentKind::RecentWork
         | VoiceIntentKind::ReviewNeeds
+        | VoiceIntentKind::RuntimeTargetStatus
         | VoiceIntentKind::ToolActivity
         | VoiceIntentKind::AgentStatus => {
             let dashboard = voice_dashboard(parsed, &plan)?;
@@ -3885,6 +3886,7 @@ fn voice_session_id(
         }
         VoiceReadScope::ProjectDashboard
         | VoiceReadScope::ProjectLatestConnectivityExposure { .. }
+        | VoiceReadScope::ProjectRuntimeTargetStatus { .. }
         | VoiceReadScope::ProjectDispatchStatus { .. }
         | VoiceReadScope::ProjectLatestDispatchStatus { .. }
         | VoiceReadScope::ProjectDogfoodReadiness
@@ -4005,6 +4007,15 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
                 append_voice_connectivity_exposure_status(&mut output, exposure);
             } else {
                 output.push_str("spoken_latest_connectivity_exposure_missing=true\n");
+            }
+        }
+        VoiceReadScope::ProjectRuntimeTargetStatus { runtime_target_id } => {
+            if let Some(target) = dashboard.runtime_target_status(runtime_target_id) {
+                append_voice_runtime_target_status(&mut output, target);
+            } else {
+                output.push_str(&format!(
+                    "spoken_runtime_target_missing={runtime_target_id}\n"
+                ));
             }
         }
         VoiceReadScope::ProjectDogfoodReadiness => {
@@ -4193,6 +4204,22 @@ fn append_voice_connectivity_exposure_status(
     ));
 }
 
+fn append_voice_runtime_target_status(output: &mut String, target: &RuntimeTargetProjection) {
+    output.push_str(&format!(
+        "spoken_runtime_target={} spoken_runtime_target_name={} spoken_runner={} spoken_workspace={} spoken_artifacts={} spoken_default_cwd={} spoken_capability_profile={} spoken_endpoint={} spoken_runtime_status={} spoken_updated_sequence={}\n",
+        target.runtime_target_id,
+        target.name,
+        target.runner_kind,
+        target.workspace_root,
+        target.artifact_root,
+        target.default_cwd,
+        target.capability_profile_id,
+        target.connectivity_endpoint_id.as_deref().unwrap_or("none"),
+        target.status,
+        target.updated_sequence
+    ));
+}
+
 fn append_voice_agent_row(output: &mut String, row: &capo_query::AgentDashboardRow) {
     output.push_str(&format!(
         "spoken_agent={} agent_status={}\n",
@@ -4318,6 +4345,7 @@ fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
         VoiceIntentKind::RecentWork => "recent_work",
         VoiceIntentKind::ReviewNeeds => "review_needs",
         VoiceIntentKind::RedirectSession => "redirect_session",
+        VoiceIntentKind::RuntimeTargetStatus => "runtime_target_status",
         VoiceIntentKind::StartNextWork => "start_next_work",
         VoiceIntentKind::InterruptSession => "interrupt_session",
         VoiceIntentKind::StopSession => "stop_session",
@@ -4332,6 +4360,7 @@ fn voice_scope_label(scope: &VoiceReadScope) -> &'static str {
         VoiceReadScope::ProjectLatestConnectivityExposure { .. } => {
             "project_latest_connectivity_exposure"
         }
+        VoiceReadScope::ProjectRuntimeTargetStatus { .. } => "project_runtime_target_status",
         VoiceReadScope::ProjectDispatchStatus { .. } => "project_dispatch_status",
         VoiceReadScope::ProjectLatestDispatchStatus { .. } => "project_latest_dispatch_status",
         VoiceReadScope::ProjectDogfoodReadiness => "project_dogfood_readiness",
@@ -10086,6 +10115,39 @@ mod tests {
         assert!(status.contains("tunnel_opened=false"));
         assert!(status.contains("runtime_process_started=false"));
         assert!(status.contains("state_mutated=false"));
+
+        let voice_status = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What is the runtime target status for runtime target local 1?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice runtime target status");
+        assert!(voice_status.contains("voice_plan=runtime_target_status"));
+        assert!(voice_status.contains("read_scope=project_runtime_target_status"));
+        assert!(voice_status.contains("spoken_runtime_target=runtime-target-local-1"));
+        assert!(voice_status.contains("spoken_runner=local-process"));
+        assert!(voice_status.contains("spoken_capability_profile=read-only-local"));
+        assert!(voice_status.contains("spoken_endpoint=endpoint-loopback-1"));
+        assert!(voice_status.contains("spoken_runtime_status=available"));
+        assert!(voice_status.contains("mutation_applied=false"));
+        assert!(voice_status.contains("raw_transcript_retained=false"));
+
+        let missing_voice_status = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What is the runtime target status for missing runtime target?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice missing runtime target status");
+        assert!(missing_voice_status.contains("voice_plan=runtime_target_status"));
+        assert!(
+            missing_voice_status.contains("spoken_runtime_target_missing=missing-runtime-target")
+        );
 
         let missing_status = run_cli(vec![
             "runtime".to_string(),

@@ -391,3 +391,33 @@ Decision:
 - Treat exact runtime target status as shared query/read-model behavior so CLI, dashboard, voice, web, and mobile surfaces can reuse the same selector.
 - Keep the operator command read-only. It renders placement/status metadata and explicitly reports that provider CLIs, tunnels, runtime processes, and state mutation were not used.
 - Keep missing-target behavior fail-closed with a clear operator error instead of returning an empty status row.
+
+### RR17 - Voice Runtime Target Status Query
+
+Status: completed
+
+Acceptance:
+
+- Add a voice/input intent for asking Capo about one runtime target's status.
+- Lower the utterance into a read-only command envelope and shared runtime target status read scope.
+- Render the target's latest placement/status metadata through the same dashboard query surface used by CLI status.
+- Return a clear spoken missing-target row when the target is unknown.
+- Do not launch runtimes, launch providers, inspect credentials, open tunnels, request approvals, activate grants, retain raw transcripts, or mutate state.
+
+Evidence:
+
+- Voice runtime-target status intent, read scope, parser, and regression coverage in `../../crates/capo-voice/src/lib.rs`.
+- CLI voice runtime-target status rendering and regression coverage in `../../crates/capo-cli/src/main.rs`.
+- Shared exact target selector in `../../crates/capo-query/src/lib.rs`.
+- `cargo test -p capo-voice runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Decision:
+
+- Treat voice runtime target status as a read-only input surface over the same shared target selector used by CLI status.
+- Keep runtime target status distinct from latest connectivity exposure: a user can ask whether a machine is available without asking whether a tunnel/exposure is active.
+- Return a spoken missing-target row for unknown targets instead of mutating state or requesting permission.

@@ -35,6 +35,7 @@ pub enum VoiceIntentKind {
     RecentWork,
     ReviewNeeds,
     RedirectSession,
+    RuntimeTargetStatus,
     StartNextWork,
     InterruptSession,
     StopSession,
@@ -75,6 +76,9 @@ pub enum VoiceReadScope {
         owner_kind: Option<String>,
         owner_id: Option<String>,
         channel_kind: Option<String>,
+    },
+    ProjectRuntimeTargetStatus {
+        runtime_target_id: String,
     },
     ProjectDispatchStatus {
         dispatch_plan_id: String,
@@ -320,6 +324,45 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
             assistant_reply_hint:
                 "Answer latest connectivity exposure status from shared dashboard read models."
                     .to_string(),
+        };
+    }
+
+    if let Some(runtime_target_id) = runtime_target_status_id(&normalized) {
+        let mut command = voice_command(
+            "voice-runtime-target-status",
+            &input,
+            CommandTarget::Project(input.project_id.clone()),
+            CommandIntent::QueryStatus,
+            None,
+        );
+        command
+            .structured_args
+            .push(("view".to_string(), "runtime_target_status".to_string()));
+        command
+            .structured_args
+            .push(("runtime_target".to_string(), runtime_target_id.clone()));
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::RuntimeTargetStatus,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::ProjectRuntimeTargetStatus { runtime_target_id },
+                required_fields: vec![
+                    "runtime_target_id",
+                    "name",
+                    "runner",
+                    "workspace",
+                    "artifacts",
+                    "default_cwd",
+                    "capability_profile",
+                    "endpoint",
+                    "status",
+                    "updated_sequence",
+                ],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: false,
+            assistant_reply_hint: "Answer runtime target status from shared dashboard read models."
+                .to_string(),
         };
     }
 
@@ -928,6 +971,18 @@ fn latest_connectivity_exposure_filter(
     None
 }
 
+fn runtime_target_status_id(normalized: &str) -> Option<String> {
+    normalized
+        .strip_prefix("what is the runtime target status for ")
+        .or_else(|| normalized.strip_prefix("what's the runtime target status for "))
+        .or_else(|| normalized.strip_prefix("show runtime target status for "))
+        .or_else(|| normalized.strip_prefix("runtime target status for "))
+        .or_else(|| normalized.strip_prefix("what is the status of runtime target "))
+        .or_else(|| normalized.strip_prefix("what's the status of runtime target "))
+        .map(agent_slug)
+        .filter(|runtime_target_id| !runtime_target_id.is_empty())
+}
+
 fn is_project_recent_work_question(input: &str) -> bool {
     matches!(
         input,
@@ -1293,6 +1348,47 @@ mod tests {
                 owner_id: None,
                 channel_kind: Some("dashboard".to_string()),
             }
+        );
+    }
+
+    #[test]
+    fn runtime_target_status_question_reads_target_without_mutation() {
+        let plan = plan_dummy_transcript(input(
+            "What is the runtime target status for remote target 1?",
+        ));
+
+        assert_eq!(plan.intent_kind, VoiceIntentKind::RuntimeTargetStatus);
+        assert_eq!(
+            plan.read_contract.query_scope,
+            VoiceReadScope::ProjectRuntimeTargetStatus {
+                runtime_target_id: "remote-target-1".to_string(),
+            }
+        );
+        assert!(plan.read_contract.required_fields.contains(&"status"));
+        assert!(
+            plan.read_contract
+                .required_fields
+                .contains(&"capability_profile")
+        );
+        assert!(!plan.requires_visible_confirmation);
+        assert!(!plan.transcript_policy.retain_raw_transcript);
+        let command = plan.command.expect("voice command");
+        assert_eq!(command.intent, CommandIntent::QueryStatus);
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "view")
+                .map(|(_, value)| value.as_str()),
+            Some("runtime_target_status")
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "runtime_target")
+                .map(|(_, value)| value.as_str()),
+            Some("remote-target-1")
         );
     }
 

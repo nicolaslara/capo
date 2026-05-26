@@ -977,3 +977,14 @@ Observed 2026-05-26.
 - Runtime/connectivity architecture source: `../architecture/runtime-tunnel.md`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR16.
+
+## F7/RR17 Voice Runtime Target Status Query
+
+Observed 2026-05-26.
+
+- Voice runtime-target status intent, read scope, parser, and regression coverage: `../../crates/capo-voice/src/lib.rs`
+- CLI voice runtime-target status rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared runtime target status selector consumed by voice rendering: `../../crates/capo-query/src/lib.rs`
+- Runtime/connectivity architecture source: `../architecture/runtime-tunnel.md`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR17.

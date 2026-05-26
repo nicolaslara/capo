@@ -423,6 +423,7 @@ Progress:
 - RR14 runtime target availability guard is completed: recorded runtime-target exposures fail closed unless the target is available.
 - RR15 runtime target status update surface is completed with a provider-free `runtime target set-status` command.
 - RR16 runtime target status query surface is completed with shared exact target selection and a read-only operator command.
+- RR17 voice runtime target status query is completed with a read-only input intent over the shared target selector.
 - F7 remains `in_progress` until the real local-agent connector dependency is satisfied; remote execution semantics are still contract-level and loopback/stubbed.
 
 Evidence:
@@ -452,6 +453,8 @@ Evidence:
 - `cargo test -p capo-cli connectivity_expose_stub -- --nocapture` verifies status update enables later exposure
 - `cargo test -p capo-query runtime_target -- --nocapture`
 - `cargo test -p capo-cli runtime_target -- --nocapture` verifies exact runtime target status query
+- `cargo test -p capo-voice runtime_target -- --nocapture`
+- `cargo test -p capo-cli runtime_target -- --nocapture` verifies voice runtime target status query
 - `cargo test`
 - `cargo fmt --check`
 - `git diff --check`

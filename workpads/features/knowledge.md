@@ -2067,3 +2067,24 @@ Verification:
 - `git diff --check`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - `cargo test`: passed.
+
+## F7/RR17 - Voice Runtime Target Status Query
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add a dedicated voice/input intent for runtime target status instead of overloading connectivity exposure status.
+- Lower runtime target status questions into read-only command envelopes with `ProjectRuntimeTargetStatus` read scope.
+- Render target placement/status metadata from the shared dashboard query selector: runner, workspace, artifact root, default cwd, capability profile, endpoint, status, and sequence.
+- Return a spoken missing-target row for unknown target IDs.
+- Preserve the boundary split: the voice query does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, prompt materialization, raw transcript retention, or state mutation.
+
+Verification:
+
+- `cargo test -p capo-voice runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
