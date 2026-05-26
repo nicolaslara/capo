@@ -126,6 +126,16 @@ Observed 2026-05-26.
 - Voice source workpad: `voice.md`
 - No new third-party dependencies were added for V4.
 
+## F6/V5 Recent Work Conversation
+
+Observed 2026-05-26.
+
+- Voice recent-work planning and unit coverage: `../../crates/capo-voice/src/lib.rs`
+- CLI voice read-contract rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared dashboard query consumed by voice: `../../crates/capo-query/src/lib.rs`
+- Voice source workpad: `voice.md`
+- No new third-party dependencies were added for V5.
+
 ## F1/AC1-AC2 Local Connector Preflight
 
 Observed 2026-05-25.

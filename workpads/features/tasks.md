@@ -302,6 +302,7 @@ Progress:
 - V2 voice permission confirmation is completed.
 - V3 retention and redaction smoke is completed.
 - V4 dogfood readiness conversation is completed with a read-only voice intent over the shared dashboard readiness query.
+- V5 recent work conversation is completed with read-only project and agent recent-work questions over the shared dashboard query.
 
 Evidence:
 
@@ -311,6 +312,8 @@ Evidence:
 - `cargo test -p capo-cli voice -- --nocapture`
 - `cargo test -p capo-voice dogfood_readiness -- --nocapture`
 - `cargo test -p capo-cli voice_dogfood_readiness -- --nocapture`
+- `cargo test -p capo-voice recent_work -- --nocapture`
+- `cargo test -p capo-cli voice_recent_work -- --nocapture`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`

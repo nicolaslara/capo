@@ -256,6 +256,27 @@ Follow-up:
 
 - Extend this pattern to richer conversational status questions only after dogfood traces show which readiness or agent-state summaries operators actually ask for.
 
+## F6/V5 - Recent Work Conversation
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add a read-only voice intent for simple recent-work questions at project scope, including "What have my agents done?"
+- Add agent-level recent-work questions such as "What has fake-codex done?" using the existing agent read-model scope.
+- Route both paths through the shared project dashboard query so voice, dashboard, CLI, and future mobile/web surfaces use the same read contract.
+- Render latest summaries, evidence refs, recent-event counts, active sessions, and project evidence counts from persisted projections only.
+- Preserve the existing voice safety boundary: no raw transcript retention, no mutation, no provider execution, no credential inspection, and no workpad edits.
+
+Verification:
+
+- `cargo test -p capo-voice recent_work -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_recent_work -- --nocapture`: passed.
+
+Follow-up:
+
+- Dogfood actual voice conversations before adding broader natural-language parsing; the current grammar deliberately stays narrow and auditable.
+
 ## F1/AC1-AC2 - Local Connector Preflight
 
 Status: in progress on 2026-05-25.

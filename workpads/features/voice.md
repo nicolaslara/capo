@@ -93,3 +93,25 @@ Evidence:
 Decision:
 
 - Keep dogfood-readiness voice handling as a read-only query over `ProjectDashboard::dogfood_readiness()`. Voice does not run providers, inspect credentials, edit workpads, or create readiness artifacts.
+
+### V5 - Recent Work Conversation
+
+Status: completed
+
+Acceptance:
+
+- Recognize simple project-level recent-work questions such as "What have my agents done?"
+- Recognize simple agent-level recent-work questions such as "What has fake-codex done?"
+- Answer from the shared dashboard/query contract rather than adding voice-specific state reads.
+- Render agents, active sessions, latest summaries, evidence refs, recent-event counts, and project evidence counts without retaining raw transcripts or mutating state.
+
+Evidence:
+
+- `VoiceIntentKind::RecentWork` and `VoiceReadScope::ProjectRecentWork` in `../../crates/capo-voice/src/lib.rs`.
+- CLI voice recent-work rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-voice recent_work -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_recent_work -- --nocapture`: passed.
+
+Decision:
+
+- Keep recent-work voice handling read-only over `ProjectDashboard`. Voice summarizes shared read-model facts and does not infer hidden agent activity, run providers, inspect credentials, edit workpads, or retain the raw transcript.

@@ -29,6 +29,7 @@ pub enum VoiceIntentKind {
     AgentStatus,
     DashboardSummary,
     DogfoodReadiness,
+    RecentWork,
     RedirectSession,
     InterruptSession,
     StopSession,
@@ -65,6 +66,7 @@ pub struct VoiceReadContract {
 pub enum VoiceReadScope {
     ProjectDashboard,
     ProjectDogfoodReadiness,
+    ProjectRecentWork,
     Agent { agent_name: String },
     SessionForAgent { agent_name: String },
     None,
@@ -146,6 +148,76 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
             requires_visible_confirmation: false,
             assistant_reply_hint:
                 "Answer dogfood readiness from the shared project dashboard query.".to_string(),
+        };
+    }
+
+    if is_project_recent_work_question(&normalized) {
+        let mut command = voice_command(
+            "voice-recent-work",
+            &input,
+            CommandTarget::Project(input.project_id.clone()),
+            CommandIntent::QueryStatus,
+            None,
+        );
+        command
+            .structured_args
+            .push(("view".to_string(), "recent_work".to_string()));
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::RecentWork,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::ProjectRecentWork,
+                required_fields: vec![
+                    "agents",
+                    "sessions",
+                    "latest_summary",
+                    "evidence_refs",
+                    "recent_events",
+                    "project_evidence",
+                ],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: false,
+            assistant_reply_hint:
+                "Summarize what agents have done from shared read models and evidence refs."
+                    .to_string(),
+        };
+    }
+
+    if let Some(agent_name) = recent_work_agent(&normalized) {
+        let mut command = voice_command(
+            "voice-agent-recent-work",
+            &input,
+            CommandTarget::Agent(AgentId::new(format!("agent-{agent_name}"))),
+            CommandIntent::QueryStatus,
+            None,
+        );
+        command
+            .structured_args
+            .push(("agent".to_string(), agent_name.clone()));
+        command
+            .structured_args
+            .push(("view".to_string(), "recent_work".to_string()));
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::RecentWork,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::Agent { agent_name },
+                required_fields: vec![
+                    "agent_status",
+                    "session_status",
+                    "run_status",
+                    "current_goal",
+                    "latest_summary",
+                    "evidence_refs",
+                    "recent_events",
+                ],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: false,
+            assistant_reply_hint:
+                "Summarize the agent's recent work from session read models and evidence refs."
+                    .to_string(),
         };
     }
 
@@ -342,6 +414,18 @@ fn status_agent(normalized: &str) -> Option<String> {
         .map(agent_slug)
 }
 
+fn recent_work_agent(normalized: &str) -> Option<String> {
+    normalized
+        .strip_prefix("what has ")
+        .and_then(|rest| rest.strip_suffix(" done"))
+        .or_else(|| {
+            normalized
+                .strip_prefix("what did ")
+                .and_then(|rest| rest.strip_suffix(" do"))
+        })
+        .map(agent_slug)
+}
+
 fn redirect_agent(normalized: &str) -> Option<(String, String)> {
     let rest = normalized.strip_prefix("steer ")?;
     let (agent, goal) = rest.split_once(" to ")?;
@@ -375,6 +459,18 @@ fn is_dogfood_readiness_question(input: &str) -> bool {
             | "can capo dogfood itself"
             | "is capo ready to dogfood"
             | "what is dogfood readiness"
+    )
+}
+
+fn is_project_recent_work_question(input: &str) -> bool {
+    matches!(
+        input,
+        "what have my agents done"
+            | "what have the agents done"
+            | "what did my agents do"
+            | "what did the agents do"
+            | "what has the team done"
+            | "summarize agent work"
     )
 }
 
@@ -540,6 +636,77 @@ mod tests {
                 .find(|(key, _)| key == "view")
                 .map(|(_, value)| value.as_str()),
             Some("dogfood_readiness")
+        );
+    }
+
+    #[test]
+    fn project_recent_work_question_reads_project_work_without_mutation() {
+        let plan = plan_dummy_transcript(input("What have my agents done?"));
+
+        assert_eq!(plan.intent_kind, VoiceIntentKind::RecentWork);
+        assert_eq!(
+            plan.read_contract.query_scope,
+            VoiceReadScope::ProjectRecentWork
+        );
+        assert!(
+            plan.read_contract
+                .required_fields
+                .contains(&"latest_summary")
+        );
+        assert!(
+            plan.read_contract
+                .required_fields
+                .contains(&"project_evidence")
+        );
+        assert!(!plan.requires_visible_confirmation);
+        assert!(!plan.transcript_policy.retain_raw_transcript);
+        let command = plan.command.expect("voice command");
+        assert_eq!(command.intent, CommandIntent::QueryStatus);
+        assert_eq!(
+            command.target,
+            CommandTarget::Project(ProjectId::new("project-capo"))
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "view")
+                .map(|(_, value)| value.as_str()),
+            Some("recent_work")
+        );
+    }
+
+    #[test]
+    fn agent_recent_work_question_reads_agent_work_without_mutation() {
+        let plan = plan_dummy_transcript(input("What has fake-codex done?"));
+
+        assert_eq!(plan.intent_kind, VoiceIntentKind::RecentWork);
+        assert_eq!(
+            plan.read_contract.query_scope,
+            VoiceReadScope::Agent {
+                agent_name: "fake-codex".to_string()
+            }
+        );
+        assert!(
+            plan.read_contract
+                .required_fields
+                .contains(&"latest_summary")
+        );
+        assert!(!plan.requires_visible_confirmation);
+        assert!(!plan.transcript_policy.retain_raw_transcript);
+        let command = plan.command.expect("voice command");
+        assert_eq!(command.intent, CommandIntent::QueryStatus);
+        assert_eq!(
+            command.target,
+            CommandTarget::Agent(AgentId::new("agent-fake-codex"))
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "view")
+                .map(|(_, value)| value.as_str()),
+            Some("recent_work")
         );
     }
 

@@ -3191,6 +3191,7 @@ fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> 
     match plan.intent_kind {
         VoiceIntentKind::DashboardSummary
         | VoiceIntentKind::DogfoodReadiness
+        | VoiceIntentKind::RecentWork
         | VoiceIntentKind::AgentStatus => {
             let dashboard = voice_dashboard(parsed, &plan)?;
             output.push_str(&render_voice_read_contract(&plan, &dashboard));
@@ -3552,6 +3553,7 @@ fn voice_session_id(
         }
         VoiceReadScope::ProjectDashboard
         | VoiceReadScope::ProjectDogfoodReadiness
+        | VoiceReadScope::ProjectRecentWork
         | VoiceReadScope::None => Ok(None),
     }
 }
@@ -3644,6 +3646,17 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
                 comma_or_none(&readiness.next_actions)
             ));
         }
+        VoiceReadScope::ProjectRecentWork => {
+            output.push_str(&format!(
+                "spoken_agents={}\nspoken_active_sessions={}\nspoken_project_evidence={}\n",
+                dashboard.agents.len(),
+                dashboard.active_session_count(),
+                dashboard.project_evidence.len()
+            ));
+            for row in &dashboard.agents {
+                append_voice_agent_row(&mut output, row);
+            }
+        }
         VoiceReadScope::Agent { agent_name } | VoiceReadScope::SessionForAgent { agent_name } => {
             if let Some(row) = dashboard
                 .agents
@@ -3703,6 +3716,7 @@ fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
         VoiceIntentKind::AgentStatus => "agent_status",
         VoiceIntentKind::DashboardSummary => "dashboard_summary",
         VoiceIntentKind::DogfoodReadiness => "dogfood_readiness",
+        VoiceIntentKind::RecentWork => "recent_work",
         VoiceIntentKind::RedirectSession => "redirect_session",
         VoiceIntentKind::InterruptSession => "interrupt_session",
         VoiceIntentKind::StopSession => "stop_session",
@@ -3714,6 +3728,7 @@ fn voice_scope_label(scope: &VoiceReadScope) -> &'static str {
     match scope {
         VoiceReadScope::ProjectDashboard => "project_dashboard",
         VoiceReadScope::ProjectDogfoodReadiness => "project_dogfood_readiness",
+        VoiceReadScope::ProjectRecentWork => "project_recent_work",
         VoiceReadScope::Agent { .. } => "agent",
         VoiceReadScope::SessionForAgent { .. } => "session_for_agent",
         VoiceReadScope::None => "none",
@@ -8730,6 +8745,61 @@ mod tests {
         assert!(output.contains("spoken_agent=fake-codex agent_status=running"));
         assert!(output.contains("current_goal=Inspect the project"));
         assert!(!output.contains("What is fake-codex doing?"));
+        assert_eq!(
+            state.last_sequence().expect("after sequence"),
+            before_sequence
+        );
+    }
+
+    #[test]
+    fn voice_recent_work_reads_project_and_agent_work_without_mutating() {
+        let state_root = temp_root("cli-voice-recent-work");
+        seed_running_agent(&state_root, "fake-codex", "Inspect the project");
+        seed_running_agent(&state_root, "fake-reviewer", "Review the summary");
+        let state = SqliteStateStore::open(&state_root).expect("state");
+        let before_sequence = state.last_sequence().expect("before sequence");
+
+        let project_output = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What have my agents done?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice project recent work");
+
+        assert!(project_output.contains("voice_plan=recent_work"));
+        assert!(project_output.contains("mutation_applied=false"));
+        assert!(project_output.contains("raw_transcript_retained=false"));
+        assert!(project_output.contains("read_scope=project_recent_work"));
+        assert!(project_output.contains("spoken_agents=2"));
+        assert!(project_output.contains("spoken_active_sessions=2"));
+        assert!(project_output.contains("spoken_agent=fake-codex agent_status=running"));
+        assert!(project_output.contains("spoken_agent=fake-reviewer agent_status=running"));
+        assert!(
+            project_output.contains("latest_summary=Fake adapter processed goal for fake-codex")
+        );
+        assert!(!project_output.contains("What have my agents done?"));
+
+        let agent_output = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "What has fake-codex done?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice agent recent work");
+
+        assert!(agent_output.contains("voice_plan=recent_work"));
+        assert!(agent_output.contains("mutation_applied=false"));
+        assert!(agent_output.contains("raw_transcript_retained=false"));
+        assert!(agent_output.contains("read_scope=agent"));
+        assert!(agent_output.contains("spoken_agent=fake-codex agent_status=running"));
+        assert!(agent_output.contains("current_goal=Inspect the project"));
+        assert!(agent_output.contains("latest_summary=Fake adapter processed goal for fake-codex"));
+        assert!(!agent_output.contains("What has fake-codex done?"));
         assert_eq!(
             state.last_sequence().expect("after sequence"),
             before_sequence
