@@ -2789,6 +2789,30 @@ Verification:
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - Focused read-only review subagent: no issues found; provider execution stays false, raw content policy stays `content_hashed_not_rendered`, and replay outputs counts/hashes rather than raw provider text.
 
+## F9/CLI11 - Adapter Readiness And Launch Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move adapter readiness and launch planning command handling into `adapter_launch.rs`.
+- Keep readiness projection, dispatch-plan projection, prompt-source projection, local adapter validation, and launch/readiness rendering with the command surface because they define the pre-execution connector proof contract.
+- Export only the adapter readiness/launch entrypoints, dispatch-plan composition types, validation helper, and dispatch-plan renderer needed by current CLI routing and `workpad plan-next`.
+- Keep replay, dogfood readiness, dashboard aggregation, and voice summaries out of this module.
+
+Verification:
+
+- `cargo check -p capo-cli`: passed.
+- `cargo test -p capo-cli adapter_plan_launch -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_readiness -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-adapters -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- Focused read-only review subagent: no issues found; residual gap is that this slice preserves existing provider-free planning behavior and still does not run real subscription-backed provider CLIs.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.

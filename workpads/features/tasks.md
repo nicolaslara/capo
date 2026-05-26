@@ -635,6 +635,7 @@ Progress:
 - CLI8 adapter dispatch preparation/local-run split is completed. Execution-request, prompt materialization, preflight checks, opt-in mapping, and prompt source validation now live in `crates/capo-cli/src/adapter_dispatch_prepare.rs`; local runtime execution, subscription-safe launch-plan construction, dispatch artifact scanning/deletion, and execution recording now live in `crates/capo-cli/src/adapter_dispatch_run.rs`; replay, dashboard, and voice summaries remain in `main.rs`.
 - CLI9 tool wrapper command module split is completed. Wrapper command parsing, wrapper input shaping, CLI policy selection, wrapper invocation, artifact rendering, and persisted wrapper result projections now live in `crates/capo-cli/src/tool_wrapper.rs`; routing and dashboard rendering remain in `main.rs`.
 - CLI10 adapter fixture replay module split is completed. Adapter fixture parsing, label normalization, generic fixture replay, dispatch fixture replay, replay event recording, and replay evidence chaining now live in `crates/capo-cli/src/adapter_replay.rs`; adapter smoke reports reuse the shared adapter label helper.
+- CLI11 adapter readiness/launch module split is completed. Adapter readiness status, launch-plan preview, dispatch-plan recording, prompt-source projection, local adapter validation, and launch/readiness rendering now live in `crates/capo-cli/src/adapter_launch.rs`; routing, replay, dashboard aggregation, and voice summaries remain in `main.rs`.
 
 Evidence:
 
@@ -643,6 +644,7 @@ Evidence:
 - `crates/capo-cli/src/adapter_dispatch_prepare.rs`
 - `crates/capo-cli/src/adapter_dispatch_run.rs`
 - `crates/capo-cli/src/adapter_dogfood.rs`
+- `crates/capo-cli/src/adapter_launch.rs`
 - `crates/capo-cli/src/adapter_replay.rs`
 - `crates/capo-cli/src/adapter_smoke.rs`
 - `crates/capo-cli/src/cli_surface.rs`

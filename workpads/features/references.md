@@ -1395,3 +1395,12 @@ Observed 2026-05-26.
 - CLI routing, readiness, launch planning, dashboard, and voice summaries retained in: `../../crates/capo-cli/src/main.rs`
 - Resulting file sizes: `../../crates/capo-cli/src/main.rs` 4,540 lines; `../../crates/capo-cli/src/adapter_replay.rs` 252 lines.
 - No new third-party dependencies were added for CLI10.
+
+## F9/CLI11 Adapter Readiness And Launch Module Split
+
+Observed 2026-05-26.
+
+- Adapter readiness and launch module: `../../crates/capo-cli/src/adapter_launch.rs`
+- CLI routing, replay, dogfood readiness, dashboard aggregation, and voice summaries retained in: `../../crates/capo-cli/src/main.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 4,094 lines; `../../crates/capo-cli/src/adapter_launch.rs` 457 lines.
+- No new third-party dependencies were added for CLI11.
