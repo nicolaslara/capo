@@ -10,6 +10,12 @@ Build a maintainable controller for orchestrating coding agents with explicit bo
 
 Whenever a task is too complex, spawn the strongest available analysis agents to compare options and produce reviewable findings. Use faster agents for well-defined file creation or mechanical expansion only after the target structure is clear.
 
+## LLM-Friendly File Boundaries
+
+Prefer files that have one conceptual responsibility and can be understood in one pass. When a split does not disrupt the active task, aim for source modules around 300-500 LOC. Treat 800-1,000+ LOC as a refactor-soon warning zone, and keep 1,500+ LOC for generated, highly mechanical, fixture, or temporary test files.
+
+Split by responsibility and edit surface, not arbitrary chunks. Active workpads should stay cockpit-like; move accumulated background, canonical decisions, invariants, and open questions into linked docs when markdown gets too large to navigate quickly.
+
 ## Workarounds
 
 Prefer the right fix over a shortcut. Workarounds are only acceptable when necessary to unblock progress, time-box a spike, or isolate unknowns.

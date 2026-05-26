@@ -2531,6 +2531,40 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F9/CLI3 - Runtime Target Command Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move runtime target command handling into `runtime_target.rs`: registration, list/status/readiness, status changes, shared render helpers, and runtime target parsers.
+- Move runtime target readiness/evidence exports into `runtime_target_evidence.rs`: evidence selection, markdown rendering, artifact/evidence records, and guarded evidence writers. This keeps both runtime target modules in the preferred 300-500 LOC range instead of leaving a near-warning-zone command file.
+- Keep connectivity ownership validation in `main.rs` because it belongs to the connectivity exposure command path, even though it reads runtime target state.
+- Re-export only the runtime target render helpers needed by dashboard and voice rendering. Command functions remain `pub(crate)` for `run_cli` routing.
+- Keep shared CLI primitives in `main.rs`/`cli_surface.rs` for now (`state`, `envelope`, `project_id`, `stable_cli_hash`, `escape_json`, and argument parsing) so this slice does not force a broad CLI framework abstraction.
+
+Verification:
+
+- `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_recent_work -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+## Cross-Cutting - LLM-Friendly File Boundaries
+
+Status: adopted on 2026-05-26.
+
+Decisions:
+
+- Treat source files around 300-500 LOC as the ideal target when splitting does not disrupt the current task.
+- Treat 800-1,000+ LOC as a refactor-soon warning zone, and 1,500+ LOC as unacceptable unless the file is generated, highly mechanical, or a temporary test fixture.
+- Split by responsibility and edit surface, not arbitrary chunks. A file should have one conceptual purpose and be understandable in one pass by a human or coding agent.
+- Keep active workpads short and cockpit-like. Move accumulated background, canonical decisions, invariants, and open questions into layered linked docs when markdown grows past comfortable working size.
+- Test files may be larger than source modules, but split them by scenario or command family when they stop being locally navigable.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.

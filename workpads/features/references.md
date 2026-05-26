@@ -1271,3 +1271,21 @@ Observed 2026-05-26.
 - CLI command routing and command implementation retained in: `../../crates/capo-cli/src/main.rs`
 - Resulting file sizes: `../../crates/capo-cli/src/main.rs` 8,690 lines; `../../crates/capo-cli/src/cli_surface.rs` 122 lines; `../../crates/capo-cli/src/tests.rs` 5,405 lines.
 - No new third-party dependencies were added for CLI2.
+
+## F9/CLI3 Runtime Target Command Module Split
+
+Observed 2026-05-26.
+
+- Runtime target command module: `../../crates/capo-cli/src/runtime_target.rs`
+- Runtime target evidence module: `../../crates/capo-cli/src/runtime_target_evidence.rs`
+- CLI routing, dashboard, voice, connectivity, and shared helpers retained in: `../../crates/capo-cli/src/main.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 7,905 lines; `../../crates/capo-cli/src/runtime_target.rs` 414 lines; `../../crates/capo-cli/src/runtime_target_evidence.rs` 423 lines; `../../crates/capo-cli/src/cli_surface.rs` 122 lines; `../../crates/capo-cli/src/tests.rs` 5,405 lines.
+- No new third-party dependencies were added for CLI3.
+
+## Cross-Cutting LLM-Friendly File Boundary Heuristic
+
+Observed 2026-05-26.
+
+- Workflow guidance: `../../WORKING.md`
+- Working target: source modules should usually stay around 300-500 LOC when practical; 800-1,000+ LOC is a refactor-soon warning zone; 1,500+ LOC is reserved for generated, mechanical, fixture, or temporary test files.
+- Split rule: split by responsibility and edit surface, not arbitrary file length.
