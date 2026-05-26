@@ -298,3 +298,26 @@ Decision:
 - Observation IDs are stable by adapter kind plus external tool/timeline reference, so repeated started/completed updates project one current observed-only row instead of duplicate UI entries.
 - When provider result updates omit the tool name, replay preserves the earlier observed tool name from the existing `ToolCall` row.
 - Replay remains provider-free and execution-free. It consumes normalized fixture events only.
+
+### PT11 - Session Status Tool Introspection
+
+Status: completed
+
+Acceptance:
+
+- Show governed `ToolCall` rows and observed-only `ToolObservation` rows in `capo session status --agent NAME`.
+- Preserve the distinction between Capo-executed/governed tool calls and adapter/provider-native observed-only tool facts.
+- Render enough fields for operator review: tool name, origin/source, status, instrumentation level, confidence, external ref, artifact refs, and raw event hash for observations.
+- Keep status read-only over persisted projections: no provider CLI launch, runtime launch, tunnel opening, prompt materialization, credential/session inspection, or state mutation.
+- Cover CLI session-status rendering with regression tests.
+
+Evidence:
+
+- `capo session status` projection rendering in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence -- --nocapture`: passed.
+
+Decision:
+
+- Extend session status with projection-backed tool-call and observed-only tool-observation rows so per-agent introspection no longer requires switching to dashboard or evidence export.
+- Keep the output shape aligned with dashboard: governed tool calls are rendered as `tool_call=...`, while adapter/provider-native facts are rendered as `tool_observation=...` with `instrumentation=observed_only`.
+- Keep status read-only. It reads persisted state only and does not launch providers, runtimes, tunnels, prompt materialization, or credential/session inspection.

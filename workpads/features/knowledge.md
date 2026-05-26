@@ -1776,3 +1776,22 @@ Verification:
 Follow-up:
 
 - When real adapter streams are enabled, reuse the same observation projection helper for live stream ingestion rather than adding a separate native-tool observation path.
+
+## F4/PT11 - Session Status Tool Introspection
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add governed tool-call and observed-only tool-observation rows to `capo session status --agent NAME`.
+- Keep per-agent status aligned with dashboard/evidence terminology: `tool_call` rows are Capo-governed timeline/tool records, while `tool_observation` rows are adapter/provider-native facts with partial visibility.
+- Render source, observed status, instrumentation level, confidence, external ref, artifact ref, and raw event hash for observations so operators can review native tool activity from the compact status surface.
+- Keep status read-only over persisted projections. It does not launch provider CLIs, start runtimes, open tunnels, materialize prompts, inspect credentials/sessions, or mutate state.
+
+Verification:
+
+- `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence -- --nocapture`: passed.
+
+Follow-up:
+
+- Consider moving per-session status assembly into `capo-query` once another consumer besides CLI needs the exact compact status contract.

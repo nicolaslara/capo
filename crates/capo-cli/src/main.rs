@@ -3147,10 +3147,23 @@ fn session_status(parsed: &ParsedArgs, args: &[String]) -> Result<String, String
     let observation = controller(parsed)?
         .observe_agent_name(&agent)
         .map_err(debug_error)?;
-    let evidence = state(parsed)?
+    let state = state(parsed)?;
+    let evidence = state
         .evidence_for_session(&observation.session.session_id)
         .map_err(debug_error)?;
-    Ok(render_status(&command, &observation, &evidence))
+    let tool_calls = state
+        .tool_calls_for_session(&observation.session.session_id)
+        .map_err(debug_error)?;
+    let tool_observations = state
+        .tool_observations_for_session(&observation.session.session_id)
+        .map_err(debug_error)?;
+    Ok(render_status(
+        &command,
+        &observation,
+        &evidence,
+        &tool_calls,
+        &tool_observations,
+    ))
 }
 
 fn redirect_session(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
@@ -6096,9 +6109,11 @@ fn render_status(
     command: &CommandEnvelope,
     observation: &capo_controller::FakeReadModelObservation,
     evidence: &[EvidenceProjection],
+    tool_calls: &[ToolCallProjection],
+    tool_observations: &[ToolObservationProjection],
 ) -> String {
     let mut output = format!(
-        "command_id={}\nagent={} agent_status={}\nsession_id={} session_status={}\nrun_id={} run_status={}\ncurrent_goal={}\nlatest_summary={}\nconfidence={}\nblocker={}\nevidence_refs={}\nrecent_events={}\n",
+        "command_id={}\nagent={} agent_status={}\nsession_id={} session_status={}\nrun_id={} run_status={}\ncurrent_goal={}\nlatest_summary={}\nconfidence={}\nblocker={}\nevidence_refs={}\ntool_calls={}\ntool_observations={}\nrecent_events={}\n",
         command.command_id,
         observation.agent.name,
         observation.agent.status,
@@ -6127,8 +6142,35 @@ fn render_status(
             .map(|item| item.evidence_id.to_string())
             .collect::<Vec<_>>()
             .join(","),
+        tool_calls.len(),
+        tool_observations.len(),
         observation.recent_events.len()
     );
+    for tool_call in tool_calls {
+        output.push_str(&format!(
+            "tool_call={} tool={} tool_origin={} tool_status={} input_artifact={} output_artifact={}\n",
+            tool_call.tool_call_id,
+            tool_call.tool_name,
+            tool_call.tool_origin,
+            tool_call.status,
+            tool_call.input_artifact_id.as_deref().unwrap_or("none"),
+            tool_call.output_artifact_id.as_deref().unwrap_or("none")
+        ));
+    }
+    for observation in tool_observations {
+        output.push_str(&format!(
+            "tool_observation={} tool={} source={} observed_status={} instrumentation={} confidence={} external_ref={} artifact={} raw_event_hash={}\n",
+            observation.tool_observation_id,
+            observation.tool_name,
+            observation.source,
+            observation.observed_status,
+            observation.instrumentation_level,
+            observation.confidence,
+            observation.external_tool_ref.as_deref().unwrap_or("none"),
+            observation.artifact_id.as_deref().unwrap_or("none"),
+            observation.raw_event_hash
+        ));
+    }
     for event in &observation.recent_events {
         output.push_str(&format!("event={} kind={}\n", event.sequence, event.kind));
     }
@@ -10693,6 +10735,15 @@ mod tests {
 
         let codex_status = run(vec!["session", "status", "--agent", "fake-codex"]);
         assert!(codex_status.contains("current_goal=Inspect the project"));
+        assert!(codex_status.contains("tool_calls=1"));
+        assert!(codex_status.contains("tool_call=tool-fake-codex tool=capo.session_summary"));
+        assert!(codex_status.contains("tool_observations=1"));
+        assert!(
+            codex_status.contains(
+                "tool_observation=tool-observation-fake-codex tool=provider.native_search"
+            )
+        );
+        assert!(codex_status.contains("instrumentation=observed_only confidence=high"));
         assert!(codex_status.contains("kind=permission.decided"));
         assert!(codex_status.contains("kind=capability.grant_used"));
         assert!(codex_status.contains("kind=tool.result_delivered"));

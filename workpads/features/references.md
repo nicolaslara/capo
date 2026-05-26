@@ -814,3 +814,14 @@ Observed 2026-05-26.
 - Tool observation architecture source: `../architecture/tool-exposure.md`
 - Permissions source workpad: `permissions-tools.md`
 - No new third-party dependencies were added for PT10.
+
+## F4/PT11 Session Status Tool Introspection
+
+Observed 2026-05-26.
+
+- CLI session status tool-call and tool-observation rendering: `../../crates/capo-cli/src/main.rs`
+- Observed-only state projection consumed by status: `../../crates/capo-state/src/lib.rs`
+- Dashboard/evidence observation rendering used for output alignment: `../../crates/capo-cli/src/main.rs`
+- Tool observation architecture source: `../architecture/tool-exposure.md`
+- Permissions source workpad: `permissions-tools.md`
+- No new third-party dependencies were added for PT11.
