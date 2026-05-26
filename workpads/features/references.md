@@ -1414,3 +1414,13 @@ Observed 2026-05-26.
 - CLI routing, dashboard rendering, voice summaries, evidence exports, and review/eval surfaces retained in: `../../crates/capo-cli/src/main.rs`
 - Resulting file sizes: `../../crates/capo-cli/src/main.rs` 3,384 lines; `../../crates/capo-cli/src/workpad.rs` 728 lines.
 - No new third-party dependencies were added for CLI12.
+
+## F9/CLI13 Dashboard Module Split
+
+Observed 2026-05-26.
+
+- Dashboard module: `../../crates/capo-cli/src/dashboard.rs`
+- Shared query surface remains: `../../crates/capo-query/src/lib.rs`
+- CLI routing, voice summaries, evidence exports, review/eval surfaces, permissions, and session control retained in: `../../crates/capo-cli/src/main.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 2,829 lines; `../../crates/capo-cli/src/dashboard.rs` 563 lines.
+- No new third-party dependencies were added for CLI13.

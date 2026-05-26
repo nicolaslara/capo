@@ -2838,6 +2838,29 @@ Verification:
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - Focused read-only review subagent: no issues found; residual gap is that this split preserves existing fake/local start-next dispatch behavior and does not add real provider execution.
 
+## F9/CLI13 - Dashboard Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move dashboard command handling into `dashboard.rs`: dashboard filter parsing, shared `ProjectDashboardQuery` execution, dashboard text rendering, and latest adapter smoke report summaries.
+- Keep dashboard read-only. The module opens state only to run the shared query surface and does not append events, write artifacts, or execute providers.
+- Reuse existing feature renderers from their owner modules for runtime target rows and adapter dogfood gate rows. This keeps dashboard as an aggregator instead of duplicating feature-specific formatting rules.
+- Keep voice summaries in `main.rs` for this slice because voice is a separate conversational input/control surface, even though it reads the same dashboard query.
+
+Verification:
+
+- `cargo check -p capo-cli`: passed.
+- `cargo test -p capo-cli dashboard -- --nocapture`: passed.
+- `cargo test -p capo-query project_dashboard -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_dogfood_readiness -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- Focused read-only review subagent: no issues found; residual gap is that dashboard output compatibility remains assertion-based rather than byte-for-byte golden snapshots.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.
