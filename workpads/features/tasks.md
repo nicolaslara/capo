@@ -370,6 +370,7 @@ Progress:
 - RR5 connectivity exposure operator surface is completed with a provider-free `connectivity expose-stub` command that records blocked private/public exposure intent without opening tunnels or running agents.
 - RR6 connectivity exposure approval bridge is completed with commands to queue a permission approval from a blocked exposure and activate it only after a matching durable allow grant exists.
 - RR7 connectivity exposure revocation surface is completed with a command that records revoked exposure state, disabled health, and unreachable status without managing real tunnels or runtime processes.
+- RR8 connectivity exposure evidence export is completed with a Capo-owned project evidence artifact for endpoint/owner/channel/scope/status/health/grant/revocation review.
 - F7 remains `in_progress` until the real local-agent connector dependency is satisfied; remote execution semantics are still contract-level and loopback/stubbed.
 
 Evidence:
@@ -385,3 +386,4 @@ Evidence:
 - `cargo test -p capo-cli dashboard_renders_connectivity -- --nocapture`
 - `cargo test -p capo-cli connectivity_expose_stub -- --nocapture`
 - `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`
+- `capo connectivity exposure-evidence --exposure EXPOSURE_ID --out DIR [--state PATH]`

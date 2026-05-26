@@ -701,3 +701,13 @@ Observed 2026-05-26.
 - CLI workpad next/plan-next/start-next routing through the shared selector: `../../crates/capo-cli/src/main.rs`
 - Dashboard source workpad: `dashboard.md`
 - No new third-party dependencies were added for DS7.
+
+## F7/RR8 Connectivity Exposure Evidence Export
+
+Observed 2026-05-26.
+
+- CLI `connectivity exposure-evidence` command, markdown renderer, guarded writer, and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Connectivity exposure source projections consumed by the export: `../../crates/capo-state/src/lib.rs`
+- Project-level evidence dashboard path reused by the export: `../../crates/capo-query/src/lib.rs`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for RR8.

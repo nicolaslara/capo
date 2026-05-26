@@ -156,3 +156,27 @@ Decision:
 
 - Keep capability grants append-only for now. Revocation changes exposure availability, not historical grant evidence.
 - Use the existing dashboard row as the operator visibility surface for revoked exposure state.
+
+### RR8 - Connectivity Exposure Evidence Export
+
+Status: completed
+
+Acceptance:
+
+- Add a provider-free command that exports a Capo-owned evidence artifact for a recorded connectivity exposure.
+- Include endpoint, owner, channel, exposure scope, permission scope, status, health, reachability, linked grant, and revocation state.
+- Record the exported markdown as project-level evidence so dashboards and future dogfood readiness checkpoints can inspect it.
+- Do not open tunnels, launch runtimes or providers, inspect credentials, or mutate exposure state.
+
+Evidence:
+
+- CLI `capo connectivity exposure-evidence --exposure EXPOSURE_ID --out DIR` in `../../crates/capo-cli/src/main.rs`.
+- Exported artifacts use the `<!-- capo:connectivity-exposure-evidence -->` marker and guarded overwrite behavior.
+- Artifact records use `kind=connectivity_exposure_evidence`; evidence projections use `kind=connectivity_exposure_evidence`.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Decision:
+
+- Treat connectivity exposure evidence as an operator review artifact, not proof of real tunnel reachability.
+- Keep the export read-model-derived and provider-free. It records endpoint/owner/channel/scope/status/health/grant/revocation metadata only, without opening tunnels, launching runtimes, launching provider CLIs, inspecting credentials, or mutating exposure state.

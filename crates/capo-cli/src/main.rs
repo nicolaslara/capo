@@ -85,6 +85,7 @@ Usage:
   capo connectivity request-approval --exposure EXPOSURE_ID [--approval APPROVAL_ID] [--state PATH]
   capo connectivity activate-exposure --exposure EXPOSURE_ID [--state PATH]
   capo connectivity revoke-exposure --exposure EXPOSURE_ID [--reason REASON] [--state PATH]
+  capo connectivity exposure-evidence --exposure EXPOSURE_ID --out DIR [--state PATH]
   capo workpad index --root PATH [--state PATH]
   capo workpad next [--path PATH] [--state PATH]
   capo workpad plan-next --agent NAME --adapter codex|claude [--path PATH] [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
@@ -221,6 +222,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "connectivity" && command == "revoke-exposure" => {
             revoke_connectivity_exposure(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "connectivity" && command == "exposure-evidence" => {
+            connectivity_exposure_evidence(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "workpad" && command == "index" => {
             index_workpads(&parsed, rest)
@@ -4570,6 +4574,128 @@ fn revoke_connectivity_exposure(parsed: &ParsedArgs, args: &[String]) -> Result<
     ))
 }
 
+fn connectivity_exposure_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let exposure_id = required_arg(args, "--exposure")?;
+    let out = PathBuf::from(required_arg(args, "--out")?);
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--exposure" | "--out"))
+    {
+        return Err(format!(
+            "unknown connectivity exposure-evidence option: {unknown}"
+        ));
+    }
+    let state = state(parsed)?;
+    let exposure = connectivity_exposure(&state, &exposure_id)?;
+    let project_id = project_id();
+    let command = envelope(
+        "connectivity-exposure-evidence",
+        CommandTarget::Project(project_id.clone()),
+        CommandIntent::ExportEvidence,
+        Some(exposure.exposure_id.clone()),
+    );
+    let markdown = render_connectivity_exposure_evidence(&project_id, &exposure);
+    fs::create_dir_all(&out).map_err(|error| error.to_string())?;
+    let content_hash = stable_cli_hash(&markdown);
+    let artifact_id = format!("artifact-connectivity-exposure-evidence-{content_hash}");
+    let path = out.join(format!("{artifact_id}.md"));
+    write_connectivity_exposure_evidence_file(&path, &markdown)?;
+    state
+        .record_artifact(ArtifactRecord {
+            artifact_id: artifact_id.clone(),
+            project_id: Some(project_id.clone()),
+            session_id: None,
+            run_id: None,
+            kind: "connectivity_exposure_evidence".to_string(),
+            uri: path.display().to_string(),
+            content_hash: content_hash.clone(),
+            size_bytes: markdown.len() as i64,
+            redaction_state: RedactionState::Safe,
+        })
+        .map_err(debug_error)?;
+    let evidence_id = format!("evidence-{artifact_id}");
+    let sequence = state
+        .append_event(
+            NewEvent {
+                event_id: format!("event-{evidence_id}"),
+                kind: EventKind::EvidenceRecorded,
+                actor: "cli".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: None,
+                run_id: None,
+                turn_id: None,
+                item_id: Some(evidence_id.clone()),
+                payload_json: format!(
+                    "{{\"artifact_id\":\"{}\",\"content_hash\":\"{}\",\"exposure_id\":\"{}\",\"status\":\"{}\"}}",
+                    escape_json(&artifact_id),
+                    escape_json(&content_hash),
+                    escape_json(&exposure.exposure_id),
+                    escape_json(&exposure.status)
+                ),
+                idempotency_key: Some(format!(
+                    "connectivity-exposure-evidence:{}:{}:{content_hash}",
+                    project_id, exposure.exposure_id
+                )),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Evidence(EvidenceProjection {
+                evidence_id: capo_core::EvidenceId::new(evidence_id.clone()),
+                project_id: project_id.clone(),
+                task_id: None,
+                session_id: None,
+                run_id: None,
+                kind: "connectivity_exposure_evidence".to_string(),
+                artifact_id: Some(artifact_id.clone()),
+                confidence: connectivity_exposure_evidence_confidence(&exposure),
+                updated_sequence: 0,
+            })],
+        )
+        .map_err(debug_error)?;
+
+    Ok(format!(
+        "connectivity_exposure_evidence_exported=true\nexposure={}\nevidence_id={evidence_id}\nartifact_id={artifact_id}\npath={}\ncontent_hash={content_hash}\nsequence={sequence}\ncommand_id={}\n",
+        exposure.exposure_id,
+        path.display(),
+        command.command_id
+    ))
+}
+
+fn connectivity_exposure_evidence_confidence(exposure: &ConnectivityExposureProjection) -> i64 {
+    if exposure.status == "active" && exposure.capability_grant_id.is_some() {
+        85
+    } else if exposure.status == "revoked" {
+        80
+    } else {
+        65
+    }
+}
+
+fn render_connectivity_exposure_evidence(
+    project_id: &ProjectId,
+    exposure: &ConnectivityExposureProjection,
+) -> String {
+    format!(
+        "<!-- capo:connectivity-exposure-evidence -->\n# Capo Connectivity Exposure Evidence - {}\n\n## Objective\n\nReview a recorded connectivity exposure without opening tunnels or touching runtime/provider processes.\n\n## Exposure\n\n- Project: `{}`\n- Exposure: `{}`\n- Endpoint: `{}`\n- Owner: `{}:{}`\n- Channel: `{}`\n- Exposure scope: `{}`\n- Permission scope: `{}`\n- Status: `{}`\n- Health: `{}`\n- Reachable: `{}`\n- Linked grant: `{}`\n- Revoked at: `{}`\n- Updated sequence: `{}`\n\n## Review Notes\n\n- Active exposure requires a matching durable allow grant before the exposure state can become active.\n- Revocation disables the exposure read model and marks it unreachable while preserving historical grant evidence.\n- This artifact records Capo connectivity metadata only; it is not proof of real tunnel reachability.\n\n## Evidence Policy\n\n- This report is derived from persisted Capo connectivity read models only.\n- It does not open tunnels, launch runtimes, launch provider CLIs, inspect credentials, materialize prompts, or mutate exposure state.\n- Credential material, tokens, cookies, subscription sessions, raw prompts, and provider output are not rendered.\n",
+        exposure.exposure_id,
+        project_id,
+        exposure.exposure_id,
+        exposure.connectivity_endpoint_id,
+        exposure.owner_kind,
+        exposure.owner_id,
+        exposure.channel_kind,
+        exposure.exposure,
+        exposure.permission_scope,
+        exposure.status,
+        exposure.health_status,
+        exposure.reachable,
+        exposure.capability_grant_id.as_deref().unwrap_or("none"),
+        exposure.revoked_at.as_deref().unwrap_or("none"),
+        exposure.updated_sequence
+    )
+}
+
 fn render_connectivity_exposure_activation(
     exposure: &ConnectivityExposureProjection,
     grant_id: &str,
@@ -6187,6 +6313,24 @@ fn write_dogfood_readiness_file(path: &Path, markdown: &str) -> Result<(), Strin
     fs::write(path, markdown).map_err(|error| error.to_string())
 }
 
+fn write_connectivity_exposure_evidence_file(path: &Path, markdown: &str) -> Result<(), String> {
+    if let Ok(existing) = fs::read_to_string(path) {
+        if !existing.starts_with("<!-- capo:connectivity-exposure-evidence -->") {
+            return Err(format!(
+                "refusing to overwrite non-Capo connectivity exposure evidence file: {}",
+                path.display()
+            ));
+        }
+        if existing != markdown {
+            return Err(format!(
+                "refusing to overwrite changed Capo connectivity exposure evidence file: {}",
+                path.display()
+            ));
+        }
+    }
+    fs::write(path, markdown).map_err(|error| error.to_string())
+}
+
 fn write_task_outcome_report_file(path: &Path, markdown: &str) -> Result<(), String> {
     if let Ok(existing) = fs::read_to_string(path) {
         if !existing.starts_with("<!-- capo:task-outcome-report -->") {
@@ -6453,6 +6597,7 @@ mod tests {
         assert!(HELP.contains("connectivity request-approval"));
         assert!(HELP.contains("connectivity activate-exposure"));
         assert!(HELP.contains("connectivity revoke-exposure"));
+        assert!(HELP.contains("connectivity exposure-evidence"));
         assert!(HELP.contains("workpad index"));
         assert!(HELP.contains("workpad next"));
         assert!(HELP.contains("workpad plan-next"));
@@ -9021,6 +9166,38 @@ mod tests {
         assert!(dashboard.contains("health=disabled"));
         assert!(dashboard.contains("reachable=false"));
         assert!(dashboard.contains("revoked_at=unix:"));
+
+        let evidence_dir = temp_root("cli-connectivity-exposure-evidence");
+        let evidence = run_cli(vec![
+            "connectivity".to_string(),
+            "exposure-evidence".to_string(),
+            "--exposure".to_string(),
+            output_value(&revoked, "exposure"),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("export connectivity exposure evidence");
+        assert!(evidence.contains("connectivity_exposure_evidence_exported=true"));
+        assert!(evidence.contains("evidence_id=evidence-artifact-connectivity-exposure-evidence-"));
+        let evidence_path = output_value(&evidence, "path");
+        let markdown = fs::read_to_string(&evidence_path).expect("read connectivity evidence");
+        assert!(markdown.starts_with("<!-- capo:connectivity-exposure-evidence -->"));
+        assert!(markdown.contains("## Exposure"));
+        assert!(markdown.contains("- Status: `revoked`"));
+        assert!(markdown.contains("- Health: `disabled`"));
+        assert!(markdown.contains("- Reachable: `false`"));
+        assert!(markdown.contains("does not open tunnels"));
+
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard after exposure evidence");
+        assert!(dashboard.contains("project_evidence=1"));
+        assert!(dashboard.contains("kind=connectivity_exposure_evidence"));
     }
 
     #[test]

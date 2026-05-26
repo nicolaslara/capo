@@ -1553,3 +1553,23 @@ Verification:
 - `cargo test -p capo-query next_actionable_workpad -- --nocapture`: passed.
 - `cargo test -p capo-cli workpad_index_imports_markdown_refs_without_modifying_sources -- --nocapture`: passed.
 - `cargo test -p capo-cli voice_confirmed_start_next_work -- --nocapture`: passed.
+
+## F7/RR8 - Connectivity Exposure Evidence Export
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `capo connectivity exposure-evidence --exposure EXPOSURE_ID --out DIR` as a provider-free review artifact for recorded connectivity exposure state.
+- Record the exported artifact as project-level evidence so dashboard and future dogfood migration checks can inspect remote-control exposure decisions without binding them to one agent session.
+- Render only Capo connectivity metadata: endpoint, owner, channel, exposure scope, permission scope, status, health, reachability, linked grant, revocation time, and update sequence.
+- Preserve the runtime/tunnel boundary: evidence export does not open tunnels, launch runtimes, launch provider CLIs, inspect credentials, materialize prompts, or mutate exposure state.
+
+Verification:
+
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Follow-up:
+
+- Once a real tunnel adapter exists, add a separate reachability evidence artifact instead of overloading this read-model review report.
