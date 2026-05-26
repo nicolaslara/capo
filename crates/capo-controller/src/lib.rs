@@ -7,8 +7,9 @@
 use std::path::{Path, PathBuf};
 
 use capo_adapters::{
-    AgentAdapter, ClaudeCodeAdapter, CodexExecAdapter, FakeAdapterSessionRequest,
-    FakeAdapterTurnRequest, LocalAdapterLaunchPlan, NormalizedAdapterEvent, ProviderConnector,
+    AdapterToolObservation, AgentAdapter, ClaudeCodeAdapter, CodexExecAdapter,
+    FakeAdapterSessionRequest, FakeAdapterTurnRequest, LocalAdapterLaunchPlan,
+    NormalizedAdapterEvent, ProviderConnector,
 };
 use capo_core::{
     AgentId, CommandEnvelope, CommandIntent, EvidenceId, MemoryPacketId, ProjectId, RunId,
@@ -234,6 +235,48 @@ impl FakeBoundaryController {
                     _ => {}
                 }
             }
+            if let Some(observation_projection) =
+                self.adapter_tool_observation_projection(refs, adapter_event)?
+            {
+                let mut observation_event = scoped_event(
+                    &format!(
+                        "event-adapter-tool-observation-{}-{}-{}",
+                        adapter_event.adapter_kind.as_str(),
+                        refs.session_id,
+                        index
+                    ),
+                    EventKind::ToolObservationRecorded,
+                    &self.project_id,
+                    &refs.task_id,
+                    &refs.agent_id,
+                    &refs.session_id,
+                    &refs.run_id,
+                );
+                observation_event.turn_id = adapter_event
+                    .timeline_key
+                    .as_ref()
+                    .map(|key| format!("turn-{}", slug(key)))
+                    .or_else(|| Some("turn-adapter-replay".to_string()));
+                observation_event.item_id = adapter_event.external_item_ref.clone();
+                observation_event.payload_json = adapter_event_payload_json(adapter_event);
+                observation_event.idempotency_key = adapter_event
+                    .idempotency_key
+                    .as_ref()
+                    .map(|key| format!("{key}:tool-observation"))
+                    .or_else(|| {
+                        Some(format!(
+                            "adapter-replay:{}:{index}:tool-observation",
+                            refs.session_id
+                        ))
+                    });
+                observation_event.redaction_state = RedactionState::Safe;
+                let before = self.state.event_count()?;
+                self.state
+                    .append_event(observation_event, &[observation_projection])?;
+                if self.state.event_count()? > before {
+                    appended_event_count += 1;
+                }
+            }
         }
 
         Ok(AdapterReplayReport {
@@ -330,16 +373,7 @@ impl FakeBoundaryController {
             | "adapter.tool_call_started"
             | "adapter.tool_call_completed"
             | "adapter.tool_call_failed" => {
-                let tool_call_id = ToolCallId::new(format!(
-                    "tool-adapter-{}",
-                    slug(
-                        adapter_event
-                            .external_item_ref
-                            .as_deref()
-                            .or(adapter_event.timeline_key.as_deref())
-                            .unwrap_or(&adapter_event.raw_event_hash)
-                    )
-                ));
+                let tool_call_id = adapter_tool_call_id(adapter_event);
                 let existing_tool_name = self
                     .state
                     .tool_calls_for_session(&refs.session_id)?
@@ -412,6 +446,31 @@ impl FakeBoundaryController {
             "adapter.session_started" | "adapter.raw_event" => Ok(None),
             _ => Ok(None),
         }
+    }
+
+    fn adapter_tool_observation_projection(
+        &self,
+        refs: &FakeRunRefs,
+        adapter_event: &NormalizedAdapterEvent,
+    ) -> StateResult<Option<ProjectionRecord>> {
+        let Some(mut observation) = adapter_event.tool_observation() else {
+            return Ok(None);
+        };
+        if observation.tool_name == "adapter-native-tool" {
+            let tool_call_id = adapter_tool_call_id(adapter_event);
+            if let Some(existing_tool_name) = self
+                .state
+                .tool_calls_for_session(&refs.session_id)?
+                .into_iter()
+                .find(|tool| tool.tool_call_id == tool_call_id)
+                .map(|tool| tool.tool_name)
+            {
+                observation.tool_name = existing_tool_name;
+            }
+        }
+        Ok(Some(ProjectionRecord::ToolObservation(
+            tool_observation_projection(refs, adapter_event, &observation),
+        )))
     }
 
     pub fn register_agent(&self, agent_name: &str) -> StateResult<FakeAgentRegistration> {
@@ -1691,6 +1750,53 @@ fn adapter_event_payload_json(adapter_event: &NormalizedAdapterEvent) -> String 
     )
 }
 
+fn adapter_tool_call_id(adapter_event: &NormalizedAdapterEvent) -> ToolCallId {
+    ToolCallId::new(format!(
+        "tool-adapter-{}",
+        slug(
+            adapter_event
+                .external_item_ref
+                .as_deref()
+                .or(adapter_event.timeline_key.as_deref())
+                .unwrap_or(&adapter_event.raw_event_hash)
+        )
+    ))
+}
+
+fn tool_observation_projection(
+    refs: &FakeRunRefs,
+    adapter_event: &NormalizedAdapterEvent,
+    observation: &AdapterToolObservation,
+) -> capo_state::ToolObservationProjection {
+    capo_state::ToolObservationProjection {
+        tool_observation_id: format!(
+            "tool-observation-{}-{}",
+            adapter_event.adapter_kind.as_str(),
+            slug(
+                observation
+                    .external_tool_ref
+                    .as_deref()
+                    .or(adapter_event.timeline_key.as_deref())
+                    .unwrap_or(&observation.raw_event_hash)
+            )
+        ),
+        session_id: refs.session_id.clone(),
+        tool_call_id: Some(adapter_tool_call_id(adapter_event)),
+        source: format!("adapter_event:{}", observation.source_adapter),
+        external_tool_ref: observation.external_tool_ref.clone(),
+        tool_name: observation.tool_name.clone(),
+        observed_status: observation.observed_status.clone(),
+        instrumentation_level: observation.instrumentation_level.clone(),
+        confidence: observation.confidence.clone(),
+        raw_event_hash: observation.raw_event_hash.clone(),
+        artifact_id: adapter_event
+            .content
+            .as_ref()
+            .map(|_| format!("artifact-adapter-output-{}", adapter_event.raw_event_hash)),
+        updated_sequence: 0,
+    }
+}
+
 fn stable_hash(bytes: &[u8]) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
@@ -2064,6 +2170,18 @@ mod tests {
                 && tool.tool_origin == "adapter_native:codex_exec"
                 && tool.status == "completed"
         }));
+        let observations = controller
+            .state()
+            .tool_observations_for_session(&refs.session_id)
+            .expect("tool observations");
+        assert!(observations.iter().any(|observation| {
+            observation.tool_name == "exec_command"
+                && observation.source == "adapter_event:codex_exec"
+                && observation.observed_status == "completed"
+                && observation.instrumentation_level == "observed_only"
+                && observation.confidence == "high"
+                && observation.tool_call_id.is_some()
+        }));
         let evidence = controller
             .state()
             .evidence_for_session(&refs.session_id)
@@ -2081,6 +2199,11 @@ mod tests {
             events
                 .iter()
                 .any(|event| event.kind == "session.summary_updated")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == "tool.observation_recorded")
         );
         for event in events {
             assert!(!event.payload_json.contains("Codex fixture response."));
@@ -2123,6 +2246,17 @@ mod tests {
             tool.tool_name == "Bash"
                 && tool.tool_origin == "adapter_native:claude_code"
                 && tool.status == "completed"
+        }));
+        let observations = controller
+            .state()
+            .tool_observations_for_session(&refs.session_id)
+            .expect("tool observations");
+        assert!(observations.iter().any(|observation| {
+            observation.tool_name == "Bash"
+                && observation.source == "adapter_event:claude_code"
+                && observation.observed_status == "completed"
+                && observation.instrumentation_level == "observed_only"
+                && observation.tool_call_id.is_some()
         }));
         let evidence = controller
             .state()

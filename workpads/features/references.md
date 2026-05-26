@@ -802,3 +802,15 @@ Observed 2026-05-26.
 - Tool observation architecture source: `../architecture/tool-exposure.md`
 - Permissions source workpad: `permissions-tools.md`
 - No new third-party dependencies were added for PT9.
+
+## F4/PT10 Adapter Replay Tool Observation Ingestion
+
+Observed 2026-05-26.
+
+- Controller replay ingestion and regression coverage: `../../crates/capo-controller/src/lib.rs`
+- CLI fixture replay evidence/dashboard regression coverage: `../../crates/capo-cli/src/main.rs`
+- Adapter observed-only source contract: `../../crates/capo-adapters/src/lib.rs`
+- Observed-only state projection: `../../crates/capo-state/src/lib.rs`
+- Tool observation architecture source: `../architecture/tool-exposure.md`
+- Permissions source workpad: `permissions-tools.md`
+- No new third-party dependencies were added for PT10.

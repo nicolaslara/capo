@@ -1755,3 +1755,24 @@ Verification:
 Follow-up:
 
 - Future adapter fixture replay should append `ToolObservationProjection` rows automatically when normalized adapter events contain observed native tool updates.
+
+## F4/PT10 - Adapter Replay Tool Observation Ingestion
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Route normalized adapter-native tool events into both the timeline `ToolCall` projection and a separate observed-only `ToolObservationProjection`.
+- Append `tool.observation_recorded` events during fixture replay so rebuilt state and dashboard/evidence views can distinguish native provider tool activity from Capo-governed wrapper execution.
+- Use stable observation IDs based on adapter kind plus external tool/timeline reference. Started/completed updates for the same native tool project to one current observation row instead of duplicate UI entries.
+- Preserve earlier tool names when later provider result updates omit the name, as Claude Code does for `tool_result` events.
+- Keep replay provider-free and execution-free. No provider CLI, runtime, tunnel, credential/session inspection, or raw prompt/content persistence is introduced.
+
+Verification:
+
+- `cargo test -p capo-controller fixture_replay -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_fixture_replay_cli_exports_evidence_without_raw_provider_text -- --nocapture`: passed.
+
+Follow-up:
+
+- When real adapter streams are enabled, reuse the same observation projection helper for live stream ingestion rather than adding a separate native-tool observation path.

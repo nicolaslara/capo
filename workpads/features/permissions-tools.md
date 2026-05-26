@@ -272,3 +272,29 @@ Decision:
 - Surface observations through the existing session dashboard row so CLI, voice, web, and mobile consumers can use the same query contract.
 - Render observed-only native tool facts in a separate CLI/evidence section rather than merging them into governed `tool_call` rows.
 - Preserve source, external ref, status, instrumentation level, confidence, raw event hash, and artifact ref so future evaluation work can distinguish partial provider visibility from Capo-executed wrapper tools.
+
+### PT10 - Adapter Replay Tool Observation Ingestion
+
+Status: completed
+
+Acceptance:
+
+- Automatically append observed-only `ToolObservationProjection` rows when normalized adapter fixture replay contains native tool events.
+- Keep observed-only tool observations separate from governed `ToolCall` rows and wrapper invocations.
+- Preserve stable observation identity across repeated replay so rebuilds and retries do not duplicate UI state.
+- Keep replay provider-free and execution-free: no provider CLI launch, runtime launch, tunnel opening, or credential/session inspection.
+- Cover controller replay plus CLI dashboard/evidence visibility with regression tests.
+
+Evidence:
+
+- `FakeBoundaryController::apply_normalized_adapter_events(...)` in `../../crates/capo-controller/src/lib.rs`.
+- CLI replay fixture dashboard/evidence regression coverage in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-controller fixture_replay -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_fixture_replay_cli_exports_evidence_without_raw_provider_text -- --nocapture`: passed.
+
+Decision:
+
+- Adapter replay now appends a separate `tool.observation_recorded` event for native tool updates while preserving the existing timeline `ToolCall` row.
+- Observation IDs are stable by adapter kind plus external tool/timeline reference, so repeated started/completed updates project one current observed-only row instead of duplicate UI entries.
+- When provider result updates omit the tool name, replay preserves the earlier observed tool name from the existing `ToolCall` row.
+- Replay remains provider-free and execution-free. It consumes normalized fixture events only.

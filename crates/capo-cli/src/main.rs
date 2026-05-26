@@ -9588,9 +9588,20 @@ mod tests {
         let evidence = fs::read_to_string(&evidence_path).expect("read replay evidence");
         assert!(evidence.contains("adapter_replay:codex_exec"));
         assert!(evidence.contains("adapter_native:codex_exec"));
+        assert!(evidence.contains("## Tool Observations"));
+        assert!(evidence.contains("source=`adapter_event:codex_exec`"));
+        assert!(evidence.contains("instrumentation=`observed_only`"));
         assert!(evidence.contains("content_hash="));
         assert!(!evidence.contains("Codex fixture response."));
         assert!(!evidence.contains("cargo test"));
+        let dashboard = run_cli(vec![
+            "dashboard".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("dashboard after adapter replay");
+        assert!(dashboard.contains("tool_observations=1"));
+        assert!(dashboard.contains("source=adapter_event:codex_exec"));
         assert_text_absent_in_tree(&state_root, "Codex fixture response.");
         assert_text_absent_in_tree(&state_root, "cargo test");
         assert_text_absent_in_tree(&evidence_dir, "Codex fixture response.");

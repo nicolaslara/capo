@@ -246,6 +246,7 @@ Progress:
 - PT7 adapter native tool observation contract is completed with observed-only classifications for ACP, Codex, and Claude fixture tool updates.
 - PT8 observed-only tool observation state projection is completed with durable append/read/rebuild coverage.
 - PT9 query and evidence visibility is completed with observed-only tool observations surfaced through the shared session dashboard row and CLI/evidence views.
+- PT10 adapter replay observation ingestion is completed with normalized adapter tool events automatically appending observed-only tool observation rows.
 
 Evidence:
 
@@ -272,6 +273,8 @@ Evidence:
 - `cargo test -p capo-state tool_observations -- --nocapture`
 - `cargo test -p capo-query project_dashboard_aggregates_agents_sessions_runs_evidence_and_events -- --nocapture`
 - `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence -- --nocapture`
+- `cargo test -p capo-controller fixture_replay -- --nocapture`
+- `cargo test -p capo-cli adapter_fixture_replay_cli_exports_evidence_without_raw_provider_text -- --nocapture`
 - Focused PT3 wrapper reviews: split authorization replay, arbitrary workpad reads, artifact path escaping, unredacted input artifacts, misleading permission status, same-tool replay, runtime run ID paths, and ambiguous context hashing blockers found and fixed
 
 ## F5 - Memory And Evaluation Reports
