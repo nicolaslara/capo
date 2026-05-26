@@ -836,3 +836,14 @@ Observed 2026-05-26.
 - Voice source workpad: `voice.md`
 - Tool observation architecture source: `../architecture/tool-exposure.md`
 - No new third-party dependencies were added for V12.
+
+## F1/AC29 Dispatch Tool Observation Evidence
+
+Observed 2026-05-26.
+
+- CLI dispatch evidence rendering of observed-only tool observations and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Tool observation read model consumed by the evidence export: `../../crates/capo-state/src/lib.rs`
+- Adapter replay observation ingestion source: `../../crates/capo-controller/src/lib.rs`
+- Tool observation architecture source: `../architecture/tool-exposure.md`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC29.

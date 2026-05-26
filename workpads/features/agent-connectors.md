@@ -708,3 +708,26 @@ Decision:
 
 - Treat latest evidence export as operator ergonomics over the shared dispatch status selector. It selects the latest plan through `ProjectDashboard::latest_adapter_dispatch_status(...)`, then writes the same Capo-owned prompt-redacted evidence artifact as exact plan export.
 - Keep exact `--dispatch-plan` and latest `--latest` mutually exclusive; `--agent` is only valid with `--latest`.
+
+### AC29 - Dispatch Tool Observation Evidence
+
+Status: completed
+
+Acceptance:
+
+- Include observed-only native tool observations in dispatch-chain evidence exports after fixture replay records them.
+- Preserve the distinction between governed Capo tool calls and adapter/provider-native observed-only tool activity.
+- Do not render raw dispatch prompts, raw provider fixture text, or raw provider tool input/output.
+- Cover dispatch evidence export with regression assertions for observed tool metadata.
+
+Evidence:
+
+- CLI `capo adapter dispatch-evidence --dispatch-plan DISPATCH_PLAN_ID --out DIR` now includes an `Observed Tool Activity` section sourced from `tool_observations_for_session`.
+- CLI `capo adapter dispatch-evidence --latest [--agent NAME] --out DIR` reuses the same observed-tool evidence rendering after latest dispatch selection.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Treat observed native tool activity as dispatch-chain review evidence when fixture replay records structured tool observations.
+- Keep observed-only native tools separate from governed Capo tool calls. The evidence artifact renders observation ID, tool name, adapter-event source, observed status, instrumentation level, confidence, external ref, artifact ref, and raw-event hash only.
+- Continue excluding raw dispatch prompts, raw provider fixture text, and raw provider tool input/output from dispatch evidence artifacts.

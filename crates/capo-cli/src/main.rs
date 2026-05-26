@@ -1507,6 +1507,9 @@ fn adapter_dispatch_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<Str
         .iter()
         .rev()
         .find(|execution| execution.dispatch_plan_id == plan.dispatch_plan_id);
+    let tool_observations = state
+        .tool_observations_for_session(&plan.session_id)
+        .map_err(debug_error)?;
     let command = envelope(
         "adapter-dispatch-evidence",
         CommandTarget::Session(plan.session_id.clone()),
@@ -1519,6 +1522,7 @@ fn adapter_dispatch_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<Str
         latest_replay,
         latest_execution,
         &dashboard.adapter_dogfood_gate,
+        &tool_observations,
     );
     fs::create_dir_all(&out).map_err(|error| error.to_string())?;
     let content_hash = stable_cli_hash(&markdown);
@@ -6425,6 +6429,7 @@ fn render_adapter_dispatch_evidence(
     latest_replay: Option<&AdapterDispatchReplayProjection>,
     latest_execution: Option<&AdapterDispatchExecutionProjection>,
     dogfood_gate: &AdapterDogfoodGate,
+    tool_observations: &[ToolObservationProjection],
 ) -> String {
     let mut markdown = format!(
         "<!-- capo:adapter-dispatch-evidence -->\n# Capo Adapter Dispatch Evidence - {}\n\n## Objective\n\nReview a prompt-redacted dispatch chain before treating provider execution as dogfood evidence.\n\n## Dispatch Plan\n\n- Project: `{}`\n- Dispatch plan: `{}`\n- Adapter: `{}`\n- Provider: `{}`\n- Credential scope: `{}`\n- Agent: `{}` `{}`\n- Session: `{}`\n- Run: `{}`\n- Plan status: `{}`\n- Runtime program: `{}`\n- Runtime arg count: `{}`\n- Runtime cwd: `{}`\n- Artifact root: `{}`\n- Runtime prompt policy: `{}`\n- Provider CLI executed in plan: `{}`\n\n## Dogfood Gate\n\n- Status: `{}`\n- Ready: `{}`\n- Reasons: `{}`\n\n",
@@ -6507,6 +6512,26 @@ fn render_adapter_dispatch_evidence(
         ));
     } else {
         markdown.push_str("- none\n\n");
+    }
+    markdown.push_str("## Observed Tool Activity\n\n");
+    if tool_observations.is_empty() {
+        markdown.push_str("- none\n\n");
+    } else {
+        for observation in tool_observations {
+            markdown.push_str(&format!(
+                "- Observation: `{}` name=`{}` source=`{}` observed_status=`{}` instrumentation=`{}` confidence=`{}` external_ref=`{}` artifact=`{}` raw_event_hash=`{}`\n",
+                observation.tool_observation_id,
+                observation.tool_name,
+                observation.source,
+                observation.observed_status,
+                observation.instrumentation_level,
+                observation.confidence,
+                observation.external_tool_ref.as_deref().unwrap_or("none"),
+                observation.artifact_id.as_deref().unwrap_or("none"),
+                observation.raw_event_hash
+            ));
+        }
+        markdown.push('\n');
     }
     markdown.push_str("## Redaction Policy\n\n- Raw dispatch prompts are not rendered.\n- Raw provider output is not rendered.\n- Runtime stdout/stderr are referenced by artifact IDs only.\n");
     markdown
@@ -7486,6 +7511,16 @@ mod tests {
         assert_eq!(replays[0].tool_event_count, 2);
         assert!(!replays[0].provider_cli_executed);
         assert_eq!(replays[0].raw_content_policy, "content_hashed_not_rendered");
+        let replay_tool_observations = SqliteStateStore::open(&state_root)
+            .expect("state")
+            .tool_observations_for_session(&replays[0].session_id)
+            .expect("dispatch replay tool observations");
+        assert!(replay_tool_observations.iter().any(|observation| {
+            observation.tool_name == "exec_command"
+                && observation.source == "adapter_event:codex_exec"
+                && observation.instrumentation_level == "observed_only"
+                && observation.confidence == "high"
+        }));
         let replay_dashboard = run_cli(vec![
             "dashboard".to_string(),
             "--state".to_string(),
@@ -7550,6 +7585,11 @@ mod tests {
         assert!(dispatch_evidence_markdown.contains("## Latest Dispatch Gate"));
         assert!(dispatch_evidence_markdown.contains("## Latest Fixture Replay"));
         assert!(dispatch_evidence_markdown.contains("## Latest Local Execution"));
+        assert!(dispatch_evidence_markdown.contains("## Observed Tool Activity"));
+        assert!(dispatch_evidence_markdown.contains("name=`exec_command`"));
+        assert!(dispatch_evidence_markdown.contains("source=`adapter_event:codex_exec`"));
+        assert!(dispatch_evidence_markdown.contains("instrumentation=`observed_only`"));
+        assert!(dispatch_evidence_markdown.contains("confidence=`high`"));
         assert!(dispatch_evidence_markdown.contains("Raw dispatch prompts are not rendered"));
         assert!(
             dispatch_evidence_markdown.contains("Status: `blocked_missing_prompt_materialization`")
@@ -7587,6 +7627,8 @@ mod tests {
                 .starts_with("<!-- capo:adapter-dispatch-evidence -->")
         );
         assert!(latest_dispatch_evidence_markdown.contains("## Latest Fixture Replay"));
+        assert!(latest_dispatch_evidence_markdown.contains("## Observed Tool Activity"));
+        assert!(latest_dispatch_evidence_markdown.contains("instrumentation=`observed_only`"));
         assert!(
             latest_dispatch_evidence_markdown.contains("Raw dispatch prompts are not rendered")
         );

@@ -1815,3 +1815,22 @@ Verification:
 Follow-up:
 
 - If recent-work answers become too verbose, add a query-level compact activity summary instead of making voice apply its own filtering rules.
+
+## F1/AC29 - Dispatch Tool Observation Evidence
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Dispatch-chain evidence now includes observed-only native tool observations from the dispatch plan's Capo session when fixture replay records them.
+- Keep the evidence section explicitly about observed tool activity, not governed Capo tool calls. Governed tool calls remain in the session/evidence surfaces; this slice makes adapter/provider-native tool use reviewable from dispatch evidence.
+- Render only metadata: observation ID, tool name, adapter-event source, observed status, instrumentation level, confidence, external ref, artifact ref, and raw-event hash.
+- Preserve the existing redaction boundary. Dispatch evidence still excludes raw dispatch prompts, raw provider fixture text, provider output, and tool input/output.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Follow-up:
+
+- Once real opt-in local dispatch runs are authorized, verify that successful provider execution outcomes either produce structured observed-only tool observations or clearly report that the provider stream did not expose safe tool metadata.

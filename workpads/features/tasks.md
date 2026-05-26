@@ -81,6 +81,7 @@ Progress:
 - AC26 dispatch status query contract is completed. `dispatch-status` now renders a reusable `capo-query` summary instead of assembling dispatch-chain state in the CLI.
 - AC27 latest dispatch status selection is completed. `dispatch-status --latest [--agent NAME]` selects the latest dispatch-chain status through the shared query contract.
 - AC28 latest dispatch evidence export is completed. `dispatch-evidence --latest [--agent NAME]` exports prompt-redacted evidence for the latest dispatch chain through the shared query selector.
+- AC29 dispatch tool observation evidence is completed. Dispatch evidence exports now include observed-only native tool observations recorded by fixture replay, without rendering raw prompts, provider fixture text, or tool input/output.
 
 Evidence:
 
@@ -127,6 +128,7 @@ Evidence:
 - `cargo test -p capo-query adapter_dispatch_status -- --nocapture`
 - `cargo test -p capo-query latest_adapter_dispatch_status -- --nocapture`
 - `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture` verifies dispatch evidence observed tool activity
 - Focused F1 connector safety reviews: provider-artifact cleanup blocker found and fixed; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge
