@@ -3001,6 +3001,29 @@ Verification:
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - Focused read-only review subagent: no behavior regressions found; it identified missing positive coverage for restricted `allow_always`, which was fixed by extending the permission CLI regression test to accept durable Capo read/status scopes.
 
+## F9/CLI18 - Agent And Session Command Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move the base project/agent/session CLI lifecycle commands into `agent_session.rs`.
+- Keep `main.rs` as the command router plus shared CLI helpers (`controller`, `state`, `envelope`, hash/JSON formatting, and common list rendering).
+- Keep lifecycle command output stable: project initialization, fake agent registration/spawn/list, task send, session status, redirect, interrupt/stop, and recovery still use the same line-oriented response contract.
+- Make test-only dependencies on `AgentId`, `ToolCallProjection`, `ToolObservationProjection`, and `Path` explicit in `tests.rs` instead of relying on incidental root imports.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-cli help_mentions_command_envelopes_and_no_credentials -- --nocapture`: passed.
+- `cargo test -p capo-cli agent -- --nocapture`: passed.
+- `cargo test -p capo-cli -- --nocapture`: passed, 40 tests.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- Focused self-review of the diff found the split is behavior-preserving: routing stayed in `main.rs`, lifecycle output format moved unchanged, and tests now import their own helper types directly.
+- Resulting file sizes: `crates/capo-cli/src/main.rs` 348 lines and `crates/capo-cli/src/agent_session.rs` 311 lines.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.

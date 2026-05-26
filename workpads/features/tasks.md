@@ -756,7 +756,7 @@ Evidence:
 
 ## F9 - CLI Maintainability
 
-Status: in_progress
+Status: completed
 
 Source workpad: cross-cutting CLI implementation and feature workpads.
 
@@ -784,10 +784,13 @@ Progress:
 - CLI14 voice command/render split is completed. Voice transcript handling, visible approval, permission decisions, reviewed-summary memory ingestion, and controller mutations now live in `crates/capo-cli/src/voice.rs`; voice read-contract rendering and spoken status formatting live in `crates/capo-cli/src/voice_render.rs`.
 - CLI15 evidence/review module split is completed. Session evidence export, task-outcome report export, review finding recording, review outcome derivation, evidence/review markdown rendering, and guarded evidence/review artifact writes now live in `crates/capo-cli/src/evidence.rs`; session status rendering, dogfood readiness artifacts, permissions, and routing remain in `main.rs`.
 - CLI16 permission command module split is completed. Permission approval queue/list/decision commands, ACP-style decision mapping, durable-scope validation, approval subject shaping, and scope parsing now live in `crates/capo-cli/src/permission.rs`; voice approvals and connectivity grant matching import the shared permission helpers explicitly.
+- CLI17 dogfood readiness module split is completed. Project dogfood readiness command handling, evidence markdown rendering, guarded artifact writes, and persisted evidence projection are isolated in `crates/capo-cli/src/dogfood.rs`; routing remains in `main.rs`.
+- CLI18 agent/session command module split is completed. Project initialization, fake agent registration/spawn/list, task send, session status, redirect, interrupt/stop, recovery, and session status rendering now live in `crates/capo-cli/src/agent_session.rs`; `main.rs` is reduced to command routing and shared helpers.
 
 Evidence:
 
 - `crates/capo-cli/src/main.rs`
+- `crates/capo-cli/src/agent_session.rs`
 - `crates/capo-cli/src/adapter_dispatch.rs`
 - `crates/capo-cli/src/adapter_dispatch_prepare.rs`
 - `crates/capo-cli/src/adapter_dispatch_run.rs`

@@ -237,6 +237,16 @@ Observed 2026-05-26.
 - Resulting file sizes: `../../crates/capo-cli/src/main.rs` 652 lines; `../../crates/capo-cli/src/dogfood.rs` 203 lines.
 - No new third-party dependencies were added for CLI17.
 
+## F9/CLI18 Agent And Session Command Module Split
+
+Observed 2026-05-26.
+
+- Agent/session lifecycle command module: `../../crates/capo-cli/src/agent_session.rs`
+- CLI routing and shared helpers retained in: `../../crates/capo-cli/src/main.rs`
+- Test imports made explicit after the split: `../../crates/capo-cli/src/tests.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 348 lines; `../../crates/capo-cli/src/agent_session.rs` 311 lines.
+- No new third-party dependencies were added for CLI18.
+
 ## F1/AC12 Workpad Next Adapter Plan
 
 Observed 2026-05-25.

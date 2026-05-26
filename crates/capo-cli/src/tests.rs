@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,10 +8,10 @@ use crate::adapter_dispatch_run::{
     apply_dispatch_adapter_output, scan_dispatch_artifacts_or_delete,
 };
 use capo_adapters::LocalAdapterSmokeError;
-use capo_core::{RunId, SessionId, TaskId, ToolCallId};
+use capo_core::{AgentId, RunId, SessionId, TaskId, ToolCallId};
 use capo_state::{
     ConnectivityExposureProjection, EventKind, NewEvent, ProjectionRecord, RedactionState,
-    WorkpadFileProjection, WorkpadTaskProjection,
+    ToolCallProjection, ToolObservationProjection, WorkpadFileProjection, WorkpadTaskProjection,
 };
 
 #[test]
