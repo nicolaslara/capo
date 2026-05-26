@@ -4,6 +4,10 @@
 
 Prove that Capo can safely dispatch work to real local subscription-backed coding agents, starting with Codex and then Claude Code, without reading or persisting credential material.
 
+Priority: highest feature-phase blocker. Real local Codex/Claude connector proof is required before Capo can honestly claim first real-agent dogfood readiness or move remote-runtime semantics beyond contract/stub behavior.
+
+Authorization: explicitly approved by the user on 2026-05-26 for Capo to work with the user's local Codex / ChatGPT Pro subscription and Claude Code subscription for the gated local smoke and real-dispatch proof paths. This approval does not relax the credential boundary: Capo must still avoid reading or persisting credential/session material, keep restrictive launch defaults, scan artifacts/state, and record evidence before clearing dogfood gates.
+
 ## Prototype Inputs
 
 - P6 parsed Codex, Claude Code, and ACP fixtures into normalized adapter events.
@@ -15,16 +19,17 @@ Prove that Capo can safely dispatch work to real local subscription-backed codin
 - Use `LocalProcessRunner`; do not spawn provider CLIs directly from adapter code.
 - Keep subscription connectors local-only and user-owned.
 - Preserve read-model ownership: provider streams are adapter inputs, not controller truth.
+- Add a deterministic mock-agent path before broadening real-provider coverage. The mock should exercise the same adapter/controller/runtime surfaces as real agents where possible, so agent interaction tests can be scripted without subscription CLIs.
 
 ## Tasks
 
 ### AC1 - Codex Opt-In Smoke
 
-Status: waiting_on_opt_in
+Status: approved_pending_execution
 
 Acceptance:
 
-- Run `CAPO_RUN_CODEX_LOCAL_SMOKE=1 cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture` only after explicit user opt-in.
+- Run `CAPO_RUN_CODEX_LOCAL_SMOKE=1 cargo test -p capo-adapters local_codex_adapter_smoke -- --ignored --nocapture`; explicit user opt-in was granted on 2026-05-26.
 - Use restrictive defaults: isolated workspace, read-only sandbox, ephemeral mode, ignored user config/rules, no provider-native write/network tools.
 - Scan stdout/stderr artifacts and state/evidence trees for credential/session markers.
 - Record whether the local Codex connector is safe enough for first dogfood.
@@ -40,11 +45,11 @@ Evidence:
 
 Skipped verification:
 
-- The real Codex subscription-backed smoke was not run because the task requires explicit user opt-in before setting `CAPO_RUN_CODEX_LOCAL_SMOKE=1`.
+- Prior skipped verification was due to missing opt-in. That blocker is removed as of 2026-05-26; the remaining work is to run the smoke safely, diagnose any environment/CLI blockers, scan artifacts, and record passed/failed/skipped evidence.
 
 Decision:
 
-- The Codex connector is not yet safe enough for first dogfood because the actual subscription-backed process has not run. The harness shape remains appropriate: local process runtime, isolated temporary workspace, read-only sandbox, ephemeral mode, ignored user config/rules, bounded/redacted artifacts, and marker scanning.
+- The Codex connector is high priority and approved for real local proof, but is not yet safe enough for first dogfood until a clean subscription-backed smoke report is recorded. The harness shape remains appropriate: local process runtime, isolated temporary workspace, read-only sandbox, ephemeral mode, ignored user config/rules, bounded/redacted artifacts, and marker scanning.
 
 Review:
 
@@ -69,7 +74,7 @@ Evidence:
 
 Decision:
 
-- Claude Code restricted-argument compatibility is ready for a future opt-in smoke. The smoke itself remains gated behind `CAPO_RUN_CLAUDE_LOCAL_SMOKE=1` and should not run until explicitly authorized.
+- Claude Code restricted-argument compatibility is ready for an opt-in smoke. User authorization was granted on 2026-05-26 for the local Claude Code subscription-backed proof path; the smoke remains gated behind `CAPO_RUN_CLAUDE_LOCAL_SMOKE=1` and must still preserve the credential/session boundary and artifact scanning rules.
 
 Review:
 
@@ -101,7 +106,7 @@ Evidence:
 
 Skipped verification:
 
-- A real local Codex or Claude adapter process has still not been run because subscription-backed smokes require explicit user opt-in.
+- A real local Codex or Claude adapter process has still not produced accepted proof. User opt-in was granted on 2026-05-26, so this is now an execution/evidence task rather than an authorization blocker.
 
 ### AC4 - Connector Readiness Surface
 
@@ -840,3 +845,34 @@ Decision:
 - Treat adapter dogfood gate evidence as the connector-level checkpoint before broader `dogfood readiness`.
 - Keep this report narrower than dogfood readiness: it answers only whether recorded connector smoke evidence clears the first real-agent dogfood gate.
 - Keep smoke report refs metadata-only. The report does not render smoke stdout/stderr, raw prompts, provider output, tokens, cookies, subscription sessions, or credential material.
+
+### AC34 - Scriptable Mock Agent Harness
+
+Status: completed
+
+Acceptance:
+
+- Add a reusable mock agent for deterministic tests of agent interaction flows: start/session, prompt/response, streamed updates, tool requests, permission requests, interruptions, failures, and completion.
+- Drive the mock through Capo's existing adapter/controller/runtime boundaries instead of adding test-only controller shortcuts. Prefer the static-dispatch `FakeAdapter`/fake provider path first, and include an ACP-shaped mock path if that is the cleaner way to exercise protocol behavior.
+- Let tests script responses and state transitions explicitly, similar in spirit to `../aget` mock site/tool tests, so each test can say exactly how the agent responds.
+- Keep the mock provider-free and credential-free. It must not launch Codex, Claude, local model servers, tunnels, or external services.
+- Use the mock in at least one end-to-end controller/CLI test that proves deterministic multi-turn interaction and evidence/read-model updates without relying on fixed Codex/Claude fixture files.
+
+Evidence:
+
+- Reference pattern: `../aget/tests/support/mock_site.rs`, `../aget/tests/support/mock_tools.rs`, and `../aget/tests/fixtures/mock-tools/`.
+- Existing Capo boundaries to reuse: `AgentAdapter::Fake`, `FakeBoundaryController`, normalized adapter events, ACP fixture replay, and static dispatch boundary enums.
+- Scripted mock agent implementation: `../../crates/capo-adapters/src/scripted_mock_agent.rs`.
+- Controller application path: `FakeBoundaryController::apply_scripted_mock_turn` in `../../crates/capo-controller/src/lib.rs`.
+- `cargo test -p capo-adapters scripted_mock_agent -- --nocapture`: passed.
+- `cargo test -p capo-controller scripted_mock_agent_drives_multi_turn_controller_state -- --nocapture`: passed.
+- New tests run without opt-in env vars or provider subscriptions.
+- Focused AC34 review found three medium gaps: unprojected permission/failure/interruption events, bypassed adapter enum dispatch, and duplicate streaming delta idempotency collisions. All three were fixed before completion.
+
+Decision:
+
+- Treat this as a testing architecture task, not a substitute for real local connector proof. The mock proves Capo interaction semantics deterministically; Codex/Claude smoke still proves real subscription-backed connector safety.
+- Prefer scripted mock interactions over more golden JSONL files when testing controller behavior that depends on live turn sequencing, permission/tool branches, interruption, or failure handling.
+- Scripted mock turns emit normalized adapter events with `adapter_kind=mock` and stable idempotency keys. The controller applies them through the static `AgentAdapter::ScriptedMock` variant and existing adapter replay pipeline, so tests exercise read-model, tool-observation, evidence, redirect, permission, failure, interruption, and interrupt behavior without launching a provider.
+- The first AC34 test exposed and fixed a replay event-ID collision: controller adapter replay event IDs now include stable adapter event identity instead of only session plus local index. This matters for multi-turn streams and future ACP `session/load` replay.
+- Repeated streaming deltas for the same item now include a stable event index in the mock timeline key, so deterministic reruns dedupe correctly while distinct deltas in the same turn remain visible.

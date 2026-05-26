@@ -15,6 +15,8 @@ Decisions:
 - Split the post-prototype backlog by boundary rather than by UI milestone. This keeps real-agent connectors, workpad dogfood, dashboard/query, permissions/tools, memory/eval, voice, and remote runtime independently reviewable.
 - The first feature priority should be either `agent-connectors.md` if the goal is real Codex/Claude execution, or `dogfood-bridge.md` if the goal is importing Capo's own workpads before real-agent execution.
 - Real local agent execution remains the main product constraint from the prototype gate. Fake agents prove controller/state/evidence semantics, not useful coding output.
+- As of 2026-05-26, real local Codex/Claude connector proof is the highest feature-phase priority and the user has explicitly approved using the local Codex / ChatGPT Pro subscription and Claude Code subscription for the gated proof paths. Approval removes the opt-in blocker, but does not relax credential/session non-retention, restrictive launch defaults, artifact scanning, or evidence gates.
+- Deterministic agent-interaction tests need a scriptable mock agent, not only fixed Codex/Claude/ACP fixture files. Add the mock behind the existing static-dispatch adapter/controller/runtime boundaries, with `../aget` mock site/tool tests as the reference style for explicit scripted behavior.
 - Workpad import/update safety is the main dogfood bridge constraint. Evidence export is safe, but Capo cannot yet manage source workpad files directly.
 - Dashboard and voice should share a reusable query surface before adding richer UI or conversational clients.
 
@@ -266,6 +268,25 @@ Decisions:
 Verification:
 
 - `cargo test -p capo-cli adapter_dogfood -- --nocapture`: passed.
+
+## F1/AC34 - Scriptable Mock Agent Harness
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `ScriptedMockAgent` / `ScriptedMockTurn` in `capo-adapters` as a reusable provider-free test harness for explicit agent behavior scripts.
+- Represent scripted behavior as normalized adapter events with `adapter_kind=mock`, stable timeline keys, stable idempotency keys, and observed-only native tool observations.
+- Apply scripted turns through `AgentAdapter::ScriptedMock` plus `FakeBoundaryController::apply_scripted_mock_turn`, which delegates to the existing normalized adapter replay pipeline. This avoids a test-only controller shortcut while still making prompt/response, tool, redirect, permission, failure, interruption, evidence, and interrupt flows deterministic.
+- Keep this harness separate from real connector proof. It strengthens deterministic architecture tests, but Codex/Claude subscription-backed smoke evidence is still required before first real-agent dogfood readiness.
+- Fix adapter replay event identity to include stable adapter event identity instead of only session plus local index. This prevents multi-turn scripted streams, and later ACP replay/load streams, from colliding on event IDs while preserving idempotency-key dedupe.
+- Include the mock event index in scripted timeline keys so repeated streaming deltas for the same item remain distinct while reruns of the same script still dedupe.
+- Focused review found and resolved three medium gaps before completion: permission/failure/interruption mock events were not projected, the mock path bypassed static adapter dispatch, and duplicate deltas could collide.
+
+Verification:
+
+- `cargo test -p capo-adapters scripted_mock_agent -- --nocapture`: passed.
+- `cargo test -p capo-controller scripted_mock_agent_drives_multi_turn_controller_state -- --nocapture`: passed.
 
 ## F7/RR23 - Latest Runtime Target Control Readiness
 

@@ -46,6 +46,8 @@ Status: in_progress
 
 Source workpad: `agent-connectors.md`
 
+Priority: highest feature-phase blocker. User approval was granted on 2026-05-26 to use the local Codex / ChatGPT Pro subscription and Claude Code subscription for gated real local connector proof, while preserving all credential/session non-retention, restrictive launch, artifact-scan, and evidence requirements.
+
 Acceptance:
 
 - Run the opt-in Codex local smoke through the existing restrictive harness or record why it cannot safely run.
@@ -54,9 +56,9 @@ Acceptance:
 
 Progress:
 
-- AC1 Codex smoke is waiting on explicit user opt-in. The local Codex CLI exists and the non-secret harness/preflight tests pass, but the real subscription-backed process has not been run.
+- AC1 Codex smoke is approved and pending execution/evidence. The local Codex CLI exists and the non-secret harness/preflight tests pass; explicit user opt-in was granted on 2026-05-26, but an accepted real subscription-backed smoke report has not been recorded.
 - AC2 Claude Code restricted-args verification is completed for installed `claude 2.1.150`.
-- AC3 deterministic normalized adapter replay through controller/state is completed for Codex and Claude fixtures, but the real-agent controller path remains pending until at least one real local adapter stream is run.
+- AC3 deterministic normalized adapter replay through controller/state is completed for Codex and Claude fixtures, but the real-agent controller path remains pending until at least one approved real local adapter stream is run and accepted as evidence.
 - AC4 connector readiness surface is completed. `capo adapter readiness` reports configured Codex/Claude opt-in gates and smoke-plan safety metadata without launching provider CLIs or inspecting credentials.
 - AC5 durable connector readiness state is completed. `capo adapter readiness --record` persists readiness rows and the dashboard renders the remaining dogfood blocker.
 - AC6 real smoke evidence contract is completed. `capo adapter smoke-report record` can persist skipped/failed/passed smoke reports and refuses passed reports without a clean credential scan plus expected marker.
@@ -87,6 +89,7 @@ Progress:
 - AC31 adapter smoke report status query is completed. `smoke-report status` exposes exact and latest connector smoke status through the shared query contract.
 - AC32 latest adapter smoke evidence export is completed. `smoke-report evidence --latest` exports connector proof/blocker artifacts through the shared latest smoke selector.
 - AC33 adapter dogfood gate evidence export is completed. `adapter dogfood-gate evidence` writes a connector-level gate artifact for first real-agent dogfood review.
+- AC34 scriptable mock agent harness is completed. Scripted mock turns now emit stable normalized adapter events and drive deterministic multi-turn controller tests through the existing adapter replay path without provider subscriptions.
 
 Evidence:
 
@@ -141,6 +144,8 @@ Evidence:
 - `capo adapter smoke-report status --latest [--adapter codex|claude] [--state PATH]`
 - `capo adapter smoke-report evidence --latest [--adapter codex|claude] --out DIR [--state PATH]`
 - `capo adapter dogfood-gate evidence --out DIR [--state PATH]`
+- `cargo test -p capo-adapters scripted_mock_agent -- --nocapture`
+- `cargo test -p capo-controller scripted_mock_agent_drives_multi_turn_controller_state -- --nocapture`
 - Focused F1 connector safety reviews: provider-artifact cleanup blocker found and fixed; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge

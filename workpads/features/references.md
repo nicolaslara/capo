@@ -196,6 +196,16 @@ Observed 2026-05-26.
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC33.
 
+## F1/AC34 Scriptable Mock Agent Harness
+
+Observed 2026-05-26.
+
+- Scripted mock agent event builder and unit coverage: `../../crates/capo-adapters/src/scripted_mock_agent.rs`
+- Static `AgentAdapter::ScriptedMock` dispatch, normalized mock adapter kind, and stable event identity support: `../../crates/capo-adapters/src/lib.rs`
+- Controller scripted-turn replay helper, permission/failure/interruption projection, and deterministic multi-turn regression: `../../crates/capo-controller/src/lib.rs`
+- Reference style from aget mock tests: `../../../aget/tests/support/mock_site.rs`, `../../../aget/tests/support/mock_tools.rs`, `../../../aget/tests/fixtures/mock-tools/`
+- No new third-party dependencies were added for AC34.
+
 ## F7/RR23 Latest Runtime Target Control Readiness
 
 Observed 2026-05-26.

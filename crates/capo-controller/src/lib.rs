@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use capo_adapters::{
     AdapterToolObservation, AgentAdapter, ClaudeCodeAdapter, CodexExecAdapter,
     FakeAdapterSessionRequest, FakeAdapterTurnRequest, LocalAdapterLaunchPlan,
-    NormalizedAdapterEvent, ProviderConnector,
+    NormalizedAdapterEvent, ProviderConnector, ScriptedMockAgent, ScriptedMockTurn,
 };
 use capo_core::{
     AgentId, CommandEnvelope, CommandIntent, EvidenceId, MemoryPacketId, ProjectId, RunId,
@@ -188,6 +188,7 @@ impl FakeBoundaryController {
         let mut completed_turn_count = 0;
 
         for (index, adapter_event) in adapter_events.iter().enumerate() {
+            let event_identity = adapter_event_identity(adapter_event, index);
             let Some((event_kind, projection)) =
                 self.adapter_event_projection(refs, adapter_event, &session, &task)?
             else {
@@ -198,7 +199,7 @@ impl FakeBoundaryController {
                     "event-adapter-replay-{}-{}-{}",
                     adapter_event.adapter_kind.as_str(),
                     refs.session_id,
-                    index
+                    event_identity
                 ),
                 event_kind,
                 &self.project_id,
@@ -243,7 +244,7 @@ impl FakeBoundaryController {
                         "event-adapter-tool-observation-{}-{}-{}",
                         adapter_event.adapter_kind.as_str(),
                         refs.session_id,
-                        index
+                        event_identity
                     ),
                     EventKind::ToolObservationRecorded,
                     &self.project_id,
@@ -286,6 +287,20 @@ impl FakeBoundaryController {
             summary_event_count,
             completed_turn_count,
         })
+    }
+
+    pub fn apply_scripted_mock_turn(
+        &self,
+        refs: &FakeRunRefs,
+        turn: &ScriptedMockTurn,
+    ) -> StateResult<AdapterReplayReport> {
+        let adapter = AgentAdapter::scripted_mock(
+            ScriptedMockAgent::new(refs.external_session_ref.clone()).with_turn(turn.clone()),
+        );
+        let events = adapter
+            .scripted_turn_events(turn.turn_ref())
+            .ok_or_else(|| missing_read_model("scripted_mock_turn", &turn.turn_ref()))?;
+        self.apply_normalized_adapter_events(refs, &events)
     }
 
     pub fn plan_local_adapter_dispatch(
@@ -443,6 +458,73 @@ impl FakeBoundaryController {
                     updated_sequence: 0,
                 }),
             ))),
+            "adapter.permission_requested" => Ok(Some((
+                EventKind::PermissionRequested,
+                ProjectionRecord::Session(SessionProjection {
+                    session_id: refs.session_id.clone(),
+                    project_id: self.project_id.clone(),
+                    task_id: Some(refs.task_id.clone()),
+                    agent_id: refs.agent_id.clone(),
+                    title: session.title.clone(),
+                    status: "waiting_for_permission".to_string(),
+                    current_goal: session.current_goal.clone(),
+                    latest_summary: session.latest_summary.clone(),
+                    latest_confidence: session.latest_confidence,
+                    latest_blocker: Some(format!(
+                        "Adapter {} requested permission for content_hash={}",
+                        adapter_event.adapter_kind.as_str(),
+                        adapter_event
+                            .content
+                            .as_ref()
+                            .map(|content| stable_hash(content.as_bytes()))
+                            .unwrap_or_else(|| adapter_event.raw_event_hash.clone())
+                    )),
+                    updated_sequence: 0,
+                }),
+            ))),
+            "adapter.turn_failed" | "adapter.turn_interrupted" => {
+                let interrupted = adapter_event.kind == "adapter.turn_interrupted";
+                Ok(Some((
+                    if interrupted {
+                        EventKind::SessionInterrupted
+                    } else {
+                        EventKind::RunExited
+                    },
+                    ProjectionRecord::Session(SessionProjection {
+                        session_id: refs.session_id.clone(),
+                        project_id: self.project_id.clone(),
+                        task_id: Some(refs.task_id.clone()),
+                        agent_id: refs.agent_id.clone(),
+                        title: session.title.clone(),
+                        status: if interrupted {
+                            "canceled".to_string()
+                        } else {
+                            "failed".to_string()
+                        },
+                        current_goal: session.current_goal.clone(),
+                        latest_summary: Some(format!(
+                            "Adapter {} {} content_hash={}",
+                            adapter_event.adapter_kind.as_str(),
+                            if interrupted { "interrupted" } else { "failed" },
+                            adapter_event
+                                .content
+                                .as_ref()
+                                .map(|content| stable_hash(content.as_bytes()))
+                                .unwrap_or_else(|| adapter_event.raw_event_hash.clone())
+                        )),
+                        latest_confidence: Some(40),
+                        latest_blocker: adapter_event.content.as_ref().map(|content| {
+                            format!(
+                                "Adapter {} {} content_hash={}",
+                                adapter_event.adapter_kind.as_str(),
+                                if interrupted { "interrupted" } else { "failed" },
+                                stable_hash(content.as_bytes())
+                            )
+                        }),
+                        updated_sequence: 0,
+                    }),
+                )))
+            }
             "adapter.session_started" | "adapter.raw_event" => Ok(None),
             _ => Ok(None),
         }
@@ -1750,6 +1832,24 @@ fn adapter_event_payload_json(adapter_event: &NormalizedAdapterEvent) -> String 
     )
 }
 
+fn adapter_event_identity(adapter_event: &NormalizedAdapterEvent, fallback_index: usize) -> String {
+    let mut identity = slug(
+        adapter_event
+            .idempotency_key
+            .as_deref()
+            .or(adapter_event.timeline_key.as_deref())
+            .or(adapter_event.external_item_ref.as_deref())
+            .unwrap_or(&adapter_event.raw_event_hash),
+    );
+    identity = identity.chars().take(96).collect::<String>();
+    identity = identity.trim_matches('-').to_string();
+    if identity.is_empty() {
+        format!("event-{fallback_index}")
+    } else {
+        identity
+    }
+}
+
 fn adapter_tool_call_id(adapter_event: &NormalizedAdapterEvent) -> ToolCallId {
     ToolCallId::new(format!(
         "tool-adapter-{}",
@@ -2037,6 +2137,139 @@ mod tests {
                 .expect("evidence")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn scripted_mock_agent_drives_multi_turn_controller_state() {
+        let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), temp_root())
+            .expect("open controller");
+        let registration = controller.register_agent("mock-worker").expect("agent");
+        let refs = controller
+            .send_task(&registration, "Run a deterministic scripted mock agent")
+            .expect("send task");
+
+        let first_turn = capo_adapters::ScriptedMockTurn::new("turn-1")
+            .message_delta("msg-1", "inspecting state")
+            .message_delta("msg-1", "still inspecting state")
+            .tool_requested("tool-1", "capo.agent_status")
+            .tool_completed("tool-1", "capo.agent_status", "agent is running")
+            .message_completed("msg-2", "state inspected")
+            .turn_completed("done-1");
+        let first_report = controller
+            .apply_scripted_mock_turn(&refs, &first_turn)
+            .expect("apply first mock turn");
+
+        assert_eq!(first_report.input_event_count, 6);
+        assert_eq!(first_report.summary_event_count, 3);
+        assert_eq!(first_report.tool_event_count, 2);
+        assert_eq!(first_report.completed_turn_count, 1);
+
+        let redirected = controller
+            .redirect(&registration, &refs, "Now report the blocker state")
+            .expect("redirect");
+        assert_eq!(
+            redirected.session.current_goal,
+            "Now report the blocker state"
+        );
+
+        let second_turn = capo_adapters::ScriptedMockTurn::new("turn-2")
+            .message_completed("msg-3", "no blockers found")
+            .turn_completed("done-2");
+        let second_report = controller
+            .apply_scripted_mock_turn(&refs, &second_turn)
+            .expect("apply second mock turn");
+
+        assert_eq!(second_report.input_event_count, 2);
+        assert_eq!(second_report.summary_event_count, 1);
+        assert_eq!(second_report.completed_turn_count, 1);
+
+        let control_turn = capo_adapters::ScriptedMockTurn::new("turn-3")
+            .permission_requested("permission-1", "[\"tool:invoke:capo.agent_status\"]")
+            .failed("failure-1", "scripted failure branch")
+            .interrupted("interrupt-1", "scripted interrupt branch");
+        let control_report = controller
+            .apply_scripted_mock_turn(&refs, &control_turn)
+            .expect("apply control mock turn");
+
+        assert_eq!(control_report.input_event_count, 3);
+        assert_eq!(control_report.appended_event_count, 3);
+
+        let observation = controller.observe(&refs).expect("observe");
+        assert_eq!(observation.session.status, "canceled");
+        assert!(
+            observation
+                .session
+                .latest_blocker
+                .as_deref()
+                .unwrap_or_default()
+                .contains("content_hash=")
+        );
+        assert!(
+            observation
+                .session
+                .latest_summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("content_hash=")
+        );
+        let tools = controller
+            .state()
+            .tool_calls_for_session(&refs.session_id)
+            .expect("tool calls");
+        assert!(tools.iter().any(|tool| {
+            tool.tool_name == "capo.agent_status"
+                && tool.tool_origin == "adapter_native:mock"
+                && tool.status == "completed"
+        }));
+        let observations = controller
+            .state()
+            .tool_observations_for_session(&refs.session_id)
+            .expect("tool observations");
+        assert!(observations.iter().any(|observation| {
+            observation.tool_name == "capo.agent_status"
+                && observation.source == "adapter_event:mock"
+                && observation.observed_status == "completed"
+                && observation.instrumentation_level == "observed_only"
+                && observation.tool_call_id.is_some()
+        }));
+        let events = controller
+            .state()
+            .recent_events_for_session(&refs.session_id, 32)
+            .expect("recent events");
+        assert!(events.iter().any(|event| {
+            event.kind == "permission.requested"
+                && event
+                    .payload_json
+                    .contains("\"normalized_kind\":\"adapter.permission_requested\"")
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == "run.exited"
+                && event
+                    .payload_json
+                    .contains("\"normalized_kind\":\"adapter.turn_failed\"")
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == "session.interrupted"
+                && event
+                    .payload_json
+                    .contains("\"normalized_kind\":\"adapter.turn_interrupted\"")
+        }));
+        let evidence = controller
+            .state()
+            .evidence_for_session(&refs.session_id)
+            .expect("evidence");
+        assert!(
+            evidence
+                .iter()
+                .any(|item| item.kind == "adapter_replay:mock")
+        );
+
+        let interrupted = controller
+            .interrupt(&registration, &refs, "scripted mock done")
+            .expect("interrupt");
+        assert_eq!(interrupted.task.capo_execution_status, "canceled");
+        assert_eq!(interrupted.agent.status, "available");
+        assert_eq!(interrupted.run.status, "stopping");
     }
 
     #[test]

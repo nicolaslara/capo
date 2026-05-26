@@ -4,6 +4,8 @@
 //! parsers preserve provider-specific records as adapter facts and emit
 //! normalized adapter events for the controller pipeline.
 
+mod scripted_mock_agent;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -19,12 +21,16 @@ use capo_tools::{
 };
 use serde_json::Value;
 
+pub use scripted_mock_agent::{ScriptedMockAgent, ScriptedMockEvent, ScriptedMockTurn};
+
 /// Initial adapter variants named by the architecture.
-pub const PLANNED_ADAPTERS: &[&str] = &["fake", "codex-exec", "claude-code", "acp"];
+pub const PLANNED_ADAPTERS: &[&str] =
+    &["fake", "scripted-mock", "codex-exec", "claude-code", "acp"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentAdapter {
     Fake(FakeAdapter),
+    ScriptedMock(ScriptedMockAgent),
 }
 
 impl AgentAdapter {
@@ -32,15 +38,21 @@ impl AgentAdapter {
         Self::Fake(FakeAdapter)
     }
 
+    pub fn scripted_mock(script: ScriptedMockAgent) -> Self {
+        Self::ScriptedMock(script)
+    }
+
     pub fn binding(&self) -> BoundaryBinding {
         match self {
             Self::Fake(adapter) => adapter.binding(),
+            Self::ScriptedMock(agent) => agent.binding(),
         }
     }
 
     pub fn open_session(&self, request: FakeAdapterSessionRequest) -> FakeAdapterSession {
         match self {
             Self::Fake(adapter) => adapter.open_session(request),
+            Self::ScriptedMock(agent) => agent.open_session(request),
         }
     }
 
@@ -51,6 +63,7 @@ impl AgentAdapter {
     ) -> FakeAdapterTurnOutput {
         match self {
             Self::Fake(adapter) => adapter.send_turn(session, request),
+            Self::ScriptedMock(agent) => agent.send_turn(session, request),
         }
     }
 
@@ -61,18 +74,28 @@ impl AgentAdapter {
     ) -> FakeAdapterSession {
         match self {
             Self::Fake(adapter) => adapter.attach_session(session_id, external_session_ref),
+            Self::ScriptedMock(agent) => agent.attach_session(session_id, external_session_ref),
         }
     }
 
     pub fn interrupt(&self, session: &FakeAdapterSession, reason: &str) -> FakeAdapterTurnOutput {
         match self {
             Self::Fake(adapter) => adapter.interrupt(session, reason),
+            Self::ScriptedMock(agent) => agent.interrupt(session, reason),
         }
     }
 
     pub fn stop(&self, session: &FakeAdapterSession, reason: &str) -> FakeAdapterTurnOutput {
         match self {
             Self::Fake(adapter) => adapter.stop(session, reason),
+            Self::ScriptedMock(agent) => agent.stop(session, reason),
+        }
+    }
+
+    pub fn scripted_turn_events(&self, turn_ref: &str) -> Option<Vec<NormalizedAdapterEvent>> {
+        match self {
+            Self::Fake(_) => None,
+            Self::ScriptedMock(agent) => agent.turn_events(turn_ref),
         }
     }
 }
@@ -591,6 +614,7 @@ impl AdapterParseError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NormalizedAdapterKind {
+    Mock,
     CodexExec,
     ClaudeCode,
     Acp,
@@ -599,6 +623,7 @@ pub enum NormalizedAdapterKind {
 impl NormalizedAdapterKind {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Mock => "mock",
             Self::CodexExec => "codex_exec",
             Self::ClaudeCode => "claude_code",
             Self::Acp => "acp",
@@ -633,7 +658,7 @@ pub struct NormalizedAdapterEvent {
 }
 
 impl NormalizedAdapterEvent {
-    fn new(
+    pub(crate) fn new(
         adapter_kind: NormalizedAdapterKind,
         kind: impl Into<String>,
         provider_event_kind: impl Into<String>,
@@ -658,7 +683,7 @@ impl NormalizedAdapterEvent {
         }
     }
 
-    fn with_timeline(
+    pub(crate) fn with_timeline(
         mut self,
         external_session_ref: Option<String>,
         external_item_ref: Option<String>,
