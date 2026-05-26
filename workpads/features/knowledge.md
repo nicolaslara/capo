@@ -1614,3 +1614,22 @@ Verification:
 Follow-up:
 
 - Once real tunnel adapters exist, add a separate voice path for reachability evidence rather than overloading exposure metadata.
+
+## F7/RR10 - Latest Connectivity Exposure Evidence Export
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Extend `connectivity exposure-evidence` with `--latest` plus optional owner/channel filters so reviewed remote-control evidence can be exported without copying exposure IDs.
+- Reuse `ProjectDashboard::latest_connectivity_exposure(...)` for selection and the existing connectivity exposure evidence renderer/writer for artifact contents.
+- Preserve the runtime/tunnel boundary: read projections and write Capo-owned evidence only; no tunnel opening, runtime/provider launch, credential inspection, approval request, activation, revocation, or exposure mutation.
+
+Verification:
+
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Follow-up:
+
+- Future voice/web/mobile evidence export should use the same selector if those surfaces request reviewed connectivity artifacts.

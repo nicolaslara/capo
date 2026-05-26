@@ -88,6 +88,7 @@ Usage:
   capo connectivity exposure-status --exposure EXPOSURE_ID [--state PATH]
   capo connectivity exposure-status --latest [--owner-kind runtime_target|capo_server] [--owner-id OWNER_ID] [--channel control|stdio|logs|dashboard|artifact] [--state PATH]
   capo connectivity exposure-evidence --exposure EXPOSURE_ID --out DIR [--state PATH]
+  capo connectivity exposure-evidence --latest [--owner-kind runtime_target|capo_server] [--owner-id OWNER_ID] [--channel control|stdio|logs|dashboard|artifact] --out DIR [--state PATH]
   capo workpad index --root PATH [--state PATH]
   capo workpad next [--path PATH] [--state PATH]
   capo workpad plan-next --agent NAME --adapter codex|claude [--path PATH] [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
@@ -4696,18 +4697,77 @@ fn connectivity_exposure_status(parsed: &ParsedArgs, args: &[String]) -> Result<
 }
 
 fn connectivity_exposure_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
-    let exposure_id = required_arg(args, "--exposure")?;
+    let latest = has_flag(args, "--latest");
+    let exposure_id = optional_arg(args, "--exposure");
+    let owner_kind = optional_arg(args, "--owner-kind");
+    let owner_id = optional_arg(args, "--owner-id");
+    let channel = optional_arg(args, "--channel");
     let out = PathBuf::from(required_arg(args, "--out")?);
-    if let Some(unknown) = args
-        .iter()
-        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--exposure" | "--out"))
-    {
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--")
+            && !matches!(
+                arg.as_str(),
+                "--exposure" | "--latest" | "--owner-kind" | "--owner-id" | "--channel" | "--out"
+            )
+    }) {
         return Err(format!(
             "unknown connectivity exposure-evidence option: {unknown}"
         ));
     }
+    if latest && exposure_id.is_some() {
+        return Err(
+            "connectivity exposure-evidence accepts either --exposure or --latest".to_string(),
+        );
+    }
+    if !latest && (owner_kind.is_some() || owner_id.is_some() || channel.is_some()) {
+        return Err("connectivity exposure-evidence filters require --latest".to_string());
+    }
+    if let Some(kind) = owner_kind.as_deref() {
+        endpoint_owner(kind, owner_id.as_deref().unwrap_or("filter-validation"))?;
+    }
+    if let Some(channel) = channel.as_deref() {
+        parse_channel_kind(channel)?;
+    }
     let state = state(parsed)?;
-    let exposure = connectivity_exposure(&state, &exposure_id)?;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    let exposure = if latest {
+        dashboard
+            .latest_connectivity_exposure(
+                owner_kind.as_deref(),
+                owner_id.as_deref(),
+                channel.as_deref(),
+            )
+            .ok_or_else(|| {
+                let mut filters = Vec::new();
+                if let Some(owner_kind) = owner_kind.as_deref() {
+                    filters.push(format!("owner_kind={owner_kind}"));
+                }
+                if let Some(owner_id) = owner_id.as_deref() {
+                    filters.push(format!("owner_id={owner_id}"));
+                }
+                if let Some(channel) = channel.as_deref() {
+                    filters.push(format!("channel={channel}"));
+                }
+                if filters.is_empty() {
+                    "no recorded connectivity exposures".to_string()
+                } else {
+                    format!(
+                        "no recorded connectivity exposures matching {}",
+                        filters.join(",")
+                    )
+                }
+            })?
+            .clone()
+    } else {
+        let exposure_id = exposure_id.ok_or_else(|| {
+            "connectivity exposure-evidence requires --exposure or --latest".to_string()
+        })?;
+        dashboard
+            .connectivity_exposure_status(&exposure_id)
+            .ok_or_else(|| format!("missing connectivity exposure: {exposure_id}"))?
+            .clone()
+    };
     let project_id = project_id();
     let command = envelope(
         "connectivity-exposure-evidence",
@@ -9405,6 +9465,34 @@ mod tests {
         assert!(markdown.contains("- Health: `disabled`"));
         assert!(markdown.contains("- Reachable: `false`"));
         assert!(markdown.contains("does not open tunnels"));
+
+        let latest_evidence = run_cli(vec![
+            "connectivity".to_string(),
+            "exposure-evidence".to_string(),
+            "--latest".to_string(),
+            "--owner-kind".to_string(),
+            "runtime_target".to_string(),
+            "--owner-id".to_string(),
+            "remote-target-1".to_string(),
+            "--channel".to_string(),
+            "control".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("export latest connectivity exposure evidence");
+        assert!(latest_evidence.contains("connectivity_exposure_evidence_exported=true"));
+        assert_eq!(
+            output_value(&latest_evidence, "exposure"),
+            output_value(&revoked, "exposure")
+        );
+        let latest_evidence_path = output_value(&latest_evidence, "path");
+        let latest_markdown =
+            fs::read_to_string(&latest_evidence_path).expect("read latest connectivity evidence");
+        assert!(latest_markdown.starts_with("<!-- capo:connectivity-exposure-evidence -->"));
+        assert!(latest_markdown.contains("- Status: `revoked`"));
+        assert!(latest_markdown.contains("- Owner: `runtime_target:remote-target-1`"));
 
         let dashboard = run_cli(vec![
             "dashboard".to_string(),

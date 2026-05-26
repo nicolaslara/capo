@@ -206,3 +206,27 @@ Decision:
 - Treat latest connectivity exposure selection as query/read-model behavior. The selector uses the newest exposure projection sequence, with exposure ID as a deterministic tie breaker.
 - Keep exact `--exposure` lookup and latest `--latest` lookup mutually exclusive. Owner and channel filters are only valid for latest lookup.
 - Keep status read-only. It does not open tunnels, launch runtimes or providers, inspect credentials, request approvals, activate grants, revoke exposure, or mutate state.
+
+### RR10 - Latest Connectivity Exposure Evidence Export
+
+Status: completed
+
+Acceptance:
+
+- Add a provider-free latest-selector path for connectivity exposure evidence export.
+- Support the same optional owner/channel filters as latest exposure status.
+- Reuse the Capo-marked connectivity exposure evidence artifact format and guarded writer.
+- Do not open tunnels, launch runtimes or providers, inspect credentials, request approvals, activate grants, revoke exposure, or mutate exposure state.
+
+Evidence:
+
+- CLI `capo connectivity exposure-evidence --latest [--owner-kind runtime_target|capo_server] [--owner-id OWNER_ID] [--channel control|stdio|logs|dashboard|artifact] --out DIR` in `../../crates/capo-cli/src/main.rs`.
+- Latest export reuses `ProjectDashboard::latest_connectivity_exposure(...)` and the existing Capo-marked evidence renderer/writer.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+Decision:
+
+- Treat latest evidence export as operator ergonomics over the shared connectivity exposure selector. It selects the latest matching exposure, then writes the same Capo-owned connectivity exposure evidence artifact as exact export.
+- Keep exact `--exposure` and latest `--latest` mutually exclusive; owner/channel filters are only valid with `--latest`.
+- Keep the export read-model-derived and provider-free. It does not open tunnels, launch runtimes or providers, inspect credentials, request approvals, activate grants, revoke exposure, or mutate exposure state.
