@@ -632,11 +632,14 @@ Progress:
 - CLI5 adapter smoke command module split is completed. Adapter smoke-report record/status/evidence, artifact scanning, smoke evidence rendering, guarded smoke evidence writes, and smoke scan error formatting now live in `crates/capo-cli/src/adapter_smoke.rs`; routing, dashboard, voice summaries, adapter dogfood gate, and dispatch execution remain in `main.rs`.
 - CLI6 adapter dogfood gate module split is completed. Adapter dogfood gate status, gate evidence export, gate evidence rendering, confidence scoring, and guarded gate evidence writes now live in `crates/capo-cli/src/adapter_dogfood.rs`; dashboard rendering continues to reuse the exported gate renderer.
 - CLI7 adapter dispatch status/evidence module split is completed. Dispatch gate checks, latest/specific dispatch status, dispatch evidence export, gate projection, status rendering, evidence rendering, confidence scoring, and guarded dispatch evidence writes now live in `crates/capo-cli/src/adapter_dispatch.rs`; execution request, prompt materialization, preflight, local run, replay, dashboard, and voice summaries remain in `main.rs`.
+- CLI8 adapter dispatch preparation/local-run split is completed. Execution-request, prompt materialization, preflight checks, opt-in mapping, and prompt source validation now live in `crates/capo-cli/src/adapter_dispatch_prepare.rs`; local runtime execution, subscription-safe launch-plan construction, dispatch artifact scanning/deletion, and execution recording now live in `crates/capo-cli/src/adapter_dispatch_run.rs`; replay, dashboard, and voice summaries remain in `main.rs`.
 
 Evidence:
 
 - `crates/capo-cli/src/main.rs`
 - `crates/capo-cli/src/adapter_dispatch.rs`
+- `crates/capo-cli/src/adapter_dispatch_prepare.rs`
+- `crates/capo-cli/src/adapter_dispatch_run.rs`
 - `crates/capo-cli/src/adapter_dogfood.rs`
 - `crates/capo-cli/src/adapter_smoke.rs`
 - `crates/capo-cli/src/cli_surface.rs`

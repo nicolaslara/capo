@@ -2718,6 +2718,30 @@ Verification:
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - Focused read-only review subagent: no behavior or helper-visibility issues found; residual cohesion risk accepted as the next split target.
 
+## F9/CLI8 - Adapter Dispatch Preparation And Local Run Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move adapter dispatch execution-request, prompt materialization, run preflight, opt-in environment mapping, prompt source validation, and redacted prompt materialization rendering into `adapter_dispatch_prepare.rs`.
+- Move adapter dispatch local provider execution, subscription-safe launch-plan construction, dispatch artifact secret scanning/deletion, execution projection, and execution event recording into `adapter_dispatch_run.rs`.
+- Keep dispatch replay in `main.rs` for this slice. Replay applies normalized fixture events through the controller and is closer to adapter fixture replay than runtime provider execution.
+- Keep dashboard and voice summaries in `main.rs` for this slice because they aggregate multiple feature families rather than owning dispatch execution state.
+- Split the first extraction into two modules after seeing that a single execution module would be 889 lines. The final split keeps `adapter_dispatch_prepare.rs` at 552 lines and `adapter_dispatch_run.rs` at 384 lines, closer to the LLM-friendly target.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_dispatch -- --nocapture`: passed.
+- `cargo test -p capo-cli prototype_e2e_smoke -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_dispatch_status -- --nocapture`: passed.
+- `cargo check -p capo-cli`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- Focused read-only review subagent: no issues found; residual risk is that real provider CLI dispatch remains manually opt-in and not run by default gates.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.
