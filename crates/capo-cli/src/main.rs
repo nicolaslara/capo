@@ -3125,12 +3125,15 @@ fn render_adapter_dogfood_gate(gate: &AdapterDogfoodGate) -> String {
 
 fn render_dogfood_readiness(readiness: &ProjectDogfoodReadiness) -> String {
     format!(
-        "dogfood_readiness=true\nready={}\nstatus={}\nreal_agent_connector_ready={}\nworkpad_bridge_ready={}\ndispatch_chain_ready={}\nworkpad_tasks={}\nworkpad_tasks_observed_only={}\nworkpad_tasks_imported={}\ndispatch_plans={}\nready_dispatch_gates={}\ndispatch_replays={}\ndispatch_executions={}\nconnector_evidence_refs={}\nworkpad_task_refs={}\ndispatch_chain_refs={}\nproject_evidence_refs={}\nblockers={}\nnext_actions={}\n",
+        "dogfood_readiness=true\nready={}\nstatus={}\nreal_agent_connector_ready={}\nruntime_target_ready={}\nworkpad_bridge_ready={}\ndispatch_chain_ready={}\nruntime_targets={}\nruntime_targets_available={}\nworkpad_tasks={}\nworkpad_tasks_observed_only={}\nworkpad_tasks_imported={}\ndispatch_plans={}\nready_dispatch_gates={}\ndispatch_replays={}\ndispatch_executions={}\nconnector_evidence_refs={}\nruntime_target_refs={}\nworkpad_task_refs={}\ndispatch_chain_refs={}\nproject_evidence_refs={}\nblockers={}\nnext_actions={}\n",
         readiness.ready,
         readiness.status,
         readiness.real_agent_connector_ready,
+        readiness.runtime_target_ready,
         readiness.workpad_bridge_ready,
         readiness.dispatch_chain_ready,
+        readiness.runtime_target_count,
+        readiness.available_runtime_target_count,
         readiness.workpad_task_count,
         readiness.observed_workpad_task_count,
         readiness.imported_workpad_task_count,
@@ -3139,6 +3142,7 @@ fn render_dogfood_readiness(readiness: &ProjectDogfoodReadiness) -> String {
         readiness.dispatch_replay_count,
         readiness.dispatch_execution_count,
         comma_or_none(&readiness.connector_evidence_refs),
+        comma_or_none(&readiness.runtime_target_refs),
         comma_or_none(&readiness.workpad_task_refs),
         comma_or_none(&readiness.dispatch_chain_refs),
         comma_or_none(&readiness.project_evidence_refs),
@@ -3156,14 +3160,17 @@ fn render_dogfood_readiness_evidence(
     readiness: &ProjectDogfoodReadiness,
 ) -> String {
     format!(
-        "<!-- capo:dogfood-readiness -->\n# Capo Dogfood Readiness - {}\n\n## Objective\n\nReview whether Capo is ready to move its own project workpads into Capo-managed dogfood.\n\n## Summary\n\n- Project: `{}`\n- Ready: `{}`\n- Status: `{}`\n- Real-agent connector ready: `{}`\n- Workpad bridge ready: `{}`\n- Dispatch chain ready: `{}`\n\n## Counts\n\n- Workpad tasks: `{}`\n- Observed-only workpad tasks: `{}`\n- Imported workpad tasks: `{}`\n- Dispatch plans: `{}`\n- Ready dispatch gates: `{}`\n- Dispatch replays: `{}`\n- Dispatch executions: `{}`\n\n## Component Refs\n\n- Connector evidence refs: `{}`\n- Workpad task refs: `{}`\n- Dispatch chain refs: `{}`\n- Project evidence refs: `{}`\n\n## Blockers\n\n{}\n\n## Next Actions\n\n{}\n\n## Evidence Policy\n\n- This report is derived from persisted Capo read models only.\n- It does not run provider CLIs, inspect credentials, materialize prompts, open tunnels, or edit markdown.\n- Raw prompts, raw provider output, credentials, cookies, and subscription session material are not rendered.\n",
+        "<!-- capo:dogfood-readiness -->\n# Capo Dogfood Readiness - {}\n\n## Objective\n\nReview whether Capo is ready to move its own project workpads into Capo-managed dogfood.\n\n## Summary\n\n- Project: `{}`\n- Ready: `{}`\n- Status: `{}`\n- Real-agent connector ready: `{}`\n- Runtime target ready: `{}`\n- Workpad bridge ready: `{}`\n- Dispatch chain ready: `{}`\n\n## Counts\n\n- Runtime targets: `{}`\n- Available runtime targets: `{}`\n- Workpad tasks: `{}`\n- Observed-only workpad tasks: `{}`\n- Imported workpad tasks: `{}`\n- Dispatch plans: `{}`\n- Ready dispatch gates: `{}`\n- Dispatch replays: `{}`\n- Dispatch executions: `{}`\n\n## Component Refs\n\n- Connector evidence refs: `{}`\n- Runtime target refs: `{}`\n- Workpad task refs: `{}`\n- Dispatch chain refs: `{}`\n- Project evidence refs: `{}`\n\n## Blockers\n\n{}\n\n## Next Actions\n\n{}\n\n## Evidence Policy\n\n- This report is derived from persisted Capo read models only.\n- It does not run provider CLIs, inspect credentials, materialize prompts, open tunnels, launch runtimes, or edit markdown.\n- Raw prompts, raw provider output, credentials, cookies, and subscription session material are not rendered.\n",
         readiness.status,
         project_id,
         readiness.ready,
         readiness.status,
         readiness.real_agent_connector_ready,
+        readiness.runtime_target_ready,
         readiness.workpad_bridge_ready,
         readiness.dispatch_chain_ready,
+        readiness.runtime_target_count,
+        readiness.available_runtime_target_count,
         readiness.workpad_task_count,
         readiness.observed_workpad_task_count,
         readiness.imported_workpad_task_count,
@@ -3172,6 +3179,7 @@ fn render_dogfood_readiness_evidence(
         readiness.dispatch_replay_count,
         readiness.dispatch_execution_count,
         comma_or_none(&readiness.connector_evidence_refs),
+        comma_or_none(&readiness.runtime_target_refs),
         comma_or_none(&readiness.workpad_task_refs),
         comma_or_none(&readiness.dispatch_chain_refs),
         comma_or_none(&readiness.project_evidence_refs),
@@ -3669,13 +3677,15 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
         &dashboard.adapter_dogfood_gate,
     ));
     output.push_str(&format!(
-        "project_dogfood_readiness={} status={} real_agent_connector_ready={} workpad_bridge_ready={} dispatch_chain_ready={} connector_evidence_refs={} workpad_task_refs={} dispatch_chain_refs={} project_evidence_refs={} blockers={} next_actions={}\n",
+        "project_dogfood_readiness={} status={} real_agent_connector_ready={} runtime_target_ready={} workpad_bridge_ready={} dispatch_chain_ready={} connector_evidence_refs={} runtime_target_refs={} workpad_task_refs={} dispatch_chain_refs={} project_evidence_refs={} blockers={} next_actions={}\n",
         dogfood_readiness.ready,
         dogfood_readiness.status,
         dogfood_readiness.real_agent_connector_ready,
+        dogfood_readiness.runtime_target_ready,
         dogfood_readiness.workpad_bridge_ready,
         dogfood_readiness.dispatch_chain_ready,
         comma_or_none(&dogfood_readiness.connector_evidence_refs),
+        comma_or_none(&dogfood_readiness.runtime_target_refs),
         comma_or_none(&dogfood_readiness.workpad_task_refs),
         comma_or_none(&dogfood_readiness.dispatch_chain_refs),
         comma_or_none(&dogfood_readiness.project_evidence_refs),
@@ -4457,18 +4467,20 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
         VoiceReadScope::ProjectDogfoodReadiness => {
             let readiness = dashboard.dogfood_readiness();
             output.push_str(&format!(
-                "spoken_dogfood_ready={}\nspoken_dogfood_status={}\nspoken_real_agent_connector_ready={}\nspoken_workpad_bridge_ready={}\nspoken_dispatch_chain_ready={}\nspoken_blockers={}\nspoken_next_actions={}\n",
+                "spoken_dogfood_ready={}\nspoken_dogfood_status={}\nspoken_real_agent_connector_ready={}\nspoken_runtime_target_ready={}\nspoken_workpad_bridge_ready={}\nspoken_dispatch_chain_ready={}\nspoken_blockers={}\nspoken_next_actions={}\n",
                 readiness.ready,
                 readiness.status,
                 readiness.real_agent_connector_ready,
+                readiness.runtime_target_ready,
                 readiness.workpad_bridge_ready,
                 readiness.dispatch_chain_ready,
                 comma_or_none(&readiness.blockers),
                 comma_or_none(&readiness.next_actions)
             ));
             output.push_str(&format!(
-                "spoken_connector_evidence_refs={}\nspoken_workpad_task_refs={}\nspoken_dispatch_chain_refs={}\nspoken_project_evidence_refs={}\n",
+                "spoken_connector_evidence_refs={}\nspoken_runtime_target_refs={}\nspoken_workpad_task_refs={}\nspoken_dispatch_chain_refs={}\nspoken_project_evidence_refs={}\n",
                 comma_or_none(&readiness.connector_evidence_refs),
+                comma_or_none(&readiness.runtime_target_refs),
                 comma_or_none(&readiness.workpad_task_refs),
                 comma_or_none(&readiness.dispatch_chain_refs),
                 comma_or_none(&readiness.project_evidence_refs)
@@ -9025,6 +9037,27 @@ mod tests {
                 .iter()
                 .any(|evidence| evidence.kind == "adapter_dispatch_evidence")
         );
+        let runtime_workspace = temp_root("dogfood-readiness-runtime-workspace");
+        let runtime_artifacts = temp_root("dogfood-readiness-runtime-artifacts");
+        let runtime_target = run_cli(vec![
+            "runtime".to_string(),
+            "target".to_string(),
+            "register".to_string(),
+            "--target".to_string(),
+            "runtime-target-local-dogfood".to_string(),
+            "--name".to_string(),
+            "local dogfood runtime".to_string(),
+            "--runner".to_string(),
+            "local-process".to_string(),
+            "--workspace".to_string(),
+            runtime_workspace.display().to_string(),
+            "--artifacts".to_string(),
+            runtime_artifacts.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("register dogfood runtime target");
+        assert!(runtime_target.contains("runtime_target_registered=true"));
         let readiness = run_cli(vec![
             "dogfood".to_string(),
             "readiness".to_string(),
@@ -9037,12 +9070,16 @@ mod tests {
         assert!(readiness.contains("dogfood_readiness=true"));
         assert!(readiness.contains("ready=false"));
         assert!(readiness.contains("real_agent_connector_ready=true"));
+        assert!(readiness.contains("runtime_target_ready=true"));
         assert!(readiness.contains("dispatch_chain_ready=true"));
         assert!(readiness.contains("workpad_bridge_ready=false"));
+        assert!(readiness.contains("runtime_targets=1"));
+        assert!(readiness.contains("runtime_targets_available=1"));
         assert!(readiness.contains("dispatch_plans=1"));
         assert!(readiness.contains("dispatch_replays=1"));
         assert!(readiness.contains("dispatch_executions=1"));
         assert!(readiness.contains("connector_evidence_refs=adapter-smoke-codex"));
+        assert!(readiness.contains("runtime_target_refs=runtime-target-local-dogfood"));
         assert!(readiness.contains("dispatch_chain_refs=adapter-dispatch-plan-"));
         assert!(readiness.contains("adapter-dispatch-replay-"));
         assert!(readiness.contains("adapter-dispatch-execution-"));
@@ -9063,6 +9100,7 @@ mod tests {
         assert!(readiness_markdown.contains("## Counts"));
         assert!(readiness_markdown.contains("## Component Refs"));
         assert!(readiness_markdown.contains("Connector evidence refs: `adapter-smoke-codex"));
+        assert!(readiness_markdown.contains("Runtime target refs: `runtime-target-local-dogfood`"));
         assert!(readiness_markdown.contains("Dispatch chain refs: `adapter-dispatch-plan-"));
         assert!(readiness_markdown.contains("adapter-dispatch-replay-"));
         assert!(readiness_markdown.contains("adapter-dispatch-execution-"));
@@ -9083,9 +9121,13 @@ mod tests {
         assert!(dashboard_after_readiness.contains("project_dogfood_readiness=false"));
         assert!(dashboard_after_readiness.contains("status=blocked_pending_dogfood_prerequisites"));
         assert!(dashboard_after_readiness.contains("real_agent_connector_ready=true"));
+        assert!(dashboard_after_readiness.contains("runtime_target_ready=true"));
         assert!(dashboard_after_readiness.contains("workpad_bridge_ready=false"));
         assert!(dashboard_after_readiness.contains("dispatch_chain_ready=true"));
         assert!(dashboard_after_readiness.contains("connector_evidence_refs=adapter-smoke-codex"));
+        assert!(
+            dashboard_after_readiness.contains("runtime_target_refs=runtime-target-local-dogfood")
+        );
         assert!(dashboard_after_readiness.contains("workpad_task_refs=none"));
         assert!(dashboard_after_readiness.contains("dispatch_chain_refs=adapter-dispatch-plan-"));
         assert!(dashboard_after_readiness.contains("adapter-dispatch-replay-"));
@@ -12160,9 +12202,11 @@ mod tests {
         assert!(output.contains("read_scope=project_dogfood_readiness"));
         assert!(output.contains("spoken_dogfood_ready=false"));
         assert!(output.contains("spoken_dogfood_status=blocked_pending_dogfood_prerequisites"));
-        assert!(output.contains("spoken_blockers=real_agent_connector_not_proven,workpad_index_missing,dispatch_chain_missing"));
-        assert!(output.contains("spoken_next_actions=record_clean_codex_smoke_evidence,run_workpad_index,record_or_replay_workpad_dispatch_plan"));
+        assert!(output.contains("spoken_runtime_target_ready=false"));
+        assert!(output.contains("spoken_blockers=real_agent_connector_not_proven,available_runtime_target_missing,workpad_index_missing,dispatch_chain_missing"));
+        assert!(output.contains("spoken_next_actions=record_clean_codex_smoke_evidence,register_available_runtime_target,run_workpad_index,record_or_replay_workpad_dispatch_plan"));
         assert!(output.contains("spoken_connector_evidence_refs=none"));
+        assert!(output.contains("spoken_runtime_target_refs=none"));
         assert!(output.contains("spoken_workpad_task_refs=none"));
         assert!(output.contains("spoken_dispatch_chain_refs=none"));
         assert!(output.contains("spoken_project_evidence_refs=none"));

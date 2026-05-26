@@ -180,6 +180,7 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
                     "ready",
                     "status",
                     "real_agent_connector_ready",
+                    "runtime_target_ready",
                     "workpad_bridge_ready",
                     "dispatch_chain_ready",
                     "component_refs",
@@ -1452,6 +1453,11 @@ mod tests {
             plan.read_contract
                 .required_fields
                 .contains(&"real_agent_connector_ready")
+        );
+        assert!(
+            plan.read_contract
+                .required_fields
+                .contains(&"runtime_target_ready")
         );
         assert!(!plan.requires_visible_confirmation);
         assert!(!plan.transcript_policy.retain_raw_transcript);

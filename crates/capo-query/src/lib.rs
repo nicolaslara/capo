@@ -423,8 +423,11 @@ pub struct ProjectDogfoodReadiness {
     pub ready: bool,
     pub status: String,
     pub real_agent_connector_ready: bool,
+    pub runtime_target_ready: bool,
     pub workpad_bridge_ready: bool,
     pub dispatch_chain_ready: bool,
+    pub runtime_target_count: usize,
+    pub available_runtime_target_count: usize,
     pub workpad_task_count: usize,
     pub observed_workpad_task_count: usize,
     pub imported_workpad_task_count: usize,
@@ -433,6 +436,7 @@ pub struct ProjectDogfoodReadiness {
     pub dispatch_replay_count: usize,
     pub dispatch_execution_count: usize,
     pub connector_evidence_refs: Vec<String>,
+    pub runtime_target_refs: Vec<String>,
     pub workpad_task_refs: Vec<String>,
     pub dispatch_chain_refs: Vec<String>,
     pub project_evidence_refs: Vec<String>,
@@ -614,6 +618,13 @@ pub fn adapter_dogfood_gate(smoke_reports: &[AdapterSmokeReportProjection]) -> A
 
 pub fn project_dogfood_readiness(dashboard: &ProjectDashboard) -> ProjectDogfoodReadiness {
     let real_agent_connector_ready = dashboard.adapter_dogfood_gate.ready;
+    let runtime_target_count = dashboard.runtime_targets.len();
+    let available_runtime_target_count = dashboard
+        .runtime_targets
+        .iter()
+        .filter(|target| target.status == "available")
+        .count();
+    let runtime_target_ready = available_runtime_target_count > 0;
     let workpad_task_count = dashboard.workpad_tasks.len();
     let observed_workpad_task_count = dashboard
         .workpad_tasks
@@ -642,6 +653,11 @@ pub fn project_dogfood_readiness(dashboard: &ProjectDashboard) -> ProjectDogfood
         .adapter_smoke_reports
         .iter()
         .map(|report| report.smoke_report_id.clone())
+        .collect::<Vec<_>>();
+    let runtime_target_refs = dashboard
+        .runtime_targets
+        .iter()
+        .map(|target| target.runtime_target_id.clone())
         .collect::<Vec<_>>();
     let workpad_task_refs = dashboard
         .workpad_tasks
@@ -676,6 +692,10 @@ pub fn project_dogfood_readiness(dashboard: &ProjectDashboard) -> ProjectDogfood
         blockers.push("real_agent_connector_not_proven".to_string());
         next_actions.push("record_clean_codex_smoke_evidence".to_string());
     }
+    if !runtime_target_ready {
+        blockers.push("available_runtime_target_missing".to_string());
+        next_actions.push("register_available_runtime_target".to_string());
+    }
     if !workpad_bridge_ready {
         blockers.push("workpad_index_missing".to_string());
         next_actions.push("run_workpad_index".to_string());
@@ -693,8 +713,11 @@ pub fn project_dogfood_readiness(dashboard: &ProjectDashboard) -> ProjectDogfood
             "blocked_pending_dogfood_prerequisites".to_string()
         },
         real_agent_connector_ready,
+        runtime_target_ready,
         workpad_bridge_ready,
         dispatch_chain_ready,
+        runtime_target_count,
+        available_runtime_target_count,
         workpad_task_count,
         observed_workpad_task_count,
         imported_workpad_task_count,
@@ -703,6 +726,7 @@ pub fn project_dogfood_readiness(dashboard: &ProjectDashboard) -> ProjectDogfood
         dispatch_replay_count,
         dispatch_execution_count,
         connector_evidence_refs,
+        runtime_target_refs,
         workpad_task_refs,
         dispatch_chain_refs,
         project_evidence_refs,
@@ -1261,6 +1285,7 @@ mod tests {
             blocked.blockers,
             vec![
                 "real_agent_connector_not_proven",
+                "available_runtime_target_missing",
                 "workpad_index_missing",
                 "dispatch_chain_missing"
             ]
@@ -1275,6 +1300,7 @@ mod tests {
             "clean",
             true,
         );
+        append_runtime_target(&state, &project_id, "runtime-target-local-1", "available");
         append_workpad_task(
             &state,
             &project_id,
@@ -1322,8 +1348,11 @@ mod tests {
         assert!(ready.ready);
         assert_eq!(ready.status, "ready_for_first_dogfood");
         assert!(ready.real_agent_connector_ready);
+        assert!(ready.runtime_target_ready);
         assert!(ready.workpad_bridge_ready);
         assert!(ready.dispatch_chain_ready);
+        assert_eq!(ready.runtime_target_count, 1);
+        assert_eq!(ready.available_runtime_target_count, 1);
         assert_eq!(ready.workpad_task_count, 1);
         assert_eq!(ready.observed_workpad_task_count, 1);
         assert_eq!(ready.dispatch_plan_count, 1);
@@ -1332,6 +1361,7 @@ mod tests {
             ready.connector_evidence_refs,
             vec!["adapter-smoke-codex-clean"]
         );
+        assert_eq!(ready.runtime_target_refs, vec!["runtime-target-local-1"]);
         assert_eq!(
             ready.workpad_task_refs,
             vec!["workpads:features:tasks.md#f1"]

@@ -228,3 +228,33 @@ Decision:
 
 - Treat component refs as review breadcrumbs for the migration checkpoint. Operators can see which persisted rows support or block readiness without parsing raw events.
 - Use IDs only: smoke report IDs, workpad task IDs, dispatch plan/replay/execution IDs, and project evidence IDs. Raw prompts, provider fixture text, provider output, and markdown source bodies remain excluded.
+
+### DB9 - Runtime Target Dogfood Readiness
+
+Status: completed
+
+Acceptance:
+
+- Include runtime target readiness in the shared dogfood readiness query.
+- Require at least one available runtime target before Capo reports ready for first dogfood.
+- Render runtime target counts and refs in CLI readiness output, dashboard readiness rows, voice readiness answers, and readiness evidence artifacts.
+- Keep the readiness check read-model-derived and provider-free: do not launch runtimes, launch providers, inspect credentials, open tunnels, materialize prompts, request approvals, activate grants, or edit markdown.
+
+Evidence:
+
+- `ProjectDogfoodReadiness` runtime target fields and readiness computation in `../../crates/capo-query/src/lib.rs`.
+- CLI/dashboard/voice dogfood readiness rendering in `../../crates/capo-cli/src/main.rs`.
+- Voice dogfood-readiness read contract in `../../crates/capo-voice/src/lib.rs`.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test -p capo-query dogfood_readiness -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_dogfood_readiness -- --nocapture`: passed.
+- `cargo test`: passed.
+
+Decision:
+
+- Treat runtime target readiness as an execution-placement prerequisite distinct from connector proof, workpad bridge state, dispatch-chain state, and connectivity exposure.
+- Count only targets with `status=available` as satisfying the gate. Disabled and unhealthy targets remain visible through runtime target status surfaces but do not clear dogfood readiness.
+- Use runtime target IDs as review breadcrumbs in readiness output and artifacts. The readiness check does not prove a runtime process is live or that a tunnel is open.

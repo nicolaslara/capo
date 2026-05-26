@@ -2045,6 +2045,27 @@ Verification:
 - `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
 - `cargo test`: passed.
 
+## F2/DB9 - Runtime Target Dogfood Readiness
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add runtime target readiness to `ProjectDogfoodReadiness` so the dogfood gate tracks execution placement separately from connector proof, workpad bridge state, and dispatch-chain state.
+- Require at least one `available` runtime target before reporting `ready_for_first_dogfood`. Disabled and unhealthy targets remain visible through target status surfaces but do not clear the gate.
+- Render runtime target readiness, counts, and refs through CLI readiness, dashboard readiness, voice dogfood answers, and readiness evidence artifacts.
+- Keep the check read-model-derived and metadata-only. It does not launch runtime processes, launch provider CLIs, open tunnels, inspect credentials, materialize prompts, request approvals, activate grants, retain raw transcripts, or edit markdown.
+
+Verification:
+
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test -p capo-query dogfood_readiness -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_dogfood_readiness -- --nocapture`: passed.
+- `cargo test`: passed.
+
 ## F7/RR11 - Runtime Target Inventory
 
 Status: completed on 2026-05-26.

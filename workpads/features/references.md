@@ -1069,3 +1069,14 @@ Observed 2026-05-26.
 - Shared latest runtime target selector: `../../crates/capo-query/src/lib.rs`
 - Voice source workpad: `voice.md`
 - No new third-party dependencies were added for V15.
+
+## F2/DB9 Runtime Target Dogfood Readiness
+
+Observed 2026-05-26.
+
+- Shared dogfood readiness runtime target fields and gating: `../../crates/capo-query/src/lib.rs`
+- CLI readiness, dashboard readiness, voice rendering, evidence artifact, and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Voice dogfood-readiness required field contract: `../../crates/capo-voice/src/lib.rs`
+- Dogfood bridge source workpad: `dogfood-bridge.md`
+- Runtime target source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for DB9.
