@@ -1543,3 +1543,15 @@ Observed 2026-05-26.
 - Adapter regression tests: `../../crates/capo-adapters/src/tests.rs`
 - Resulting file sizes: `../../crates/capo-adapters/src/lib.rs` 932 lines; `../../crates/capo-adapters/src/local_subscription.rs` 364 lines; `../../crates/capo-adapters/src/scripted_mock_agent.rs` 479 lines; `../../crates/capo-adapters/src/tests.rs` 610 lines.
 - No new third-party dependencies were added for AD1.
+
+## F14/VM1 Voice Contract, Planning Support, And Test Module Split
+
+Observed 2026-05-26.
+
+- Voice crate root after split: `../../crates/capo-voice/src/lib.rs`
+- Public voice contract types: `../../crates/capo-voice/src/contract.rs`
+- Transcript matcher and planning helper module: `../../crates/capo-voice/src/planning_support.rs`
+- Voice regression tests: `../../crates/capo-voice/src/tests.rs`
+- Deterministic agent interaction mock retained from AC34: `../../crates/capo-adapters/src/scripted_mock_agent.rs`
+- Resulting file sizes: `../../crates/capo-voice/src/lib.rs` 829 lines; `../../crates/capo-voice/src/contract.rs` 119 lines; `../../crates/capo-voice/src/planning_support.rs` 467 lines; `../../crates/capo-voice/src/tests.rs` 782 lines.
+- No new third-party dependencies were added for VM1.

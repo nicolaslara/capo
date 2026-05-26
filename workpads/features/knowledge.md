@@ -3179,3 +3179,23 @@ Verification:
 - `git diff --check`: passed.
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+## F14/VM1 - Voice Contract, Planning Support, And Test Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move public voice contract types into `contract.rs` so callers and documentation can inspect the voice API without reading the entire transcript planner decision tree.
+- Move transcript parsing helpers, selector filters, normalization, and command-envelope support into `planning_support.rs`. These are one concern: converting normalized transcript text into stable planner inputs and read-model filters.
+- Keep `plan_dummy_transcript` in the crate root for now. It remains 829 lines after the split because it encodes many feature-specific intent branches; splitting the branches should happen alongside future behavior work so tests can prove each intent family independently.
+- Keep `ConnectivityExposureVoiceFilter` and `RuntimeTargetVoiceFilter` re-exported from the crate root to preserve the public `capo_voice::...` import surface.
+- Treat the deterministic mock-agent request as satisfied by AC34's `ScriptedMockAgent`, which already routes scripted turns through static adapter dispatch and controller replay. Future ACP-specific protocol mocks should build on that seam instead of bypassing controller boundaries.
+
+Verification:
+
+- `cargo test -p capo-voice`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.

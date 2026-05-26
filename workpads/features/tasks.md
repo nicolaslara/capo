@@ -693,6 +693,37 @@ Evidence:
 - `cargo test --workspace --all-targets`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 
+## F14 - Voice Maintainability
+
+Status: completed
+
+Source workpad: `voice.md`; cross-cutting voice implementation.
+
+Acceptance:
+
+- Reduce `capo-voice` file size where behavior-preserving splits are available.
+- Preserve the public voice planning contract, read scopes, transcript-retention policy, and confirmation requirements.
+- Keep voice contract types, transcript intent matching, and regression tests separated by responsibility.
+
+Progress:
+
+- VM1 voice contract, planning support, and test module split is completed. Public voice contract types now live in `crates/capo-voice/src/contract.rs`; transcript matcher/helper logic now lives in `crates/capo-voice/src/planning_support.rs`; regression tests now live in `crates/capo-voice/src/tests.rs`; the crate root retains the planner entrypoint and public re-exports.
+- `crates/capo-voice/src/lib.rs` is reduced from 2,184 lines to 829 lines. Remaining `lib.rs` size is driven by the broad planner decision tree; future voice work should split planner branches by intent family when behavior changes require touching those branches.
+- Deterministic agent-interaction testing is already covered by AC34's `ScriptedMockAgent`; do not reopen that work unless future tests need a narrower ACP-shaped mock.
+
+Evidence:
+
+- `crates/capo-voice/src/lib.rs`
+- `crates/capo-voice/src/contract.rs`
+- `crates/capo-voice/src/planning_support.rs`
+- `crates/capo-voice/src/tests.rs`
+- `crates/capo-adapters/src/scripted_mock_agent.rs`
+- `cargo test -p capo-voice`
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo test --workspace --all-targets`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+
 ## F9 - CLI Maintainability
 
 Status: in_progress
