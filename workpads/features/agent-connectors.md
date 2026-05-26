@@ -664,3 +664,26 @@ Decision:
 
 - Treat dispatch-chain status as a read-model query contract, not CLI glue. The CLI still owns text formatting, but the cross-row selection and next-action derivation live in `capo-query`.
 - Keep dispatch evidence export on its existing projection inputs for now; it produces a markdown artifact and has broader rendering needs than the one-line status contract.
+
+### AC27 - Latest Dispatch Status Selection
+
+Status: completed
+
+Acceptance:
+
+- Add a shared query helper that selects the latest recorded dispatch-chain status without requiring the operator to know a dispatch-plan ID.
+- Support an optional agent-name filter so operators can ask for the latest dispatch status for a specific agent.
+- Expose the selector through the existing `dispatch-status` operator surface without mutating state.
+- Preserve prompt/output redaction and avoid provider CLI execution, prompt materialization, tunnel changes, or credential inspection.
+
+Evidence:
+
+- `ProjectDashboard::latest_adapter_dispatch_status(...)` in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo adapter dispatch-status --latest [--agent NAME]` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query latest_adapter_dispatch_status -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Decision:
+
+- Treat latest dispatch selection as query/read-model behavior. It chooses the dispatch plan with the latest plan/gate/replay/execution activity and then renders the same `AdapterDispatchStatus` contract as ID-based lookup.
+- Keep `--agent` scoped to `--latest` so ID-based lookup remains unambiguous.

@@ -317,6 +317,26 @@ Follow-up:
 
 - Dogfood whether operators naturally refer to dispatch plan IDs directly or whether Capo needs a read-only voice helper for "latest dispatch for agent/task" once real dispatch traces exist.
 
+## F1/AC27 - Latest Dispatch Status Selection
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `ProjectDashboard::latest_adapter_dispatch_status(...)` so operator surfaces can inspect the latest dispatch-chain status without requiring a copied dispatch-plan ID.
+- Select latest by the maximum activity sequence across the dispatch plan and its related gate, replay, and execution rows. This treats follow-up gate/replay/execution records as activity on the same dispatch chain.
+- Support an optional agent-name filter for "latest dispatch for this agent" while keeping exact `--dispatch-plan` lookup unchanged.
+- Preserve provider safety: the selector reads projections only and does not rerun gates, materialize prompts, launch providers, inspect credentials, or open tunnels.
+
+Verification:
+
+- `cargo test -p capo-query latest_adapter_dispatch_status -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+Follow-up:
+
+- Voice can use this latest selector in a future natural-language convenience path if direct dispatch-plan IDs prove awkward during dogfooding.
+
 ## F1/AC1-AC2 - Local Connector Preflight
 
 Status: in progress on 2026-05-25.

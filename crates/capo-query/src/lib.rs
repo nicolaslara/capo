@@ -175,6 +175,54 @@ impl ProjectDashboard {
             next_action: next_action.to_string(),
         })
     }
+
+    pub fn latest_adapter_dispatch_status(
+        &self,
+        agent_name: Option<&str>,
+    ) -> Option<AdapterDispatchStatus> {
+        self.adapter_dispatch_plans
+            .iter()
+            .filter(|plan| {
+                agent_name
+                    .map(|name| plan.agent_name == name)
+                    .unwrap_or(true)
+            })
+            .max_by(|left, right| {
+                self.adapter_dispatch_activity_sequence(left)
+                    .cmp(&self.adapter_dispatch_activity_sequence(right))
+                    .then_with(|| left.dispatch_plan_id.cmp(&right.dispatch_plan_id))
+            })
+            .and_then(|plan| self.adapter_dispatch_status(&plan.dispatch_plan_id))
+    }
+
+    fn adapter_dispatch_activity_sequence(&self, plan: &AdapterDispatchPlanProjection) -> i64 {
+        let latest_gate_sequence = self
+            .adapter_dispatch_gates
+            .iter()
+            .filter(|gate| gate.dispatch_plan_id == plan.dispatch_plan_id)
+            .map(|gate| gate.updated_sequence)
+            .max()
+            .unwrap_or(0);
+        let latest_replay_sequence = self
+            .adapter_dispatch_replays
+            .iter()
+            .filter(|replay| replay.dispatch_plan_id == plan.dispatch_plan_id)
+            .map(|replay| replay.updated_sequence)
+            .max()
+            .unwrap_or(0);
+        let latest_execution_sequence = self
+            .adapter_dispatch_executions
+            .iter()
+            .filter(|execution| execution.dispatch_plan_id == plan.dispatch_plan_id)
+            .map(|execution| execution.updated_sequence)
+            .max()
+            .unwrap_or(0);
+
+        plan.updated_sequence
+            .max(latest_gate_sequence)
+            .max(latest_replay_sequence)
+            .max(latest_execution_sequence)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1026,6 +1074,49 @@ mod tests {
     }
 
     #[test]
+    fn project_dashboard_selects_latest_adapter_dispatch_status() {
+        let root = temp_root("query-latest-adapter-dispatch-status");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        append_adapter_dispatch_plan(&state, &project_id);
+        append_adapter_dispatch_plan_named(
+            &state,
+            &project_id,
+            "adapter-dispatch-plan-reviewer",
+            "reviewer",
+            "session-reviewer",
+            "run-reviewer",
+        );
+        append_adapter_dispatch_execution_named(
+            &state,
+            &project_id,
+            "adapter-dispatch-plan-codex",
+            "adapter-dispatch-execution-codex",
+            false,
+        );
+
+        let dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+        let latest = dashboard
+            .latest_adapter_dispatch_status(None)
+            .expect("latest dispatch status");
+        assert_eq!(latest.dispatch_plan_id, "adapter-dispatch-plan-codex");
+        assert_eq!(latest.latest_execution_status, "blocked_missing_opt_in");
+        assert_eq!(latest.next_action, "resolve_latest_execution_blocker");
+
+        let reviewer = dashboard
+            .latest_adapter_dispatch_status(Some("reviewer"))
+            .expect("reviewer dispatch status");
+        assert_eq!(reviewer.dispatch_plan_id, "adapter-dispatch-plan-reviewer");
+        assert_eq!(reviewer.agent_name, "reviewer");
+        assert!(
+            dashboard
+                .latest_adapter_dispatch_status(Some("missing-agent"))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn project_dashboard_includes_workpad_tasks() {
         let root = temp_root("query-dashboard-workpad-tasks");
         let state = SqliteStateStore::open(&root).expect("state");
@@ -1577,34 +1668,52 @@ mod tests {
     }
 
     fn append_adapter_dispatch_plan(state: &SqliteStateStore, project_id: &ProjectId) {
+        append_adapter_dispatch_plan_named(
+            state,
+            project_id,
+            "adapter-dispatch-plan-codex",
+            "codex",
+            "session-codex",
+            "run-codex",
+        );
+    }
+
+    fn append_adapter_dispatch_plan_named(
+        state: &SqliteStateStore,
+        project_id: &ProjectId,
+        dispatch_plan_id: &str,
+        agent_name: &str,
+        session_id: &str,
+        run_id: &str,
+    ) {
         state
             .append_event(
                 NewEvent {
-                    event_id: "event-adapter-dispatch-plan-codex".to_string(),
+                    event_id: format!("event-{dispatch_plan_id}"),
                     kind: EventKind::AdapterDispatchPlanned,
                     actor: "test".to_string(),
                     project_id: Some(project_id.clone()),
                     task_id: None,
-                    agent_id: Some(AgentId::new("agent-codex")),
-                    session_id: Some(SessionId::new("session-codex")),
-                    run_id: Some(RunId::new("run-codex")),
+                    agent_id: Some(AgentId::new(format!("agent-{agent_name}"))),
+                    session_id: Some(SessionId::new(session_id)),
+                    run_id: Some(RunId::new(run_id)),
                     turn_id: None,
-                    item_id: Some("adapter-dispatch-plan-codex".to_string()),
+                    item_id: Some(dispatch_plan_id.to_string()),
                     payload_json: "{}".to_string(),
                     idempotency_key: None,
                     redaction_state: RedactionState::Safe,
                 },
                 &[ProjectionRecord::AdapterDispatchPlan(
                     AdapterDispatchPlanProjection {
-                        dispatch_plan_id: "adapter-dispatch-plan-codex".to_string(),
+                        dispatch_plan_id: dispatch_plan_id.to_string(),
                         project_id: project_id.clone(),
                         adapter_kind: "codex_exec".to_string(),
                         provider_kind: "codex_subscription".to_string(),
                         credential_scope: "user_local_subscription".to_string(),
-                        agent_id: AgentId::new("agent-codex"),
-                        agent_name: "codex".to_string(),
-                        session_id: SessionId::new("session-codex"),
-                        run_id: RunId::new("run-codex"),
+                        agent_id: AgentId::new(format!("agent-{agent_name}")),
+                        agent_name: agent_name.to_string(),
+                        session_id: SessionId::new(session_id),
+                        run_id: RunId::new(run_id),
                         runtime_program: "codex".to_string(),
                         runtime_arg_count: 9,
                         runtime_prompt_policy: "not_rendered".to_string(),
@@ -1824,10 +1933,26 @@ mod tests {
     }
 
     fn append_adapter_dispatch_execution(state: &SqliteStateStore, project_id: &ProjectId) {
+        append_adapter_dispatch_execution_named(
+            state,
+            project_id,
+            "adapter-dispatch-plan-codex",
+            "adapter-dispatch-execution-codex",
+            true,
+        );
+    }
+
+    fn append_adapter_dispatch_execution_named(
+        state: &SqliteStateStore,
+        project_id: &ProjectId,
+        dispatch_plan_id: &str,
+        dispatch_execution_id: &str,
+        provider_cli_executed: bool,
+    ) {
         state
             .append_event(
                 NewEvent {
-                    event_id: "event-adapter-dispatch-execution-codex".to_string(),
+                    event_id: format!("event-{dispatch_execution_id}"),
                     kind: EventKind::AdapterDispatchExecuted,
                     actor: "test".to_string(),
                     project_id: Some(project_id.clone()),
@@ -1836,33 +1961,48 @@ mod tests {
                     session_id: Some(SessionId::new("session-codex")),
                     run_id: Some(RunId::new("run-codex")),
                     turn_id: None,
-                    item_id: Some("adapter-dispatch-execution-codex".to_string()),
+                    item_id: Some(dispatch_execution_id.to_string()),
                     payload_json: "{}".to_string(),
                     idempotency_key: None,
                     redaction_state: RedactionState::Safe,
                 },
                 &[ProjectionRecord::AdapterDispatchExecution(
                     AdapterDispatchExecutionProjection {
-                        dispatch_execution_id: "adapter-dispatch-execution-codex".to_string(),
+                        dispatch_execution_id: dispatch_execution_id.to_string(),
                         project_id: project_id.clone(),
-                        dispatch_plan_id: "adapter-dispatch-plan-codex".to_string(),
+                        dispatch_plan_id: dispatch_plan_id.to_string(),
                         execution_request_id: "adapter-dispatch-execution-request-codex"
                             .to_string(),
                         adapter_kind: "codex_exec".to_string(),
                         session_id: SessionId::new("session-codex"),
                         run_id: RunId::new("run-codex"),
                         provider_cli_execution_allowed: true,
-                        provider_cli_executed: true,
-                        status: "completed".to_string(),
-                        exit_code: Some(0),
-                        runtime_process_ref: Some("runtime-process-codex".to_string()),
-                        stdout_artifact_id: Some("artifact-dispatch-stdout".to_string()),
-                        stderr_artifact_id: Some("artifact-dispatch-stderr".to_string()),
+                        provider_cli_executed,
+                        status: if provider_cli_executed {
+                            "completed".to_string()
+                        } else {
+                            "blocked_missing_opt_in".to_string()
+                        },
+                        exit_code: provider_cli_executed.then_some(0),
+                        runtime_process_ref: provider_cli_executed
+                            .then(|| "runtime-process-codex".to_string()),
+                        stdout_artifact_id: provider_cli_executed
+                            .then(|| "artifact-dispatch-stdout".to_string()),
+                        stderr_artifact_id: provider_cli_executed
+                            .then(|| "artifact-dispatch-stderr".to_string()),
                         artifact_root: "/tmp/capo-artifacts".to_string(),
-                        credential_scan_status: "clean".to_string(),
+                        credential_scan_status: if provider_cli_executed {
+                            "clean".to_string()
+                        } else {
+                            "not_run".to_string()
+                        },
                         raw_prompt_policy: "not_rendered".to_string(),
                         raw_output_policy: "artifacts_scanned_redacted".to_string(),
-                        reason_codes: "provider_cli_executed_with_clean_artifacts".to_string(),
+                        reason_codes: if provider_cli_executed {
+                            "provider_cli_executed_with_clean_artifacts".to_string()
+                        } else {
+                            "explicit_provider_execution_opt_in_required".to_string()
+                        },
                         updated_sequence: 0,
                     },
                 )],

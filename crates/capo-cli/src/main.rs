@@ -58,6 +58,7 @@ Usage:
   capo adapter plan-launch --adapter codex|claude --agent NAME --goal GOAL [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
   capo adapter dispatch-gate --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter dispatch-status --dispatch-plan DISPATCH_PLAN_ID [--state PATH]
+  capo adapter dispatch-status --latest [--agent NAME] [--state PATH]
   capo adapter dispatch-evidence --dispatch-plan DISPATCH_PLAN_ID --out DIR [--state PATH]
   capo adapter execution-request --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
   capo adapter materialize-prompt --dispatch-plan DISPATCH_PLAN_ID [--record] [--state PATH]
@@ -1393,19 +1394,42 @@ fn adapter_dispatch_gate(parsed: &ParsedArgs, args: &[String]) -> Result<String,
 }
 
 fn adapter_dispatch_status(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
-    let dispatch_plan_id = required_arg(args, "--dispatch-plan")?;
-    if let Some(unknown) = args
-        .iter()
-        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan"))
-    {
+    let latest = has_flag(args, "--latest");
+    let dispatch_plan_id = optional_arg(args, "--dispatch-plan");
+    let agent_name = optional_arg(args, "--agent");
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--") && !matches!(arg.as_str(), "--dispatch-plan" | "--latest" | "--agent")
+    }) {
         return Err(format!("unknown adapter dispatch-status option: {unknown}"));
+    }
+    if latest && dispatch_plan_id.is_some() {
+        return Err(
+            "adapter dispatch-status accepts either --dispatch-plan or --latest".to_string(),
+        );
+    }
+    if !latest && agent_name.is_some() {
+        return Err("adapter dispatch-status --agent requires --latest".to_string());
     }
     let state = state(parsed)?;
     let dashboard =
         project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
-    let status = dashboard
-        .adapter_dispatch_status(&dispatch_plan_id)
-        .ok_or_else(|| format!("unknown adapter dispatch plan: {dispatch_plan_id}"))?;
+    let status = if latest {
+        dashboard
+            .latest_adapter_dispatch_status(agent_name.as_deref())
+            .ok_or_else(|| {
+                agent_name.map_or_else(
+                    || "no recorded adapter dispatch plans".to_string(),
+                    |agent| format!("no recorded adapter dispatch plans for agent: {agent}"),
+                )
+            })?
+    } else {
+        let dispatch_plan_id = dispatch_plan_id.ok_or_else(|| {
+            "adapter dispatch-status requires --dispatch-plan or --latest".to_string()
+        })?;
+        dashboard
+            .adapter_dispatch_status(&dispatch_plan_id)
+            .ok_or_else(|| format!("unknown adapter dispatch plan: {dispatch_plan_id}"))?
+    };
     Ok(render_adapter_dispatch_status(&status))
 }
 
@@ -6641,6 +6665,20 @@ mod tests {
         assert!(blocked_status.contains("latest_execution_status=missing"));
         assert!(blocked_status.contains("next_action=record_clean_real_smoke_evidence"));
         assert!(!blocked_status.contains("Do not render this dispatch prompt"));
+        let blocked_latest_status = run_cli(vec![
+            "adapter".to_string(),
+            "dispatch-status".to_string(),
+            "--latest".to_string(),
+            "--agent".to_string(),
+            "codex-worker".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("latest blocked dispatch status");
+        assert!(blocked_latest_status.contains(&format!("dispatch_plan={dispatch_plan_id}")));
+        assert!(blocked_latest_status.contains("agent=codex-worker"));
+        assert!(blocked_latest_status.contains("next_action=record_clean_real_smoke_evidence"));
+        assert!(!blocked_latest_status.contains("Do not render this dispatch prompt"));
         let blocked_execution_request = run_cli(vec![
             "adapter".to_string(),
             "execution-request".to_string(),
@@ -6845,6 +6883,26 @@ mod tests {
         );
         assert!(blocked_execution_status.contains("next_action=resolve_latest_execution_blocker"));
         assert!(!blocked_execution_status.contains("Do not render this dispatch prompt"));
+        let latest_after_blocked_execution = run_cli(vec![
+            "adapter".to_string(),
+            "dispatch-status".to_string(),
+            "--latest".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("latest status after blocked local run");
+        assert!(
+            latest_after_blocked_execution
+                .contains(&format!("dispatch_plan={}", gates[0].dispatch_plan_id))
+        );
+        assert!(
+            latest_after_blocked_execution
+                .contains("latest_execution_status=blocked_missing_prompt_materialization")
+        );
+        assert!(
+            latest_after_blocked_execution.contains("next_action=resolve_latest_execution_blocker")
+        );
+        assert!(!latest_after_blocked_execution.contains("Do not render this dispatch prompt"));
         let inline_materialization = run_cli(vec![
             "adapter".to_string(),
             "materialize-prompt".to_string(),
