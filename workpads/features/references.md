@@ -869,3 +869,13 @@ Observed 2026-05-26.
 - Voice source workpad: `voice.md`
 - Tool observation architecture source: `../architecture/tool-exposure.md`
 - No new third-party dependencies were added for DS8.
+
+## F3/DS9 Dashboard Tool Activity Summary
+
+Observed 2026-05-26.
+
+- CLI dashboard aggregate tool activity rendering and e2e regression assertions: `../../crates/capo-cli/src/main.rs`
+- Shared summary source: `../../crates/capo-query/src/lib.rs`
+- Dashboard source workpad: `dashboard.md`
+- Tool observation architecture source: `../architecture/tool-exposure.md`
+- No new third-party dependencies were added for DS9.

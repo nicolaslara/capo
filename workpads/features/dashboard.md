@@ -221,3 +221,24 @@ Decision:
 
 - Treat compact tool activity counts as query contract data because voice, dashboard, mobile, and future web/TUI surfaces should agree on project and agent-level totals.
 - Keep detailed governed tool calls and observed-only native tool observations in session rows. The summary only counts them; it does not replace detailed rows.
+
+### DS9 - Dashboard Tool Activity Summary
+
+Status: completed
+
+Acceptance:
+
+- Render the shared project-level tool activity summary in `capo dashboard`.
+- Keep per-session governed tool-call rows and observed-only tool-observation rows unchanged.
+- Cover the aggregate dashboard summary with regression assertions.
+
+Evidence:
+
+- CLI dashboard summary rendering in `../../crates/capo-cli/src/main.rs`.
+- Shared summary source: `ProjectDashboard::tool_activity_summary(...)` in `../../crates/capo-query/src/lib.rs`.
+- `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence -- --nocapture`: passed.
+
+Decision:
+
+- Put compact tool activity totals at the top of the operator dashboard so users can quickly see project-wide governed and observed-only tool activity before reading per-session rows.
+- Keep the detailed rows unchanged so audit and evidence review still have tool IDs, origins, statuses, confidence, artifacts, and hashes.

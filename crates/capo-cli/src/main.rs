@@ -2678,10 +2678,15 @@ fn dashboard_query(args: &[String]) -> Result<ProjectDashboardQuery, String> {
 
 fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> String {
     let dogfood_readiness = dashboard.dogfood_readiness();
+    let tool_activity = dashboard.tool_activity_summary(None);
     let mut output = format!(
-        "command_id={}\nview=dashboard\nagents={}\n",
+        "command_id={}\nview=dashboard\nagents={}\ntool_activity_agents={}\ntool_activity_active_sessions={}\ntool_calls={}\ntool_observations={}\n",
         command.command_id,
-        dashboard.agents.len()
+        dashboard.agents.len(),
+        tool_activity.agent_count,
+        tool_activity.active_session_count,
+        tool_activity.tool_call_count,
+        tool_activity.tool_observation_count
     );
 
     for row in &dashboard.agents {
@@ -10953,6 +10958,10 @@ mod tests {
         assert!(dashboard.contains("view=dashboard"));
         assert!(dashboard.contains("agents=2"));
         assert!(dashboard.contains("active_sessions=2"));
+        assert!(dashboard.contains("tool_activity_agents=2"));
+        assert!(dashboard.contains("tool_activity_active_sessions=2"));
+        assert!(dashboard.contains("tool_calls=2"));
+        assert!(dashboard.contains("tool_observations=1"));
         assert!(dashboard.contains("agent=fake-codex agent_status=running"));
         assert!(dashboard.contains("session=session-fake-codex session_status=active"));
         assert!(dashboard.contains("goal=Inspect the project"));

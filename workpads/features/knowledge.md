@@ -1867,3 +1867,17 @@ Verification:
 
 - `cargo test -p capo-query project_dashboard_aggregates_agents_sessions_runs_evidence_and_events -- --nocapture`: passed.
 - `cargo test -p capo-cli voice_recent_work -- --nocapture`: passed.
+
+## F3/DS9 - Dashboard Tool Activity Summary
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Render `ProjectDashboard::tool_activity_summary(None)` in `capo dashboard` as project-wide tool activity totals.
+- Keep the summary separate from per-session rows: aggregate counts support quick operator scanning, while existing detailed rows remain the audit surface.
+- Summary fields are `tool_activity_agents`, `tool_activity_active_sessions`, governed `tool_calls`, and observed-only `tool_observations`.
+
+Verification:
+
+- `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence -- --nocapture`: passed.
