@@ -762,3 +762,33 @@ Decision:
 - Treat smoke-report evidence as a connector-readiness review artifact, not a provider execution step.
 - Render smoke report metadata and artifact-root references only. Do not render smoke stdout/stderr content, raw prompts, provider output, tokens, cookies, or subscription session material.
 - Keep skipped and failed reports exportable because they explain why real-agent dogfood remains blocked.
+
+### AC31 - Adapter Smoke Report Status Query
+
+Status: completed
+
+Acceptance:
+
+- Add shared query helpers for exact and latest adapter smoke report status.
+- Expose exact and latest smoke report status through a read-only operator command.
+- Support adapter filtering for latest smoke report selection.
+- Do not launch provider CLIs, inspect credentials, materialize prompts, open tunnels, request approvals, activate grants, render smoke stdout/stderr content, or mutate state.
+
+Evidence:
+
+- `ProjectDashboard::adapter_smoke_report_status(...)` and `ProjectDashboard::latest_adapter_smoke_report(...)` in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo adapter smoke-report status --smoke-report SMOKE_REPORT_ID` in `../../crates/capo-cli/src/main.rs`.
+- CLI `capo adapter smoke-report status --latest [--adapter codex|claude]` in `../../crates/capo-cli/src/main.rs`.
+- `cargo test -p capo-query adapter_smoke_report -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Decision:
+
+- Treat adapter smoke report status as shared query/read-model behavior so CLI, dashboard, voice, web, and mobile surfaces can answer connector readiness questions from the same selector.
+- Keep exact ID lookup and latest lookup separate. Adapter filtering is only valid for latest lookup.
+- Render metadata only: status, credential scan status, marker flag, artifact-root reference, dogfood readiness effect, reason, and no-side-effect markers.

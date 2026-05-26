@@ -83,6 +83,7 @@ Progress:
 - AC28 latest dispatch evidence export is completed. `dispatch-evidence --latest [--agent NAME]` exports prompt-redacted evidence for the latest dispatch chain through the shared query selector.
 - AC29 dispatch tool observation evidence is completed. Dispatch evidence exports now include observed-only native tool observations recorded by fixture replay, without rendering raw prompts, provider fixture text, or tool input/output.
 - AC30 adapter smoke report evidence export is completed. `smoke-report evidence` writes a prompt/output-redacted Capo evidence artifact for connector proof or blocker review.
+- AC31 adapter smoke report status query is completed. `smoke-report status` exposes exact and latest connector smoke status through the shared query contract.
 
 Evidence:
 
@@ -133,6 +134,8 @@ Evidence:
 - `capo adapter smoke-report evidence --smoke-report SMOKE_REPORT_ID --out DIR [--state PATH]`
 - `cargo test -p capo-query adapter_smoke_report -- --nocapture`
 - `cargo test -p capo-cli adapter_smoke -- --nocapture`
+- `capo adapter smoke-report status --smoke-report SMOKE_REPORT_ID [--state PATH]`
+- `capo adapter smoke-report status --latest [--adapter codex|claude] [--state PATH]`
 - Focused F1 connector safety reviews: provider-artifact cleanup blocker found and fixed; real-agent readiness remains unclaimed pending opt-in smoke
 
 ## F2 - Workpad Dogfood Bridge

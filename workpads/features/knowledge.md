@@ -2067,10 +2067,6 @@ Verification:
 - `git diff --check`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - `cargo test`: passed.
-- `cargo fmt --check`: passed.
-- `git diff --check`: passed.
-- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
-- `cargo test`: passed.
 
 ## F7/RR17 - Voice Runtime Target Status Query
 
@@ -2122,6 +2118,28 @@ Decisions:
 - Use `kind=adapter_smoke_evidence` for both artifact and evidence rows so dashboards and future readiness checks can distinguish smoke proof/blocker artifacts from dispatch-chain evidence.
 - Render metadata and artifact-root references only. The evidence artifact does not render smoke stdout/stderr, raw prompts, provider output, tokens, cookies, or subscription session material.
 - Preserve the provider boundary: the export does not launch provider CLIs, materialize prompts, open tunnels, inspect credentials, request approvals, activate grants, or mutate connector state.
+
+Verification:
+
+- `cargo test -p capo-query adapter_smoke_report -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+## F1/AC31 - Adapter Smoke Report Status Query
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add shared exact and latest selectors for adapter smoke report metadata.
+- Add `capo adapter smoke-report status --smoke-report SMOKE_REPORT_ID` and `capo adapter smoke-report status --latest [--adapter codex|claude]`.
+- Keep exact ID lookup and latest lookup separate; adapter filtering is only valid for latest lookup.
+- Render connector readiness metadata and no-side-effect markers only. The status command does not render smoke stdout/stderr, raw prompts, provider output, tokens, cookies, or subscription session material.
+- Preserve the provider boundary: the query does not launch provider CLIs, materialize prompts, open tunnels, inspect credentials, request approvals, activate grants, or mutate connector state.
 
 Verification:
 

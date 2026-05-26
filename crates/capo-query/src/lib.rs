@@ -228,6 +228,24 @@ impl ProjectDashboard {
             .find(|report| report.smoke_report_id == smoke_report_id)
     }
 
+    pub fn latest_adapter_smoke_report(
+        &self,
+        adapter_kind: Option<&str>,
+    ) -> Option<&AdapterSmokeReportProjection> {
+        self.adapter_smoke_reports
+            .iter()
+            .filter(|report| {
+                adapter_kind
+                    .map(|kind| report.adapter_kind == kind)
+                    .unwrap_or(true)
+            })
+            .max_by(|left, right| {
+                left.updated_sequence
+                    .cmp(&right.updated_sequence)
+                    .then_with(|| left.smoke_report_id.cmp(&right.smoke_report_id))
+            })
+    }
+
     fn adapter_dispatch_activity_sequence(&self, plan: &AdapterDispatchPlanProjection) -> i64 {
         let latest_gate_sequence = self
             .adapter_dispatch_gates
@@ -1149,8 +1167,8 @@ mod tests {
             false,
         );
 
-        let dashboard =
-            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+        let dashboard = project_dashboard(&state, ProjectDashboardQuery::new(project_id.clone()))
+            .expect("dashboard");
 
         let report = dashboard
             .adapter_smoke_report_status("adapter-smoke-codex")
@@ -1163,6 +1181,32 @@ mod tests {
                 .adapter_smoke_report_status("missing-smoke-report")
                 .is_none()
         );
+        let latest_any = dashboard
+            .latest_adapter_smoke_report(None)
+            .expect("latest smoke report");
+        assert_eq!(latest_any.smoke_report_id, "adapter-smoke-codex");
+        assert!(
+            dashboard
+                .latest_adapter_smoke_report(Some("claude_code"))
+                .is_none()
+        );
+
+        append_adapter_smoke_report(
+            &state,
+            &project_id,
+            "adapter-smoke-claude",
+            "claude_code",
+            "failed",
+            "blocked",
+            false,
+        );
+        let updated =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+        let latest_claude = updated
+            .latest_adapter_smoke_report(Some("claude_code"))
+            .expect("latest claude smoke report");
+        assert_eq!(latest_claude.smoke_report_id, "adapter-smoke-claude");
+        assert_eq!(latest_claude.credential_scan_status, "blocked");
     }
 
     #[test]

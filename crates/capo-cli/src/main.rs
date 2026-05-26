@@ -72,6 +72,8 @@ Usage:
   capo adapter dogfood-gate [--state PATH]
   capo adapter smoke-report scan --artifact-root PATH [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
+  capo adapter smoke-report status --smoke-report SMOKE_REPORT_ID [--state PATH]
+  capo adapter smoke-report status --latest [--adapter codex|claude] [--state PATH]
   capo adapter smoke-report evidence --smoke-report SMOKE_REPORT_ID --out DIR [--state PATH]
   capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR] [--state PATH]
   capo adapter replay-dispatch --dispatch-plan DISPATCH_PLAN_ID --fixture PATH [--out DIR] [--state PATH]
@@ -196,6 +198,11 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             if area == "adapter" && command == "smoke-report" && action == "record" =>
         {
             record_adapter_smoke_report(&parsed, rest)
+        }
+        [area, command, action, rest @ ..]
+            if area == "adapter" && command == "smoke-report" && action == "status" =>
+        {
+            adapter_smoke_report_status(&parsed, rest)
         }
         [area, command, action, rest @ ..]
             if area == "adapter" && command == "smoke-report" && action == "evidence" =>
@@ -1340,6 +1347,57 @@ fn record_adapter_smoke_report(parsed: &ParsedArgs, args: &[String]) -> Result<S
     ))
 }
 
+fn adapter_smoke_report_status(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let latest = has_flag(args, "--latest");
+    let smoke_report_id = optional_arg(args, "--smoke-report");
+    let adapter = optional_arg(args, "--adapter")
+        .map(|adapter| adapter_label(&adapter).to_string())
+        .filter(|adapter| adapter != "unknown");
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--")
+            && !matches!(arg.as_str(), "--smoke-report" | "--latest" | "--adapter")
+    }) {
+        return Err(format!(
+            "unknown adapter smoke-report status option: {unknown}"
+        ));
+    }
+    if optional_arg(args, "--adapter").is_some() && adapter.is_none() {
+        return Err("--adapter must be codex or claude".to_string());
+    }
+    if latest && smoke_report_id.is_some() {
+        return Err(
+            "adapter smoke-report status accepts either --smoke-report or --latest".to_string(),
+        );
+    }
+    if !latest && adapter.is_some() {
+        return Err("adapter smoke-report status --adapter filter requires --latest".to_string());
+    }
+
+    let state = state(parsed)?;
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id())).map_err(debug_error)?;
+    let report = if latest {
+        dashboard
+            .latest_adapter_smoke_report(adapter.as_deref())
+            .ok_or_else(|| {
+                adapter
+                    .as_ref()
+                    .map(|adapter| {
+                        format!("no recorded adapter smoke reports matching adapter={adapter}")
+                    })
+                    .unwrap_or_else(|| "no recorded adapter smoke reports".to_string())
+            })?
+    } else {
+        let smoke_report_id = smoke_report_id.ok_or_else(|| {
+            "adapter smoke-report status requires --smoke-report or --latest".to_string()
+        })?;
+        dashboard
+            .adapter_smoke_report_status(&smoke_report_id)
+            .ok_or_else(|| format!("missing adapter smoke report: {smoke_report_id}"))?
+    };
+    Ok(render_adapter_smoke_report_status(report))
+}
+
 fn adapter_smoke_report_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     if let Some(unknown) = args
         .iter()
@@ -1470,6 +1528,21 @@ fn render_adapter_smoke_report_evidence(
         report.marker_found,
         report.artifact_root.as_deref().unwrap_or("none"),
         report.dogfood_readiness_effect,
+        report.reason,
+        report.updated_sequence
+    )
+}
+
+fn render_adapter_smoke_report_status(report: &AdapterSmokeReportProjection) -> String {
+    format!(
+        "adapter_smoke_report_status=true\nsmoke_report_id={}\nadapter={}\nsmoke_status={}\ncredential_scan_status={}\nmarker_found={}\ndogfood_readiness_effect={}\nartifact_root={}\nreason={}\nupdated_sequence={}\nprovider_cli_executed=false credential_material_rendered=false state_mutated=false\n",
+        report.smoke_report_id,
+        report.adapter_kind,
+        report.smoke_status,
+        report.credential_scan_status,
+        report.marker_found,
+        report.dogfood_readiness_effect,
+        report.artifact_root.as_deref().unwrap_or("none"),
         report.reason,
         report.updated_sequence
     )
@@ -7812,6 +7885,7 @@ mod tests {
         assert!(HELP.contains("adapter dispatch-gate"));
         assert!(HELP.contains("adapter dispatch-status"));
         assert!(HELP.contains("adapter dispatch-evidence"));
+        assert!(HELP.contains("adapter smoke-report status"));
         assert!(HELP.contains("adapter smoke-report evidence"));
         assert!(HELP.contains("adapter execution-request"));
         assert!(HELP.contains("adapter materialize-prompt"));
@@ -8832,6 +8906,41 @@ mod tests {
         .expect("record passed smoke");
         assert!(passed.contains("dogfood_readiness_effect=real_agent_connector_proven"));
 
+        let exact_status = run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "status".to_string(),
+            "--smoke-report".to_string(),
+            output_value(&passed, "smoke_report_id"),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("adapter smoke report status");
+        assert!(exact_status.contains("adapter_smoke_report_status=true"));
+        assert!(exact_status.contains("adapter=codex_exec"));
+        assert!(exact_status.contains("smoke_status=passed"));
+        assert!(exact_status.contains("credential_scan_status=clean"));
+        assert!(exact_status.contains("provider_cli_executed=false"));
+        assert!(exact_status.contains("credential_material_rendered=false"));
+        assert!(exact_status.contains("state_mutated=false"));
+
+        let latest_status = run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "status".to_string(),
+            "--latest".to_string(),
+            "--adapter".to_string(),
+            "codex".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("latest adapter smoke report status");
+        assert!(latest_status.contains("adapter_smoke_report_status=true"));
+        assert_eq!(
+            output_value(&latest_status, "smoke_report_id"),
+            output_value(&passed, "smoke_report_id")
+        );
+
         let evidence_dir = temp_root("adapter-smoke-report-evidence");
         let evidence = run_cli(vec![
             "adapter".to_string(),
@@ -8870,6 +8979,17 @@ mod tests {
         ])
         .expect_err("missing adapter smoke evidence");
         assert!(missing_evidence.contains("missing adapter smoke report: missing-smoke-report"));
+        let missing_status = run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "status".to_string(),
+            "--smoke-report".to_string(),
+            "missing-smoke-report".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("missing adapter smoke report status");
+        assert!(missing_status.contains("missing adapter smoke report: missing-smoke-report"));
 
         let dashboard = run_cli(vec![
             "dashboard".to_string(),

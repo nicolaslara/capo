@@ -1009,3 +1009,13 @@ Observed 2026-05-26.
 - Adapter smoke report projection stored by state layer: `../../crates/capo-state/src/lib.rs`
 - Agent connectors source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for AC30.
+
+## F1/AC31 Adapter Smoke Report Status Query
+
+Observed 2026-05-26.
+
+- Shared exact/latest adapter smoke report selectors and regression coverage: `../../crates/capo-query/src/lib.rs`
+- CLI `capo adapter smoke-report status` parser, rendering, and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Adapter smoke report projection stored by state layer: `../../crates/capo-state/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC31.
