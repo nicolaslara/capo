@@ -443,6 +443,10 @@ Decisions:
 Verification:
 
 - `cargo test -p capo-cli adapter_smoke -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
 - `cargo test -p capo-cli adapter_dogfood -- --nocapture`: passed.
 
 Follow-up:
@@ -1933,6 +1937,21 @@ Decisions:
 Verification:
 
 - `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`: passed.
+
+## F3/DS11 - Dashboard Latest Adapter Smoke Summary
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Render latest adapter smoke-report shortcuts in `capo dashboard` for any adapter, Codex, and Claude.
+- Source the rows from `ProjectDashboard::latest_adapter_smoke_report(...)` so dashboard, CLI status, and voice share selector semantics.
+- Keep latest rows as scanning shortcuts only. The full smoke-report list and evidence exports remain the audit surface.
+- Keep the dashboard metadata-only and read-model-derived. It does not launch provider CLIs, inspect credentials, materialize prompts, open tunnels, request approvals, activate grants, render smoke stdout/stderr, or mutate state.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`: passed.
 
 ## F4/PT12 - Git Commit Wrapper
 

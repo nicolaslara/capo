@@ -1030,3 +1030,13 @@ Observed 2026-05-26.
 - Voice source workpad: `voice.md`
 - Agent connector source workpad: `agent-connectors.md`
 - No new third-party dependencies were added for V14.
+
+## F3/DS11 Dashboard Latest Adapter Smoke Summary
+
+Observed 2026-05-26.
+
+- Dashboard latest adapter smoke summary rendering and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared latest adapter smoke selector: `../../crates/capo-query/src/lib.rs`
+- Dashboard source workpad: `dashboard.md`
+- Agent connector source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for DS11.

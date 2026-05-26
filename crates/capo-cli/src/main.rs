@@ -3342,6 +3342,19 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
         "adapter_smoke_reports={}\n",
         dashboard.adapter_smoke_reports.len()
     ));
+    append_dashboard_latest_adapter_smoke_report(&mut output, dashboard, "any", None);
+    append_dashboard_latest_adapter_smoke_report(
+        &mut output,
+        dashboard,
+        "codex",
+        Some("codex_exec"),
+    );
+    append_dashboard_latest_adapter_smoke_report(
+        &mut output,
+        dashboard,
+        "claude",
+        Some("claude_code"),
+    );
     for report in &dashboard.adapter_smoke_reports {
         output.push_str(&format!(
             "adapter_smoke_report={} adapter={} smoke_status={} credential_scan_status={} marker_found={} dogfood_readiness_effect={} artifact_root={} reason={}\n",
@@ -3538,6 +3551,28 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
         dashboard.active_session_count()
     ));
     output
+}
+
+fn append_dashboard_latest_adapter_smoke_report(
+    output: &mut String,
+    dashboard: &ProjectDashboard,
+    label: &str,
+    adapter_kind: Option<&str>,
+) {
+    if let Some(report) = dashboard.latest_adapter_smoke_report(adapter_kind) {
+        output.push_str(&format!(
+            "latest_adapter_smoke_report_{label}={} adapter={} smoke_status={} credential_scan_status={} marker_found={} dogfood_readiness_effect={} updated_sequence={}\n",
+            report.smoke_report_id,
+            report.adapter_kind,
+            report.smoke_status,
+            report.credential_scan_status,
+            report.marker_found,
+            report.dogfood_readiness_effect,
+            report.updated_sequence
+        ));
+    } else {
+        output.push_str(&format!("latest_adapter_smoke_report_{label}=none\n"));
+    }
 }
 
 fn send_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
@@ -9043,6 +9078,9 @@ mod tests {
         ])
         .expect("dashboard");
         assert!(dashboard.contains("adapter_smoke_reports=2"));
+        assert!(dashboard.contains("latest_adapter_smoke_report_any=adapter-smoke-codex_exec"));
+        assert!(dashboard.contains("latest_adapter_smoke_report_codex=adapter-smoke-codex_exec"));
+        assert!(dashboard.contains("latest_adapter_smoke_report_claude=none"));
         assert!(dashboard.contains("adapter_smoke_report=adapter-smoke-codex_exec"));
         assert!(dashboard.contains("credential_scan_status=not_run"));
         assert!(dashboard.contains("project_evidence=1"));

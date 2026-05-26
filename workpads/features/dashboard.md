@@ -264,3 +264,29 @@ Decision:
 - Render the same component ref groups in `capo dashboard` that `capo dogfood readiness`, readiness evidence, and voice already expose.
 - Keep the dashboard read-only over the shared readiness query. The refs are review breadcrumbs only: connector smoke report IDs, workpad task IDs, dispatch plan/replay/execution IDs, and project evidence IDs.
 - Do not render raw prompts, provider output, credential/session material, tunnel data, or source markdown bodies.
+
+### DS11 - Dashboard Latest Adapter Smoke Summary
+
+Status: completed
+
+Acceptance:
+
+- Render latest adapter smoke-report shortcuts in `capo dashboard` for any adapter, Codex, and Claude.
+- Source the summary from `ProjectDashboard::latest_adapter_smoke_report(...)` so dashboard, CLI status, and voice use the same selector semantics.
+- Keep the existing complete smoke-report list visible for audit.
+- Keep the dashboard read-only and metadata-only: no provider CLIs, credentials, prompt materialization, tunnels, approvals, grants, raw provider output, raw prompts, smoke stdout/stderr, or state mutation.
+
+Evidence:
+
+- Dashboard latest smoke summary rendering in `../../crates/capo-cli/src/main.rs`.
+- Shared latest smoke selector in `../../crates/capo-query/src/lib.rs`.
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Decision:
+
+- Treat latest smoke-report rows as operator shortcuts, not replacements for the full report list or evidence exports.
+- Render `latest_adapter_smoke_report_any`, `latest_adapter_smoke_report_codex`, and `latest_adapter_smoke_report_claude` so dashboards can show the most relevant connector blocker/proof without requiring report IDs.

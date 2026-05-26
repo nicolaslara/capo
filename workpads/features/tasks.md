@@ -213,6 +213,7 @@ Progress:
 - DS8 shared tool activity summary is completed with compact project/agent tool counts exposed by `capo-query` and consumed by voice tool-activity rendering.
 - DS9 dashboard tool activity summary is completed with project-level governed tool-call and observed-only tool-observation totals rendered in `capo dashboard`.
 - DS10 dashboard dogfood readiness component refs is completed with connector, workpad, dispatch-chain, and project-evidence refs rendered in the operator dashboard.
+- DS11 dashboard latest adapter smoke summary is completed with latest any/Codex/Claude smoke-report shortcuts sourced from the shared query selector.
 
 Evidence:
 
@@ -236,6 +237,7 @@ Evidence:
 - `cargo test -p capo-cli voice_recent_work -- --nocapture`
 - `cargo test -p capo-cli prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence -- --nocapture`
 - `cargo test -p capo-cli adapter_dispatch_gate -- --nocapture`
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`
