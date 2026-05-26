@@ -1424,3 +1424,14 @@ Observed 2026-05-26.
 - CLI routing, voice summaries, evidence exports, review/eval surfaces, permissions, and session control retained in: `../../crates/capo-cli/src/main.rs`
 - Resulting file sizes: `../../crates/capo-cli/src/main.rs` 2,829 lines; `../../crates/capo-cli/src/dashboard.rs` 563 lines.
 - No new third-party dependencies were added for CLI13.
+
+## F9/CLI14 Voice Command And Render Split
+
+Observed 2026-05-26.
+
+- Voice command/control module: `../../crates/capo-cli/src/voice.rs`
+- Voice read-contract rendering module: `../../crates/capo-cli/src/voice_render.rs`
+- Voice planning crate remains: `../../crates/capo-voice/src/lib.rs`
+- CLI routing, evidence exports, review/eval surfaces, permissions, and session control retained in: `../../crates/capo-cli/src/main.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 1,780 lines; `../../crates/capo-cli/src/voice.rs` 505 lines; `../../crates/capo-cli/src/voice_render.rs` 579 lines.
+- No new third-party dependencies were added for CLI14.

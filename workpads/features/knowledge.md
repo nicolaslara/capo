@@ -2861,6 +2861,31 @@ Verification:
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - Focused read-only review subagent: no issues found; residual gap is that dashboard output compatibility remains assertion-based rather than byte-for-byte golden snapshots.
 
+## F9/CLI14 - Voice Command And Render Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move voice command/control handling into `voice.rs`: transcript option parsing, retention policy selection, visible approval queue/decision, reviewed redacted summary ingestion, read-only dashboard query execution, and confirmed controller mutations.
+- Split pure voice output rendering into `voice_render.rs` so spoken read-contract formatting, labels, and per-surface status summaries are separate from the mutation/approval flow.
+- Keep `capo-voice` as the intent-planning crate. The CLI voice modules remain the local command adapter that turns a `VoiceCommandPlan` into state reads, approval events, controller calls, and rendered output.
+- Make the shared permission decision primitives crate-visible because both the generic permission CLI and voice approval path use the same ACP-style decision vocabulary.
+- Preserve the no-raw-transcript default and require `--reviewed-summary` before redacted summary memory ingestion.
+
+Verification:
+
+- `cargo check -p capo-cli`: passed.
+- `cargo test -p capo-cli voice -- --nocapture`: passed.
+- `cargo test -p capo-voice -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_confirmed_start_next_work -- --nocapture`: passed.
+- `cargo test -p capo-cli voice_redacted_summary -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- Focused read-only review subagent: no issues found; residual gap is that voice output compatibility remains covered by assertions rather than full golden snapshots.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.

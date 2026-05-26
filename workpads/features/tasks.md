@@ -638,6 +638,7 @@ Progress:
 - CLI11 adapter readiness/launch module split is completed. Adapter readiness status, launch-plan preview, dispatch-plan recording, prompt-source projection, local adapter validation, and launch/readiness rendering now live in `crates/capo-cli/src/adapter_launch.rs`; routing, replay, dashboard aggregation, and voice summaries remain in `main.rs`.
 - CLI12 workpad command module split is completed. Workpad indexing, next selection, plan-next composition, start-next dispatch, task import, proposal generation, apply guard, projection conversion, and proposal artifact safety now live in `crates/capo-cli/src/workpad.rs`; dashboard and voice rendering reuse exported workpad helpers from `main.rs`.
 - CLI13 dashboard module split is completed. Dashboard filter parsing, shared query execution, dashboard text rendering, latest smoke summaries, and cross-feature read-model display now live in `crates/capo-cli/src/dashboard.rs`; routing and voice summaries remain in `main.rs`.
+- CLI14 voice command/render split is completed. Voice transcript handling, visible approval, permission decisions, reviewed-summary memory ingestion, and controller mutations now live in `crates/capo-cli/src/voice.rs`; voice read-contract rendering and spoken status formatting live in `crates/capo-cli/src/voice_render.rs`.
 
 Evidence:
 
@@ -657,6 +658,8 @@ Evidence:
 - `crates/capo-cli/src/runtime_target_evidence.rs`
 - `crates/capo-cli/src/tests.rs`
 - `crates/capo-cli/src/tool_wrapper.rs`
+- `crates/capo-cli/src/voice.rs`
+- `crates/capo-cli/src/voice_render.rs`
 - `crates/capo-cli/src/workpad.rs`
 - `cargo test -p capo-cli`
 - `cargo fmt --check`
