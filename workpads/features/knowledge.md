@@ -2658,6 +2658,25 @@ Verification:
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 
+## F9/CLI5 - Adapter Smoke Command Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Move adapter smoke-report command handling into `adapter_smoke.rs`: report recording, exact/latest status, exact/latest evidence export, artifact-root credential scan, smoke evidence rendering, guarded Capo-owned evidence writes, and smoke scan error formatting.
+- Keep adapter dogfood gate and dispatch execution in `main.rs` for this slice. They depend on broader dashboard/readiness and dispatch-chain behavior, while the smoke-report surface is a smaller cohesive operator command family.
+- Reuse crate-root shared helpers for command envelopes, project IDs, state access, adapter label normalization, stable hashes, escaping, and debug error formatting.
+- Keep `scan_dispatch_artifacts_or_delete` in `main.rs`, but use the smoke module's public scan-error formatter so dispatch cleanup behavior remains unchanged.
+
+Verification:
+
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
 ## F8/SS2g - State Projection Codec Encoder Split
 
 Status: completed on 2026-05-26.

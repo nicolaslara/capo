@@ -629,10 +629,12 @@ Progress:
 - CLI2 surface parsing module split is completed. Help text, global `--state` parsing, and generic option/flag helpers now live in `crates/capo-cli/src/cli_surface.rs`, while command routing and command-family implementation remain in `main.rs`.
 - CLI3 runtime target command module split is completed. Runtime target registration, status/readiness queries, status mutation, shared render helpers, and parser helpers now live in `crates/capo-cli/src/runtime_target.rs`; readiness/evidence exports and guarded evidence writers live in `crates/capo-cli/src/runtime_target_evidence.rs`; routing, dashboard, voice, and connectivity callers stay in `main.rs`.
 - CLI4 connectivity command module split is completed. Connectivity exposure planning, approval, activation/revocation, status rendering, grant matching, and channel/scope parsing now live in `crates/capo-cli/src/connectivity.rs`; evidence export and guarded evidence writing live in `crates/capo-cli/src/connectivity_evidence.rs`; routing, dashboard, and voice summaries stay in `main.rs`.
+- CLI5 adapter smoke command module split is completed. Adapter smoke-report record/status/evidence, artifact scanning, smoke evidence rendering, guarded smoke evidence writes, and smoke scan error formatting now live in `crates/capo-cli/src/adapter_smoke.rs`; routing, dashboard, voice summaries, adapter dogfood gate, and dispatch execution remain in `main.rs`.
 
 Evidence:
 
 - `crates/capo-cli/src/main.rs`
+- `crates/capo-cli/src/adapter_smoke.rs`
 - `crates/capo-cli/src/cli_surface.rs`
 - `crates/capo-cli/src/connectivity.rs`
 - `crates/capo-cli/src/connectivity_evidence.rs`

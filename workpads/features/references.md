@@ -1338,3 +1338,12 @@ Observed 2026-05-26.
 - Tools tests module: `../../crates/capo-tools/src/tests.rs`
 - Resulting file sizes: `../../crates/capo-tools/src/lib.rs` 594 lines; `../../crates/capo-tools/src/runtime_wrappers.rs` 775 lines; `../../crates/capo-tools/src/permission.rs` 285 lines; `../../crates/capo-tools/src/tests.rs` 900 lines.
 - No new third-party dependencies were added for T3.
+
+## F9/CLI5 Adapter Smoke Command Module Split
+
+Observed 2026-05-26.
+
+- Adapter smoke command module: `../../crates/capo-cli/src/adapter_smoke.rs`
+- CLI routing, adapter readiness, adapter dogfood gate, dispatch execution, dashboard, and voice rendering retained in: `../../crates/capo-cli/src/main.rs`
+- Resulting file sizes: `../../crates/capo-cli/src/main.rs` 6,615 lines; `../../crates/capo-cli/src/adapter_smoke.rs` 449 lines.
+- No new third-party dependencies were added for CLI5.
