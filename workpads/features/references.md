@@ -999,3 +999,13 @@ Observed 2026-05-26.
 - Runtime/connectivity architecture source: `../architecture/runtime-tunnel.md`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR18.
+
+## F1/AC30 Adapter Smoke Report Evidence Export
+
+Observed 2026-05-26.
+
+- Shared adapter smoke report selector and regression coverage: `../../crates/capo-query/src/lib.rs`
+- CLI `capo adapter smoke-report evidence` command, markdown renderer, guarded writer, project evidence record, and regression coverage: `../../crates/capo-cli/src/main.rs`
+- Adapter smoke report projection stored by state layer: `../../crates/capo-state/src/lib.rs`
+- Agent connectors source workpad: `agent-connectors.md`
+- No new third-party dependencies were added for AC30.

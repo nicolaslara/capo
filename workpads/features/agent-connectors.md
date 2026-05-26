@@ -731,3 +731,34 @@ Decision:
 - Treat observed native tool activity as dispatch-chain review evidence when fixture replay records structured tool observations.
 - Keep observed-only native tools separate from governed Capo tool calls. The evidence artifact renders observation ID, tool name, adapter-event source, observed status, instrumentation level, confidence, external ref, artifact ref, and raw-event hash only.
 - Continue excluding raw dispatch prompts, raw provider fixture text, and raw provider tool input/output from dispatch evidence artifacts.
+
+### AC30 - Adapter Smoke Report Evidence Export
+
+Status: completed
+
+Acceptance:
+
+- Add a provider-free command that exports a Capo-owned evidence artifact for a recorded adapter smoke report.
+- Record the exported markdown as project-level evidence so readiness and dogfood reviews can cite connector proof or blocker records.
+- Use guarded overwrite behavior so Capo does not overwrite user-authored files.
+- Do not launch provider CLIs, inspect credentials, materialize prompts, open tunnels, request approvals, activate grants, or render smoke stdout/stderr content.
+
+Evidence:
+
+- `ProjectDashboard::adapter_smoke_report_status(...)` in `../../crates/capo-query/src/lib.rs`.
+- CLI `capo adapter smoke-report evidence --smoke-report SMOKE_REPORT_ID --out DIR` in `../../crates/capo-cli/src/main.rs`.
+- Exported artifacts use the `<!-- capo:adapter-smoke-evidence -->` marker and guarded overwrite behavior.
+- Artifact records use `kind=adapter_smoke_evidence`; evidence projections use `kind=adapter_smoke_evidence`.
+- `cargo test -p capo-query adapter_smoke_report -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.
+
+Decision:
+
+- Treat smoke-report evidence as a connector-readiness review artifact, not a provider execution step.
+- Render smoke report metadata and artifact-root references only. Do not render smoke stdout/stderr content, raw prompts, provider output, tokens, cookies, or subscription session material.
+- Keep skipped and failed reports exportable because they explain why real-agent dogfood remains blocked.

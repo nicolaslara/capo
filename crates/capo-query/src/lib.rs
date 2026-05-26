@@ -218,6 +218,16 @@ impl ProjectDashboard {
             .and_then(|plan| self.adapter_dispatch_status(&plan.dispatch_plan_id))
     }
 
+    pub fn adapter_smoke_report_status(
+        &self,
+        smoke_report_id: &str,
+    ) -> Option<&AdapterSmokeReportProjection> {
+        self.adapter_smoke_reports
+            .iter()
+            .rev()
+            .find(|report| report.smoke_report_id == smoke_report_id)
+    }
+
     fn adapter_dispatch_activity_sequence(&self, plan: &AdapterDispatchPlanProjection) -> i64 {
         let latest_gate_sequence = self
             .adapter_dispatch_gates
@@ -1121,6 +1131,37 @@ mod tests {
         assert_eq!(
             ready.adapter_dogfood_gate.proven_adapters,
             vec!["codex_exec"]
+        );
+    }
+
+    #[test]
+    fn project_dashboard_selects_adapter_smoke_report_status() {
+        let root = temp_root("query-dashboard-smoke-report-status");
+        let state = SqliteStateStore::open(&root).expect("state");
+        let project_id = ProjectId::new("project-capo");
+        append_adapter_smoke_report(
+            &state,
+            &project_id,
+            "adapter-smoke-codex",
+            "codex_exec",
+            "skipped",
+            "not_run",
+            false,
+        );
+
+        let dashboard =
+            project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+
+        let report = dashboard
+            .adapter_smoke_report_status("adapter-smoke-codex")
+            .expect("adapter smoke report status");
+        assert_eq!(report.adapter_kind, "codex_exec");
+        assert_eq!(report.smoke_status, "skipped");
+        assert_eq!(report.credential_scan_status, "not_run");
+        assert!(
+            dashboard
+                .adapter_smoke_report_status("missing-smoke-report")
+                .is_none()
         );
     }
 

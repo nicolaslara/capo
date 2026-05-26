@@ -2109,3 +2109,26 @@ Verification:
 
 - `cargo test -p capo-cli runtime_target -- --nocapture`: passed.
 - `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+
+## F1/AC30 - Adapter Smoke Report Evidence Export
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `ProjectDashboard::adapter_smoke_report_status(...)` as the shared exact selector for adapter smoke report metadata.
+- Add `capo adapter smoke-report evidence --smoke-report SMOKE_REPORT_ID --out DIR` as a provider-free evidence export for connector proof or blocker records.
+- Write a Capo-marked markdown artifact with guarded overwrite behavior and record it as project-level evidence.
+- Use `kind=adapter_smoke_evidence` for both artifact and evidence rows so dashboards and future readiness checks can distinguish smoke proof/blocker artifacts from dispatch-chain evidence.
+- Render metadata and artifact-root references only. The evidence artifact does not render smoke stdout/stderr, raw prompts, provider output, tokens, cookies, or subscription session material.
+- Preserve the provider boundary: the export does not launch provider CLIs, materialize prompts, open tunnels, inspect credentials, request approvals, activate grants, or mutate connector state.
+
+Verification:
+
+- `cargo test -p capo-query adapter_smoke_report -- --nocapture`: passed.
+- `cargo test -p capo-cli adapter_smoke -- --nocapture`: passed.
+- `cargo test -p capo-cli help_mentions -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `git diff --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test`: passed.

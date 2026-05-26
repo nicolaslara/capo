@@ -72,6 +72,7 @@ Usage:
   capo adapter dogfood-gate [--state PATH]
   capo adapter smoke-report scan --artifact-root PATH [--state PATH]
   capo adapter smoke-report record --adapter codex|claude --status skipped|passed|failed --credential-scan clean|blocked|not_run --reason TEXT [--marker-found] [--artifact-root PATH] [--state PATH]
+  capo adapter smoke-report evidence --smoke-report SMOKE_REPORT_ID --out DIR [--state PATH]
   capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR] [--state PATH]
   capo adapter replay-dispatch --dispatch-plan DISPATCH_PLAN_ID --fixture PATH [--out DIR] [--state PATH]
   capo dogfood readiness [--out DIR] [--state PATH]
@@ -195,6 +196,11 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             if area == "adapter" && command == "smoke-report" && action == "record" =>
         {
             record_adapter_smoke_report(&parsed, rest)
+        }
+        [area, command, action, rest @ ..]
+            if area == "adapter" && command == "smoke-report" && action == "evidence" =>
+        {
+            adapter_smoke_report_evidence(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "task" && command == "send" => {
             send_task(&parsed, rest)
@@ -1334,6 +1340,99 @@ fn record_adapter_smoke_report(parsed: &ParsedArgs, args: &[String]) -> Result<S
     ))
 }
 
+fn adapter_smoke_report_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--smoke-report" | "--out"))
+    {
+        return Err(format!(
+            "unknown adapter smoke-report evidence option: {unknown}"
+        ));
+    }
+    let smoke_report_id = required_arg(args, "--smoke-report")?;
+    let out = PathBuf::from(required_arg(args, "--out")?);
+    let project_id = project_id();
+    let command = envelope(
+        "adapter-smoke-report-evidence",
+        CommandTarget::Project(project_id.clone()),
+        CommandIntent::ExportEvidence,
+        Some(smoke_report_id.clone()),
+    );
+    let state = state(parsed)?;
+    let dashboard = project_dashboard(&state, ProjectDashboardQuery::new(project_id.clone()))
+        .map_err(debug_error)?;
+    let report = dashboard
+        .adapter_smoke_report_status(&smoke_report_id)
+        .ok_or_else(|| format!("missing adapter smoke report: {smoke_report_id}"))?
+        .clone();
+    let markdown = render_adapter_smoke_report_evidence(&project_id, &report);
+    fs::create_dir_all(&out).map_err(|error| error.to_string())?;
+    let content_hash = stable_cli_hash(&markdown);
+    let artifact_id = format!("artifact-adapter-smoke-evidence-{content_hash}");
+    let path = out.join(format!("{artifact_id}.md"));
+    write_adapter_smoke_report_evidence_file(&path, &markdown)?;
+    state
+        .record_artifact(ArtifactRecord {
+            artifact_id: artifact_id.clone(),
+            project_id: Some(project_id.clone()),
+            session_id: None,
+            run_id: None,
+            kind: "adapter_smoke_evidence".to_string(),
+            uri: path.display().to_string(),
+            content_hash: content_hash.clone(),
+            size_bytes: markdown.len() as i64,
+            redaction_state: RedactionState::Safe,
+        })
+        .map_err(debug_error)?;
+    let evidence_id = format!("evidence-{artifact_id}");
+    let sequence = state
+        .append_event(
+            NewEvent {
+                event_id: format!("event-{evidence_id}"),
+                kind: EventKind::EvidenceRecorded,
+                actor: "cli".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: None,
+                run_id: None,
+                turn_id: None,
+                item_id: Some(evidence_id.clone()),
+                payload_json: format!(
+                    "{{\"artifact_id\":\"{}\",\"content_hash\":\"{}\",\"smoke_report_id\":\"{}\",\"adapter\":\"{}\",\"smoke_status\":\"{}\"}}",
+                    escape_json(&artifact_id),
+                    escape_json(&content_hash),
+                    escape_json(&report.smoke_report_id),
+                    escape_json(&report.adapter_kind),
+                    escape_json(&report.smoke_status)
+                ),
+                idempotency_key: Some(format!(
+                    "adapter-smoke-report-evidence:{}:{}:{content_hash}",
+                    project_id, report.smoke_report_id
+                )),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Evidence(EvidenceProjection {
+                evidence_id: capo_core::EvidenceId::new(evidence_id.clone()),
+                project_id: project_id.clone(),
+                task_id: None,
+                session_id: None,
+                run_id: None,
+                kind: "adapter_smoke_evidence".to_string(),
+                artifact_id: Some(artifact_id.clone()),
+                confidence: adapter_smoke_report_evidence_confidence(&report),
+                updated_sequence: 0,
+            })],
+        )
+        .map_err(debug_error)?;
+    Ok(format!(
+        "adapter_smoke_report_evidence_exported=true\nsmoke_report_id={}\nevidence_id={evidence_id}\nartifact_id={artifact_id}\npath={}\ncontent_hash={content_hash}\nsequence={sequence}\ncommand_id={}\n",
+        report.smoke_report_id,
+        path.display(),
+        command.command_id
+    ))
+}
+
 fn scan_adapter_smoke_artifacts(args: &[String]) -> Result<String, String> {
     let artifact_root = required_arg(args, "--artifact-root")?;
     let scan = scan_artifact_root(Path::new(&artifact_root))?;
@@ -1341,6 +1440,39 @@ fn scan_adapter_smoke_artifacts(args: &[String]) -> Result<String, String> {
         "adapter_smoke_artifact_scan=true\ncredential_scan_status=clean\nartifact_root={artifact_root}\nfiles_scanned={}\n",
         scan.files_scanned
     ))
+}
+
+fn adapter_smoke_report_evidence_confidence(report: &AdapterSmokeReportProjection) -> i64 {
+    if report.smoke_status == "passed"
+        && report.credential_scan_status == "clean"
+        && report.marker_found
+    {
+        85
+    } else if report.smoke_status == "failed" || report.credential_scan_status == "blocked" {
+        75
+    } else {
+        65
+    }
+}
+
+fn render_adapter_smoke_report_evidence(
+    project_id: &ProjectId,
+    report: &AdapterSmokeReportProjection,
+) -> String {
+    format!(
+        "<!-- capo:adapter-smoke-evidence -->\n# Capo Adapter Smoke Evidence - {}\n\n## Objective\n\nReview a recorded local adapter smoke report without launching subscription-backed provider CLIs or inspecting credential material.\n\n## Smoke Report\n\n- Project: `{}`\n- Smoke report: `{}`\n- Adapter: `{}`\n- Smoke status: `{}`\n- Credential scan status: `{}`\n- Marker found: `{}`\n- Artifact root: `{}`\n- Dogfood readiness effect: `{}`\n- Reason: `{}`\n- Updated sequence: `{}`\n\n## Review Notes\n\n- A passed report only counts toward first real-agent dogfood readiness when the credential scan is clean and the expected marker is present.\n- Skipped and failed reports remain useful evidence because they explain why connector readiness is still blocked.\n- Artifact roots are references only; this report does not render stdout, stderr, prompts, provider output, tokens, cookies, or subscription session material.\n\n## Evidence Policy\n\n- This report is derived from persisted Capo adapter smoke report read models only.\n- It does not launch provider CLIs, materialize prompts, open tunnels, inspect credentials, request approvals, activate grants, or mutate connector state.\n- Credential material, tokens, cookies, subscription sessions, raw prompts, and provider output are not rendered.\n",
+        report.smoke_report_id,
+        project_id,
+        report.smoke_report_id,
+        report.adapter_kind,
+        report.smoke_status,
+        report.credential_scan_status,
+        report.marker_found,
+        report.artifact_root.as_deref().unwrap_or("none"),
+        report.dogfood_readiness_effect,
+        report.reason,
+        report.updated_sequence
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -7388,6 +7520,24 @@ fn write_connectivity_exposure_evidence_file(path: &Path, markdown: &str) -> Res
     fs::write(path, markdown).map_err(|error| error.to_string())
 }
 
+fn write_adapter_smoke_report_evidence_file(path: &Path, markdown: &str) -> Result<(), String> {
+    if let Ok(existing) = fs::read_to_string(path) {
+        if !existing.starts_with("<!-- capo:adapter-smoke-evidence -->") {
+            return Err(format!(
+                "refusing to overwrite non-Capo adapter smoke evidence file: {}",
+                path.display()
+            ));
+        }
+        if existing != markdown {
+            return Err(format!(
+                "refusing to overwrite changed Capo adapter smoke evidence file: {}",
+                path.display()
+            ));
+        }
+    }
+    fs::write(path, markdown).map_err(|error| error.to_string())
+}
+
 fn write_runtime_target_evidence_file(path: &Path, markdown: &str) -> Result<(), String> {
     if let Ok(existing) = fs::read_to_string(path) {
         if !existing.starts_with("<!-- capo:runtime-target-evidence -->") {
@@ -7662,6 +7812,7 @@ mod tests {
         assert!(HELP.contains("adapter dispatch-gate"));
         assert!(HELP.contains("adapter dispatch-status"));
         assert!(HELP.contains("adapter dispatch-evidence"));
+        assert!(HELP.contains("adapter smoke-report evidence"));
         assert!(HELP.contains("adapter execution-request"));
         assert!(HELP.contains("adapter materialize-prompt"));
         assert!(HELP.contains("adapter run-preflight"));
@@ -8681,6 +8832,45 @@ mod tests {
         .expect("record passed smoke");
         assert!(passed.contains("dogfood_readiness_effect=real_agent_connector_proven"));
 
+        let evidence_dir = temp_root("adapter-smoke-report-evidence");
+        let evidence = run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "evidence".to_string(),
+            "--smoke-report".to_string(),
+            output_value(&passed, "smoke_report_id"),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("export adapter smoke evidence");
+        assert!(evidence.contains("adapter_smoke_report_evidence_exported=true"));
+        assert!(evidence.contains("evidence_id=evidence-artifact-adapter-smoke-evidence-"));
+        let evidence_path = output_value(&evidence, "path");
+        let markdown = fs::read_to_string(&evidence_path).expect("read adapter smoke evidence");
+        assert!(markdown.starts_with("<!-- capo:adapter-smoke-evidence -->"));
+        assert!(markdown.contains("## Smoke Report"));
+        assert!(markdown.contains("- Adapter: `codex_exec`"));
+        assert!(markdown.contains("- Smoke status: `passed`"));
+        assert!(markdown.contains("- Credential scan status: `clean`"));
+        assert!(markdown.contains("does not render stdout"));
+        assert!(!markdown.contains("CAPO_CODEX_SMOKE_OK"));
+        assert!(!markdown.contains("Authorization:"));
+        let missing_evidence = run_cli(vec![
+            "adapter".to_string(),
+            "smoke-report".to_string(),
+            "evidence".to_string(),
+            "--smoke-report".to_string(),
+            "missing-smoke-report".to_string(),
+            "--out".to_string(),
+            evidence_dir.display().to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect_err("missing adapter smoke evidence");
+        assert!(missing_evidence.contains("missing adapter smoke report: missing-smoke-report"));
+
         let dashboard = run_cli(vec![
             "dashboard".to_string(),
             "--state".to_string(),
@@ -8690,6 +8880,8 @@ mod tests {
         assert!(dashboard.contains("adapter_smoke_reports=2"));
         assert!(dashboard.contains("adapter_smoke_report=adapter-smoke-codex_exec"));
         assert!(dashboard.contains("credential_scan_status=not_run"));
+        assert!(dashboard.contains("project_evidence=1"));
+        assert!(dashboard.contains("kind=adapter_smoke_evidence"));
     }
 
     #[test]
