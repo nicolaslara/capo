@@ -358,3 +358,27 @@ Decision:
 
 - Keep latest runtime target voice handling read-only over the shared dashboard query. Voice can answer execution-placement status without requiring the operator to copy a target ID, but it cannot launch runtimes, run providers, open tunnels, inspect credentials, or mutate Capo state.
 - Use the same runner/status vocabulary as the CLI latest selector: `local-process`, `remote-process`, `container`, `available`, `disabled`, and `unhealthy`.
+
+### V16 - Runtime Target Control Readiness Conversation
+
+Status: completed
+
+Acceptance:
+
+- Recognize simple runtime-target readiness questions such as "Is runtime target remote-target-1 ready for remote control?"
+- Lower the utterance into a read-only command envelope and shared runtime target control-readiness read scope.
+- Answer from `ProjectDashboard::runtime_target_control_readiness(...)` rather than duplicating target/exposure lookup in voice code.
+- Render target readiness, control exposure readiness, blockers, and next action.
+- Preserve raw transcript non-retention, avoid mutating state, and avoid launching runtimes, launching providers, opening tunnels, inspecting credentials, requesting approvals, activating grants, or editing workpads.
+
+Evidence:
+
+- `VoiceIntentKind::RuntimeTargetReadiness` and `VoiceReadScope::ProjectRuntimeTargetControlReadiness` in `../../crates/capo-voice/src/lib.rs`.
+- CLI voice runtime-target readiness rendering in `../../crates/capo-cli/src/main.rs`.
+- Shared runtime target control-readiness query in `../../crates/capo-query/src/lib.rs`.
+- `cargo test -p capo-voice runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+
+Decision:
+
+- Keep runtime-target readiness voice handling read-only over the shared dashboard query. Voice can answer whether a target appears ready for remote control from stored target/exposure metadata, but it cannot open tunnels, grant permissions, run providers, launch runtimes, or claim stronger reachability than the recorded exposure health.

@@ -1099,3 +1099,14 @@ Observed 2026-05-26.
 - Runtime target projections and connectivity exposure projections stored separately by state layer: `../../crates/capo-state/src/lib.rs`
 - Remote runtime source workpad: `remote-runtime.md`
 - No new third-party dependencies were added for RR21.
+
+## F6/V16 Runtime Target Control Readiness Conversation
+
+Observed 2026-05-26.
+
+- Voice runtime-target readiness intent, read scope, parser, and regression coverage: `../../crates/capo-voice/src/lib.rs`
+- CLI voice runtime-target readiness rendering and no-mutation regression coverage: `../../crates/capo-cli/src/main.rs`
+- Shared runtime target control-readiness query consumed by voice rendering: `../../crates/capo-query/src/lib.rs`
+- Voice source workpad: `voice.md`
+- Remote runtime source workpad: `remote-runtime.md`
+- No new third-party dependencies were added for V16.

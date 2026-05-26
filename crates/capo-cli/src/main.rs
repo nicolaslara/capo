@@ -3920,6 +3920,7 @@ fn submit_voice(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> 
         | VoiceIntentKind::NextWork
         | VoiceIntentKind::RecentWork
         | VoiceIntentKind::ReviewNeeds
+        | VoiceIntentKind::RuntimeTargetReadiness
         | VoiceIntentKind::RuntimeTargetStatus
         | VoiceIntentKind::ToolActivity
         | VoiceIntentKind::AgentStatus => {
@@ -4304,6 +4305,7 @@ fn voice_session_id(
         VoiceReadScope::ProjectDashboard
         | VoiceReadScope::ProjectLatestConnectivityExposure { .. }
         | VoiceReadScope::ProjectRuntimeTargetStatus { .. }
+        | VoiceReadScope::ProjectRuntimeTargetControlReadiness { .. }
         | VoiceReadScope::ProjectLatestRuntimeTargetStatus { .. }
         | VoiceReadScope::ProjectAdapterSmokeReportStatus { .. }
         | VoiceReadScope::ProjectLatestAdapterSmokeReport { .. }
@@ -4450,6 +4452,15 @@ fn render_voice_read_contract(plan: &VoiceCommandPlan, dashboard: &ProjectDashbo
         VoiceReadScope::ProjectRuntimeTargetStatus { runtime_target_id } => {
             if let Some(target) = dashboard.runtime_target_status(runtime_target_id) {
                 append_voice_runtime_target_status(&mut output, target);
+            } else {
+                output.push_str(&format!(
+                    "spoken_runtime_target_missing={runtime_target_id}\n"
+                ));
+            }
+        }
+        VoiceReadScope::ProjectRuntimeTargetControlReadiness { runtime_target_id } => {
+            if let Some(readiness) = dashboard.runtime_target_control_readiness(runtime_target_id) {
+                append_voice_runtime_target_control_readiness(&mut output, &readiness);
             } else {
                 output.push_str(&format!(
                     "spoken_runtime_target_missing={runtime_target_id}\n"
@@ -4693,6 +4704,28 @@ fn append_voice_runtime_target_status(output: &mut String, target: &RuntimeTarge
     ));
 }
 
+fn append_voice_runtime_target_control_readiness(
+    output: &mut String,
+    readiness: &RuntimeTargetControlReadiness,
+) {
+    output.push_str(&format!(
+        "spoken_runtime_target={} spoken_runner={} spoken_target_status={} spoken_target_ready={} spoken_control_exposure_ready={} spoken_control_exposure={} spoken_control_exposure_status={} spoken_control_exposure_scope={} spoken_control_exposure_permission_scope={} spoken_control_exposure_reachable={} spoken_runtime_target_ready_for_control={} spoken_blockers={} spoken_next_action={}\n",
+        readiness.runtime_target_id,
+        readiness.runner_kind,
+        readiness.target_status,
+        readiness.target_ready,
+        readiness.control_exposure_ready,
+        readiness.control_exposure_id,
+        readiness.control_exposure_status,
+        readiness.control_exposure_scope,
+        readiness.control_exposure_permission_scope,
+        readiness.control_exposure_reachable,
+        readiness.ready,
+        readiness.blockers,
+        readiness.next_action
+    ));
+}
+
 fn append_voice_agent_row(output: &mut String, row: &capo_query::AgentDashboardRow) {
     output.push_str(&format!(
         "spoken_agent={} agent_status={}\n",
@@ -4819,6 +4852,7 @@ fn voice_intent_label(intent: VoiceIntentKind) -> &'static str {
         VoiceIntentKind::RecentWork => "recent_work",
         VoiceIntentKind::ReviewNeeds => "review_needs",
         VoiceIntentKind::RedirectSession => "redirect_session",
+        VoiceIntentKind::RuntimeTargetReadiness => "runtime_target_readiness",
         VoiceIntentKind::RuntimeTargetStatus => "runtime_target_status",
         VoiceIntentKind::StartNextWork => "start_next_work",
         VoiceIntentKind::InterruptSession => "interrupt_session",
@@ -4835,6 +4869,9 @@ fn voice_scope_label(scope: &VoiceReadScope) -> &'static str {
             "project_latest_connectivity_exposure"
         }
         VoiceReadScope::ProjectRuntimeTargetStatus { .. } => "project_runtime_target_status",
+        VoiceReadScope::ProjectRuntimeTargetControlReadiness { .. } => {
+            "project_runtime_target_control_readiness"
+        }
         VoiceReadScope::ProjectLatestRuntimeTargetStatus { .. } => {
             "project_latest_runtime_target_status"
         }
@@ -11662,6 +11699,42 @@ mod tests {
         assert!(readiness_after_grant.contains("blockers=none"));
         assert!(
             readiness_after_grant.contains("next_action=use_runtime_target_for_remote_control")
+        );
+
+        let before_voice_readiness_sequence = SqliteStateStore::open(&state_root)
+            .expect("state")
+            .last_sequence()
+            .expect("sequence before voice readiness");
+        let voice_readiness = run_cli(vec![
+            "voice".to_string(),
+            "submit".to_string(),
+            "--transcript".to_string(),
+            "Is runtime target remote target 1 ready for remote control?".to_string(),
+            "--state".to_string(),
+            state_root.display().to_string(),
+        ])
+        .expect("voice runtime target readiness");
+        assert!(voice_readiness.contains("voice_plan=runtime_target_readiness"));
+        assert!(voice_readiness.contains("read_scope=project_runtime_target_control_readiness"));
+        assert!(voice_readiness.contains("spoken_runtime_target=remote-target-1"));
+        assert!(voice_readiness.contains("spoken_target_ready=true"));
+        assert!(voice_readiness.contains("spoken_control_exposure_ready=true"));
+        assert!(voice_readiness.contains("spoken_runtime_target_ready_for_control=true"));
+        assert!(voice_readiness.contains("spoken_blockers=none"));
+        assert!(
+            voice_readiness.contains("spoken_next_action=use_runtime_target_for_remote_control")
+        );
+        assert!(voice_readiness.contains("mutation_applied=false"));
+        assert!(voice_readiness.contains("raw_transcript_retained=false"));
+        assert!(
+            !voice_readiness.contains("Is runtime target remote target 1 ready for remote control")
+        );
+        assert_eq!(
+            SqliteStateStore::open(&state_root)
+                .expect("state")
+                .last_sequence()
+                .expect("sequence after voice readiness"),
+            before_voice_readiness_sequence
         );
 
         let dashboard = run_cli(vec![

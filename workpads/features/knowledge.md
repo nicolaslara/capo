@@ -2305,3 +2305,20 @@ Verification:
 
 - `cargo test -p capo-query runtime_target -- --nocapture`: passed.
 - `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.
+
+## F6/V16 - Runtime Target Control Readiness Conversation
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Add `VoiceIntentKind::RuntimeTargetReadiness` and `VoiceReadScope::ProjectRuntimeTargetControlReadiness`.
+- Recognize read-only questions such as "Is runtime target remote target 1 ready for remote control?"
+- Render readiness from `ProjectDashboard::runtime_target_control_readiness(...)` so voice uses the same target/exposure aggregation as CLI and future UI surfaces.
+- Return target readiness, control exposure readiness, blocker codes, and next action without retaining the raw transcript.
+- Preserve the boundary split: the voice query does not launch runtime processes, provider CLIs, tunnels, approvals, grants, credentials, prompt materialization, workpad edits, or state mutation.
+
+Verification:
+
+- `cargo test -p capo-voice runtime_target -- --nocapture`: passed.
+- `cargo test -p capo-cli connectivity_exposure_approval -- --nocapture`: passed.

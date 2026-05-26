@@ -36,6 +36,7 @@ pub enum VoiceIntentKind {
     RecentWork,
     ReviewNeeds,
     RedirectSession,
+    RuntimeTargetReadiness,
     RuntimeTargetStatus,
     StartNextWork,
     InterruptSession,
@@ -79,6 +80,9 @@ pub enum VoiceReadScope {
         channel_kind: Option<String>,
     },
     ProjectRuntimeTargetStatus {
+        runtime_target_id: String,
+    },
+    ProjectRuntimeTargetControlReadiness {
         runtime_target_id: String,
     },
     ProjectLatestRuntimeTargetStatus {
@@ -467,6 +471,48 @@ pub fn plan_dummy_transcript(input: VoiceTranscriptInput) -> VoiceCommandPlan {
             requires_visible_confirmation: false,
             assistant_reply_hint:
                 "Answer latest runtime target status from shared dashboard read models.".to_string(),
+        };
+    }
+
+    if let Some(runtime_target_id) = runtime_target_readiness_id(&normalized) {
+        let mut command = voice_command(
+            "voice-runtime-target-readiness",
+            &input,
+            CommandTarget::Project(input.project_id.clone()),
+            CommandIntent::QueryStatus,
+            None,
+        );
+        command
+            .structured_args
+            .push(("view".to_string(), "runtime_target_readiness".to_string()));
+        command
+            .structured_args
+            .push(("runtime_target".to_string(), runtime_target_id.clone()));
+        return VoiceCommandPlan {
+            intent_kind: VoiceIntentKind::RuntimeTargetReadiness,
+            command: Some(command),
+            read_contract: VoiceReadContract {
+                query_scope: VoiceReadScope::ProjectRuntimeTargetControlReadiness {
+                    runtime_target_id,
+                },
+                required_fields: vec![
+                    "runtime_target_id",
+                    "runner",
+                    "target_status",
+                    "target_ready",
+                    "control_exposure_ready",
+                    "control_exposure_status",
+                    "control_exposure_reachable",
+                    "ready",
+                    "blockers",
+                    "next_action",
+                ],
+            },
+            transcript_policy: policy,
+            requires_visible_confirmation: false,
+            assistant_reply_hint:
+                "Answer runtime target control readiness from shared dashboard read models."
+                    .to_string(),
         };
     }
 
@@ -1258,6 +1304,23 @@ fn runtime_target_status_id(normalized: &str) -> Option<String> {
         .filter(|runtime_target_id| !runtime_target_id.is_empty())
 }
 
+fn runtime_target_readiness_id(normalized: &str) -> Option<String> {
+    normalized
+        .strip_prefix("is runtime target ")
+        .and_then(|rest| rest.strip_suffix(" ready for remote control"))
+        .or_else(|| {
+            normalized
+                .strip_prefix("is runtime target ")
+                .and_then(|rest| rest.strip_suffix(" control ready"))
+        })
+        .or_else(|| normalized.strip_prefix("what is runtime target readiness for "))
+        .or_else(|| normalized.strip_prefix("what is the runtime target readiness for "))
+        .or_else(|| normalized.strip_prefix("show runtime target readiness for "))
+        .or_else(|| normalized.strip_prefix("runtime target readiness for "))
+        .map(agent_slug)
+        .filter(|runtime_target_id| !runtime_target_id.is_empty())
+}
+
 fn is_project_recent_work_question(input: &str) -> bool {
     matches!(
         input,
@@ -1785,6 +1848,57 @@ mod tests {
                 .find(|(key, _)| key == "runtime_target")
                 .map(|(_, value)| value.as_str()),
             Some("remote-target-1")
+        );
+    }
+
+    #[test]
+    fn runtime_target_readiness_question_reads_control_readiness_without_mutation() {
+        let plan = plan_dummy_transcript(input(
+            "Is runtime target remote target 1 ready for remote control?",
+        ));
+
+        assert_eq!(plan.intent_kind, VoiceIntentKind::RuntimeTargetReadiness);
+        assert_eq!(
+            plan.read_contract.query_scope,
+            VoiceReadScope::ProjectRuntimeTargetControlReadiness {
+                runtime_target_id: "remote-target-1".to_string(),
+            }
+        );
+        assert!(
+            plan.read_contract
+                .required_fields
+                .contains(&"control_exposure_ready")
+        );
+        assert!(plan.read_contract.required_fields.contains(&"next_action"));
+        assert!(!plan.requires_visible_confirmation);
+        assert!(!plan.transcript_policy.retain_raw_transcript);
+        let command = plan.command.expect("voice command");
+        assert_eq!(command.intent, CommandIntent::QueryStatus);
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "view")
+                .map(|(_, value)| value.as_str()),
+            Some("runtime_target_readiness")
+        );
+        assert_eq!(
+            command
+                .structured_args
+                .iter()
+                .find(|(key, _)| key == "runtime_target")
+                .map(|(_, value)| value.as_str()),
+            Some("remote-target-1")
+        );
+
+        let alternate = plan_dummy_transcript(input(
+            "What is runtime target readiness for remote target 1?",
+        ));
+        assert_eq!(
+            alternate.read_contract.query_scope,
+            VoiceReadScope::ProjectRuntimeTargetControlReadiness {
+                runtime_target_id: "remote-target-1".to_string(),
+            }
         );
     }
 
