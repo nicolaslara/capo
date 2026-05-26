@@ -532,6 +532,7 @@ Progress:
 
 - SS1 state store library decision is completed. Manual `rusqlite` SQL is acceptable as the current implementation, but no longer the preferred path for broad projection growth. Diesel is the first migration candidate to spike; SQLx remains the second candidate for an async/server-oriented path; SeaORM is deferred for the controller core; a typed in-house `rusqlite` projection registry remains the shortest safe hardening option.
 - SS2 state crate test module split is completed. The first maintainability slice moved the large inline `capo-state` test module into its own file before deeper state/query/projection splits.
+- SS2a state event/error module split is completed. Stable event envelope, redaction, artifact, recovery, and error/result types now live in focused modules with crate-root re-exports preserved.
 
 Evidence:
 

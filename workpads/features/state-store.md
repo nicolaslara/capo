@@ -81,3 +81,31 @@ Decision:
 
 - Start with tests because this reduces the largest state file without touching projection semantics or downstream imports.
 - Keep the first split mechanical and single-crate. Deeper state modules for events, projections, schema, and queries should follow only after this low-risk move lands cleanly.
+
+### SS2a - State Event And Error Module Split
+
+Status: completed
+
+Acceptance:
+
+- Move stable event envelope, redaction, artifact, recovery, and state-error types out of `src/lib.rs`.
+- Preserve crate-root public APIs through re-exports so downstream crates can continue importing the same names from `capo_state`.
+- Do not change SQLite schema, projection encoding, query behavior, rebuild behavior, or event kind strings.
+- Run focused `capo-state` tests and the standard workspace gate before completion.
+
+Evidence:
+
+- `../../crates/capo-state/src/event.rs` now owns `EventKind`, `RedactionState`, `NewEvent`, `EventRecord`, `ArtifactRecord`, and `RecoveryAttempt`.
+- `../../crates/capo-state/src/error.rs` now owns `StateError` and `StateResult`.
+- `../../crates/capo-state/src/lib.rs` re-exports those types at the crate root.
+- Resulting state crate file sizes: `../../crates/capo-state/src/lib.rs` 5,875 lines; `../../crates/capo-state/src/event.rs` 207 lines; `../../crates/capo-state/src/error.rs` 37 lines; `../../crates/capo-state/src/tests.rs` 1,876 lines.
+- `git diff --check`: passed.
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+Decision:
+
+- Split event/error types before projection internals because they are stable boundary vocabulary and can be moved without touching persisted projection rows.
+- Keep the new modules private with crate-root `pub use` exports for now. This preserves the current `capo_state::{EventKind, StateError, ...}` import surface while making later `schema`, `projections`, and `queries` splits easier.

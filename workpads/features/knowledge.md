@@ -2454,3 +2454,22 @@ Verification:
 - `cargo fmt --check`: passed.
 - `cargo test --workspace --all-targets`: passed.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+
+## F8/SS2a - State Event And Error Module Split
+
+Status: completed on 2026-05-26.
+
+Decisions:
+
+- Continue the state-crate decomposition with stable boundary vocabulary rather than deeper SQL helpers first.
+- Move event envelope, redaction, artifact, recovery, and state-error types into focused modules while preserving crate-root re-exports. This keeps downstream imports stable and reduces risk before touching schema, projection codecs, or read queries.
+- Treat event kind strings as persisted compatibility data. This slice moved the `EventKind` definition without changing any `as_str()` output.
+- Keep `error.rs` separate from `event.rs` even though `StateError` references `RedactionState`; errors are a cross-cutting store API concern, not event payload vocabulary.
+
+Verification:
+
+- `git diff --check`: passed.
+- `cargo fmt --check`: passed.
+- `cargo test -p capo-state`: passed.
+- `cargo test --workspace --all-targets`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
