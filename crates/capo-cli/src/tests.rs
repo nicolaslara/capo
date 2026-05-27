@@ -39,6 +39,10 @@ fn help_mentions_command_envelopes_and_no_credentials() {
     assert!(HELP.contains("adapter replay-dispatch"));
     assert!(HELP.contains("adapter dogfood-gate"));
     assert!(HELP.contains("dogfood readiness"));
+    assert!(HELP.contains("server agent register"));
+    assert!(HELP.contains("server task send"));
+    assert!(HELP.contains("server dashboard"));
+    assert!(HELP.contains("server recover"));
     assert!(HELP.contains("runtime target register"));
     assert!(HELP.contains("runtime target set-status"));
     assert!(HELP.contains("runtime target status"));
@@ -3565,6 +3569,207 @@ fn cli_drives_fake_controller_and_exports_evidence() {
     assert!(review_artifact.starts_with("<!-- capo:review-finding -->"));
     assert!(review_artifact.contains("Follow-up source task: `ME3`"));
     assert!(review_artifact.contains("Compatibility workpad task: `ME3`"));
+}
+
+#[test]
+fn server_cli_routes_agent_work_through_server_boundary() {
+    let state_root = temp_root("server-cli-state");
+
+    let registered = run_cli(vec![
+        "server".to_string(),
+        "agent".to_string(),
+        "register".to_string(),
+        "--name".to_string(),
+        "mock-codex".to_string(),
+        "--adapter".to_string(),
+        "fake".to_string(),
+        "--runtime".to_string(),
+        "fake".to_string(),
+        "--request".to_string(),
+        "request-register-mock-codex".to_string(),
+        "--client".to_string(),
+        "cli-test".to_string(),
+        "--actor".to_string(),
+        "nicolas".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("server register");
+    assert!(registered.contains("server_boundary=capo-server"));
+    assert!(registered.contains("server_agent_registered=true"));
+    assert!(registered.contains("server_request_id=request-register-mock-codex"));
+    assert!(registered.contains("server_client_id=cli-test"));
+    assert!(registered.contains("server_actor_id=nicolas"));
+
+    let second = run_cli(vec![
+        "server".to_string(),
+        "agent".to_string(),
+        "register".to_string(),
+        "--name".to_string(),
+        "mock-reviewer".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("server register second agent");
+    assert!(second.contains("agent=mock-reviewer"));
+
+    let sent = run_cli(vec![
+        "server".to_string(),
+        "task".to_string(),
+        "send".to_string(),
+        "--agent".to_string(),
+        "mock-codex".to_string(),
+        "--goal".to_string(),
+        "Inspect server CLI routing".to_string(),
+        "--scenario".to_string(),
+        "tool-memory".to_string(),
+        "--request".to_string(),
+        "request-send-mock-codex".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("server send task");
+    assert!(sent.contains("server_task_sent=true"));
+    assert!(sent.contains("server_request_id=request-send-mock-codex"));
+    assert!(sent.contains("session_id=session-mock-codex"));
+
+    let status = run_cli(vec![
+        "server".to_string(),
+        "agent".to_string(),
+        "status".to_string(),
+        "--agent".to_string(),
+        "mock-codex".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("server status");
+    assert!(status.contains("server_agent_status=true"));
+    assert!(status.contains("agent=mock-codex status=running"));
+    assert!(status.contains("current_session=session-mock-codex"));
+    assert!(status.contains("run_status=running"));
+    assert!(status.contains("tool_calls=1"));
+    assert!(status.contains("memory_packets=1"));
+
+    let state = SqliteStateStore::open(&state_root).expect("state");
+    let server_events = state
+        .recent_events_for_session(&SessionId::new("session-mock-codex"), 20)
+        .expect("session events")
+        .into_iter()
+        .filter(|event| event.kind == "server.request_handled")
+        .collect::<Vec<_>>();
+    assert_eq!(server_events.len(), 1);
+    assert_eq!(server_events[0].actor, "local-user");
+    assert_eq!(
+        server_events[0].item_id.as_deref(),
+        Some("request-send-mock-codex")
+    );
+    assert!(
+        server_events[0]
+            .payload_json
+            .contains("\"client_id\":\"local-cli\"")
+    );
+    assert!(
+        server_events[0]
+            .payload_json
+            .contains("\"command_kind\":\"send_task\"")
+    );
+    assert!(
+        server_events[0]
+            .idempotency_key
+            .as_deref()
+            .is_some_and(|key| key.contains("server:local-cli:local-user:request-send-mock-codex"))
+    );
+
+    let repeated = run_cli(vec![
+        "server".to_string(),
+        "task".to_string(),
+        "send".to_string(),
+        "--agent".to_string(),
+        "mock-codex".to_string(),
+        "--goal".to_string(),
+        "This should not collide with existing fake IDs".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect_err("repeated server task send should fail");
+    assert!(repeated.contains("AgentAlreadyHasSession"));
+
+    let dashboard = run_cli(vec![
+        "server".to_string(),
+        "dashboard".to_string(),
+        "--recent-events".to_string(),
+        "8".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("server dashboard");
+    assert!(dashboard.contains("server_dashboard=true"));
+    assert!(dashboard.contains("agent_count=2"));
+    assert!(dashboard.contains("active_session_count=1"));
+
+    let listed = run_cli(vec![
+        "server".to_string(),
+        "agent".to_string(),
+        "list".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("server list");
+    assert!(listed.contains("server_agents_listed=true"));
+    assert!(listed.contains("active_agents=2"));
+    assert!(listed.contains("agent=mock-codex"));
+    assert!(listed.contains("agent=mock-reviewer"));
+
+    let missing = run_cli(vec![
+        "server".to_string(),
+        "agent".to_string(),
+        "status".to_string(),
+        "--agent".to_string(),
+        "missing".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect_err("missing server agent should fail");
+    assert!(missing.contains("UnknownAgent"));
+
+    let missing_send = run_cli(vec![
+        "server".to_string(),
+        "task".to_string(),
+        "send".to_string(),
+        "--agent".to_string(),
+        "missing".to_string(),
+        "--goal".to_string(),
+        "This should fail at the server boundary".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect_err("missing server task send should fail");
+    assert!(missing_send.contains("UnknownAgent"));
+
+    let recovered = run_cli(vec![
+        "server".to_string(),
+        "recover".to_string(),
+        "--request".to_string(),
+        "request-recover-server-cli".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("server recover");
+    assert!(recovered.contains("server_recovered=true"));
+    assert!(recovered.contains("server_request_id=request-recover-server-cli"));
+    assert!(recovered.contains("recovered_run_count=1"));
+
+    let recovered_status = run_cli(vec![
+        "server".to_string(),
+        "agent".to_string(),
+        "status".to_string(),
+        "--agent".to_string(),
+        "mock-codex".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("server recovered status");
+    assert!(recovered_status.contains("run_status=exited_unknown"));
 }
 
 #[test]

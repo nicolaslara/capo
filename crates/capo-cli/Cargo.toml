@@ -18,6 +18,7 @@ capo-eval.workspace = true
 capo-memory.workspace = true
 capo-query.workspace = true
 capo-runtime.workspace = true
+capo-server.workspace = true
 capo-state.workspace = true
 capo-tools.workspace = true
 capo-voice.workspace = true

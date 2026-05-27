@@ -22,3 +22,12 @@
 - `.agents/skills/next/SKILL.md` - Codex next workflow now includes server workpad context.
 - `.cursor/commands/next.md` - slash-command next workflow now includes server workpad context.
 - `.opencode/commands/next.md` - opencode next workflow now includes server workpad context.
+
+## SV1 Implementation Sources
+
+- `crates/capo-cli/src/server_client.rs` - server-backed CLI client commands.
+- `crates/capo-cli/src/main.rs` - routes `capo server ...` commands to the server client module.
+- `crates/capo-cli/src/cli_surface.rs` - help text for server-backed CLI commands.
+- `crates/capo-cli/src/tests.rs` - server-backed CLI flow coverage.
+- `crates/capo-server/src/lib.rs` - request identity/origin propagation and status command.
+- `crates/capo-state/src/event.rs` - `server.request_handled` audit event kind.

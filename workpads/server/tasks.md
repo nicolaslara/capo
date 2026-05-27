@@ -43,7 +43,7 @@ Review follow-ups:
 
 ## SV1 - CLI Client Through Server Boundary
 
-Status: pending
+Status: completed on 2026-05-27
 
 Acceptance:
 
@@ -52,6 +52,33 @@ Acceptance:
 - Cover agent registration, task send, agent list, dashboard/status, and recovery.
 - Preserve compatibility for existing direct commands until the server-backed path is proven.
 - Add tests that fail if the CLI bypasses the server boundary for the new server-backed commands, including unknown-agent and multi-agent coverage.
+
+Evidence:
+
+- `crates/capo-cli/src/server_client.rs`
+- `crates/capo-cli/src/main.rs`
+- `crates/capo-server/src/lib.rs`
+- `crates/capo-server/src/tests.rs`
+- `crates/capo-cli/src/tests.rs`
+- `cargo test -p capo-server`
+- `cargo test -p capo-cli server_cli_routes_agent_work_through_server_boundary -- --nocapture`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+
+Progress:
+
+- Added `capo server agent register|list|status`, `capo server task send`, `capo server dashboard`, and `capo server recover` as server-backed CLI client commands.
+- Server responses now carry request ID, client ID, actor ID, and input origin metadata.
+- Mutating server requests now emit `server.request_handled` audit events with request/client/actor/origin/idempotency metadata.
+- Added focused tests for request-origin propagation, unknown-agent rejection, audit-event correlation, multi-agent CLI flow, dashboard/status, and recovery through the server boundary.
+- Review fixes reject repeated sends while the mocked controller still uses fixed session/run IDs, map unknown task sends to `UnknownAgent`, JSON-encode audit payloads, and assert CLI-persisted server audit events.
+
+Result:
+
+- SV1 keeps the existing direct CLI commands as compatibility paths and adds a server-backed `capo server ...` namespace for the product path.
+- The server-backed CLI covers register, list, status, task send, dashboard, and recovery.
+- Request identity and origin metadata are visible in CLI output and persisted as auditable state events for mutating server requests.
+- Repeated task sends are temporarily rejected for agents with existing sessions until the controller facade can create request/task-aware session/run identities.
 
 ## SV2 - Runnable Local Server Transport
 

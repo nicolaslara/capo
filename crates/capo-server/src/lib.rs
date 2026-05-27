@@ -6,8 +6,12 @@
 use std::path::Path;
 
 use capo_controller::{FakeBoundaryController, FakeRunRefs};
-use capo_core::{AgentId, ProjectId, RunId, SessionId, TaskId};
+use capo_core::{
+    AgentId, CommandEnvelope, CommandId, CommandIntent, CommandTarget, InputOrigin, ProjectId,
+    RunId, SessionId, TaskId,
+};
 use capo_query::{ProjectDashboardQuery, project_dashboard};
+use capo_state::{EventKind, NewEvent};
 
 #[derive(Clone, Debug)]
 pub struct CapoServer {
@@ -26,50 +30,121 @@ impl CapoServer {
     }
 
     pub fn handle(&self, request: ServerRequest) -> ServerResult<ServerResponse> {
+        let request_id = request.request_id.clone();
+        let origin = request.origin.clone();
         match request.command {
             ServerCommand::RegisterAgent { name } => {
+                let command = self.command_envelope(
+                    &request_id,
+                    &origin,
+                    CommandTarget::Project(self.project_id.clone()),
+                    CommandIntent::RegisterAgent,
+                    Some(name),
+                );
                 let registration = self
                     .controller
-                    .register_agent(&name)
+                    .register_agent_command(&command)
                     .map_err(ServerError::State)?;
-                Ok(ServerResponse::AgentRegistered(AgentSummary {
-                    agent_id: registration.agent_id,
-                    name: registration.agent_name,
-                    status: "available".to_string(),
-                    current_session_id: None,
-                    session: None,
-                }))
+                self.record_server_request_handled(&command, &origin, "register_agent", None)
+                    .map_err(ServerError::State)?;
+                self.response(
+                    request_id,
+                    origin,
+                    ServerResponsePayload::AgentRegistered(AgentSummary {
+                        agent_id: registration.agent_id,
+                        name: registration.agent_name,
+                        status: "available".to_string(),
+                        current_session_id: None,
+                        session: None,
+                    }),
+                )
             }
-            ServerCommand::SendTask { agent_name, goal } => {
+            ServerCommand::SendTask {
+                agent_name,
+                goal,
+                scenario,
+            } => {
+                if let Some(agent) = self.agent_by_name(&agent_name)? {
+                    if let Some(session) = agent.session {
+                        return Err(ServerError::AgentAlreadyHasSession {
+                            agent_name,
+                            session_id: session.session_id.to_string(),
+                            run_status: session.run_status,
+                        });
+                    }
+                } else {
+                    return Err(ServerError::UnknownAgent { agent_name });
+                }
+                let mut command = self.command_envelope(
+                    &request_id,
+                    &origin,
+                    CommandTarget::Agent(AgentId::new(format!("agent-{agent_name}"))),
+                    CommandIntent::SendTask,
+                    Some(goal),
+                );
+                command
+                    .structured_args
+                    .push(("agent".to_string(), agent_name));
+                command
+                    .structured_args
+                    .push(("scenario".to_string(), scenario));
                 let run = self
                     .controller
-                    .send_task_to_agent_name(&agent_name, &goal)
+                    .send_task_command(&command)
                     .map_err(ServerError::State)?;
-                Ok(ServerResponse::TaskSent(TaskRunSummary::from_run_refs(run)))
+                self.record_server_request_handled(&command, &origin, "send_task", Some(&run))
+                    .map_err(ServerError::State)?;
+                self.response(
+                    request_id,
+                    origin,
+                    ServerResponsePayload::TaskSent(TaskRunSummary::from_run_refs(run)),
+                )
             }
             ServerCommand::ListAgents => {
-                Ok(ServerResponse::Agents(self.dashboard_snapshot()?.agents))
+                let agents = self.dashboard_snapshot()?.agents;
+                self.response(request_id, origin, ServerResponsePayload::Agents(agents))
             }
-            ServerCommand::Dashboard { recent_event_limit } => Ok(ServerResponse::Dashboard(
-                self.dashboard_with_limit(recent_event_limit)?,
-            )),
+            ServerCommand::AgentStatus { agent_name } => {
+                let agent = self
+                    .dashboard_snapshot()?
+                    .agents
+                    .into_iter()
+                    .find(|agent| agent.name == agent_name)
+                    .ok_or(ServerError::UnknownAgent { agent_name })?;
+                self.response(
+                    request_id,
+                    origin,
+                    ServerResponsePayload::AgentStatus(agent),
+                )
+            }
+            ServerCommand::Dashboard { recent_event_limit } => self.response(
+                request_id,
+                origin,
+                ServerResponsePayload::Dashboard(self.dashboard_with_limit(recent_event_limit)?),
+            ),
             ServerCommand::Recover => {
+                let command = self.command_envelope(
+                    &request_id,
+                    &origin,
+                    CommandTarget::Project(self.project_id.clone()),
+                    CommandIntent::Recover,
+                    None,
+                );
                 let report = self
                     .controller
-                    .recover_command(&capo_core::CommandEnvelope::new(
-                        capo_core::CommandId::new("command-server-recover"),
-                        capo_core::InputOrigin::Api,
-                        request.origin.actor_id,
-                        self.project_id.clone(),
-                        capo_core::CommandTarget::Project(self.project_id.clone()),
-                        capo_core::CommandIntent::Recover,
-                    ))
+                    .recover_command(&command)
                     .map_err(ServerError::State)?;
-                Ok(ServerResponse::Recovery(RecoverySummary {
-                    recovery_attempt_id: report.recovery_attempt_id,
-                    recovered_run_count: report.recovered_run_count,
-                    watermark: report.watermark,
-                }))
+                self.record_server_request_handled(&command, &origin, "recover", None)
+                    .map_err(ServerError::State)?;
+                self.response(
+                    request_id,
+                    origin,
+                    ServerResponsePayload::Recovery(RecoverySummary {
+                        recovery_attempt_id: report.recovery_attempt_id,
+                        recovered_run_count: report.recovered_run_count,
+                        watermark: report.watermark,
+                    }),
+                )
             }
         }
     }
@@ -126,6 +201,89 @@ impl CapoServer {
             agents,
         })
     }
+
+    fn agent_by_name(&self, agent_name: &str) -> ServerResult<Option<AgentSummary>> {
+        Ok(self
+            .dashboard_snapshot()?
+            .agents
+            .into_iter()
+            .find(|agent| agent.name == agent_name))
+    }
+
+    fn command_envelope(
+        &self,
+        request_id: &str,
+        origin: &ServerClientOrigin,
+        target: CommandTarget,
+        intent: CommandIntent,
+        text: Option<String>,
+    ) -> CommandEnvelope {
+        let mut command = CommandEnvelope::new(
+            CommandId::new(request_id),
+            origin.input_origin.into(),
+            origin.actor_id.clone(),
+            self.project_id.clone(),
+            target,
+            intent,
+        );
+        command.idempotency_key = format!(
+            "server:{}:{}:{}",
+            origin.client_id, origin.actor_id, request_id
+        );
+        if let Some(text) = text {
+            command = command.with_text(text);
+        }
+        command
+    }
+
+    fn response(
+        &self,
+        request_id: String,
+        origin: ServerClientOrigin,
+        payload: ServerResponsePayload,
+    ) -> ServerResult<ServerResponse> {
+        Ok(ServerResponse {
+            request_id,
+            client_id: origin.client_id,
+            actor_id: origin.actor_id,
+            input_origin: origin.input_origin,
+            payload,
+        })
+    }
+
+    fn record_server_request_handled(
+        &self,
+        command: &CommandEnvelope,
+        origin: &ServerClientOrigin,
+        command_kind: &str,
+        run: Option<&FakeRunRefs>,
+    ) -> capo_state::StateResult<i64> {
+        let event_id = format!(
+            "event-server-request-{}-{}",
+            slug(command.command_id.as_str()),
+            stable_hash(command.idempotency_key.as_bytes())
+        );
+        let mut event = NewEvent::new(event_id, EventKind::ServerRequestHandled, &origin.actor_id);
+        event.project_id = Some(self.project_id.clone());
+        event.item_id = Some(command.command_id.to_string());
+        event.idempotency_key = Some(command.idempotency_key.clone());
+        if let Some(run) = run {
+            event.task_id = Some(run.task_id.clone());
+            event.agent_id = Some(run.agent_id.clone());
+            event.session_id = Some(run.session_id.clone());
+            event.run_id = Some(run.run_id.clone());
+        }
+        event.payload_json = serde_json::json!({
+            "request_id": command.command_id.to_string(),
+            "client_id": origin.client_id,
+            "actor_id": origin.actor_id,
+            "input_origin": format!("{:?}", origin.input_origin),
+            "command_kind": command_kind,
+            "idempotency_key": command.idempotency_key,
+        })
+        .to_string();
+        self.controller.state().append_event(event, &[])
+    }
 }
 
 pub type ServerResult<T> = Result<T, ServerError>;
@@ -133,20 +291,35 @@ pub type ServerResult<T> = Result<T, ServerError>;
 #[derive(Debug)]
 pub enum ServerError {
     State(capo_state::StateError),
+    UnknownAgent {
+        agent_name: String,
+    },
+    AgentAlreadyHasSession {
+        agent_name: String,
+        session_id: String,
+        run_status: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerRequest {
+    pub request_id: String,
     pub origin: ServerClientOrigin,
     pub command: ServerCommand,
 }
 
 impl ServerRequest {
     pub fn cli(command: ServerCommand) -> Self {
+        Self::local_cli(default_request_id(&command), command)
+    }
+
+    pub fn local_cli(request_id: impl Into<String>, command: ServerCommand) -> Self {
         Self {
+            request_id: request_id.into(),
             origin: ServerClientOrigin {
                 client_id: "local-cli".to_string(),
                 actor_id: "local-user".to_string(),
+                input_origin: ServerInputOrigin::Cli,
             },
             command,
         }
@@ -157,22 +330,67 @@ impl ServerRequest {
 pub struct ServerClientOrigin {
     pub client_id: String,
     pub actor_id: String,
+    pub input_origin: ServerInputOrigin,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServerInputOrigin {
+    Cli,
+    Dashboard,
+    Mobile,
+    Voice,
+    Api,
+    System,
+}
+
+impl From<ServerInputOrigin> for InputOrigin {
+    fn from(value: ServerInputOrigin) -> Self {
+        match value {
+            ServerInputOrigin::Cli => Self::Cli,
+            ServerInputOrigin::Dashboard => Self::Dashboard,
+            ServerInputOrigin::Mobile => Self::Mobile,
+            ServerInputOrigin::Voice => Self::Voice,
+            ServerInputOrigin::Api => Self::Api,
+            ServerInputOrigin::System => Self::System,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ServerCommand {
-    RegisterAgent { name: String },
-    SendTask { agent_name: String, goal: String },
+    RegisterAgent {
+        name: String,
+    },
+    SendTask {
+        agent_name: String,
+        goal: String,
+        scenario: String,
+    },
     ListAgents,
-    Dashboard { recent_event_limit: usize },
+    AgentStatus {
+        agent_name: String,
+    },
+    Dashboard {
+        recent_event_limit: usize,
+    },
     Recover,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ServerResponse {
+pub struct ServerResponse {
+    pub request_id: String,
+    pub client_id: String,
+    pub actor_id: String,
+    pub input_origin: ServerInputOrigin,
+    pub payload: ServerResponsePayload,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ServerResponsePayload {
     AgentRegistered(AgentSummary),
     TaskSent(TaskRunSummary),
     Agents(Vec<AgentSummary>),
+    AgentStatus(AgentSummary),
     Dashboard(ServerDashboardSnapshot),
     Recovery(RecoverySummary),
 }
@@ -241,6 +459,46 @@ pub struct RecoverySummary {
     pub recovery_attempt_id: String,
     pub recovered_run_count: usize,
     pub watermark: Option<i64>,
+}
+
+fn default_request_id(command: &ServerCommand) -> String {
+    match command {
+        ServerCommand::RegisterAgent { name } => {
+            format!("server-agent-register-{}", slug(name))
+        }
+        ServerCommand::SendTask {
+            agent_name, goal, ..
+        } => {
+            format!("server-task-send-{}-{}", slug(agent_name), slug(goal))
+        }
+        ServerCommand::ListAgents => "server-agent-list".to_string(),
+        ServerCommand::AgentStatus { agent_name } => {
+            format!("server-agent-status-{}", slug(agent_name))
+        }
+        ServerCommand::Dashboard { .. } => "server-dashboard".to_string(),
+        ServerCommand::Recover => "server-recover".to_string(),
+    }
+}
+
+fn slug(value: &str) -> String {
+    let mut slug = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+fn stable_hash(value: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 #[cfg(test)]

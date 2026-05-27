@@ -23,6 +23,7 @@ mod project_memory;
 mod project_memory_flow;
 mod runtime_target;
 mod runtime_target_evidence;
+mod server_client;
 mod tool_wrapper;
 mod voice;
 mod voice_render;
@@ -67,6 +68,10 @@ use runtime_target::{
     set_runtime_target_status,
 };
 use runtime_target_evidence::{runtime_target_evidence, runtime_target_readiness_evidence};
+use server_client::{
+    server_agent_list, server_agent_register, server_agent_status, server_dashboard,
+    server_recover, server_task_send,
+};
 use tool_wrapper::run_wrapper_tool;
 use voice::submit_voice;
 use workpad::{
@@ -177,6 +182,35 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "task" && command == "send" => {
             send_task(&parsed, rest)
+        }
+        [area, domain, command, rest @ ..]
+            if area == "server" && domain == "agent" && command == "register" =>
+        {
+            server_agent_register(&parsed, rest)
+        }
+        [area, domain, command] if area == "server" && domain == "agent" && command == "list" => {
+            server_agent_list(&parsed, &[])
+        }
+        [area, domain, command, rest @ ..]
+            if area == "server" && domain == "agent" && command == "list" =>
+        {
+            server_agent_list(&parsed, rest)
+        }
+        [area, domain, command, rest @ ..]
+            if area == "server" && domain == "agent" && command == "status" =>
+        {
+            server_agent_status(&parsed, rest)
+        }
+        [area, domain, command, rest @ ..]
+            if area == "server" && domain == "task" && command == "send" =>
+        {
+            server_task_send(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "server" && command == "dashboard" => {
+            server_dashboard(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "server" && command == "recover" => {
+            server_recover(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "session" && command == "status" => {
             session_status(&parsed, rest)

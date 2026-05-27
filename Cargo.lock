@@ -36,6 +36,7 @@ dependencies = [
  "capo-memory",
  "capo-query",
  "capo-runtime",
+ "capo-server",
  "capo-state",
  "capo-tools",
  "capo-voice",
@@ -97,6 +98,7 @@ dependencies = [
  "capo-core",
  "capo-query",
  "capo-state",
+ "serde_json",
 ]
 
 [[package]]
