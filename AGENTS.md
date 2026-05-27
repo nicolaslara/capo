@@ -25,6 +25,7 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 | `workpads/architecture/prototype-plan.md` | Ordered prototype implementation sequence, e2e smoke path, and dogfood prerequisites |
 | `workpads/architecture/gate-review.md` | Architecture gate decision, user-sensitive decisions, and prototype residual risks |
 | `workpads/scaffold/tasks.md` | Scaffold alignment tasks: product spine, command naming, memory hierarchy, e2e gate |
+| `workpads/server/tasks.md` | Server/control-plane tasks: server-owned agent tracking, CLI client path, mocked-agent and Codex proofs |
 | `.cursor/commands/next.md` / `.opencode/commands/next.md` | `/next` task-execution command |
 | `.agents/skills/next/SKILL.md` | Codex `$next` task-execution skill |
 
@@ -36,10 +37,11 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 4. If active workpad is `prototype`, confirm the architecture gate has passed or that `TASKS.md` explicitly authorizes a spike.
 5. If active workpad is `dogfood`, confirm the prototype gate has passed.
 6. If active workpad is `scaffold`, confirm the architecture/prototype/feature/dogfood history is loaded and treat this as an alignment pass before new breadth.
+7. If active workpad is `server`, confirm scaffold alignment is complete and keep work focused on server-owned orchestration before richer clients.
 
 ## Current Phase
 
-**Scaffold alignment** is active after the architecture, prototype, feature, and dogfood gates were recorded. The next durable target is not more breadth; it is to align the implemented scaffold with the intended product spine: Capo as server/control plane, ACP-tracked agents, DB-backed project memory pointing to markdown, minimal client surfaces, and deterministic e2e tests. Existing `capo workpad ...` commands are transitional scaffolding, not the desired top-level product model.
+**Server/control-plane implementation** is active after scaffold alignment completed. The durable target is to make Capo run as a server that owns controller/state/query behavior while CLI and future clients steer tracked agents through that server boundary. Mocked-agent tests come first; Codex must then be proven through the same path.
 
 ## Mandatory Workflow
 

@@ -8,6 +8,7 @@ members = [
     "crates/capo-memory",
     "crates/capo-query",
     "crates/capo-runtime",
+    "crates/capo-server",
     "crates/capo-state",
     "crates/capo-tools",
     "crates/capo-voice",
@@ -29,6 +30,7 @@ capo-eval = { path = "crates/capo-eval" }
 capo-memory = { path = "crates/capo-memory" }
 capo-query = { path = "crates/capo-query" }
 capo-runtime = { path = "crates/capo-runtime" }
+capo-server = { path = "crates/capo-server" }
 capo-state = { path = "crates/capo-state" }
 capo-tools = { path = "crates/capo-tools" }
 capo-voice = { path = "crates/capo-voice" }

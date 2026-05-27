@@ -90,6 +90,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "capo-server"
+version = "0.1.0"
+dependencies = [
+ "capo-controller",
+ "capo-core",
+ "capo-query",
+ "capo-state",
+]
+
+[[package]]
 name = "capo-state"
 version = "0.1.0"
 dependencies = [

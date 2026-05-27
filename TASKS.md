@@ -6,7 +6,7 @@ Read top to bottom. The **first unchecked** item is the active workpad unless No
 
 ## Active Now
 
-No active workpad. Scaffold alignment completed on 2026-05-26; select the next workpad or backlog slice before running another `/next` pass.
+**server** - Build the Capo server/control-plane runtime and route client/CLI interactions with agents through it.
 
 ## Workpad Queue
 
@@ -16,6 +16,7 @@ No active workpad. Scaffold alignment completed on 2026-05-26; select the next w
 - [x] **features** - Product feature workpads derived from the architecture and prototype (feature gate passed 2026-05-26)
 - [x] **dogfood** - Move Capo project execution into Capo itself once stable enough (dogfood gate passed 2026-05-26 for Capo-assisted development with markdown/git fallback)
 - [x] **scaffold** - Align the implemented scaffold with the intended product spine before more breadth: Capo server/control plane, ACP-tracked agents, simple DB-backed project memory, minimal CLI client, deterministic e2e tests (completed 2026-05-26)
+- [ ] **server** - Implement the server/control plane, CLI-through-server path, mocked-agent tests, and Codex-backed proof.
 
 ## Notes
 
@@ -31,3 +32,4 @@ No active workpad. Scaffold alignment completed on 2026-05-26; select the next w
 - Dogfood gate passed 2026-05-26 for Capo-assisted development with markdown/git fallback. Full unattended/source-writing dogfood remains future hardening.
 - Current product correction: Capo should not expose `workpad` as a primary product concept. Existing workpad commands are transitional scaffolding for this repository's markdown planning files. The future-facing model is Capo server/controller plus clients, ACP-tracked agents, and DB-backed project/workpad/task memory records that point to markdown files and are exposed to agents through tools/context.
 - Scaffold work should prefer the narrow e2e spine over breadth: inspect agents, send instructions, track state, expose requested context/tool activity, persist/recover, and export evidence. Voice, remote clients, rich dashboards, and graph/vector memory should remain planned or stubbed unless needed to prove that spine.
+- Server work should make the product-spine real: a durable Capo process owns controller/state/query behavior; local CLI commands become clients of that process; agent interactions are tested deterministically with mocked agents before proving Codex behind the same boundary.

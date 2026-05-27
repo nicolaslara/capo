@@ -22,19 +22,20 @@ Read these files first:
 
 Load these conditionally:
 
-- `workpads/architecture/boundaries.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, or `scaffold`
-- `workpads/architecture/state-model.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, or `scaffold` after A2 is complete
-- `workpads/architecture/acp-replay-dedupe.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, or `scaffold` after A2a is complete
-- `workpads/architecture/capability-permissions.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, or `scaffold` after A3 is complete
-- `workpads/architecture/runtime-tunnel.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, or `scaffold` after A4 is complete
-- `workpads/architecture/protocol-provider.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, or `scaffold` after A5 is complete
-- `workpads/architecture/tool-exposure.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, or `scaffold` after A5a is complete
-- `workpads/architecture/memory-architecture.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, or `scaffold` after A6 is complete
-- `workpads/architecture/prototype-plan.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, or `scaffold` after A7 is complete
+- `workpads/architecture/boundaries.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, `scaffold`, or `server`
+- `workpads/architecture/state-model.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, `scaffold`, or `server` after A2 is complete
+- `workpads/architecture/acp-replay-dedupe.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, `scaffold`, or `server` after A2a is complete
+- `workpads/architecture/capability-permissions.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, `scaffold`, or `server` after A3 is complete
+- `workpads/architecture/runtime-tunnel.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, `scaffold`, or `server` after A4 is complete
+- `workpads/architecture/protocol-provider.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, `scaffold`, or `server` after A5 is complete
+- `workpads/architecture/tool-exposure.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, `scaffold`, or `server` after A5a is complete
+- `workpads/architecture/memory-architecture.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, `scaffold`, or `server` after A6 is complete
+- `workpads/architecture/prototype-plan.md` when active workpad is `architecture`, `prototype`, `features`, `dogfood`, `scaffold`, or `server` after A7 is complete
 - `workpads/prototype/spec.md` when active workpad is `prototype`, `dogfood`, or `scaffold`
 - `workpads/research/knowledge.md` when active workpad is `architecture`
 - `workpads/architecture/knowledge.md` when active workpad is `prototype`
 - `workpads/prototype/knowledge.md` when active workpad is `features`, `dogfood`, or `scaffold`
+- `workpads/scaffold/knowledge.md` when active workpad is `server`
 - The feature source file named by the selected task in `workpads/features/tasks.md` when active workpad is `features`
 
 ## Resolve And Gate
@@ -47,6 +48,7 @@ Load these conditionally:
 - If active workpad is `features` and the prototype gate is not passed, stop unless `TASKS.md` explicitly authorizes a feature spike.
 - If active workpad is `dogfood` and the prototype gate is not passed, stop.
 - If active workpad is `scaffold`, confirm prior gates are recorded and keep the work focused on product-spine alignment before new breadth.
+- If active workpad is `server`, confirm scaffold alignment is complete and keep work focused on server-owned orchestration before richer clients.
 
 ## Select Task
 

@@ -1,0 +1,13 @@
+[package]
+name = "capo-server"
+description = "Server/control-plane boundary for Capo."
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+capo-controller.workspace = true
+capo-core.workspace = true
+capo-query.workspace = true
+capo-state.workspace = true

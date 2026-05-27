@@ -142,8 +142,9 @@ Prefer clear names. Comment non-obvious invariants: permission boundaries, recov
 | Complete | `research` | `research/tasks.md`, `knowledge.md`, `references.md` |
 | Complete | `architecture` | `architecture/tasks.md`, `knowledge.md`, `references.md`, `boundaries.md`, `state-model.md`, `acp-replay-dedupe.md`, `capability-permissions.md`, `runtime-tunnel.md`, `protocol-provider.md`, `tool-exposure.md`, `memory-architecture.md`, `prototype-plan.md`, `gate-review.md` |
 | Complete | `prototype` | `prototype/spec.md`, `tasks.md`, `knowledge.md`, `references.md`, architecture artifacts including `prototype-plan.md` and `gate-review.md` |
-| Now | `features` | `features/tasks.md`, `knowledge.md`, `references.md`, selected feature source file, architecture artifacts, `prototype/knowledge.md` |
-| Later | `dogfood` | Migration of Capo project execution into Capo |
+| Complete | `features` | `features/tasks.md`, `knowledge.md`, `references.md`, selected feature source file, architecture artifacts, `prototype/knowledge.md` |
+| Complete | `dogfood` | Migration of Capo project execution into Capo |
+| Now | `server` | `server/tasks.md`, `knowledge.md`, `references.md`, architecture artifacts, scaffold knowledge |
 
 ## Dependency Policy
 

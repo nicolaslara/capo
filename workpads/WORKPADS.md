@@ -11,7 +11,8 @@
 | **prototype** | Complete | Gate passed with constraints 2026-05-25 — local scaffold, fake-agent e2e, dashboard, voice contract, evidence export |
 | **features** | Complete | Feature gate passed 2026-05-26 — real connectors, dogfood bridge, dashboard/query, permissions/tools, memory/eval, voice, remote runtime, and maintainability splits |
 | **dogfood** | Complete | Dogfood gate passed 2026-05-26 — Capo-assisted development with markdown/git fallback |
-| **scaffold** | **Active** | Recenter scaffold around Capo server/control plane, ACP-tracked agents, DB-backed project memory, and a narrow e2e interaction loop |
+| **scaffold** | Complete | Completed 2026-05-26 — product-spine alignment, project-memory aliases, deterministic scaffold proofs |
+| **server** | **Active** | Build the Capo server/control plane and CLI-through-server interaction path for mocked agents and Codex |
 
 ## research
 
@@ -255,6 +256,42 @@ workpads/dogfood/knowledge.md
 - Keep voice, mobile, remote clients, rich dashboards, remote runtime adapters, graph/vector memory, and source-writing dogfood deferred or stubbed unless a task proves they are needed for the core spine.
 - The next e2e proof should show a client talking to Capo, Capo tracking agents through protocol-shaped events, DB-backed project memory/context exposed to agents, persisted state/recovery, and evidence export.
 - Use static dispatch where it keeps boundaries readable; allow a simpler alternative only when it improves naming, testability, and modularity without coupling controller, protocol, runtime, tools, and memory.
+
+## server
+
+**Status:** Active.
+
+**Prerequisites:** Scaffold alignment completed 2026-05-26.
+
+**Objective:** Make Capo run as a server/control plane that owns agent tracking, state, and query behavior while local CLI/client surfaces interact with agents through that server boundary.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/server/tasks.md
+workpads/server/knowledge.md
+workpads/server/references.md
+workpads/architecture/boundaries.md
+workpads/architecture/state-model.md
+workpads/architecture/acp-replay-dedupe.md
+workpads/architecture/capability-permissions.md
+workpads/architecture/runtime-tunnel.md
+workpads/architecture/protocol-provider.md
+workpads/architecture/tool-exposure.md
+workpads/architecture/memory-architecture.md
+workpads/architecture/prototype-plan.md
+workpads/scaffold/knowledge.md
+```
+
+**Rules:**
+
+- The server/control plane owns controller, state, query, and recovery behavior.
+- The CLI is a client of the server boundary, not the owner of agent orchestration.
+- Test with deterministic mocked agents first, then prove Codex through the same boundary.
+- Keep tunnel/connectivity, runtime execution, protocol adapters, memory, and input surfaces modular.
 
 ## How To Switch Focus
 
