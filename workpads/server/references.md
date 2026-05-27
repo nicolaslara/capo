@@ -31,3 +31,9 @@
 - `crates/capo-cli/src/tests.rs` - server-backed CLI flow coverage.
 - `crates/capo-server/src/lib.rs` - request identity/origin propagation and status command.
 - `crates/capo-state/src/event.rs` - `server.request_handled` audit event kind.
+
+## SV2 Implementation Sources
+
+- `crates/capo-server/src/transport.rs` - loopback TCP transport and JSON wire conversion.
+- `crates/capo-cli/src/server_client.rs` - `capo server serve` and `--connect` client routing.
+- `crates/capo-cli/tests/server_transport.rs` - process-level running server proof.

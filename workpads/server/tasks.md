@@ -82,7 +82,7 @@ Result:
 
 ## SV2 - Runnable Local Server Transport
 
-Status: pending
+Status: completed on 2026-05-27
 
 Acceptance:
 
@@ -90,6 +90,33 @@ Acceptance:
 - Keep transport serialization separate from server command semantics.
 - Add a client command that connects to a running server and performs the SV1 flow.
 - Include restart/recovery coverage.
+
+Evidence:
+
+- `crates/capo-server/src/transport.rs`
+- `crates/capo-cli/src/server_client.rs`
+- `crates/capo-cli/src/tests.rs`
+- `crates/capo-cli/tests/server_transport.rs`
+- `cargo test -p capo-server`
+- `cargo test -p capo-cli --test server_transport -- --nocapture`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+
+Progress:
+
+- Added a foreground loopback TCP transport with one newline-delimited JSON request/response per connection.
+- Added `capo server serve --addr ADDR [--max-requests N]`.
+- Added `--connect ADDR` to the server-backed CLI commands from SV1.
+- Added a process-level integration test that spawns a running `capo server serve` process, then drives register, task send, status, dashboard, and recovery from separate CLI processes over the transport.
+- Chose loopback TCP over Unix sockets for SV2 because it is still local by default while matching the future remote/tunnel control path. Unix-domain sockets remain a good local-only hardening follow-up.
+- Review fixes enforce loopback-only bind addresses, make `--addr` and `--connect` fail closed when present without values, and prove true post-restart recovery by restarting the server before calling recover.
+
+Result:
+
+- Capo can now run as a foreground local server process.
+- CLI commands can connect to the running process over loopback transport using `--connect ADDR`.
+- The transport path preserves the typed `ServerRequest`/`ServerResponse` boundary and keeps serialization in `capo-server/src/transport.rs`.
+- Restart recovery is tested by starting a second server process against the same state root, running `server recover --connect`, and confirming the recovered run state.
 
 ## SV3 - Codex Agent Through Server
 

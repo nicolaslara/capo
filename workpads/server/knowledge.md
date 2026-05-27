@@ -79,3 +79,36 @@ Deferred:
 
 - Replace the temporary repeated-send rejection with request/task-aware session and run identities in the controller facade.
 - Flip selected normal CLI commands to server-backed defaults only after the runnable transport path is available.
+
+## SV2 - Runnable Local Server Transport
+
+Status: completed on 2026-05-27.
+
+Implementation so far:
+
+- Added a foreground local server transport in `capo-server`.
+- The transport is loopback TCP by default, using newline-delimited JSON frames that decode into `ServerRequest`, call `CapoServer::handle`, and encode `ServerResponse`.
+- Added `capo server serve --addr ADDR [--max-requests N]`.
+- Server-backed CLI commands now accept `--connect ADDR`; without `--connect`, they keep the embedded SV1 path.
+- Added a process-level integration test that starts `capo server serve`, connects separate CLI processes, and verifies register/send/status/dashboard/recover through the running server.
+- The process-level integration test now stops the first server before recovery, starts a second server on the same state root, runs `server recover --connect`, and verifies the recovered run state.
+
+Decision:
+
+- An xhigh planning pass recommended Unix-domain sockets for local-only safety. SV2 uses loopback TCP instead because it keeps the transport local by default while also aligning with later Tailscale/remote-control work. The server binds to the user-provided address and examples/tests use `127.0.0.1`; public binding and authentication remain future hardening.
+- Xhigh review required loopback-only enforcement before commit. `capo server serve` now rejects non-loopback bind addresses; explicit public/remote exposure must go through a future authenticated exposure path.
+- `--addr` and `--connect` now fail closed when present without values rather than falling back to defaults or embedded mode.
+
+Verification:
+
+- `cargo fmt`
+- `cargo test -p capo-server`
+- `cargo test -p capo-cli --test server_transport -- --nocapture`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+
+Deferred:
+
+- Unix-domain socket transport for same-machine hardening.
+- TCP auth tokens and explicit exposure records before any non-loopback or tunneled listener.
+- Read/write timeouts for long-lived or dashboard-style clients.

@@ -1,9 +1,39 @@
+use std::io::Write;
+use std::net::{TcpListener, ToSocketAddrs};
+
 use capo_server::{
     AgentSummary, CapoServer, ServerCommand, ServerRequest, ServerResponse, ServerResponsePayload,
+    send_tcp, serve_tcp,
 };
 
-use crate::cli_surface::{ParsedArgs, optional_arg, required_arg};
+use crate::cli_surface::{ParsedArgs, required_arg};
 use crate::{debug_error, project_id, stable_cli_hash};
+
+pub(crate) fn server_serve(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let address = optional_value(args, "--addr")?.unwrap_or_else(|| "127.0.0.1:0".to_string());
+    require_loopback_address(&address)?;
+    let max_requests = optional_value(args, "--max-requests")?
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|_| "--max-requests must be a non-negative integer".to_string())
+        })
+        .transpose()?;
+    let listener = TcpListener::bind(&address).map_err(debug_error)?;
+    let bound_address = listener.local_addr().map_err(debug_error)?;
+    if !bound_address.ip().is_loopback() {
+        return Err(format!(
+            "server bind address must be loopback, got {bound_address}"
+        ));
+    }
+    println!("server_listening=true\nserver_addr={bound_address}");
+    std::io::stdout().flush().map_err(debug_error)?;
+    let served =
+        serve_tcp(listener, project_id(), &parsed.state_root, max_requests).map_err(debug_error)?;
+    Ok(format!(
+        "server_stopped=true\nserver_addr={bound_address}\nrequests_served={served}\n"
+    ))
+}
 
 pub(crate) fn server_agent_register(
     parsed: &ParsedArgs,
@@ -12,13 +42,15 @@ pub(crate) fn server_agent_register(
     require_fake_arg(args, "--adapter")?;
     require_fake_arg(args, "--runtime")?;
     let name = required_arg(args, "--name")?;
-    let response = server(parsed)?
-        .handle(request(
+    let response = handle(
+        parsed,
+        args,
+        request(
             args,
             "server-agent-register",
             ServerCommand::RegisterAgent { name },
-        )?)
-        .map_err(debug_error)?;
+        )?,
+    )?;
     let header = render_response_header(&response);
     let ServerResponsePayload::AgentRegistered(agent) = response.payload else {
         return Err("server returned unexpected response for agent register".to_string());
@@ -30,13 +62,11 @@ pub(crate) fn server_agent_register(
 }
 
 pub(crate) fn server_agent_list(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
-    let response = server(parsed)?
-        .handle(request(
-            args,
-            "server-agent-list",
-            ServerCommand::ListAgents,
-        )?)
-        .map_err(debug_error)?;
+    let response = handle(
+        parsed,
+        args,
+        request(args, "server-agent-list", ServerCommand::ListAgents)?,
+    )?;
     let header = render_response_header(&response);
     let ServerResponsePayload::Agents(agents) = response.payload else {
         return Err("server returned unexpected response for agent list".to_string());
@@ -55,9 +85,11 @@ pub(crate) fn server_agent_list(parsed: &ParsedArgs, args: &[String]) -> Result<
 pub(crate) fn server_task_send(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let agent_name = required_arg(args, "--agent")?;
     let goal = required_arg(args, "--goal")?;
-    let scenario = optional_arg(args, "--scenario").unwrap_or_else(|| "default".to_string());
-    let response = server(parsed)?
-        .handle(request(
+    let scenario = optional_value(args, "--scenario")?.unwrap_or_else(|| "default".to_string());
+    let response = handle(
+        parsed,
+        args,
+        request(
             args,
             "server-task-send",
             ServerCommand::SendTask {
@@ -65,8 +97,8 @@ pub(crate) fn server_task_send(parsed: &ParsedArgs, args: &[String]) -> Result<S
                 goal,
                 scenario: scenario.clone(),
             },
-        )?)
-        .map_err(debug_error)?;
+        )?,
+    )?;
     let header = render_response_header(&response);
     let ServerResponsePayload::TaskSent(run) = response.payload else {
         return Err("server returned unexpected response for task send".to_string());
@@ -79,13 +111,15 @@ pub(crate) fn server_task_send(parsed: &ParsedArgs, args: &[String]) -> Result<S
 
 pub(crate) fn server_agent_status(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let agent_name = required_arg(args, "--agent")?;
-    let response = server(parsed)?
-        .handle(request(
+    let response = handle(
+        parsed,
+        args,
+        request(
             args,
             "server-agent-status",
             ServerCommand::AgentStatus { agent_name },
-        )?)
-        .map_err(debug_error)?;
+        )?,
+    )?;
     let header = render_response_header(&response);
     let ServerResponsePayload::AgentStatus(agent) = response.payload else {
         return Err("server returned unexpected response for agent status".to_string());
@@ -98,7 +132,7 @@ pub(crate) fn server_agent_status(parsed: &ParsedArgs, args: &[String]) -> Resul
 }
 
 pub(crate) fn server_dashboard(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
-    let recent_event_limit = optional_arg(args, "--recent-events")
+    let recent_event_limit = optional_value(args, "--recent-events")?
         .map(|value| {
             value
                 .parse::<usize>()
@@ -106,13 +140,15 @@ pub(crate) fn server_dashboard(parsed: &ParsedArgs, args: &[String]) -> Result<S
         })
         .transpose()?
         .unwrap_or(5);
-    let response = server(parsed)?
-        .handle(request(
+    let response = handle(
+        parsed,
+        args,
+        request(
             args,
             "server-dashboard",
             ServerCommand::Dashboard { recent_event_limit },
-        )?)
-        .map_err(debug_error)?;
+        )?,
+    )?;
     let header = render_response_header(&response);
     let ServerResponsePayload::Dashboard(snapshot) = response.payload else {
         return Err("server returned unexpected response for dashboard".to_string());
@@ -128,9 +164,11 @@ pub(crate) fn server_dashboard(parsed: &ParsedArgs, args: &[String]) -> Result<S
 }
 
 pub(crate) fn server_recover(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
-    let response = server(parsed)?
-        .handle(request(args, "server-recover", ServerCommand::Recover)?)
-        .map_err(debug_error)?;
+    let response = handle(
+        parsed,
+        args,
+        request(args, "server-recover", ServerCommand::Recover)?,
+    )?;
     let header = render_response_header(&response);
     let ServerResponsePayload::Recovery(recovery) = response.payload else {
         return Err("server returned unexpected response for recovery".to_string());
@@ -151,22 +189,34 @@ fn server(parsed: &ParsedArgs) -> Result<CapoServer, String> {
     CapoServer::open(project_id(), &parsed.state_root).map_err(debug_error)
 }
 
+fn handle(
+    parsed: &ParsedArgs,
+    args: &[String],
+    request: ServerRequest,
+) -> Result<ServerResponse, String> {
+    if let Some(address) = optional_value(args, "--connect")? {
+        send_tcp(address, &request).map_err(debug_error)
+    } else {
+        server(parsed)?.handle(request).map_err(debug_error)
+    }
+}
+
 fn request(
     args: &[String],
     default_slug: &str,
     command: ServerCommand,
 ) -> Result<ServerRequest, String> {
-    let request_id = optional_arg(args, "--request").unwrap_or_else(|| {
+    let request_id = optional_value(args, "--request")?.unwrap_or_else(|| {
         format!(
             "{default_slug}-{}",
             stable_cli_hash(&format!("{command:?}"))
         )
     });
     let mut request = ServerRequest::local_cli(request_id, command);
-    if let Some(client_id) = optional_arg(args, "--client") {
+    if let Some(client_id) = optional_value(args, "--client")? {
         request.origin.client_id = client_id;
     }
-    if let Some(actor_id) = optional_arg(args, "--actor") {
+    if let Some(actor_id) = optional_value(args, "--actor")? {
         request.origin.actor_id = actor_id;
     }
     Ok(request)
@@ -204,8 +254,37 @@ fn render_agent_line(agent: &AgentSummary) -> String {
 }
 
 fn require_fake_arg(args: &[String], key: &str) -> Result<(), String> {
-    match optional_arg(args, key).as_deref() {
+    match optional_value(args, key)?.as_deref() {
         None | Some("fake") => Ok(()),
         Some(other) => Err(format!("{key} only supports `fake` in SV1, got `{other}`")),
     }
+}
+
+fn optional_value(args: &[String], key: &str) -> Result<Option<String>, String> {
+    let Some(index) = args.iter().position(|arg| arg == key) else {
+        return Ok(None);
+    };
+    let Some(value) = args.get(index + 1) else {
+        return Err(format!("{key} requires a value"));
+    };
+    if value.starts_with("--") {
+        return Err(format!("{key} requires a value"));
+    }
+    Ok(Some(value.clone()))
+}
+
+fn require_loopback_address(address: &str) -> Result<(), String> {
+    let resolved = address
+        .to_socket_addrs()
+        .map_err(debug_error)?
+        .collect::<Vec<_>>();
+    if resolved.is_empty() {
+        return Err(format!("server bind address did not resolve: {address}"));
+    }
+    if !resolved.iter().all(|address| address.ip().is_loopback()) {
+        return Err(format!(
+            "server bind address must resolve only to loopback addresses, got {address}"
+        ));
+    }
+    Ok(())
 }

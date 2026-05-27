@@ -3773,6 +3773,45 @@ fn server_cli_routes_agent_work_through_server_boundary() {
 }
 
 #[test]
+fn server_cli_transport_options_fail_closed() {
+    let state_root = temp_root("server-cli-transport-options");
+
+    let missing_connect = run_cli(vec![
+        "server".to_string(),
+        "agent".to_string(),
+        "list".to_string(),
+        "--connect".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect_err("missing connect value should fail");
+    assert!(missing_connect.contains("--connect requires a value"));
+
+    let missing_addr = run_cli(vec![
+        "server".to_string(),
+        "serve".to_string(),
+        "--addr".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect_err("missing addr value should fail");
+    assert!(missing_addr.contains("--addr requires a value"));
+
+    let public_addr = run_cli(vec![
+        "server".to_string(),
+        "serve".to_string(),
+        "--addr".to_string(),
+        "0.0.0.0:0".to_string(),
+        "--max-requests".to_string(),
+        "0".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect_err("public bind should fail");
+    assert!(public_addr.contains("loopback"));
+}
+
+#[test]
 fn dashboard_rejects_malformed_filters() {
     let state_root = temp_root("cli-dashboard-filters");
 

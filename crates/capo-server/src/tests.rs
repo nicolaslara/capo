@@ -1,12 +1,13 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{net::TcpListener, thread};
 
 use capo_core::ProjectId;
 use capo_state::SqliteStateStore;
 
 use crate::{
     CapoServer, ServerClientOrigin, ServerCommand, ServerInputOrigin, ServerRequest,
-    ServerResponse, ServerResponsePayload,
+    ServerResponse, ServerResponsePayload, send_tcp, serve_tcp,
 };
 
 static TEMP_ROOT_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -235,6 +236,115 @@ fn server_rejects_unknown_and_repeated_task_sends_before_fake_id_collision() {
             && session_id == "session-mock-codex"
             && run_status.as_deref() == Some("running")
     ));
+}
+
+#[test]
+fn tcp_transport_round_trips_server_requests_and_recovers_state() {
+    let root = temp_root();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server_root = root.clone();
+    let server_thread = thread::spawn(move || {
+        serve_tcp(
+            listener,
+            ProjectId::new("project-capo"),
+            server_root,
+            Some(3),
+        )
+        .expect("serve tcp")
+    });
+
+    let registered = send_tcp(
+        address,
+        &ServerRequest::local_cli(
+            "tcp-register-mock-codex",
+            ServerCommand::RegisterAgent {
+                name: "mock-codex".to_string(),
+            },
+        ),
+    )
+    .expect("register over tcp");
+    assert_agent_registered(&registered, "mock-codex");
+
+    let sent = send_tcp(
+        address,
+        &ServerRequest::local_cli(
+            "tcp-send-mock-codex",
+            ServerCommand::SendTask {
+                agent_name: "mock-codex".to_string(),
+                goal: "Prove TCP transport".to_string(),
+                scenario: "default".to_string(),
+            },
+        ),
+    )
+    .expect("send over tcp");
+    let ServerResponsePayload::TaskSent(run) = sent.payload else {
+        panic!("expected task sent");
+    };
+    assert_eq!(run.session_id.as_str(), "session-mock-codex");
+
+    let dashboard = send_tcp(
+        address,
+        &ServerRequest::local_cli(
+            "tcp-dashboard",
+            ServerCommand::Dashboard {
+                recent_event_limit: 8,
+            },
+        ),
+    )
+    .expect("dashboard over tcp");
+    let ServerResponsePayload::Dashboard(snapshot) = dashboard.payload else {
+        panic!("expected dashboard");
+    };
+    assert_eq!(snapshot.agent_count, 1);
+    assert_eq!(snapshot.active_session_count, 1);
+
+    assert_eq!(server_thread.join().expect("server thread"), 3);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("restart listener");
+    let restart_address = listener.local_addr().expect("restart address");
+    let restart_root = root.clone();
+    let restart_thread = thread::spawn(move || {
+        serve_tcp(
+            listener,
+            ProjectId::new("project-capo"),
+            restart_root,
+            Some(2),
+        )
+        .expect("serve restarted tcp")
+    });
+
+    let recovered = send_tcp(
+        restart_address,
+        &ServerRequest::local_cli("tcp-recover", ServerCommand::Recover),
+    )
+    .expect("recover after restart over tcp");
+    let ServerResponsePayload::Recovery(recovery) = recovered.payload else {
+        panic!("expected recovery");
+    };
+    assert_eq!(recovery.recovered_run_count, 1);
+
+    let restarted_dashboard = send_tcp(
+        restart_address,
+        &ServerRequest::local_cli(
+            "tcp-dashboard-after-restart",
+            ServerCommand::Dashboard {
+                recent_event_limit: 8,
+            },
+        ),
+    )
+    .expect("dashboard after restart over tcp");
+    let ServerResponsePayload::Dashboard(snapshot) = restarted_dashboard.payload else {
+        panic!("expected restarted dashboard");
+    };
+    assert_eq!(snapshot.agent_count, 1);
+    assert_eq!(snapshot.active_session_count, 0);
+    assert_eq!(restart_thread.join().expect("restart thread"), 2);
+
+    let reopened = CapoServer::open(ProjectId::new("project-capo"), root).expect("reopen");
+    let dashboard = reopened.dashboard_snapshot().expect("dashboard");
+    assert_eq!(dashboard.agent_count, 1);
+    assert_eq!(dashboard.active_session_count, 0);
 }
 
 fn handle(server: &CapoServer, command: ServerCommand) -> ServerResponse {

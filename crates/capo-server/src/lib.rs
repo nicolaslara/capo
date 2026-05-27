@@ -13,6 +13,10 @@ use capo_core::{
 use capo_query::{ProjectDashboardQuery, project_dashboard};
 use capo_state::{EventKind, NewEvent};
 
+mod transport;
+
+pub use transport::{TransportError, send_tcp, serve_tcp};
+
 #[derive(Clone, Debug)]
 pub struct CapoServer {
     project_id: ProjectId,

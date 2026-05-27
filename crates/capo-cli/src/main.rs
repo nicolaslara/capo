@@ -70,7 +70,7 @@ use runtime_target::{
 use runtime_target_evidence::{runtime_target_evidence, runtime_target_readiness_evidence};
 use server_client::{
     server_agent_list, server_agent_register, server_agent_status, server_dashboard,
-    server_recover, server_task_send,
+    server_recover, server_serve, server_task_send,
 };
 use tool_wrapper::run_wrapper_tool;
 use voice::submit_voice;
@@ -182,6 +182,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "task" && command == "send" => {
             send_task(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "server" && command == "serve" => {
+            server_serve(&parsed, rest)
         }
         [area, domain, command, rest @ ..]
             if area == "server" && domain == "agent" && command == "register" =>
