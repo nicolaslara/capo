@@ -18,6 +18,7 @@ pub const CAPO_OWNED_TOOLS: &[&str] = &[
     "capo.task_status",
     "capo.agent_status",
     "capo.session_summary",
+    "capo.project_memory_read",
     "capo.workpad_read",
     "capo.evidence_record",
     "capo.capability_request",
@@ -31,6 +32,7 @@ pub const CAPO_WRAPPER_TOOLS: &[&str] = &[
     "capo.git_commit",
     "capo.file_read",
     "capo.file_write",
+    "capo.project_memory_read",
     "capo.workpad_read",
 ];
 
@@ -131,6 +133,16 @@ impl CapoToolRegistry {
                 false,
                 vec![
                     "tool:invoke:capo.workpad_read",
+                    "filesystem:read:workspace",
+                    "state:read:task",
+                ],
+                "{\"input\":{\"path\":\"string\",\"heading\":\"string?\"}}",
+            ),
+            "capo.project_memory_read" => (
+                "Project Memory Read",
+                false,
+                vec![
+                    "tool:invoke:capo.project_memory_read",
                     "filesystem:read:workspace",
                     "state:read:task",
                 ],
@@ -498,6 +510,7 @@ fn render_tool_output(tool_id: &str, context: &CapoToolContext) -> String {
         "capo.task_status" => context.task_status.clone(),
         "capo.agent_status" => context.agent_status.clone(),
         "capo.session_summary" => context.session_summary.clone(),
+        "capo.project_memory_read" => context.workpad_excerpt.clone(),
         "capo.workpad_read" => context.workpad_excerpt.clone(),
         "capo.evidence_record" => format!("evidence recorded: {}", context.evidence_note),
         "capo.capability_request" => {

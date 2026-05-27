@@ -135,6 +135,21 @@ impl FakeBoundaryController {
         self.apply_normalized_adapter_events(refs, &events)
     }
 
+    pub fn apply_scripted_acp_mock_turn(
+        &self,
+        refs: &FakeRunRefs,
+        turn: &ScriptedMockTurn,
+    ) -> StateResult<AdapterReplayReport> {
+        let adapter = AgentAdapter::scripted_mock(
+            ScriptedMockAgent::acp_shaped(refs.external_session_ref.clone())
+                .with_turn(turn.clone()),
+        );
+        let events = adapter
+            .scripted_turn_events(turn.turn_ref())
+            .ok_or_else(|| missing_read_model("scripted_acp_mock_turn", &turn.turn_ref()))?;
+        self.apply_normalized_adapter_events(refs, &events)
+    }
+
     fn adapter_event_projection(
         &self,
         refs: &FakeRunRefs,

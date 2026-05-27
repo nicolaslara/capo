@@ -27,6 +27,16 @@ Coding agents are becoming powerful but fragmented across local CLIs, subscripti
 - How state, summaries, memory, and evidence are stored
 - How results are reviewed and analyzed
 
+## Product Shape
+
+Capo is primarily a durable local-first server/control plane. Users and tools interact with Capo through clients such as the local CLI, future remote CLIs, dashboards, apps, or voice surfaces. The local `capo` CLI is one client for inspecting the controller state and sending instructions; it should not become the product's domain model.
+
+Tracked coding agents are represented through the agent/protocol boundary, with ACP as the preferred tracking and interaction shape where it fits. Capo should know which agents are running, what subagents or child sessions they have, what context they requested, what tools they used or asked to use, and what state/evidence/result records were produced.
+
+Project/workpad/task concepts are Capo memory and planning records, not a top-level CLI product surface. The initial implementation may index markdown files from a repository and point database rows at those files, but the product concept is a simple DB-backed project memory hierarchy that can later evolve toward links or graph storage. Markdown files remain the human-auditable source material and fallback, while Capo exposes relevant project memory to agents through tools and context packets.
+
+Avoid treating `capo workpad ...` as the future user-facing interaction model. Existing workpad commands are acceptable as transitional development scaffolding for importing the current repo's markdown planning files. Future-facing APIs and CLI surfaces should use product-language concepts such as project, task, memory, context, agent, session, dispatch, and evidence.
+
 ## Desired Features
 
 | Area | Desired capability |
@@ -36,7 +46,7 @@ Coding agents are becoming powerful but fragmented across local CLIs, subscripti
 | Capability control | Change agent tools, filesystem scope, network scope, model/provider, and permission profile |
 | Introspection | See active goals, summaries, plans, recent actions, tool calls, blockers, confidence, and evidence |
 | State tracking | Persist agent sessions, tasks, goals, workpads, summaries, artifacts, decisions, and review status |
-| Remote control | Run Capo as a server and connect from multiple clients or locations |
+| Server and clients | Run Capo as a server/control plane and connect through CLI, remote CLI, dashboard/app, voice, or future clients |
 | Dashboard | Visualize active agents, queue health, task state, costs, failures, and review needs |
 | Voice input | Voice commands and dictation as first-class input methods |
 | Mobile input | Mobile-friendly control and monitoring surface |
@@ -48,7 +58,7 @@ Coding agents are becoming powerful but fragmented across local CLIs, subscripti
 | ACP compatibility | Build on or interoperate with Agent Client Protocol where it fits the client/agent boundary |
 | Memory | Start simple with markdown files or a database pointing to markdown; evolve toward a layered/fractional memory system |
 | Memory integrations | Research Tana, Zep/Graphiti, mem0, Letta, Capacities, and similar systems |
-| Workpads | Use project workpads as the initial planning and execution substrate |
+| Project memory | Start with markdown-backed project/workpad/task records in the DB, exposed to agents through tools/context; do not make workpads the primary product surface |
 | Dogfooding | After prototype stability, move Capo's own project execution into Capo |
 
 ## Boundary Model
@@ -58,14 +68,14 @@ Capo should keep these boundaries explicit and swappable:
 | Boundary | Responsibility | Examples |
 | --- | --- | --- |
 | Input surfaces | Capture human intent and present state | CLI, TUI, web, mobile, voice |
-| Capo controller | Own orchestration policy, task routing, permissions, state transitions | Scheduler, session manager, review gate |
+| Capo server/controller | Own orchestration policy, task routing, permissions, state transitions, and persisted state | Local server, scheduler, session manager, review gate |
 | Agent protocol | Normalize interaction between controller/client and agents | ACP, custom adapters |
 | Agent runtime | Execute coding agents in a controlled environment | Local machine, cloud VM, container, remote dev box |
 | Connectivity/tunnel | Reach execution environments securely | Tailscale, SSH, reverse tunnel |
 | Model/provider | Supply model intelligence | Subscription products, APIs, local models |
 | Capability layer | Define what agents may do | Shell, git, browser, filesystem, MCP/tools |
 | State store | Persist operational truth | SQLite/Postgres, files, event log |
-| Memory layer | Persist distilled knowledge and reusable context | Markdown, vector DB, graph memory, external memory apps |
+| Project memory layer | Persist project/workpad/task/context records and distilled knowledge with source provenance | SQLite rows pointing to markdown files first; later links/graph/vector/external memory |
 | Evaluation | Measure task quality and agent performance | Review findings, test evidence, outcome scoring |
 
 ## Stack Direction
@@ -76,7 +86,7 @@ Initial assumption:
 
 - Rust core/controller and persistent service
 - SQLite first for local state, with a path to Postgres if server mode needs it
-- Markdown workpads for human-readable project state
+- Markdown-backed project memory for human-readable source material and fallback
 - ACP-compatible adapters where possible
 - Python sidecars only where they reduce risk or accelerate integrations
 
@@ -88,7 +98,8 @@ Initial assumption:
 | 2 | Architecture | `workpads/architecture/` | Boundary definitions, data model, adapter contracts, security model, and prototype plan |
 | 3 | Prototype | `workpads/prototype/` | Minimal e2e product for spawning, tracking, and steering at least one coding agent |
 | 4 | Features | `workpads/features/` | Feature-specific workpads derived from the architecture |
-| 5 | Dogfood | `workpads/dogfood/` | Capo manages its own workpads and agent work |
+| 5 | Dogfood | `workpads/dogfood/` | Capo assists its own development while markdown/git remain the fallback |
+| 6 | Scaffold alignment | `workpads/scaffold/` | Recenter the implemented scaffold around Capo server/control-plane semantics, ACP-tracked agents, DB-backed project memory, and a narrow e2e loop |
 
 ## Workflow
 
@@ -119,6 +130,6 @@ Initial assumption:
 - Define initial memory model.
 - Build minimal local agent harness.
 - Build first dashboard surface.
-- Add voice input spike.
+- Keep voice, mobile, remote runtime, and rich dashboards as planned clients/surfaces until the core server/agent loop is stable.
 - Add performance analysis and review reports.
-- Move project workpads into Capo once the dogfood gate passes.
+- Replace transitional workpad-facing commands with product-language project/task/memory/context surfaces once the DB-backed memory hierarchy is clear.

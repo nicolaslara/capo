@@ -32,6 +32,7 @@ pub enum ProjectionRecord {
     TaskOutcomeReport(TaskOutcomeReportProjection),
     ReviewFinding(ReviewFindingProjection),
     Evidence(EvidenceProjection),
+    SourceBinding(SourceBindingProjection),
     WorkpadIndexReset(WorkpadIndexResetProjection),
     WorkpadFile(WorkpadFileProjection),
     WorkpadTask(WorkpadTaskProjection),
@@ -468,6 +469,20 @@ pub struct ReviewFindingProjection {
     pub status: String,
     pub evidence_artifact_id: Option<String>,
     pub follow_up: Option<String>,
+    pub updated_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceBindingProjection {
+    pub source_binding_id: String,
+    pub project_id: ProjectId,
+    pub task_id: TaskId,
+    pub source_kind: String,
+    pub source_task_id: String,
+    pub source_path: String,
+    pub source_anchor: String,
+    pub source_hash: String,
+    pub binding_status: String,
     pub updated_sequence: i64,
 }
 

@@ -240,11 +240,12 @@ fn normalize_wrapper_tool_id(tool: &str) -> Result<String, String> {
         "git_commit" | "git-commit" => "capo.git_commit",
         "file_read" | "file-read" => "capo.file_read",
         "file_write" | "file-write" => "capo.file_write",
+        "project_memory_read" | "project-memory-read" => "capo.project_memory_read",
         "workpad_read" | "workpad-read" => "capo.workpad_read",
         other if other.starts_with("capo.") => other,
         other => {
             return Err(format!(
-                "unknown wrapper tool: {other}; expected shell_run, git_status, git_diff, git_commit, file_read, file_write, or workpad_read"
+                "unknown wrapper tool: {other}; expected shell_run, git_status, git_diff, git_commit, file_read, file_write, project_memory_read, or workpad_read"
             ));
         }
     };
@@ -289,9 +290,11 @@ fn wrapper_tool_input(tool_id: &str, args: &[String]) -> Result<serde_json::Valu
         "capo.git_commit" => Ok(serde_json::json!({
             "message": required_arg(args, "--message")?
         })),
-        "capo.file_read" | "capo.workpad_read" => Ok(serde_json::json!({
-            "path": required_arg(args, "--path")?
-        })),
+        "capo.file_read" | "capo.project_memory_read" | "capo.workpad_read" => {
+            Ok(serde_json::json!({
+                "path": required_arg(args, "--path")?
+            }))
+        }
         "capo.file_write" => Ok(serde_json::json!({
             "path": required_arg(args, "--path")?,
             "content": required_arg(args, "--content")?

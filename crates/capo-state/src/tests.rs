@@ -97,6 +97,66 @@ fn sqlite_store_persists_events_and_core_projections() {
 }
 
 #[test]
+fn source_binding_projection_is_persisted_and_rebuilt() {
+    let store = temp_store("source-binding-rebuild");
+    let project_id = ProjectId::new("project-capo");
+    let task_id = TaskId::new("task-source-binding");
+
+    store
+        .append_event(
+            NewEvent {
+                event_id: "event-source-binding".to_string(),
+                kind: EventKind::WorkpadTaskImported,
+                actor: "test".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: Some(task_id.clone()),
+                agent_id: None,
+                session_id: None,
+                run_id: None,
+                turn_id: None,
+                item_id: Some("source-binding-task-source-binding".to_string()),
+                payload_json: "{}".to_string(),
+                idempotency_key: None,
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::SourceBinding(SourceBindingProjection {
+                source_binding_id: "source-binding-task-source-binding".to_string(),
+                project_id: project_id.clone(),
+                task_id: task_id.clone(),
+                source_kind: "markdown".to_string(),
+                source_task_id: "workpads:scaffold:tasks.md#s5".to_string(),
+                source_path: "workpads/scaffold/tasks.md".to_string(),
+                source_anchor: "S5 - Explicit Source Binding Projection".to_string(),
+                source_hash: "hash-source-binding".to_string(),
+                binding_status: "active".to_string(),
+                updated_sequence: 0,
+            })],
+        )
+        .expect("append source binding");
+
+    let binding = store
+        .source_binding_for_task(&task_id)
+        .expect("query source binding")
+        .expect("source binding");
+    assert_eq!(binding.source_kind, "markdown");
+    assert_eq!(binding.source_task_id, "workpads:scaffold:tasks.md#s5");
+    assert_eq!(binding.source_hash, "hash-source-binding");
+    assert_eq!(binding.binding_status, "active");
+    assert_eq!(
+        store.source_bindings(&project_id).unwrap(),
+        vec![binding.clone()]
+    );
+
+    store.rebuild_projections().expect("rebuild projections");
+    assert_eq!(
+        store
+            .source_binding_for_task(&task_id)
+            .expect("query rebuilt source binding"),
+        Some(binding)
+    );
+}
+
+#[test]
 fn tool_observations_are_persisted_and_rebuilt() {
     let store = temp_store("tool-observations");
     let project_id = ProjectId::new("project-capo");

@@ -18,6 +18,12 @@ use capo_state::{
 fn help_mentions_command_envelopes_and_no_credentials() {
     assert!(HELP.contains("command envelopes"));
     assert!(HELP.contains("does not read provider credentials"));
+    assert!(HELP.contains("Capo is a local-first controller/server"));
+    assert!(HELP.contains("The CLI is one client"));
+    assert!(HELP.contains("Markdown-backed planning files enter Capo as project memory"));
+    assert!(HELP.contains(
+        "Prefer project memory, source task, agent, session, dispatch, and evidence commands"
+    ));
     assert!(HELP.contains("adapter readiness"));
     assert!(HELP.contains("adapter plan-launch"));
     assert!(HELP.contains("adapter plan-proof"));
@@ -44,6 +50,29 @@ fn help_mentions_command_envelopes_and_no_credentials() {
     assert!(HELP.contains("connectivity revoke-exposure"));
     assert!(HELP.contains("connectivity exposure-status"));
     assert!(HELP.contains("connectivity exposure-evidence"));
+    assert!(HELP.contains("project memory index"));
+    assert!(HELP.contains("project memory next"));
+    assert!(HELP.contains("project memory import"));
+    assert!(HELP.contains("project memory propose"));
+    assert!(HELP.contains("project memory apply"));
+    assert!(HELP.contains("--source-path PATH"));
+    assert!(HELP.contains("--source-status STATUS"));
+    assert!(HELP.contains("--follow-up-source-task SOURCE_TASK_ID"));
+    let primary_model_position = HELP.find("Primary model:").expect("primary model section");
+    let compatibility_position = HELP
+        .find("Compatibility commands:")
+        .expect("compatibility section");
+    let project_memory_position = HELP
+        .find("capo project memory index")
+        .expect("project memory command");
+    let workpad_position = HELP.find("capo workpad index").expect("workpad command");
+    assert!(primary_model_position < compatibility_position);
+    assert!(project_memory_position < compatibility_position);
+    assert!(compatibility_position < workpad_position);
+    assert!(HELP.contains("These transitional commands remain"));
+    assert!(HELP.contains("Prefer the equivalent `capo project memory ...` commands"));
+    assert!(HELP.contains("`capo dashboard` still accepts `--workpad-path`"));
+    assert!(HELP.contains("`capo review record` still accepts `--follow-up-workpad-task`"));
     assert!(HELP.contains("workpad index"));
     assert!(HELP.contains("workpad next"));
     assert!(HELP.contains("workpad plan-next"));
@@ -51,6 +80,423 @@ fn help_mentions_command_envelopes_and_no_credentials() {
     assert!(HELP.contains("workpad propose"));
     assert!(HELP.contains("workpad apply"));
     assert!(HELP.contains("tool run-wrapper"));
+}
+
+#[test]
+fn project_memory_aliases_route_to_markdown_source_adapter() {
+    let state_root = temp_root("project-memory-alias-state");
+    let project_root = temp_root("project-memory-alias-project");
+    fs::create_dir_all(project_root.join("workpads/features")).expect("features dir");
+    fs::write(
+        project_root.join("project.md"),
+        "# Capo\n\n## Objective\n\nBuild the controller.\n",
+    )
+    .expect("write project");
+    fs::write(
+        project_root.join("TASKS.md"),
+        "# Queue\n\n## Objective\n\nRoute work.\n",
+    )
+    .expect("write tasks");
+    fs::write(
+        project_root.join("workpads/features/tasks.md"),
+        "# Features\n\n## Objective\n\nAlign product spine.\n\n## S1 - First Task\n\nStatus: pending\n\n## S2 - Second Task\n\nStatus: pending\n",
+    )
+    .expect("write scaffold tasks");
+
+    let index = run_cli(vec![
+        "project".to_string(),
+        "memory".to_string(),
+        "index".to_string(),
+        "--root".to_string(),
+        project_root.display().to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("index project memory");
+    assert!(index.contains("project_memory_indexed=true"));
+    assert!(index.contains("project_memory_source=markdown"));
+    assert!(index.contains("compatibility_adapter=workpad"));
+    assert!(index.contains("workpads_indexed=true"));
+
+    let next = run_cli(vec![
+        "project".to_string(),
+        "memory".to_string(),
+        "next".to_string(),
+        "--path".to_string(),
+        "workpads/features/tasks.md".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("select next project memory task");
+    assert!(next.contains("project_memory_next_found=true"));
+    assert!(next.contains("source_task_id=workpads:features:tasks.md#s1"));
+    assert!(next.contains("compatibility_workpad_task_id=workpads:features:tasks.md#s1"));
+    assert!(next.contains("source_path=workpads/features/tasks.md"));
+    assert!(next.contains("observed_source_status=pending"));
+    assert!(next.contains("capo_binding_status=observed_only"));
+    assert!(next.contains("workpad_next_found=true"));
+
+    let state = SqliteStateStore::open(&state_root).expect("state");
+    let source_hash = state
+        .workpad_file(&project_id(), "workpads/features/tasks.md")
+        .expect("workpad file query")
+        .expect("indexed source file")
+        .content_hash;
+    let plan = run_cli(vec![
+        "project".to_string(),
+        "memory".to_string(),
+        "plan-next".to_string(),
+        "--agent".to_string(),
+        "codex-scaffold".to_string(),
+        "--adapter".to_string(),
+        "codex".to_string(),
+        "--path".to_string(),
+        "workpads/features/tasks.md".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("plan next project memory task");
+    assert!(plan.contains("project_memory_next_planned=true"));
+    assert!(plan.contains("project_memory_helper=source_task_selection"));
+    assert!(plan.contains("source_task_id=workpads:features:tasks.md#s1"));
+
+    let import = run_cli(vec![
+        "project".to_string(),
+        "memory".to_string(),
+        "import".to_string(),
+        "--source-task".to_string(),
+        "workpads:features:tasks.md#s1".to_string(),
+        "--expected-hash".to_string(),
+        source_hash.clone(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("import project memory task");
+    assert!(import.contains("project_memory_task_imported=true"));
+    assert!(import.contains("source_task_id=workpads:features:tasks.md#s1"));
+    assert!(
+        import.contains(
+            "source_binding_id=source-binding-task-workpad-workpads-features-tasks-md-s1"
+        )
+    );
+    assert!(import.contains("workpad_task_imported=true"));
+    let source_binding = state
+        .source_binding_for_task(&TaskId::new("task-workpad-workpads-features-tasks-md-s1"))
+        .expect("source binding query")
+        .expect("source binding");
+    assert_eq!(
+        source_binding.source_task_id,
+        "workpads:features:tasks.md#s1"
+    );
+    assert_eq!(source_binding.source_path, "workpads/features/tasks.md");
+    assert_eq!(source_binding.source_hash.as_str(), source_hash.as_str());
+
+    run_cli(vec![
+        "agent".to_string(),
+        "register".to_string(),
+        "--name".to_string(),
+        "scaffold".to_string(),
+        "--adapter".to_string(),
+        "fake".to_string(),
+        "--runtime".to_string(),
+        "fake".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("register scaffold agent");
+    let started = run_cli(vec![
+        "project".to_string(),
+        "memory".to_string(),
+        "start-next".to_string(),
+        "--agent".to_string(),
+        "scaffold".to_string(),
+        "--path".to_string(),
+        "workpads/features/tasks.md".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("start next project memory task");
+    assert!(started.contains("project_memory_next_started=true"));
+    assert!(started.contains("project_memory_helper=source_task_selection"));
+    assert!(started.contains("source_task_id=workpads:features:tasks.md#s2"));
+    assert!(started.contains("workpad_next_started=true"));
+
+    let proposal_dir = temp_root("project-memory-alias-proposal");
+    let proposal = run_cli(vec![
+        "project".to_string(),
+        "memory".to_string(),
+        "propose".to_string(),
+        "--source-task".to_string(),
+        "workpads:features:tasks.md#s1".to_string(),
+        "--expected-hash".to_string(),
+        source_hash,
+        "--out".to_string(),
+        proposal_dir.display().to_string(),
+        "--summary".to_string(),
+        "Record reviewed project-memory evidence.".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("write project memory proposal");
+    assert!(proposal.contains("project_memory_proposal_written=true"));
+    assert!(proposal.contains("source_task_id=workpads:features:tasks.md#s1"));
+    let proposal_path = output_value(&proposal, "path");
+
+    let apply = run_cli(vec![
+        "project".to_string(),
+        "memory".to_string(),
+        "apply".to_string(),
+        "--proposal".to_string(),
+        proposal_path,
+        "--confirm".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("apply project memory proposal");
+    assert!(apply.contains("project_memory_apply_supported=false"));
+    assert!(apply.contains("source_modified=false"));
+}
+
+#[test]
+fn project_memory_scripted_dispatch_proves_narrow_spine() {
+    let state_root = temp_root("project-memory-scripted-spine-state");
+    let project_root = temp_root("project-memory-scripted-spine-project");
+    let evidence_dir = temp_root("project-memory-scripted-spine-evidence");
+    fs::create_dir_all(project_root.join("workpads/features")).expect("features dir");
+    fs::write(
+        project_root.join("project.md"),
+        "# Capo\n\n## Objective\n\nBuild the controller.\n",
+    )
+    .expect("write project");
+    fs::write(
+        project_root.join("TASKS.md"),
+        "# Queue\n\n## Objective\n\nRoute work.\n",
+    )
+    .expect("write tasks");
+    fs::write(
+        project_root.join("workpads/features/tasks.md"),
+        "# Features\n\n## Objective\n\nAlign product spine.\n\n## S1 - Scripted Spine\n\nStatus: pending\n",
+    )
+    .expect("write feature tasks");
+    let source_before =
+        fs::read_to_string(project_root.join("workpads/features/tasks.md")).expect("read source");
+
+    let index = run_cli(vec![
+        "project".to_string(),
+        "memory".to_string(),
+        "index".to_string(),
+        "--root".to_string(),
+        project_root.display().to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("index project memory");
+    assert!(index.contains("project_memory_indexed=true"));
+
+    let next = run_cli(vec![
+        "project".to_string(),
+        "memory".to_string(),
+        "next".to_string(),
+        "--path".to_string(),
+        "workpads/features/tasks.md".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("select source task");
+    assert!(next.contains("project_memory_next_found=true"));
+    assert!(next.contains("source_task_id=workpads:features:tasks.md#s1"));
+    assert!(next.contains("compatibility_workpad_task_id=workpads:features:tasks.md#s1"));
+    assert!(next.contains("observed_source_status=pending"));
+
+    run_cli(vec![
+        "agent".to_string(),
+        "register".to_string(),
+        "--name".to_string(),
+        "spine".to_string(),
+        "--adapter".to_string(),
+        "fake".to_string(),
+        "--runtime".to_string(),
+        "fake".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("register scripted agent");
+    let started = run_cli(vec![
+        "project".to_string(),
+        "memory".to_string(),
+        "start-next".to_string(),
+        "--agent".to_string(),
+        "spine".to_string(),
+        "--path".to_string(),
+        "workpads/features/tasks.md".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("start project memory task");
+    assert!(started.contains("project_memory_next_started=true"));
+    assert!(started.contains("source_task_id=workpads:features:tasks.md#s1"));
+    assert!(started.contains("task_id=task-workpad-workpads-features-tasks-md-s1"));
+
+    let parsed = ParsedArgs::new(vec![
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("parse state args");
+    let controller = controller(&parsed).expect("controller");
+    let refs = controller.refs_for_agent_name("spine").expect("refs");
+    let scripted_turn = capo_adapters::ScriptedMockTurn::new("turn-project-memory-spine")
+        .message_delta("msg-context", "requesting task-specific project memory")
+        .tool_requested("tool-context", "capo.project_memory_read")
+        .tool_completed(
+            "tool-context",
+            "capo.project_memory_read",
+            "loaded source task workpads/features/tasks.md#S1",
+        )
+        .message_completed("msg-summary", "project memory context loaded")
+        .turn_completed("done-context");
+    let replay = controller
+        .apply_scripted_acp_mock_turn(&refs, &scripted_turn)
+        .expect("apply scripted ACP-shaped project-memory turn");
+    assert_eq!(replay.completed_turn_count, 1);
+    assert_eq!(replay.tool_event_count, 2);
+    assert!(replay.summary_event_count >= 2);
+
+    let state = SqliteStateStore::open(&state_root).expect("state");
+    let session = state
+        .session(&refs.session_id)
+        .expect("session query")
+        .expect("session");
+    assert_eq!(session.status, "active");
+    assert_eq!(session.task_id.as_ref(), Some(&refs.task_id));
+    assert_eq!(session.agent_id, refs.agent_id);
+    assert_eq!(session.latest_confidence, Some(82));
+    assert!(
+        session
+            .latest_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("content_hash=")
+    );
+    let run = state
+        .run_for_session(&refs.session_id)
+        .expect("run query")
+        .expect("run");
+    assert_eq!(run.status, "running");
+    let task = state
+        .task(&TaskId::new("task-workpad-workpads-features-tasks-md-s1"))
+        .expect("task query")
+        .expect("task");
+    assert_eq!(task.capo_execution_status, "active");
+    assert_eq!(task.active_session_id.as_ref(), Some(&refs.session_id));
+    let source_binding = state
+        .source_binding_for_task(&TaskId::new("task-workpad-workpads-features-tasks-md-s1"))
+        .expect("source binding query")
+        .expect("source binding");
+    assert_eq!(
+        source_binding.source_task_id,
+        "workpads:features:tasks.md#s1"
+    );
+    assert_eq!(source_binding.source_path, "workpads/features/tasks.md");
+    assert_eq!(source_binding.binding_status, "active");
+    let memory_packets = state
+        .memory_packets_for_session(&refs.session_id)
+        .expect("memory packets");
+    assert_eq!(memory_packets.len(), 1);
+    assert_eq!(memory_packets[0].purpose, "turn_context");
+    assert!(memory_packets[0].packet_artifact_id.is_some());
+    let tool_calls = state
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    assert!(tool_calls.iter().any(|tool| {
+        tool.tool_name == "capo.project_memory_read"
+            && tool.status == "completed"
+            && tool.tool_origin == "adapter_native:acp"
+    }));
+    let tool_observations = state
+        .tool_observations_for_session(&refs.session_id)
+        .expect("tool observations");
+    assert!(tool_observations.iter().any(|observation| {
+        observation.tool_name == "capo.project_memory_read"
+            && observation.observed_status == "completed"
+            && observation.source == "adapter_event:acp"
+            && observation
+                .external_tool_ref
+                .as_deref()
+                .is_some_and(|external_ref| external_ref.contains("tool-context"))
+            && observation.instrumentation_level == "observed_only"
+    }));
+
+    let status = run_cli(vec![
+        "session".to_string(),
+        "status".to_string(),
+        "--agent".to_string(),
+        "spine".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("session status");
+    assert!(status.contains("session_id=session-spine"));
+    assert!(status.contains("tool=capo.project_memory_read"));
+
+    let tool_count_before_recover = tool_calls.len();
+    let memory_count_before_recover = memory_packets.len();
+    let recovered = run_cli(vec![
+        "recover".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("recover state");
+    assert!(recovered.contains("recovered=true"));
+    let recovered_state = SqliteStateStore::open(&state_root).expect("recovered state");
+    assert_eq!(
+        recovered_state
+            .tool_calls_for_session(&refs.session_id)
+            .expect("tool calls after recover")
+            .len(),
+        tool_count_before_recover
+    );
+    assert_eq!(
+        recovered_state
+            .memory_packets_for_session(&refs.session_id)
+            .expect("memory packets after recover")
+            .len(),
+        memory_count_before_recover
+    );
+
+    let stopped = run_cli(vec![
+        "session".to_string(),
+        "stop".to_string(),
+        "--agent".to_string(),
+        "spine".to_string(),
+        "--reason".to_string(),
+        "scripted spine complete".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("stop scripted session");
+    assert!(stopped.contains("status=completed"));
+    let exported = run_cli(vec![
+        "evidence".to_string(),
+        "export".to_string(),
+        "--session".to_string(),
+        refs.session_id.to_string(),
+        "--out".to_string(),
+        evidence_dir.display().to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("export evidence");
+    assert!(exported.contains("evidence_exported=true"));
+    let evidence = fs::read_to_string(evidence_dir.join("session-spine.md")).expect("evidence");
+    assert!(evidence.contains("capo.project_memory_read"));
+    assert!(evidence.contains("adapter_replay:acp"));
+    assert!(evidence.contains("session.stopped"));
+    assert_eq!(
+        fs::read_to_string(project_root.join("workpads/features/tasks.md"))
+            .expect("read source after spine"),
+        source_before
+    );
 }
 
 #[test]
@@ -65,6 +511,12 @@ fn tool_run_wrapper_exposes_governed_runtime_wrappers_without_providers() {
         .output()
         .expect("git init");
     fs::write(workspace.join("tracked.txt"), "tracked\n").expect("tracked");
+    fs::create_dir_all(workspace.join("workpads/features")).expect("workpad source dir");
+    fs::write(
+        workspace.join("workpads/features/tasks.md"),
+        "# Features\n\n## S1 - Source Task\n\nStatus: pending\n",
+    )
+    .expect("source task file");
 
     let read_only_status = run_cli(vec![
         "tool".to_string(),
@@ -157,6 +609,72 @@ fn tool_run_wrapper_exposes_governed_runtime_wrappers_without_providers() {
         .output()
         .expect("git log");
     assert!(String::from_utf8_lossy(&log.stdout).contains("Trusted wrapper commit"));
+
+    let project_memory_read = run_cli(vec![
+        "tool".to_string(),
+        "run-wrapper".to_string(),
+        "--tool".to_string(),
+        "project_memory_read".to_string(),
+        "--workspace".to_string(),
+        workspace.display().to_string(),
+        "--artifacts".to_string(),
+        artifacts.display().to_string(),
+        "--path".to_string(),
+        "workpads/features/tasks.md".to_string(),
+    ])
+    .expect("project memory read shorthand");
+    assert!(project_memory_read.contains("tool=capo.project_memory_read"));
+    assert!(project_memory_read.contains("status=completed"));
+    assert!(project_memory_read.contains("kind=project_memory_read"));
+    assert!(!project_memory_read.contains("tool=capo.workpad_read"));
+
+    let project_memory_read_qualified = run_cli(vec![
+        "tool".to_string(),
+        "run-wrapper".to_string(),
+        "--tool".to_string(),
+        "capo.project_memory_read".to_string(),
+        "--workspace".to_string(),
+        workspace.display().to_string(),
+        "--artifacts".to_string(),
+        artifacts.display().to_string(),
+        "--path".to_string(),
+        "workpads/features/tasks.md".to_string(),
+    ])
+    .expect("qualified project memory read");
+    assert!(project_memory_read_qualified.contains("tool=capo.project_memory_read"));
+    assert!(project_memory_read_qualified.contains("status=completed"));
+    assert!(project_memory_read_qualified.contains("kind=project_memory_read"));
+
+    let workpad_read = run_cli(vec![
+        "tool".to_string(),
+        "run-wrapper".to_string(),
+        "--tool".to_string(),
+        "workpad_read".to_string(),
+        "--workspace".to_string(),
+        workspace.display().to_string(),
+        "--artifacts".to_string(),
+        artifacts.display().to_string(),
+        "--path".to_string(),
+        "workpads/features/tasks.md".to_string(),
+    ])
+    .expect("compatibility workpad read shorthand");
+    assert!(workpad_read.contains("tool=capo.workpad_read"));
+    assert!(workpad_read.contains("status=completed"));
+    assert!(workpad_read.contains("kind=workpad_read"));
+
+    let unknown_tool = run_cli(vec![
+        "tool".to_string(),
+        "run-wrapper".to_string(),
+        "--tool".to_string(),
+        "memory_read".to_string(),
+        "--workspace".to_string(),
+        workspace.display().to_string(),
+        "--artifacts".to_string(),
+        artifacts.display().to_string(),
+    ])
+    .unwrap_err();
+    assert!(unknown_tool.contains("project_memory_read"));
+    assert!(unknown_tool.contains("or workpad_read"));
 }
 
 #[test]
@@ -1026,20 +1544,25 @@ fn adapter_dispatch_gate_blocks_until_real_smoke_evidence_is_recorded() {
     assert!(readiness.contains("real_agent_connector_ready=true"));
     assert!(readiness.contains("runtime_target_ready=true"));
     assert!(readiness.contains("dispatch_chain_ready=true"));
+    assert!(readiness.contains("project_memory_ready=false"));
     assert!(readiness.contains("workpad_bridge_ready=false"));
     assert!(readiness.contains("runtime_targets=1"));
     assert!(readiness.contains("runtime_targets_available=1"));
+    assert!(readiness.contains("source_tasks=0"));
     assert!(readiness.contains("dispatch_plans=1"));
     assert!(readiness.contains("dispatch_replays=1"));
     assert!(readiness.contains("dispatch_executions=1"));
     assert!(readiness.contains("connector_evidence_refs=adapter-smoke-codex"));
     assert!(readiness.contains("runtime_target_refs=runtime-target-local-dogfood"));
+    assert!(readiness.contains("source_task_refs=none"));
     assert!(readiness.contains("dispatch_chain_refs=adapter-dispatch-plan-"));
     assert!(readiness.contains("adapter-dispatch-replay-"));
     assert!(readiness.contains("adapter-dispatch-execution-"));
     assert!(readiness.contains("project_evidence_refs=none"));
-    assert!(readiness.contains("blockers=workpad_index_missing"));
-    assert!(readiness.contains("next_actions=run_workpad_index"));
+    assert!(readiness.contains("blockers=project_memory_index_missing"));
+    assert!(readiness.contains("next_actions=run_project_memory_index"));
+    assert!(readiness.contains("compatibility_blockers=workpad_index_missing"));
+    assert!(readiness.contains("compatibility_next_actions=run_workpad_index"));
     assert!(readiness.contains("dogfood_readiness_evidence_exported=true"));
     assert!(readiness.contains("artifact_id=artifact-dogfood-readiness-"));
     let readiness_path = readiness
@@ -1055,9 +1578,13 @@ fn adapter_dispatch_gate_blocks_until_real_smoke_evidence_is_recorded() {
     assert!(readiness_markdown.contains("## Component Refs"));
     assert!(readiness_markdown.contains("Connector evidence refs: `adapter-smoke-codex"));
     assert!(readiness_markdown.contains("Runtime target refs: `runtime-target-local-dogfood`"));
+    assert!(readiness_markdown.contains("Project memory ready: `false`"));
+    assert!(readiness_markdown.contains("Source task refs: `none`"));
     assert!(readiness_markdown.contains("Dispatch chain refs: `adapter-dispatch-plan-"));
     assert!(readiness_markdown.contains("adapter-dispatch-replay-"));
     assert!(readiness_markdown.contains("adapter-dispatch-execution-"));
+    assert!(readiness_markdown.contains("`project_memory_index_missing`"));
+    assert!(readiness_markdown.contains("## Compatibility Blockers"));
     assert!(readiness_markdown.contains("`workpad_index_missing`"));
     assert!(readiness_markdown.contains("does not run provider CLIs"));
     assert!(!readiness_markdown.contains("Do not render this dispatch prompt"));
@@ -1076,10 +1603,12 @@ fn adapter_dispatch_gate_blocks_until_real_smoke_evidence_is_recorded() {
     assert!(dashboard_after_readiness.contains("status=blocked_pending_dogfood_prerequisites"));
     assert!(dashboard_after_readiness.contains("real_agent_connector_ready=true"));
     assert!(dashboard_after_readiness.contains("runtime_target_ready=true"));
+    assert!(dashboard_after_readiness.contains("project_memory_ready=false"));
     assert!(dashboard_after_readiness.contains("workpad_bridge_ready=false"));
     assert!(dashboard_after_readiness.contains("dispatch_chain_ready=true"));
     assert!(dashboard_after_readiness.contains("connector_evidence_refs=adapter-smoke-codex"));
     assert!(dashboard_after_readiness.contains("runtime_target_refs=runtime-target-local-dogfood"));
+    assert!(dashboard_after_readiness.contains("source_task_refs=none"));
     assert!(dashboard_after_readiness.contains("workpad_task_refs=none"));
     assert!(dashboard_after_readiness.contains("dispatch_chain_refs=adapter-dispatch-plan-"));
     assert!(dashboard_after_readiness.contains("adapter-dispatch-replay-"));
@@ -1088,7 +1617,8 @@ fn adapter_dispatch_gate_blocks_until_real_smoke_evidence_is_recorded() {
         dashboard_after_readiness
             .contains("project_evidence_refs=evidence-artifact-dogfood-readiness-")
     );
-    assert!(dashboard_after_readiness.contains("blockers=workpad_index_missing"));
+    assert!(dashboard_after_readiness.contains("blockers=project_memory_index_missing"));
+    assert!(dashboard_after_readiness.contains("compatibility_blockers=workpad_index_missing"));
     assert_text_absent_in_tree(&state_root, "Do not render this dispatch prompt");
     assert_text_absent_in_tree(&state_root, "Codex fixture response.");
     assert_text_absent_in_tree(&state_root, "cargo test");
@@ -1663,6 +2193,11 @@ fn workpad_index_imports_markdown_refs_without_modifying_sources() {
         state_root.display().to_string(),
     ])
     .expect("dashboard after workpad index");
+    assert!(dashboard_after_index.contains("project_memory_source=markdown"));
+    assert!(dashboard_after_index.contains("source_tasks=3"));
+    assert!(dashboard_after_index.contains("source_task=workpads:features:tasks.md#f2"));
+    assert!(dashboard_after_index.contains("observed_source_status=in_progress"));
+    assert!(dashboard_after_index.contains("capo_binding_status=observed_only"));
     assert!(dashboard_after_index.contains("workpad_tasks=3"));
     assert!(dashboard_after_index.contains("workpad_task=workpads:features:tasks.md#f2"));
     assert!(dashboard_after_index.contains("capo_execution_status=observed_only"));
@@ -1676,9 +2211,26 @@ fn workpad_index_imports_markdown_refs_without_modifying_sources() {
         state_root.display().to_string(),
     ])
     .expect("dashboard filtered by workpad task");
+    assert!(dashboard_by_workpad.contains("source_tasks=1"));
+    assert!(dashboard_by_workpad.contains("source_task=workpads:features:tasks.md#f2"));
     assert!(dashboard_by_workpad.contains("workpad_tasks=1"));
     assert!(dashboard_by_workpad.contains("workpad_task=workpads:features:tasks.md#f2"));
     assert!(!dashboard_by_workpad.contains("workpad_task=TASKS.md#f2"));
+    let dashboard_by_source = run_cli(vec![
+        "dashboard".to_string(),
+        "--source-path".to_string(),
+        "workpads/features/tasks.md".to_string(),
+        "--source-status".to_string(),
+        "in_progress".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("dashboard filtered by source task");
+    assert!(dashboard_by_source.contains("source_tasks=1"));
+    assert!(dashboard_by_source.contains("source_task=workpads:features:tasks.md#f2"));
+    assert!(dashboard_by_source.contains("workpad_tasks=1"));
+    assert!(dashboard_by_source.contains("workpad_task=workpads:features:tasks.md#f2"));
+    assert!(!dashboard_by_source.contains("workpad_task=TASKS.md#f2"));
     let tasks_source_hash = tasks_file.content_hash.clone();
     let import_tasks_output = run_cli(vec![
         "workpad".to_string(),
@@ -3011,7 +3563,8 @@ fn cli_drives_fake_controller_and_exports_evidence() {
     )
     .expect("read review artifact");
     assert!(review_artifact.starts_with("<!-- capo:review-finding -->"));
-    assert!(review_artifact.contains("Follow-up workpad task: `ME3`"));
+    assert!(review_artifact.contains("Follow-up source task: `ME3`"));
+    assert!(review_artifact.contains("Compatibility workpad task: `ME3`"));
 }
 
 #[test]
@@ -3063,6 +3616,54 @@ fn dashboard_rejects_malformed_filters() {
     ])
     .unwrap_err();
     assert!(missing_workpad_status.contains("--workpad-status requires a value"));
+
+    let missing_source_path = run_cli(vec![
+        "dashboard".to_string(),
+        "--source-path".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .unwrap_err();
+    assert!(missing_source_path.contains("--source-path requires a value"));
+
+    let missing_source_status = run_cli(vec![
+        "dashboard".to_string(),
+        "--source-status".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .unwrap_err();
+    assert!(missing_source_status.contains("--source-status requires a value"));
+
+    let duplicate_path_alias = run_cli(vec![
+        "dashboard".to_string(),
+        "--source-path".to_string(),
+        "workpads/features/tasks.md".to_string(),
+        "--workpad-path".to_string(),
+        "workpads/prototype/tasks.md".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .unwrap_err();
+    assert!(
+        duplicate_path_alias
+            .contains("--source-path and --workpad-path are aliases; provide only one")
+    );
+
+    let duplicate_status_alias = run_cli(vec![
+        "dashboard".to_string(),
+        "--source-status".to_string(),
+        "pending".to_string(),
+        "--workpad-status".to_string(),
+        "completed".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .unwrap_err();
+    assert!(
+        duplicate_status_alias
+            .contains("--source-status and --workpad-status are aliases; provide only one")
+    );
 }
 
 #[test]
@@ -3107,6 +3708,100 @@ fn dashboard_renders_review_findings_from_shared_query() {
     assert!(dashboard.contains("status=open"));
     assert!(dashboard.contains("reviewer=focused-review"));
     assert!(dashboard.contains("summary=Dashboard must expose review blockers."));
+}
+
+#[test]
+fn review_record_accepts_follow_up_source_task_alias() {
+    let state_root = temp_root("cli-review-source-task-alias");
+    let evidence_dir = temp_root("cli-review-source-task-alias-evidence");
+    seed_running_agent(&state_root, "fake-codex", "Inspect the project");
+    let state = SqliteStateStore::open(&state_root).expect("state");
+    state
+        .append_event(
+            NewEvent::new(
+                "event-workpad-source-follow-up",
+                EventKind::WorkpadIndexed,
+                "test",
+            ),
+            &[ProjectionRecord::WorkpadTask(WorkpadTaskProjection {
+                workpad_task_id: "ME3".to_string(),
+                project_id: project_id(),
+                path: "workpads/features/memory-eval.md".to_string(),
+                source_anchor: "ME3 - Review Feedback Loop".to_string(),
+                title: "Review Feedback Loop".to_string(),
+                observed_status: "pending".to_string(),
+                capo_execution_status: "observed_only".to_string(),
+                observed_unix: 1,
+                updated_sequence: 0,
+            })],
+        )
+        .expect("append source follow-up task");
+
+    let review = run_cli(vec![
+        "review".to_string(),
+        "record".to_string(),
+        "--session".to_string(),
+        "session-fake-codex".to_string(),
+        "--reviewer".to_string(),
+        "focused-review".to_string(),
+        "--kind".to_string(),
+        "blocker".to_string(),
+        "--summary".to_string(),
+        "Source task alias should map to the persisted follow-up field.".to_string(),
+        "--follow-up-source-task".to_string(),
+        "ME3".to_string(),
+        "--out".to_string(),
+        evidence_dir.display().to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("record review with source task alias");
+    assert!(review.contains("review_finding_recorded=true"));
+
+    let findings = state
+        .review_findings_for_session(&SessionId::new("session-fake-codex"))
+        .expect("review findings");
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].workpad_task_id.as_deref(), Some("ME3"));
+    assert_eq!(findings[0].follow_up.as_deref(), Some("ME3"));
+    let review_artifact = fs::read_to_string(
+        evidence_dir
+            .join(
+                findings[0]
+                    .evidence_artifact_id
+                    .as_ref()
+                    .expect("review artifact"),
+            )
+            .with_extension("md"),
+    )
+    .expect("read review artifact");
+    assert!(review_artifact.contains("Follow-up source task: `ME3`"));
+    assert!(review_artifact.contains("Compatibility workpad task: `ME3`"));
+
+    let duplicate_alias = run_cli(vec![
+        "review".to_string(),
+        "record".to_string(),
+        "--session".to_string(),
+        "session-fake-codex".to_string(),
+        "--reviewer".to_string(),
+        "focused-review".to_string(),
+        "--kind".to_string(),
+        "blocker".to_string(),
+        "--summary".to_string(),
+        "Duplicate aliases should be rejected.".to_string(),
+        "--follow-up-source-task".to_string(),
+        "ME3".to_string(),
+        "--follow-up-workpad-task".to_string(),
+        "ME3".to_string(),
+        "--out".to_string(),
+        evidence_dir.display().to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .unwrap_err();
+    assert!(duplicate_alias.contains(
+        "--follow-up-source-task and --follow-up-workpad-task are aliases; provide only one"
+    ));
 }
 
 #[test]
@@ -4578,6 +5273,11 @@ fn voice_next_work_reads_workpad_queue_without_mutating() {
     assert!(output.contains("mutation_applied=false"));
     assert!(output.contains("raw_transcript_retained=false"));
     assert!(output.contains("read_scope=project_next_work"));
+    assert!(output.contains("spoken_source_tasks=2"));
+    assert!(output.contains("spoken_next_source_task_candidates=1"));
+    assert!(output.contains("spoken_next_source_task=workpads:features:voice.md#v7"));
+    assert!(output.contains("observed_source_status=pending"));
+    assert!(output.contains("capo_binding_status=observed_only"));
     assert!(output.contains("spoken_workpad_tasks=2"));
     assert!(output.contains("spoken_next_work_candidates=1"));
     assert!(output.contains("spoken_next_workpad_task=workpads:features:voice.md#v7"));
@@ -4698,6 +5398,7 @@ fn voice_confirmed_start_next_work_imports_and_dispatches_after_approval() {
     assert!(confirmed.contains("workpad_task_id=workpads:features:voice.md#v8"));
     assert!(confirmed.contains("task_id=task-workpad-workpads-features-voice-md-v8"));
     assert!(confirmed.contains("session_id=session-fake-codex"));
+    assert!(confirmed.contains("spoken_next_source_task=none"));
     assert!(confirmed.contains("spoken_next_workpad_task=none"));
     assert!(!confirmed.contains("Start next task with fake-codex"));
 
@@ -4846,10 +5547,19 @@ fn voice_dogfood_readiness_reads_shared_query_without_mutating() {
     assert!(output.contains("spoken_dogfood_ready=false"));
     assert!(output.contains("spoken_dogfood_status=blocked_pending_dogfood_prerequisites"));
     assert!(output.contains("spoken_runtime_target_ready=false"));
-    assert!(output.contains("spoken_blockers=real_agent_connector_not_proven,available_runtime_target_missing,workpad_index_missing,dispatch_chain_missing"));
-    assert!(output.contains("spoken_next_actions=record_clean_codex_smoke_evidence,register_available_runtime_target,run_workpad_index,record_or_replay_workpad_dispatch_plan"));
+    assert!(output.contains("spoken_project_memory_ready=false"));
+    assert!(output.contains("spoken_blockers=real_agent_connector_not_proven,available_runtime_target_missing,project_memory_index_missing,source_task_dispatch_chain_missing"));
+    assert!(output.contains("spoken_next_actions=record_clean_codex_smoke_evidence,register_available_runtime_target,run_project_memory_index,record_or_replay_source_task_dispatch_plan"));
+    assert!(
+        output
+            .contains("spoken_compatibility_blockers=workpad_index_missing,dispatch_chain_missing")
+    );
+    assert!(output.contains(
+        "spoken_compatibility_next_actions=run_workpad_index,record_or_replay_workpad_dispatch_plan"
+    ));
     assert!(output.contains("spoken_connector_evidence_refs=none"));
     assert!(output.contains("spoken_runtime_target_refs=none"));
+    assert!(output.contains("spoken_source_task_refs=none"));
     assert!(output.contains("spoken_workpad_task_refs=none"));
     assert!(output.contains("spoken_dispatch_chain_refs=none"));
     assert!(output.contains("spoken_project_evidence_refs=none"));

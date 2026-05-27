@@ -430,6 +430,18 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             follow_up TEXT,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS source_bindings (
+            source_binding_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_task_id TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            source_anchor TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            binding_status TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS workpad_files (
             path TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -527,6 +539,7 @@ pub(crate) fn clear_projection_tables(transaction: &Transaction<'_>) -> StateRes
         "evidence",
         "task_outcome_reports",
         "review_findings",
+        "source_bindings",
         "workpad_files",
         "workpad_tasks",
         "projection_watermarks",

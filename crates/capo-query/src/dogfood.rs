@@ -65,7 +65,15 @@ pub fn project_dogfood_readiness(dashboard: &ProjectDashboard) -> ProjectDogfood
         .iter()
         .filter(|task| task.capo_execution_status == "imported")
         .count();
-    let workpad_bridge_ready = workpad_task_count > 0;
+    let bound_source_task_count = dashboard
+        .workpad_tasks
+        .iter()
+        .filter(|task| task.capo_execution_status != "observed_only")
+        .count();
+    let source_task_count = workpad_task_count;
+    let observed_source_task_count = observed_workpad_task_count;
+    let project_memory_ready = source_task_count > 0;
+    let workpad_bridge_ready = project_memory_ready;
     let dispatch_plan_count = dashboard.adapter_dispatch_plans.len();
     let ready_dispatch_gate_count = dashboard
         .adapter_dispatch_gates
@@ -93,6 +101,7 @@ pub fn project_dogfood_readiness(dashboard: &ProjectDashboard) -> ProjectDogfood
         .iter()
         .map(|task| task.workpad_task_id.clone())
         .collect::<Vec<_>>();
+    let source_task_refs = workpad_task_refs.clone();
     let dispatch_chain_refs = dashboard
         .adapter_dispatch_plans
         .iter()
@@ -117,6 +126,8 @@ pub fn project_dogfood_readiness(dashboard: &ProjectDashboard) -> ProjectDogfood
         .collect::<Vec<_>>();
     let mut blockers = Vec::new();
     let mut next_actions = Vec::new();
+    let mut compatibility_blockers = Vec::new();
+    let mut compatibility_next_actions = Vec::new();
     if !real_agent_connector_ready {
         blockers.push("real_agent_connector_not_proven".to_string());
         next_actions.push("record_clean_codex_smoke_evidence".to_string());
@@ -126,12 +137,16 @@ pub fn project_dogfood_readiness(dashboard: &ProjectDashboard) -> ProjectDogfood
         next_actions.push("register_available_runtime_target".to_string());
     }
     if !workpad_bridge_ready {
-        blockers.push("workpad_index_missing".to_string());
-        next_actions.push("run_workpad_index".to_string());
+        blockers.push("project_memory_index_missing".to_string());
+        next_actions.push("run_project_memory_index".to_string());
+        compatibility_blockers.push("workpad_index_missing".to_string());
+        compatibility_next_actions.push("run_workpad_index".to_string());
     }
     if !dispatch_chain_ready {
-        blockers.push("dispatch_chain_missing".to_string());
-        next_actions.push("record_or_replay_workpad_dispatch_plan".to_string());
+        blockers.push("source_task_dispatch_chain_missing".to_string());
+        next_actions.push("record_or_replay_source_task_dispatch_plan".to_string());
+        compatibility_blockers.push("dispatch_chain_missing".to_string());
+        compatibility_next_actions.push("record_or_replay_workpad_dispatch_plan".to_string());
     }
     let ready = blockers.is_empty();
     ProjectDogfoodReadiness {
@@ -143,10 +158,14 @@ pub fn project_dogfood_readiness(dashboard: &ProjectDashboard) -> ProjectDogfood
         },
         real_agent_connector_ready,
         runtime_target_ready,
+        project_memory_ready,
         workpad_bridge_ready,
         dispatch_chain_ready,
         runtime_target_count,
         available_runtime_target_count,
+        source_task_count,
+        observed_source_task_count,
+        bound_source_task_count,
         workpad_task_count,
         observed_workpad_task_count,
         imported_workpad_task_count,
@@ -156,10 +175,13 @@ pub fn project_dogfood_readiness(dashboard: &ProjectDashboard) -> ProjectDogfood
         dispatch_execution_count,
         connector_evidence_refs,
         runtime_target_refs,
+        source_task_refs,
         workpad_task_refs,
         dispatch_chain_refs,
         project_evidence_refs,
         blockers,
         next_actions,
+        compatibility_blockers,
+        compatibility_next_actions,
     }
 }

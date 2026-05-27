@@ -9,7 +9,7 @@ Usage:
   capo --help
   capo version
   capo init [--state PATH]
-  capo dashboard [--project PROJECT_ID] [--session SESSION_ID] [--status STATUS] [--workpad-path PATH] [--workpad-status STATUS] [--state PATH]
+  capo dashboard [--project PROJECT_ID] [--session SESSION_ID] [--status STATUS] [--source-path PATH] [--source-status STATUS] [--state PATH]
   capo agent register --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent spawn --name NAME --adapter fake --runtime fake [--state PATH]
   capo agent list [--state PATH]
@@ -65,6 +65,28 @@ Usage:
   capo connectivity exposure-status --latest [--owner-kind runtime_target|capo_server] [--owner-id OWNER_ID] [--channel control|stdio|logs|dashboard|artifact] [--state PATH]
   capo connectivity exposure-evidence --exposure EXPOSURE_ID --out DIR [--state PATH]
   capo connectivity exposure-evidence --latest [--owner-kind runtime_target|capo_server] [--owner-id OWNER_ID] [--channel control|stdio|logs|dashboard|artifact] --out DIR [--state PATH]
+  capo project memory index --root PATH [--state PATH]
+  capo project memory next [--path PATH] [--state PATH]
+  capo project memory plan-next --agent NAME --adapter codex|claude [--path PATH] [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
+  capo project memory start-next --agent NAME [--path PATH] [--state PATH]
+  capo project memory import --source-task SOURCE_TASK_ID [--expected-hash HASH] [--task TASK_ID] [--state PATH]
+  capo project memory propose --source-task SOURCE_TASK_ID --out DIR [--expected-hash HASH] [--task TASK_ID] [--summary TEXT] [--state PATH]
+  capo project memory apply --proposal PATH [--confirm] [--state PATH]
+  capo evidence export --session SESSION_ID --out DIR [--state PATH]
+  capo eval task-outcome --session SESSION_ID --out DIR [--state PATH]
+  capo review record --session SESSION_ID --reviewer NAME --kind blocker|finding|no_blockers --summary TEXT --out DIR [--severity LEVEL] [--tool-call TOOL_CALL_ID] [--follow-up-source-task SOURCE_TASK_ID] [--state PATH]
+  capo tool run-wrapper --tool TOOL --workspace PATH --artifacts PATH [--policy read-only|reviewer|trusted-local] [--path PATH] [--content TEXT] [--message TEXT] [--program PROGRAM] [--argv-json JSON] [--cwd PATH] [--record] [--state PATH]
+
+Primary model:
+  Capo is a local-first controller/server for tracked coding agents.
+  The CLI is one client for inspecting state, sending instructions, dispatching agents, and exporting evidence.
+  Markdown-backed planning files enter Capo as project memory via `capo project memory ...`.
+  Prefer project memory, source task, agent, session, dispatch, and evidence commands for new workflows.
+
+Compatibility commands:
+  These transitional commands remain for existing local scripts and repository migration only.
+  Prefer the equivalent `capo project memory ...` commands in new examples and tests.
+
   capo workpad index --root PATH [--state PATH]
   capo workpad next [--path PATH] [--state PATH]
   capo workpad plan-next --agent NAME --adapter codex|claude [--path PATH] [--workspace PATH] [--artifacts PATH] [--record] [--state PATH]
@@ -72,13 +94,13 @@ Usage:
   capo workpad import --workpad-task WORKPAD_TASK_ID [--expected-hash HASH] [--task TASK_ID] [--state PATH]
   capo workpad propose --workpad-task WORKPAD_TASK_ID --out DIR [--expected-hash HASH] [--task TASK_ID] [--summary TEXT] [--state PATH]
   capo workpad apply --proposal PATH [--confirm] [--state PATH]
-  capo evidence export --session SESSION_ID --out DIR [--state PATH]
-  capo eval task-outcome --session SESSION_ID --out DIR [--state PATH]
-  capo review record --session SESSION_ID --reviewer NAME --kind blocker|finding|no_blockers --summary TEXT --out DIR [--severity LEVEL] [--tool-call TOOL_CALL_ID] [--follow-up-workpad-task WORKPAD_TASK_ID] [--state PATH]
-  capo tool run-wrapper --tool TOOL --workspace PATH --artifacts PATH [--policy read-only|reviewer|trusted-local] [--path PATH] [--content TEXT] [--message TEXT] [--program PROGRAM] [--argv-json JSON] [--cwd PATH] [--record] [--state PATH]
 
-Prototype notes:
-  The P4 CLI uses command envelopes, the fake controller, and SQLite read models.
+Compatibility options:
+  `capo dashboard` still accepts `--workpad-path` and `--workpad-status` as aliases for `--source-path` and `--source-status`.
+  `capo review record` still accepts `--follow-up-workpad-task` as an alias for `--follow-up-source-task`.
+
+Safety notes:
+  Capo uses command envelopes, controller/state read models, and bounded adapter evidence.
   It does not read provider credentials or inspect vendor subscription state.
 ";
 

@@ -16,7 +16,7 @@ pub use dogfood::{adapter_dogfood_gate, project_dogfood_readiness};
 pub use types::{
     AdapterDispatchStatus, AdapterDogfoodGate, AgentDashboardRow, ProjectDashboard,
     ProjectDashboardQuery, ProjectDogfoodReadiness, RuntimeTargetControlReadiness,
-    SessionDashboardRow, ToolActivitySummary,
+    SessionDashboardRow, SourceTaskProjection, ToolActivitySummary,
 };
 
 #[cfg(test)]

@@ -468,6 +468,19 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             })
             .to_string(),
         },
+        ProjectionRecord::SourceBinding(binding) => ProjectionRecordRow {
+            kind: "source_binding",
+            record_id: binding.source_binding_id.clone(),
+            a: Some(binding.project_id.to_string()),
+            b: Some(binding.task_id.to_string()),
+            c: Some(binding.source_kind.clone()),
+            d: Some(binding.source_task_id.clone()),
+            e: Some(binding.source_path.clone()),
+            f: Some(binding.source_anchor.clone()),
+            g: Some(binding.source_hash.clone()),
+            h: Some(binding.binding_status.clone()),
+            payload_json: "{}".to_string(),
+        },
         ProjectionRecord::WorkpadIndexReset(reset) => ProjectionRecordRow {
             kind: "workpad_index_reset",
             record_id: reset.project_id.to_string(),

@@ -9,7 +9,7 @@ use capo_state::{
     SqliteStateStore, ToolCallProjection, ToolObservationProjection,
 };
 
-use crate::cli_surface::{ParsedArgs, optional_arg, required_arg};
+use crate::cli_surface::{ParsedArgs, has_flag, optional_arg, required_arg};
 use crate::{debug_error, envelope, escape_json, stable_cli_hash, state};
 
 pub(crate) fn export_evidence(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
@@ -180,7 +180,8 @@ pub(crate) fn record_review_finding(
     let severity =
         optional_arg(args, "--severity").unwrap_or_else(|| default_review_severity(&finding_kind));
     let tool_call_id = optional_arg(args, "--tool-call").map(ToolCallId::new);
-    let follow_up_workpad_task_id = optional_arg(args, "--follow-up-workpad-task");
+    let follow_up_workpad_task_id =
+        aliased_optional_arg(args, "--follow-up-source-task", "--follow-up-workpad-task")?;
     let state = state(parsed)?;
     let session = state
         .session(&session_id)
@@ -212,7 +213,7 @@ pub(crate) fn record_review_finding(
             .map_err(debug_error)?
             .is_none()
     {
-        return Err(format!("missing follow-up workpad task: {workpad_task_id}"));
+        return Err(format!("missing follow-up source task: {workpad_task_id}"));
     }
     let command = envelope(
         "review-record",
@@ -544,7 +545,7 @@ fn render_review_finding_artifact(
     follow_up_workpad_task_id: Option<&str>,
 ) -> String {
     format!(
-        "<!-- capo:review-finding -->\n# Capo Review Finding - {}\n\n## Review\n\n- Review finding: `{}`\n- Reviewer: `{}`\n- Kind: `{}`\n- Severity: `{}`\n- Status: `{}`\n- Artifact: `{}`\n\n## Links\n\n- Project: `{}`\n- Task: `{}`\n- Session: `{}`\n- Run: `{}`\n- Tool call: `{}`\n- Follow-up workpad task: `{}`\n\n## Summary\n\n{}\n",
+        "<!-- capo:review-finding -->\n# Capo Review Finding - {}\n\n## Review\n\n- Review finding: `{}`\n- Reviewer: `{}`\n- Kind: `{}`\n- Severity: `{}`\n- Status: `{}`\n- Artifact: `{}`\n\n## Links\n\n- Project: `{}`\n- Task: `{}`\n- Session: `{}`\n- Run: `{}`\n- Tool call: `{}`\n- Follow-up source task: `{}`\n- Compatibility workpad task: `{}`\n\n## Summary\n\n{}\n",
         session.title,
         review_finding_id,
         reviewer,
@@ -565,8 +566,40 @@ fn render_review_finding_artifact(
             .map(ToString::to_string)
             .unwrap_or_else(|| "none".to_string()),
         follow_up_workpad_task_id.unwrap_or("none"),
+        follow_up_workpad_task_id.unwrap_or("none"),
         summary
     )
+}
+
+fn aliased_optional_arg(
+    args: &[String],
+    preferred_key: &str,
+    compatibility_key: &str,
+) -> Result<Option<String>, String> {
+    let preferred = arg_value(args, preferred_key)?;
+    let compatibility = arg_value(args, compatibility_key)?;
+    if preferred.is_some() && compatibility.is_some() {
+        return Err(format!(
+            "{preferred_key} and {compatibility_key} are aliases; provide only one"
+        ));
+    }
+    Ok(preferred.or(compatibility))
+}
+
+fn arg_value(args: &[String], key: &str) -> Result<Option<String>, String> {
+    if !has_flag(args, key) {
+        return Ok(None);
+    }
+    args.windows(2)
+        .find_map(|window| {
+            if window[0] == key && !window[1].starts_with("--") {
+                Some(window[1].clone())
+            } else {
+                None
+            }
+        })
+        .map(Some)
+        .ok_or_else(|| format!("{key} requires a value"))
 }
 
 fn write_evidence_file(path: &Path, markdown: &str) -> Result<(), String> {

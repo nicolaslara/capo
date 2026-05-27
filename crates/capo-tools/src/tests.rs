@@ -47,11 +47,11 @@ fn trusted_local_policy_is_explicitly_not_fake() {
 }
 
 #[test]
-fn capo_registry_defines_first_six_tools() {
+fn capo_registry_defines_first_tools() {
     let registry = CapoToolRegistry;
     let tools = registry.list_tools();
 
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 7);
     for tool_id in CAPO_OWNED_TOOLS {
         let definition = registry.describe_tool(tool_id).expect("tool definition");
         assert_eq!(definition.origin, "capo");
@@ -66,14 +66,14 @@ fn capo_registry_defines_first_six_tools() {
 }
 
 #[test]
-fn runtime_wrappers_define_shell_git_file_and_workpad_tools() {
+fn runtime_wrappers_define_shell_git_file_and_project_memory_tools() {
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         PathBuf::from("/tmp/capo-workspace"),
         PathBuf::from("/tmp/capo-artifacts"),
     ));
     let tools = wrappers.list_tools();
 
-    assert_eq!(tools.len(), 7);
+    assert_eq!(tools.len(), 8);
     for tool_id in CAPO_WRAPPER_TOOLS {
         let definition = wrappers.describe_tool(tool_id).expect("wrapper definition");
         assert_eq!(definition.origin, "runtime");
@@ -269,9 +269,38 @@ fn file_wrappers_record_input_output_artifacts_and_reject_workspace_escape() {
             .summary
             .contains("workpad_read only supports")
     );
+    let project_memory_escape = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-project-memory-escape",
+            "run-project-memory-escape",
+            "capo.project_memory_read",
+            serde_json::json!({"path":"note.md"}),
+        ),
+        &PermissionPolicy::static_read_only_local(),
+    );
+    assert_eq!(project_memory_escape.status, "failed");
+    assert!(
+        project_memory_escape
+            .summary
+            .contains("project_memory_read only supports")
+    );
 
     fs::create_dir_all(workspace.join("workpads/features")).expect("workpad dir");
     fs::write(workspace.join("workpads/features/tasks.md"), "# Tasks\n").expect("workpad");
+    let project_memory = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-project-memory-read",
+            "run-project-memory-read",
+            "capo.project_memory_read",
+            serde_json::json!({"path":"workpads/features/tasks.md"}),
+        ),
+        &PermissionPolicy::static_read_only_local(),
+    );
+    assert_eq!(project_memory.status, "completed");
+    assert_eq!(
+        project_memory.output_artifacts[0].kind,
+        "project_memory_read"
+    );
     let workpad = wrappers.authorize_and_invoke(
         wrapper_request(
             "call-workpad-read",
@@ -600,6 +629,7 @@ fn capo_tools_render_expected_context_outputs() {
         ("capo.task_status", "task active"),
         ("capo.agent_status", "agent running"),
         ("capo.session_summary", "summary text"),
+        ("capo.project_memory_read", "workpad section"),
         ("capo.workpad_read", "workpad section"),
         ("capo.evidence_record", "evidence recorded: tests passed"),
         (

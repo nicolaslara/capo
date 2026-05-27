@@ -6,8 +6,8 @@ use capo_state::{
     AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
     AgentProjection, ConnectivityExposureProjection, EventRecord, EvidenceProjection,
     MemoryPacketProjection, ReviewFindingProjection, RunProjection, RuntimeTargetProjection,
-    SessionProjection, TaskOutcomeReportProjection, ToolCallProjection, ToolObservationProjection,
-    WorkpadTaskProjection,
+    SessionProjection, SourceBindingProjection, TaskOutcomeReportProjection, ToolCallProjection,
+    ToolObservationProjection, WorkpadTaskProjection,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -30,7 +30,39 @@ pub struct ProjectDashboard {
     pub adapter_dispatch_prompt_materializations:
         Vec<AdapterDispatchPromptMaterializationProjection>,
     pub adapter_dogfood_gate: AdapterDogfoodGate,
+    pub source_bindings: Vec<SourceBindingProjection>,
     pub workpad_tasks: Vec<WorkpadTaskProjection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceTaskProjection {
+    pub source_task_id: String,
+    pub project_id: ProjectId,
+    pub source_path: String,
+    pub source_anchor: String,
+    pub title: String,
+    pub observed_source_status: String,
+    pub capo_binding_status: String,
+    pub compatibility_workpad_task_id: String,
+}
+
+impl SourceTaskProjection {
+    pub fn from_workpad_task(task: &WorkpadTaskProjection) -> Self {
+        Self {
+            source_task_id: task.workpad_task_id.clone(),
+            project_id: task.project_id.clone(),
+            source_path: task.path.clone(),
+            source_anchor: task.source_anchor.clone(),
+            title: task.title.clone(),
+            observed_source_status: task.observed_status.clone(),
+            capo_binding_status: match task.capo_execution_status.as_str() {
+                "observed_only" => "observed_only".to_string(),
+                "imported" | "active" | "ready" => "bound".to_string(),
+                other => other.to_string(),
+            },
+            compatibility_workpad_task_id: task.workpad_task_id.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -126,10 +158,14 @@ pub struct ProjectDogfoodReadiness {
     pub status: String,
     pub real_agent_connector_ready: bool,
     pub runtime_target_ready: bool,
+    pub project_memory_ready: bool,
     pub workpad_bridge_ready: bool,
     pub dispatch_chain_ready: bool,
     pub runtime_target_count: usize,
     pub available_runtime_target_count: usize,
+    pub source_task_count: usize,
+    pub observed_source_task_count: usize,
+    pub bound_source_task_count: usize,
     pub workpad_task_count: usize,
     pub observed_workpad_task_count: usize,
     pub imported_workpad_task_count: usize,
@@ -139,11 +175,14 @@ pub struct ProjectDogfoodReadiness {
     pub dispatch_execution_count: usize,
     pub connector_evidence_refs: Vec<String>,
     pub runtime_target_refs: Vec<String>,
+    pub source_task_refs: Vec<String>,
     pub workpad_task_refs: Vec<String>,
     pub dispatch_chain_refs: Vec<String>,
     pub project_evidence_refs: Vec<String>,
     pub blockers: Vec<String>,
     pub next_actions: Vec<String>,
+    pub compatibility_blockers: Vec<String>,
+    pub compatibility_next_actions: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

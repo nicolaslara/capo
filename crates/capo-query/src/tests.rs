@@ -11,8 +11,9 @@ use capo_state::{
     AdapterDispatchReplayProjection, AdapterSmokeReportProjection, AgentProjection,
     ConnectivityExposureProjection, EventKind, EvidenceProjection, MemoryPacketProjection,
     NewEvent, ProjectionRecord, RedactionState, ReviewFindingProjection, RunProjection,
-    RuntimeTargetProjection, SessionProjection, SqliteStateStore, TaskOutcomeReportProjection,
-    TaskProjection, ToolCallProjection, ToolObservationProjection, WorkpadTaskProjection,
+    RuntimeTargetProjection, SessionProjection, SourceBindingProjection, SqliteStateStore,
+    TaskOutcomeReportProjection, TaskProjection, ToolCallProjection, ToolObservationProjection,
+    WorkpadTaskProjection,
 };
 
 #[test]
@@ -548,8 +549,28 @@ fn project_dogfood_readiness_reports_blockers_and_ready_counts() {
         vec![
             "real_agent_connector_not_proven",
             "available_runtime_target_missing",
-            "workpad_index_missing",
-            "dispatch_chain_missing"
+            "project_memory_index_missing",
+            "source_task_dispatch_chain_missing"
+        ]
+    );
+    assert_eq!(
+        blocked.compatibility_blockers,
+        vec!["workpad_index_missing", "dispatch_chain_missing"]
+    );
+    assert_eq!(
+        blocked.next_actions,
+        vec![
+            "record_clean_codex_smoke_evidence",
+            "register_available_runtime_target",
+            "run_project_memory_index",
+            "record_or_replay_source_task_dispatch_plan"
+        ]
+    );
+    assert_eq!(
+        blocked.compatibility_next_actions,
+        vec![
+            "run_workpad_index",
+            "record_or_replay_workpad_dispatch_plan"
         ]
     );
 
@@ -611,10 +632,14 @@ fn project_dogfood_readiness_reports_blockers_and_ready_counts() {
     assert_eq!(ready.status, "ready_for_first_dogfood");
     assert!(ready.real_agent_connector_ready);
     assert!(ready.runtime_target_ready);
+    assert!(ready.project_memory_ready);
     assert!(ready.workpad_bridge_ready);
     assert!(ready.dispatch_chain_ready);
     assert_eq!(ready.runtime_target_count, 1);
     assert_eq!(ready.available_runtime_target_count, 1);
+    assert_eq!(ready.source_task_count, 1);
+    assert_eq!(ready.observed_source_task_count, 1);
+    assert_eq!(ready.bound_source_task_count, 0);
     assert_eq!(ready.workpad_task_count, 1);
     assert_eq!(ready.observed_workpad_task_count, 1);
     assert_eq!(ready.dispatch_plan_count, 1);
@@ -624,6 +649,10 @@ fn project_dogfood_readiness_reports_blockers_and_ready_counts() {
         vec!["adapter-smoke-codex-clean"]
     );
     assert_eq!(ready.runtime_target_refs, vec!["runtime-target-local-1"]);
+    assert_eq!(
+        ready.source_task_refs,
+        vec!["workpads:features:tasks.md#f1"]
+    );
     assert_eq!(
         ready.workpad_task_refs,
         vec!["workpads:features:tasks.md#f1"]
@@ -641,6 +670,8 @@ fn project_dogfood_readiness_reports_blockers_and_ready_counts() {
     );
     assert!(ready.blockers.is_empty());
     assert!(ready.next_actions.is_empty());
+    assert!(ready.compatibility_blockers.is_empty());
+    assert!(ready.compatibility_next_actions.is_empty());
 }
 
 #[test]
@@ -842,6 +873,48 @@ fn project_dashboard_includes_workpad_tasks() {
         dashboard.workpad_tasks[0].capo_execution_status,
         "observed_only"
     );
+
+    let source_tasks = dashboard.source_tasks();
+    assert_eq!(source_tasks.len(), 1);
+    assert_eq!(
+        source_tasks[0].source_task_id,
+        "workpads:features:tasks.md#f2"
+    );
+    assert_eq!(source_tasks[0].source_path, "workpads/features/tasks.md");
+    assert_eq!(source_tasks[0].observed_source_status, "in_progress");
+    assert_eq!(source_tasks[0].capo_binding_status, "observed_only");
+    assert_eq!(
+        source_tasks[0].compatibility_workpad_task_id,
+        "workpads:features:tasks.md#f2"
+    );
+}
+
+#[test]
+fn project_dashboard_includes_source_bindings() {
+    let root = temp_root("query-dashboard-source-bindings");
+    let state = SqliteStateStore::open(&root).expect("state");
+    let project_id = ProjectId::new("project-capo");
+    let task_id = TaskId::new("task-workpad-workpads-features-tasks-md-f2");
+    append_source_binding(
+        &state,
+        &project_id,
+        &task_id,
+        "workpads:features:tasks.md#f2",
+        "workpads/features/tasks.md",
+        "hash-f2",
+    );
+
+    let dashboard =
+        project_dashboard(&state, ProjectDashboardQuery::new(project_id)).expect("dashboard");
+
+    assert_eq!(dashboard.source_bindings.len(), 1);
+    let binding = &dashboard.source_bindings[0];
+    assert_eq!(binding.task_id, task_id);
+    assert_eq!(binding.source_kind, "markdown");
+    assert_eq!(binding.source_task_id, "workpads:features:tasks.md#f2");
+    assert_eq!(binding.source_path, "workpads/features/tasks.md");
+    assert_eq!(binding.source_hash, "hash-f2");
+    assert_eq!(binding.binding_status, "active");
 }
 
 #[test]
@@ -940,6 +1013,17 @@ fn project_dashboard_selects_next_actionable_workpad_task() {
     assert_eq!(next.workpad_task_id, "workpads:features:voice.md#v7");
     assert_eq!(next.observed_status, "pending");
     assert_eq!(next.capo_execution_status, "observed_only");
+
+    assert_eq!(dashboard.next_source_task_candidate_count(), 2);
+    let source_next = dashboard.next_source_task().expect("next source task");
+    assert_eq!(source_next.source_task_id, "workpads:features:voice.md#v7");
+    assert_eq!(
+        source_next.compatibility_workpad_task_id,
+        "workpads:features:voice.md#v7"
+    );
+    assert_eq!(source_next.source_path, "workpads/features/voice.md");
+    assert_eq!(source_next.observed_source_status, "pending");
+    assert_eq!(source_next.capo_binding_status, "observed_only");
 }
 
 #[test]
@@ -1831,6 +1915,47 @@ fn append_workpad_task(
             })],
         )
         .expect("append workpad task");
+}
+
+fn append_source_binding(
+    state: &SqliteStateStore,
+    project_id: &ProjectId,
+    task_id: &TaskId,
+    source_task_id: &str,
+    source_path: &str,
+    source_hash: &str,
+) {
+    state
+        .append_event(
+            NewEvent {
+                event_id: format!("event-source-binding-{task_id}"),
+                kind: EventKind::WorkpadTaskImported,
+                actor: "test".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: Some(task_id.clone()),
+                agent_id: None,
+                session_id: None,
+                run_id: None,
+                turn_id: None,
+                item_id: Some(format!("source-binding-{task_id}")),
+                payload_json: "{}".to_string(),
+                idempotency_key: None,
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::SourceBinding(SourceBindingProjection {
+                source_binding_id: format!("source-binding-{task_id}"),
+                project_id: project_id.clone(),
+                task_id: task_id.clone(),
+                source_kind: "markdown".to_string(),
+                source_task_id: source_task_id.to_string(),
+                source_path: source_path.to_string(),
+                source_anchor: "F2 - Workpad Dogfood Bridge".to_string(),
+                source_hash: source_hash.to_string(),
+                binding_status: "active".to_string(),
+                updated_sequence: 0,
+            })],
+        )
+        .expect("append source binding");
 }
 
 fn temp_root(name: &str) -> std::path::PathBuf {

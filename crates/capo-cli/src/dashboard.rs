@@ -3,6 +3,7 @@ use capo_query::{ProjectDashboard, ProjectDashboardQuery, project_dashboard};
 
 use crate::adapter_dogfood::render_adapter_dogfood_gate;
 use crate::cli_surface::ParsedArgs;
+use crate::project_memory_flow::default_source_task_task_id;
 use crate::runtime_target::{render_runtime_target_control_readiness, render_runtime_target_row};
 use crate::workpad::default_workpad_task_id;
 use crate::{comma_or_none, debug_error, envelope, project_id, state};
@@ -28,6 +29,8 @@ fn dashboard_query(args: &[String]) -> Result<ProjectDashboardQuery, String> {
     let mut project_id = project_id();
     let mut session_id = None;
     let mut status = None;
+    let mut source_path = None;
+    let mut source_status = None;
     let mut workpad_path = None;
     let mut workpad_status = None;
     let mut index = 0;
@@ -41,12 +44,24 @@ fn dashboard_query(args: &[String]) -> Result<ProjectDashboardQuery, String> {
             "--project" => project_id = ProjectId::new(value),
             "--session" => session_id = Some(SessionId::new(value)),
             "--status" => status = Some(value.clone()),
+            "--source-path" => source_path = Some(value.clone()),
+            "--source-status" => source_status = Some(value.clone()),
             "--workpad-path" => workpad_path = Some(value.clone()),
             "--workpad-status" => workpad_status = Some(value.clone()),
             other => return Err(format!("unknown dashboard filter: {other}")),
         }
         index += 2;
     }
+    if source_path.is_some() && workpad_path.is_some() {
+        return Err("--source-path and --workpad-path are aliases; provide only one".to_string());
+    }
+    if source_status.is_some() && workpad_status.is_some() {
+        return Err(
+            "--source-status and --workpad-status are aliases; provide only one".to_string(),
+        );
+    }
+    let source_path = source_path.or(workpad_path);
+    let source_status = source_status.or(workpad_status);
     let mut query = ProjectDashboardQuery::new(project_id);
     if let Some(session_id) = session_id {
         query = query.with_session_id(session_id);
@@ -54,11 +69,11 @@ fn dashboard_query(args: &[String]) -> Result<ProjectDashboardQuery, String> {
     if let Some(status) = status {
         query = query.with_status(status);
     }
-    if let Some(workpad_path) = workpad_path {
-        query = query.with_workpad_path(workpad_path);
+    if let Some(source_path) = source_path {
+        query = query.with_workpad_path(source_path);
     }
-    if let Some(workpad_status) = workpad_status {
-        query = query.with_workpad_status(workpad_status);
+    if let Some(source_status) = source_status {
+        query = query.with_workpad_status(source_status);
     }
     Ok(query)
 }
@@ -501,21 +516,58 @@ fn render_dashboard(command: &CommandEnvelope, dashboard: &ProjectDashboard) -> 
         &dashboard.adapter_dogfood_gate,
     ));
     output.push_str(&format!(
-        "project_dogfood_readiness={} status={} real_agent_connector_ready={} runtime_target_ready={} workpad_bridge_ready={} dispatch_chain_ready={} connector_evidence_refs={} runtime_target_refs={} workpad_task_refs={} dispatch_chain_refs={} project_evidence_refs={} blockers={} next_actions={}\n",
+        "project_dogfood_readiness={} status={} real_agent_connector_ready={} runtime_target_ready={} project_memory_ready={} workpad_bridge_ready={} dispatch_chain_ready={} connector_evidence_refs={} runtime_target_refs={} source_task_refs={} workpad_task_refs={} dispatch_chain_refs={} project_evidence_refs={} blockers={} next_actions={} compatibility_blockers={} compatibility_next_actions={}\n",
         dogfood_readiness.ready,
         dogfood_readiness.status,
         dogfood_readiness.real_agent_connector_ready,
         dogfood_readiness.runtime_target_ready,
+        dogfood_readiness.project_memory_ready,
         dogfood_readiness.workpad_bridge_ready,
         dogfood_readiness.dispatch_chain_ready,
         comma_or_none(&dogfood_readiness.connector_evidence_refs),
         comma_or_none(&dogfood_readiness.runtime_target_refs),
+        comma_or_none(&dogfood_readiness.source_task_refs),
         comma_or_none(&dogfood_readiness.workpad_task_refs),
         comma_or_none(&dogfood_readiness.dispatch_chain_refs),
         comma_or_none(&dogfood_readiness.project_evidence_refs),
         comma_or_none(&dogfood_readiness.blockers),
-        comma_or_none(&dogfood_readiness.next_actions)
+        comma_or_none(&dogfood_readiness.next_actions),
+        comma_or_none(&dogfood_readiness.compatibility_blockers),
+        comma_or_none(&dogfood_readiness.compatibility_next_actions)
     ));
+    let source_tasks = dashboard.source_tasks();
+    output.push_str(&format!(
+        "project_memory_source=markdown\nsource_tasks={}\n",
+        source_tasks.len()
+    ));
+    for task in &source_tasks {
+        output.push_str(&format!(
+            "source_task={} source_path={} source_anchor={} observed_source_status={} capo_binding_status={} default_task_id={} compatibility_workpad_task_id={}\n",
+            task.source_task_id,
+            task.source_path,
+            task.source_anchor,
+            task.observed_source_status,
+            task.capo_binding_status,
+            default_source_task_task_id(&task.source_task_id),
+            task.compatibility_workpad_task_id
+        ));
+    }
+    output.push_str(&format!(
+        "source_bindings={}\n",
+        dashboard.source_bindings.len()
+    ));
+    for binding in &dashboard.source_bindings {
+        output.push_str(&format!(
+            "source_binding={} task={} source_task={} source_path={} source_anchor={} source_hash={} binding_status={}\n",
+            binding.source_binding_id,
+            binding.task_id,
+            binding.source_task_id,
+            binding.source_path,
+            binding.source_anchor,
+            binding.source_hash,
+            binding.binding_status
+        ));
+    }
     output.push_str(&format!(
         "workpad_tasks={}\n",
         dashboard.workpad_tasks.len()

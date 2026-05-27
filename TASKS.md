@@ -6,7 +6,7 @@ Read top to bottom. The **first unchecked** item is the active workpad unless No
 
 ## Active Now
 
-All setup phases are complete. Use the workpads and git history as the durable audit trail for future backlog slices.
+No active workpad. Scaffold alignment completed on 2026-05-26; select the next workpad or backlog slice before running another `/next` pass.
 
 ## Workpad Queue
 
@@ -15,6 +15,7 @@ All setup phases are complete. Use the workpads and git history as the durable a
 - [x] **prototype** - Minimal e2e Capo that can spawn, track, and interact with at least one coding agent (gate passed with constraints 2026-05-25)
 - [x] **features** - Product feature workpads derived from the architecture and prototype (feature gate passed 2026-05-26)
 - [x] **dogfood** - Move Capo project execution into Capo itself once stable enough (dogfood gate passed 2026-05-26 for Capo-assisted development with markdown/git fallback)
+- [x] **scaffold** - Align the implemented scaffold with the intended product spine before more breadth: Capo server/control plane, ACP-tracked agents, simple DB-backed project memory, minimal CLI client, deterministic e2e tests (completed 2026-05-26)
 
 ## Notes
 
@@ -28,3 +29,5 @@ All setup phases are complete. Use the workpads and git history as the durable a
 - Prototype gate passed with constraints 2026-05-25. The local scaffold is proven with fake agents; real Codex/Claude connector proof and workpad import/update safety remain feature/dogfood blockers.
 - Feature gate passed 2026-05-26. Real Codex connector proof, workpad indexing/import/proposals, dashboard/query, permissions/tools, memory/eval, voice, remote runtime, and maintainability splits are complete enough to start the dogfood workpad.
 - Dogfood gate passed 2026-05-26 for Capo-assisted development with markdown/git fallback. Full unattended/source-writing dogfood remains future hardening.
+- Current product correction: Capo should not expose `workpad` as a primary product concept. Existing workpad commands are transitional scaffolding for this repository's markdown planning files. The future-facing model is Capo server/controller plus clients, ACP-tracked agents, and DB-backed project/workpad/task memory records that point to markdown files and are exposed to agents through tools/context.
+- Scaffold work should prefer the narrow e2e spine over breadth: inspect agents, send instructions, track state, expose requested context/tool activity, persist/recover, and export evidence. Voice, remote clients, rich dashboards, and graph/vector memory should remain planned or stubbed unless needed to prove that spine.

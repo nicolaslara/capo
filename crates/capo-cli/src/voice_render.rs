@@ -7,6 +7,7 @@ use capo_state::{
 use capo_voice::{MemoryIngestionPolicy, VoiceCommandPlan, VoiceIntentKind, VoiceReadScope};
 
 use crate::comma_or_none;
+use crate::project_memory_flow::default_source_task_task_id;
 use crate::workpad::default_workpad_task_id;
 
 pub(crate) fn render_voice_approval(
@@ -162,31 +163,55 @@ pub(crate) fn render_voice_read_contract(
         VoiceReadScope::ProjectDogfoodReadiness => {
             let readiness = dashboard.dogfood_readiness();
             output.push_str(&format!(
-                "spoken_dogfood_ready={}\nspoken_dogfood_status={}\nspoken_real_agent_connector_ready={}\nspoken_runtime_target_ready={}\nspoken_workpad_bridge_ready={}\nspoken_dispatch_chain_ready={}\nspoken_blockers={}\nspoken_next_actions={}\n",
+                "spoken_dogfood_ready={}\nspoken_dogfood_status={}\nspoken_real_agent_connector_ready={}\nspoken_runtime_target_ready={}\nspoken_project_memory_ready={}\nspoken_workpad_bridge_ready={}\nspoken_dispatch_chain_ready={}\nspoken_blockers={}\nspoken_next_actions={}\nspoken_compatibility_blockers={}\nspoken_compatibility_next_actions={}\n",
                 readiness.ready,
                 readiness.status,
                 readiness.real_agent_connector_ready,
                 readiness.runtime_target_ready,
+                readiness.project_memory_ready,
                 readiness.workpad_bridge_ready,
                 readiness.dispatch_chain_ready,
                 comma_or_none(&readiness.blockers),
-                comma_or_none(&readiness.next_actions)
+                comma_or_none(&readiness.next_actions),
+                comma_or_none(&readiness.compatibility_blockers),
+                comma_or_none(&readiness.compatibility_next_actions)
             ));
             output.push_str(&format!(
-                "spoken_connector_evidence_refs={}\nspoken_runtime_target_refs={}\nspoken_workpad_task_refs={}\nspoken_dispatch_chain_refs={}\nspoken_project_evidence_refs={}\n",
+                "spoken_connector_evidence_refs={}\nspoken_runtime_target_refs={}\nspoken_source_task_refs={}\nspoken_workpad_task_refs={}\nspoken_dispatch_chain_refs={}\nspoken_project_evidence_refs={}\n",
                 comma_or_none(&readiness.connector_evidence_refs),
                 comma_or_none(&readiness.runtime_target_refs),
+                comma_or_none(&readiness.source_task_refs),
                 comma_or_none(&readiness.workpad_task_refs),
                 comma_or_none(&readiness.dispatch_chain_refs),
                 comma_or_none(&readiness.project_evidence_refs)
             ));
         }
         VoiceReadScope::ProjectNextWork => {
+            let source_tasks = dashboard.source_tasks();
             output.push_str(&format!(
-                "spoken_workpad_tasks={}\nspoken_next_work_candidates={}\n",
+                "spoken_source_tasks={}\nspoken_next_source_task_candidates={}\nspoken_workpad_tasks={}\nspoken_next_work_candidates={}\n",
+                source_tasks.len(),
+                dashboard.next_source_task_candidate_count(),
                 dashboard.workpad_tasks.len(),
                 dashboard.next_workpad_candidate_count()
             ));
+            if let Some(next) = dashboard.next_source_task() {
+                output.push_str(&format!(
+                    "spoken_next_source_task={} default_task_id={} source_path={} source_anchor={} source={}#{} title={} observed_source_status={} capo_binding_status={} compatibility_workpad_task_id={}\n",
+                    next.source_task_id,
+                    default_source_task_task_id(&next.source_task_id),
+                    next.source_path,
+                    next.source_anchor,
+                    next.source_path,
+                    next.source_anchor,
+                    next.title,
+                    next.observed_source_status,
+                    next.capo_binding_status,
+                    next.compatibility_workpad_task_id
+                ));
+            } else {
+                output.push_str("spoken_next_source_task=none\n");
+            }
             if let Some(next) = dashboard.next_workpad_task() {
                 output.push_str(&format!(
                     "spoken_next_workpad_task={} default_task_id={} path={} source_anchor={} source={}#{} title={} observed_status={} capo_execution_status={}\n",

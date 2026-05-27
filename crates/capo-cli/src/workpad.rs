@@ -6,8 +6,7 @@ use capo_core::{AgentId, CommandIntent, CommandTarget, EvidenceId, TaskId};
 use capo_query::{ProjectDashboardQuery, project_dashboard};
 use capo_state::{
     ArtifactRecord, EventKind, EvidenceProjection, NewEvent, ProjectionRecord, RedactionState,
-    SqliteStateStore, TaskProjection, WorkpadFileProjection, WorkpadIndexResetProjection,
-    WorkpadTaskProjection,
+    SqliteStateStore, WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection,
 };
 use capo_workpads::{WorkpadIndex, index_project_workpads};
 
@@ -16,6 +15,9 @@ use crate::adapter_launch::{
     render_adapter_dispatch_plan, validate_local_launch_adapter,
 };
 use crate::cli_surface::{ParsedArgs, has_flag, optional_arg, required_arg};
+use crate::project_memory_flow::{
+    SourceTaskImportRequest, default_source_task_task_id, import_markdown_source_task,
+};
 use crate::{controller, debug_error, envelope, escape_json, project_id, stable_cli_hash, state};
 
 pub(crate) fn index_workpads(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
@@ -75,7 +77,7 @@ pub(crate) fn index_workpads(parsed: &ParsedArgs, args: &[String]) -> Result<Str
 }
 
 pub(crate) fn default_workpad_task_id(workpad_task_id: &str) -> String {
-    format!("task-workpad-{}", sanitize_id_component(workpad_task_id))
+    default_source_task_task_id(workpad_task_id)
 }
 
 pub(crate) fn next_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
@@ -361,127 +363,27 @@ fn remove_option(args: &[String], key: &str) -> Vec<String> {
 
 pub(crate) fn import_workpad_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let workpad_task_id = required_arg(args, "--workpad-task")?;
-    let state = state(parsed)?;
-    let project_id = project_id();
-    let workpad_task = state
-        .workpad_task(&project_id, &workpad_task_id)
-        .map_err(debug_error)?
-        .ok_or_else(|| format!("missing workpad task read model: {workpad_task_id}"))?;
-    let workpad_file = state
-        .workpad_file(&project_id, &workpad_task.path)
-        .map_err(debug_error)?
-        .ok_or_else(|| format!("missing workpad file read model: {}", workpad_task.path))?;
-
-    if let Some(expected_hash) = optional_arg(args, "--expected-hash")
-        && expected_hash != workpad_file.content_hash
-    {
-        return Err(format!(
-            "source drift detected for {}: expected_hash={} current_hash={}",
-            workpad_task.path, expected_hash, workpad_file.content_hash
-        ));
-    }
-
-    let task_id = TaskId::new(
-        optional_arg(args, "--task")
-            .unwrap_or_else(|| default_workpad_task_id(&workpad_task.workpad_task_id)),
-    );
-    if let Some(existing_task) = state.task(&task_id).map_err(debug_error)? {
-        let same_source = existing_task
-            .latest_summary
-            .as_deref()
-            .is_some_and(|summary| {
-                summary.contains(&format!("workpad_task_id={}", workpad_task.workpad_task_id))
-            });
-        if !same_source
-            || existing_task.capo_execution_status != "ready"
-            || existing_task.active_session_id.is_some()
-        {
-            return Err(format!(
-                "refusing to overwrite existing Capo task read model: {task_id}"
-            ));
-        }
-    }
-    let mut command = envelope(
-        "workpad-import",
-        CommandTarget::Task(task_id.clone()),
-        CommandIntent::ImportWorkpadTask,
-        Some(workpad_task.title.clone()),
-    );
-    command.structured_args.push((
-        "workpad_task_id".to_string(),
-        workpad_task.workpad_task_id.clone(),
-    ));
-    command
-        .structured_args
-        .push(("source_hash".to_string(), workpad_file.content_hash.clone()));
-    let source_ref = format!("{}#{}", workpad_task.path, workpad_task.source_anchor);
-    let latest_summary = format!(
-        "source={} hash={} observed_status={} workpad_task_id={}",
-        source_ref,
-        workpad_file.content_hash,
-        workpad_task.observed_status,
-        workpad_task.workpad_task_id
-    );
-    let imported_workpad_task = WorkpadTaskProjection {
-        capo_execution_status: "imported".to_string(),
-        ..workpad_task.clone()
-    };
-    let task_projection = ProjectionRecord::Task(TaskProjection {
-        task_id: task_id.clone(),
-        project_id: project_id.clone(),
-        title: workpad_task.title.clone(),
-        capo_execution_status: "ready".to_string(),
-        active_session_id: None,
-        latest_summary: Some(latest_summary),
-        evidence_id: None,
-        updated_sequence: 0,
-    });
-    let mut event = NewEvent::new(
-        format!(
-            "event-workpad-import-{}",
-            stable_cli_hash(&format!(
-                "{}:{}:{}",
-                task_id, workpad_task.workpad_task_id, workpad_file.content_hash
-            ))
-        ),
-        EventKind::WorkpadTaskImported,
-        "capo-cli",
-    );
-    event.project_id = Some(project_id.clone());
-    event.task_id = Some(task_id.clone());
-    event.payload_json = format!(
-        "{{\"task_id\":\"{}\",\"workpad_task_id\":\"{}\",\"path\":\"{}\",\"source_anchor\":\"{}\",\"content_hash\":\"{}\",\"observed_status\":\"{}\"}}",
-        escape_json(task_id.as_str()),
-        escape_json(&workpad_task.workpad_task_id),
-        escape_json(&workpad_task.path),
-        escape_json(&workpad_task.source_anchor),
-        escape_json(&workpad_file.content_hash),
-        escape_json(&workpad_task.observed_status)
-    );
-    event.idempotency_key = Some(format!(
-        "workpad-import:{}:{}:{}",
-        task_id, workpad_task.workpad_task_id, workpad_file.content_hash
-    ));
-    event.redaction_state = RedactionState::Safe;
-    let sequence = state
-        .append_event(
-            event,
-            &[
-                task_projection,
-                ProjectionRecord::WorkpadTask(imported_workpad_task),
-            ],
-        )
-        .map_err(debug_error)?;
+    let imported = import_markdown_source_task(
+        parsed,
+        SourceTaskImportRequest {
+            source_task_id: workpad_task_id,
+            task_id: optional_arg(args, "--task").map(TaskId::new),
+            expected_hash: optional_arg(args, "--expected-hash"),
+            command_slug: "workpad-import",
+        },
+    )?;
 
     Ok(format!(
-        "workpad_task_imported=true\nworkpad_task_id={}\ntask_id={}\nsource={}#{}\nsource_hash={}\nobserved_status={}\ncapo_execution_status=ready\nsequence={sequence}\ncommand_id={}\n",
-        workpad_task.workpad_task_id,
-        task_id,
-        workpad_task.path,
-        workpad_task.source_anchor,
-        workpad_file.content_hash,
-        workpad_task.observed_status,
-        command.command_id
+        "workpad_task_imported=true\nworkpad_task_id={}\ntask_id={}\nsource_binding_id={}\nsource={}#{}\nsource_hash={}\nobserved_status={}\ncapo_execution_status=ready\nsequence={}\ncommand_id={}\n",
+        imported.compatibility_workpad_task_id,
+        imported.task_id,
+        imported.source_binding_id,
+        imported.source_path,
+        imported.source_anchor,
+        imported.source_hash,
+        imported.observed_source_status,
+        imported.sequence,
+        imported.command_id
     ))
 }
 
@@ -675,26 +577,6 @@ fn workpad_index_projections(
         }));
     }
     projections
-}
-
-fn sanitize_id_component(value: &str) -> String {
-    let mut sanitized = String::new();
-    let mut previous_dash = false;
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            sanitized.push(ch.to_ascii_lowercase());
-            previous_dash = false;
-        } else if !previous_dash {
-            sanitized.push('-');
-            previous_dash = true;
-        }
-    }
-    let trimmed = sanitized.trim_matches('-').to_string();
-    if trimmed.is_empty() {
-        "workpad-task".to_string()
-    } else {
-        trimmed
-    }
 }
 
 fn render_workpad_proposal(

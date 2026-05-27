@@ -11,6 +11,7 @@
 | **prototype** | Complete | Gate passed with constraints 2026-05-25 — local scaffold, fake-agent e2e, dashboard, voice contract, evidence export |
 | **features** | Complete | Feature gate passed 2026-05-26 — real connectors, dogfood bridge, dashboard/query, permissions/tools, memory/eval, voice, remote runtime, and maintainability splits |
 | **dogfood** | Complete | Dogfood gate passed 2026-05-26 — Capo-assisted development with markdown/git fallback |
+| **scaffold** | **Active** | Recenter scaffold around Capo server/control plane, ACP-tracked agents, DB-backed project memory, and a narrow e2e interaction loop |
 
 ## research
 
@@ -213,6 +214,47 @@ workpads/architecture/prototype-plan.md
 
 - Do not migrate project execution into Capo until restart recovery and state inspection are proven.
 - Keep file workpads as the human-auditable fallback until Capo is demonstrably reliable.
+
+## scaffold
+
+**Status:** Complete. Scaffold alignment completed 2026-05-26.
+
+**Prerequisites:** Architecture, prototype, feature, and dogfood gates are recorded as passed. The scaffold product-direction correction is complete.
+
+**Objective:** Align the implemented scaffold with the intended product spine: Capo is a server/control plane with clients; tracked agents are represented through ACP-compatible protocol boundaries; project/workpad/task memory is data in Capo's DB pointing to markdown source files; the local CLI is one client for inspecting and steering tracked agents, not the domain model itself.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/scaffold/tasks.md
+workpads/scaffold/knowledge.md
+workpads/scaffold/references.md
+workpads/prototype/spec.md
+workpads/architecture/boundaries.md
+workpads/architecture/state-model.md
+workpads/architecture/acp-replay-dedupe.md
+workpads/architecture/capability-permissions.md
+workpads/architecture/runtime-tunnel.md
+workpads/architecture/protocol-provider.md
+workpads/architecture/tool-exposure.md
+workpads/architecture/memory-architecture.md
+workpads/architecture/prototype-plan.md
+workpads/features/agent-connectors.md
+workpads/features/dogfood-bridge.md
+workpads/features/tasks.md
+workpads/dogfood/knowledge.md
+```
+
+**Rules:**
+
+- Prefer product-language surfaces: project, task, memory, context, agent, session, dispatch, evidence.
+- Treat `capo workpad ...` as transitional development scaffolding for this repo's markdown files, not the long-term user-facing API.
+- Keep voice, mobile, remote clients, rich dashboards, remote runtime adapters, graph/vector memory, and source-writing dogfood deferred or stubbed unless a task proves they are needed for the core spine.
+- The next e2e proof should show a client talking to Capo, Capo tracking agents through protocol-shaped events, DB-backed project memory/context exposed to agents, persisted state/recovery, and evidence export.
+- Use static dispatch where it keeps boundaries readable; allow a simpler alternative only when it improves naming, testability, and modularity without coupling controller, protocol, runtime, tools, and memory.
 
 ## How To Switch Focus
 

@@ -19,6 +19,8 @@ mod dashboard;
 mod dogfood;
 mod evidence;
 mod permission;
+mod project_memory;
+mod project_memory_flow;
 mod runtime_target;
 mod runtime_target_evidence;
 mod tool_wrapper;
@@ -54,6 +56,11 @@ use dogfood::dogfood_readiness;
 use evidence::{export_evidence, export_task_outcome_report, record_review_finding};
 use permission::{
     decide_permission_approval, list_permission_approvals, request_permission_approval,
+};
+use project_memory::{
+    apply_project_memory_proposal, import_project_memory_task, index_project_memory,
+    next_project_memory_task, plan_next_project_memory_task, propose_project_memory_update,
+    start_next_project_memory_task,
 };
 use runtime_target::{
     list_runtime_targets, register_runtime_target, runtime_target_readiness, runtime_target_status,
@@ -246,6 +253,41 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "connectivity" && command == "exposure-evidence" => {
             connectivity_exposure_evidence(&parsed, rest)
+        }
+        [area, noun, command, rest @ ..]
+            if area == "project" && noun == "memory" && command == "index" =>
+        {
+            index_project_memory(&parsed, rest)
+        }
+        [area, noun, command, rest @ ..]
+            if area == "project" && noun == "memory" && command == "next" =>
+        {
+            next_project_memory_task(&parsed, rest)
+        }
+        [area, noun, command, rest @ ..]
+            if area == "project" && noun == "memory" && command == "plan-next" =>
+        {
+            plan_next_project_memory_task(&parsed, rest)
+        }
+        [area, noun, command, rest @ ..]
+            if area == "project" && noun == "memory" && command == "start-next" =>
+        {
+            start_next_project_memory_task(&parsed, rest)
+        }
+        [area, noun, command, rest @ ..]
+            if area == "project" && noun == "memory" && command == "import" =>
+        {
+            import_project_memory_task(&parsed, rest)
+        }
+        [area, noun, command, rest @ ..]
+            if area == "project" && noun == "memory" && command == "propose" =>
+        {
+            propose_project_memory_update(&parsed, rest)
+        }
+        [area, noun, command, rest @ ..]
+            if area == "project" && noun == "memory" && command == "apply" =>
+        {
+            apply_project_memory_proposal(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "workpad" && command == "index" => {
             index_workpads(&parsed, rest)

@@ -24,6 +24,7 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 | `workpads/architecture/memory-architecture.md` | Memory records, provenance, indexes, packets, and external adapter path |
 | `workpads/architecture/prototype-plan.md` | Ordered prototype implementation sequence, e2e smoke path, and dogfood prerequisites |
 | `workpads/architecture/gate-review.md` | Architecture gate decision, user-sensitive decisions, and prototype residual risks |
+| `workpads/scaffold/tasks.md` | Scaffold alignment tasks: product spine, command naming, memory hierarchy, e2e gate |
 | `.cursor/commands/next.md` / `.opencode/commands/next.md` | `/next` task-execution command |
 | `.agents/skills/next/SKILL.md` | Codex `$next` task-execution skill |
 
@@ -34,10 +35,11 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 3. If active workpad is `architecture`, confirm the research gate has passed or that `TASKS.md` explicitly authorizes architecture discovery in parallel.
 4. If active workpad is `prototype`, confirm the architecture gate has passed or that `TASKS.md` explicitly authorizes a spike.
 5. If active workpad is `dogfood`, confirm the prototype gate has passed.
+6. If active workpad is `scaffold`, confirm the architecture/prototype/feature/dogfood history is loaded and treat this as an alignment pass before new breadth.
 
 ## Current Phase
 
-**Features** is active after the prototype gate passed with constraints on 2026-05-25. The local scaffold can spawn/track/steer fake agents, persist/recover state, show a text dashboard, plan voice commands, and export markdown evidence. The next durable targets are real local connector proof, workpad dogfood bridge, reusable query surfaces, permission/tool hardening, memory/evaluation reports, voice integration, and remote-runtime adapters.
+**Scaffold alignment** is active after the architecture, prototype, feature, and dogfood gates were recorded. The next durable target is not more breadth; it is to align the implemented scaffold with the intended product spine: Capo as server/control plane, ACP-tracked agents, DB-backed project memory pointing to markdown, minimal client surfaces, and deterministic e2e tests. Existing `capo workpad ...` commands are transitional scaffolding, not the desired top-level product model.
 
 ## Mandatory Workflow
 
@@ -46,16 +48,16 @@ Before task work:
 1. `TASKS.md` -> active workpad
 2. `project.md`, `WORKING.md`, `workpads/WORKPADS.md`
 3. Active workpad `tasks.md`, `knowledge.md`, `references.md`
-4. `workpads/architecture/boundaries.md` for architecture, prototype, features, and dogfood work
-5. `workpads/architecture/state-model.md` for architecture, prototype, features, and dogfood work once A2 is complete
-6. `workpads/architecture/acp-replay-dedupe.md` for ACP/protocol, state, prototype, features, and dogfood work once A2a is complete
-7. `workpads/architecture/capability-permissions.md` for permission, runtime, tool, protocol, prototype, features, and dogfood work once A3 is complete
-8. `workpads/architecture/runtime-tunnel.md` for runtime, tunnel, protocol, provider, prototype, features, and dogfood work once A4 is complete
-9. `workpads/architecture/protocol-provider.md` for protocol, provider, adapter, prototype, features, and dogfood work once A5 is complete
-10. `workpads/architecture/tool-exposure.md` for tool, ACP client capability, MCP, runtime wrapper, prototype, features, and dogfood work once A5a is complete
-11. `workpads/architecture/memory-architecture.md` for memory, retrieval, prompt context, prototype, features, and dogfood work once A6 is complete
-12. `workpads/architecture/prototype-plan.md` for architecture, prototype, features, and dogfood work once A7 is complete
-13. `workpads/prototype/spec.md` for prototype and dogfood work
+4. `workpads/architecture/boundaries.md` for architecture, prototype, features, dogfood, and scaffold work
+5. `workpads/architecture/state-model.md` for architecture, prototype, features, dogfood, and scaffold work once A2 is complete
+6. `workpads/architecture/acp-replay-dedupe.md` for ACP/protocol, state, prototype, features, dogfood, and scaffold work once A2a is complete
+7. `workpads/architecture/capability-permissions.md` for permission, runtime, tool, protocol, prototype, features, dogfood, and scaffold work once A3 is complete
+8. `workpads/architecture/runtime-tunnel.md` for runtime, tunnel, protocol, provider, prototype, features, dogfood, and scaffold work once A4 is complete
+9. `workpads/architecture/protocol-provider.md` for protocol, provider, adapter, prototype, features, dogfood, and scaffold work once A5 is complete
+10. `workpads/architecture/tool-exposure.md` for tool, ACP client capability, MCP, runtime wrapper, prototype, features, dogfood, and scaffold work once A5a is complete
+11. `workpads/architecture/memory-architecture.md` for memory, retrieval, prompt context, prototype, features, dogfood, and scaffold work once A6 is complete
+12. `workpads/architecture/prototype-plan.md` for architecture, prototype, features, dogfood, and scaffold work once A7 is complete
+13. `workpads/prototype/spec.md` for prototype, dogfood, and scaffold work
 14. For features work, load the feature source file named by the selected task in `workpads/features/tasks.md`
 15. Pick a pending task and mark it `in_progress`
 16. Complete the acceptance criteria with the smallest correct change

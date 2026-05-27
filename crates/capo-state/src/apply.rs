@@ -921,6 +921,34 @@ pub(crate) fn apply_projection_record(
                 sequence,
             ],
         )?,
+        ProjectionRecord::SourceBinding(binding) => transaction.execute(
+            "INSERT INTO source_bindings(
+                source_binding_id, project_id, task_id, source_kind, source_task_id,
+                source_path, source_anchor, source_hash, binding_status, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(source_binding_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                task_id = excluded.task_id,
+                source_kind = excluded.source_kind,
+                source_task_id = excluded.source_task_id,
+                source_path = excluded.source_path,
+                source_anchor = excluded.source_anchor,
+                source_hash = excluded.source_hash,
+                binding_status = excluded.binding_status,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                binding.source_binding_id,
+                binding.project_id.as_str(),
+                binding.task_id.as_str(),
+                binding.source_kind,
+                binding.source_task_id,
+                binding.source_path,
+                binding.source_anchor,
+                binding.source_hash,
+                binding.binding_status,
+                sequence,
+            ],
+        )?,
         ProjectionRecord::WorkpadIndexReset(reset) => {
             transaction.execute(
                 "DELETE FROM workpad_files WHERE project_id = ?1",

@@ -109,15 +109,19 @@ pub(crate) fn dogfood_readiness(parsed: &ParsedArgs, args: &[String]) -> Result<
 
 fn render_dogfood_readiness(readiness: &ProjectDogfoodReadiness) -> String {
     format!(
-        "dogfood_readiness=true\nready={}\nstatus={}\nreal_agent_connector_ready={}\nruntime_target_ready={}\nworkpad_bridge_ready={}\ndispatch_chain_ready={}\nruntime_targets={}\nruntime_targets_available={}\nworkpad_tasks={}\nworkpad_tasks_observed_only={}\nworkpad_tasks_imported={}\ndispatch_plans={}\nready_dispatch_gates={}\ndispatch_replays={}\ndispatch_executions={}\nconnector_evidence_refs={}\nruntime_target_refs={}\nworkpad_task_refs={}\ndispatch_chain_refs={}\nproject_evidence_refs={}\nblockers={}\nnext_actions={}\n",
+        "dogfood_readiness=true\nready={}\nstatus={}\nreal_agent_connector_ready={}\nruntime_target_ready={}\nproject_memory_ready={}\nworkpad_bridge_ready={}\ndispatch_chain_ready={}\nruntime_targets={}\nruntime_targets_available={}\nsource_tasks={}\nsource_tasks_observed_only={}\nsource_tasks_bound={}\nworkpad_tasks={}\nworkpad_tasks_observed_only={}\nworkpad_tasks_imported={}\ndispatch_plans={}\nready_dispatch_gates={}\ndispatch_replays={}\ndispatch_executions={}\nconnector_evidence_refs={}\nruntime_target_refs={}\nsource_task_refs={}\nworkpad_task_refs={}\ndispatch_chain_refs={}\nproject_evidence_refs={}\nblockers={}\nnext_actions={}\ncompatibility_blockers={}\ncompatibility_next_actions={}\n",
         readiness.ready,
         readiness.status,
         readiness.real_agent_connector_ready,
         readiness.runtime_target_ready,
+        readiness.project_memory_ready,
         readiness.workpad_bridge_ready,
         readiness.dispatch_chain_ready,
         readiness.runtime_target_count,
         readiness.available_runtime_target_count,
+        readiness.source_task_count,
+        readiness.observed_source_task_count,
+        readiness.bound_source_task_count,
         readiness.workpad_task_count,
         readiness.observed_workpad_task_count,
         readiness.imported_workpad_task_count,
@@ -127,11 +131,14 @@ fn render_dogfood_readiness(readiness: &ProjectDogfoodReadiness) -> String {
         readiness.dispatch_execution_count,
         comma_or_none(&readiness.connector_evidence_refs),
         comma_or_none(&readiness.runtime_target_refs),
+        comma_or_none(&readiness.source_task_refs),
         comma_or_none(&readiness.workpad_task_refs),
         comma_or_none(&readiness.dispatch_chain_refs),
         comma_or_none(&readiness.project_evidence_refs),
         readiness.blockers.join(","),
-        readiness.next_actions.join(",")
+        readiness.next_actions.join(","),
+        comma_or_none(&readiness.compatibility_blockers),
+        comma_or_none(&readiness.compatibility_next_actions)
     )
 }
 
@@ -144,17 +151,21 @@ fn render_dogfood_readiness_evidence(
     readiness: &ProjectDogfoodReadiness,
 ) -> String {
     format!(
-        "<!-- capo:dogfood-readiness -->\n# Capo Dogfood Readiness - {}\n\n## Objective\n\nReview whether Capo is ready to move its own project workpads into Capo-managed dogfood.\n\n## Summary\n\n- Project: `{}`\n- Ready: `{}`\n- Status: `{}`\n- Real-agent connector ready: `{}`\n- Runtime target ready: `{}`\n- Workpad bridge ready: `{}`\n- Dispatch chain ready: `{}`\n\n## Counts\n\n- Runtime targets: `{}`\n- Available runtime targets: `{}`\n- Workpad tasks: `{}`\n- Observed-only workpad tasks: `{}`\n- Imported workpad tasks: `{}`\n- Dispatch plans: `{}`\n- Ready dispatch gates: `{}`\n- Dispatch replays: `{}`\n- Dispatch executions: `{}`\n\n## Component Refs\n\n- Connector evidence refs: `{}`\n- Runtime target refs: `{}`\n- Workpad task refs: `{}`\n- Dispatch chain refs: `{}`\n- Project evidence refs: `{}`\n\n## Blockers\n\n{}\n\n## Next Actions\n\n{}\n\n## Evidence Policy\n\n- This report is derived from persisted Capo read models only.\n- It does not run provider CLIs, inspect credentials, materialize prompts, open tunnels, launch runtimes, or edit markdown.\n- Raw prompts, raw provider output, credentials, cookies, and subscription session material are not rendered.\n",
+        "<!-- capo:dogfood-readiness -->\n# Capo Dogfood Readiness - {}\n\n## Objective\n\nReview whether Capo is ready to use project memory and tracked agents for its own dogfood loop.\n\n## Summary\n\n- Project: `{}`\n- Ready: `{}`\n- Status: `{}`\n- Real-agent connector ready: `{}`\n- Runtime target ready: `{}`\n- Project memory ready: `{}`\n- Workpad bridge ready: `{}`\n- Dispatch chain ready: `{}`\n\n## Counts\n\n- Runtime targets: `{}`\n- Available runtime targets: `{}`\n- Source tasks: `{}`\n- Observed-only source tasks: `{}`\n- Bound source tasks: `{}`\n- Workpad tasks: `{}`\n- Observed-only workpad tasks: `{}`\n- Imported workpad tasks: `{}`\n- Dispatch plans: `{}`\n- Ready dispatch gates: `{}`\n- Dispatch replays: `{}`\n- Dispatch executions: `{}`\n\n## Component Refs\n\n- Connector evidence refs: `{}`\n- Runtime target refs: `{}`\n- Source task refs: `{}`\n- Workpad task refs: `{}`\n- Dispatch chain refs: `{}`\n- Project evidence refs: `{}`\n\n## Blockers\n\n{}\n\n## Next Actions\n\n{}\n\n## Compatibility Blockers\n\n{}\n\n## Compatibility Next Actions\n\n{}\n\n## Evidence Policy\n\n- This report is derived from persisted Capo read models only.\n- It does not run provider CLIs, inspect credentials, materialize prompts, open tunnels, launch runtimes, or edit markdown.\n- Raw prompts, raw provider output, credentials, cookies, and subscription session material are not rendered.\n",
         readiness.status,
         project_id,
         readiness.ready,
         readiness.status,
         readiness.real_agent_connector_ready,
         readiness.runtime_target_ready,
+        readiness.project_memory_ready,
         readiness.workpad_bridge_ready,
         readiness.dispatch_chain_ready,
         readiness.runtime_target_count,
         readiness.available_runtime_target_count,
+        readiness.source_task_count,
+        readiness.observed_source_task_count,
+        readiness.bound_source_task_count,
         readiness.workpad_task_count,
         readiness.observed_workpad_task_count,
         readiness.imported_workpad_task_count,
@@ -164,11 +175,14 @@ fn render_dogfood_readiness_evidence(
         readiness.dispatch_execution_count,
         comma_or_none(&readiness.connector_evidence_refs),
         comma_or_none(&readiness.runtime_target_refs),
+        comma_or_none(&readiness.source_task_refs),
         comma_or_none(&readiness.workpad_task_refs),
         comma_or_none(&readiness.dispatch_chain_refs),
         comma_or_none(&readiness.project_evidence_refs),
         markdown_list_or_none(&readiness.blockers),
-        markdown_list_or_none(&readiness.next_actions)
+        markdown_list_or_none(&readiness.next_actions),
+        markdown_list_or_none(&readiness.compatibility_blockers),
+        markdown_list_or_none(&readiness.compatibility_next_actions)
     )
 }
 

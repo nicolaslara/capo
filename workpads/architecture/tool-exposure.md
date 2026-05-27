@@ -62,6 +62,7 @@ These tools are enough for a dogfood-oriented controller loop before broad files
 | `capo.task_status` | Return task status, active sessions, evidence refs, and blockers. | `tool:invoke:capo.task_status`, `state:read:task`, `state:read:session`, `state:read:evidence`. | No |
 | `capo.agent_status` | Return agent health, adapter/runtime/provider binding, current run, and limitations. | `tool:invoke:capo.agent_status`, `state:read:agent`, `state:read:session`, `state:read:runtime`, `state:read:provider`. | No |
 | `capo.session_summary` | Return latest session summary, active turn, recent tool calls, and pending permissions. | `tool:invoke:capo.session_summary`, `state:read:session`, `state:read:tool`, `state:read:permission_queue`. | No |
+| `capo.project_memory_read` | Read markdown-backed project memory sections by path/heading with source authority labels. | `tool:invoke:capo.project_memory_read`, `filesystem:read:workspace`, `state:read:task`. | No |
 | `capo.workpad_read` | Read selected workpad sections by path/heading with source authority labels. | `tool:invoke:capo.workpad_read`, `filesystem:read:workspace`, `state:read:task`. | No |
 | `capo.evidence_record` | Attach test/review/manual evidence to a task/session/run. | `tool:invoke:capo.evidence_record`, `state:write:evidence`, `state:read:task`. | Yes |
 | `capo.capability_request` | Request a scoped capability change or grant review. | `tool:invoke:capo.capability_request`, `state:read:capability`, `state:write:capability_request`. | Yes |
@@ -217,7 +218,9 @@ Git wrappers are separate from generic shell:
 State/workpad tools are pure controller tools:
 
 - Status tools read SQLite read models.
-- `capo.workpad_read` reads markdown source files and labels markdown as the planning authority.
+- `capo.project_memory_read` is the preferred product-language reader for markdown-backed project memory.
+- `capo.workpad_read` remains a compatibility alias for current workpad/source-file flows.
+- Both readers must keep path constraints, source authority labels, and task/source provenance.
 - `capo.evidence_record` appends evidence events and does not silently edit workpad task status.
 
 ## ACP Relationship

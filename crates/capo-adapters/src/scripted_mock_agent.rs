@@ -9,6 +9,10 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScriptedMockAgent {
     external_session_ref: String,
+    adapter_kind: NormalizedAdapterKind,
+    timeline_prefix: String,
+    provider_event_prefix: String,
+    adapter_capability: String,
     turns: Vec<ScriptedMockTurn>,
 }
 
@@ -16,6 +20,21 @@ impl ScriptedMockAgent {
     pub fn new(external_session_ref: impl Into<String>) -> Self {
         Self {
             external_session_ref: external_session_ref.into(),
+            adapter_kind: NormalizedAdapterKind::Mock,
+            timeline_prefix: "mock".to_string(),
+            provider_event_prefix: "mock".to_string(),
+            adapter_capability: "scripted-mock-events".to_string(),
+            turns: Vec::new(),
+        }
+    }
+
+    pub fn acp_shaped(external_session_ref: impl Into<String>) -> Self {
+        Self {
+            external_session_ref: external_session_ref.into(),
+            adapter_kind: NormalizedAdapterKind::Acp,
+            timeline_prefix: "acp".to_string(),
+            provider_event_prefix: "acp.mock".to_string(),
+            adapter_capability: "scripted-acp-shaped-events".to_string(),
             turns: Vec::new(),
         }
     }
@@ -33,18 +52,30 @@ impl ScriptedMockAgent {
         self.turns
             .iter()
             .find(|turn| turn.turn_ref == turn_ref)
-            .map(|turn| turn.normalized_events(&self.external_session_ref))
+            .map(|turn| {
+                turn.normalized_events_with_shape(
+                    &self.external_session_ref,
+                    self.adapter_kind.clone(),
+                    &self.timeline_prefix,
+                    &self.provider_event_prefix,
+                )
+            })
     }
 
     pub fn binding(&self) -> BoundaryBinding {
-        BoundaryBinding::fake(BoundaryKind::AgentAdapter, "scripted-mock-agent")
+        match self.adapter_kind {
+            NormalizedAdapterKind::Acp => {
+                BoundaryBinding::fake(BoundaryKind::AgentAdapter, "scripted-acp-mock-agent")
+            }
+            _ => BoundaryBinding::fake(BoundaryKind::AgentAdapter, "scripted-mock-agent"),
+        }
     }
 
     pub fn open_session(&self, request: FakeAdapterSessionRequest) -> FakeAdapterSession {
         FakeAdapterSession {
             session_id: request.session_id,
             external_session_ref: self.external_session_ref.clone(),
-            adapter_capability: "scripted-mock-events".to_string(),
+            adapter_capability: self.adapter_capability.clone(),
         }
     }
 
@@ -56,7 +87,7 @@ impl ScriptedMockAgent {
         FakeAdapterSession {
             session_id,
             external_session_ref,
-            adapter_capability: "scripted-mock-events".to_string(),
+            adapter_capability: self.adapter_capability.clone(),
         }
     }
 
@@ -68,9 +99,14 @@ impl ScriptedMockAgent {
         let events = self
             .turn_events(request.turn_id.as_str())
             .or_else(|| {
-                self.turns
-                    .first()
-                    .map(|turn| turn.normalized_events(&session.external_session_ref))
+                self.turns.first().map(|turn| {
+                    turn.normalized_events_with_shape(
+                        &session.external_session_ref,
+                        self.adapter_kind.clone(),
+                        &self.timeline_prefix,
+                        &self.provider_event_prefix,
+                    )
+                })
             })
             .unwrap_or_default();
         let summary = events
@@ -226,11 +262,42 @@ impl ScriptedMockTurn {
     }
 
     pub fn normalized_events(&self, external_session_ref: &str) -> Vec<NormalizedAdapterEvent> {
+        self.normalized_events_with_shape(
+            external_session_ref,
+            NormalizedAdapterKind::Mock,
+            "mock",
+            "mock",
+        )
+    }
+
+    pub fn acp_shaped_events(&self, external_session_ref: &str) -> Vec<NormalizedAdapterEvent> {
+        self.normalized_events_with_shape(
+            external_session_ref,
+            NormalizedAdapterKind::Acp,
+            "acp",
+            "acp.mock",
+        )
+    }
+
+    fn normalized_events_with_shape(
+        &self,
+        external_session_ref: &str,
+        adapter_kind: NormalizedAdapterKind,
+        timeline_prefix: &str,
+        provider_event_prefix: &str,
+    ) -> Vec<NormalizedAdapterEvent> {
         self.events
             .iter()
             .enumerate()
             .map(|(index, event)| {
-                event.normalized_event(external_session_ref, &self.turn_ref, index)
+                event.normalized_event(
+                    external_session_ref,
+                    &self.turn_ref,
+                    index,
+                    adapter_kind.clone(),
+                    timeline_prefix,
+                    provider_event_prefix,
+                )
             })
             .collect()
     }
@@ -280,53 +347,53 @@ impl ScriptedMockEvent {
         external_session_ref: &str,
         turn_ref: &str,
         index: usize,
+        adapter_kind: NormalizedAdapterKind,
+        timeline_prefix: &str,
+        provider_event_prefix: &str,
     ) -> NormalizedAdapterEvent {
-        let (kind, provider_event_kind, item_ref, operation) = match self {
+        let (kind, provider_event_suffix, item_ref, operation) = match self {
             Self::MessageDelta { item_ref, .. } => (
                 "adapter.item_delta",
-                "mock.message_delta",
+                "message_delta",
                 item_ref.as_str(),
                 "delta",
             ),
             Self::MessageCompleted { item_ref, .. } => (
                 "adapter.item_completed",
-                "mock.message_completed",
+                "message_completed",
                 item_ref.as_str(),
                 "completed",
             ),
             Self::ToolRequested { item_ref, .. } => (
                 "adapter.tool_call_requested",
-                "mock.tool_requested",
+                "tool_requested",
                 item_ref.as_str(),
                 "requested",
             ),
             Self::ToolCompleted { item_ref, .. } => (
                 "adapter.tool_call_completed",
-                "mock.tool_completed",
+                "tool_completed",
                 item_ref.as_str(),
                 "completed",
             ),
             Self::PermissionRequested { item_ref, .. } => (
                 "adapter.permission_requested",
-                "mock.permission_requested",
+                "permission_requested",
                 item_ref.as_str(),
                 "permission",
             ),
-            Self::Failed { item_ref, .. } => (
-                "adapter.turn_failed",
-                "mock.failed",
-                item_ref.as_str(),
-                "failed",
-            ),
+            Self::Failed { item_ref, .. } => {
+                ("adapter.turn_failed", "failed", item_ref.as_str(), "failed")
+            }
             Self::Interrupted { item_ref, .. } => (
                 "adapter.turn_interrupted",
-                "mock.interrupted",
+                "interrupted",
                 item_ref.as_str(),
                 "interrupted",
             ),
             Self::TurnCompleted { item_ref } => (
                 "adapter.turn_completed",
-                "mock.turn_completed",
+                "turn_completed",
                 item_ref.as_str(),
                 "completed",
             ),
@@ -340,15 +407,15 @@ impl ScriptedMockEvent {
             "event": event_name(self),
         });
         let mut normalized = NormalizedAdapterEvent::new(
-            NormalizedAdapterKind::Mock,
+            adapter_kind,
             kind,
-            provider_event_kind,
+            format!("{provider_event_prefix}.{provider_event_suffix}"),
             &raw,
         )
         .with_timeline(
             Some(external_session_ref.to_string()),
             Some(item_ref.to_string()),
-            format!("mock:{external_session_ref}:{turn_ref}:{item_ref}:{index}"),
+            format!("{timeline_prefix}:{external_session_ref}:{turn_ref}:{item_ref}:{index}"),
             AdapterTimelineConfidence::Stable,
             operation,
         );
@@ -475,5 +542,35 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn scripted_acp_mock_agent_emits_acp_shaped_events() {
+        let script = ScriptedMockAgent::acp_shaped("acp-session-1").with_turn(
+            ScriptedMockTurn::new("turn-acp-worker")
+                .message_delta("msg-1", "reading project memory")
+                .tool_requested("tool-1", "capo.project_memory_read")
+                .tool_completed("tool-1", "capo.project_memory_read", "context loaded")
+                .turn_completed("done-1"),
+        );
+
+        let events = script.turn_events("turn-acp-worker").expect("turn events");
+
+        assert_eq!(script.binding().variant, "scripted-acp-mock-agent");
+        assert!(events.iter().all(|event| {
+            event.adapter_kind == NormalizedAdapterKind::Acp
+                && event.external_session_ref.as_deref() == Some("acp-session-1")
+                && event
+                    .timeline_key
+                    .as_deref()
+                    .is_some_and(|key| key.starts_with("acp:acp-session-1:turn-acp-worker:"))
+                && event.provider_event_kind.starts_with("acp.mock.")
+                && event.idempotency_key.is_some()
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == "adapter.tool_call_completed"
+                && event.tool_name.as_deref() == Some("capo.project_memory_read")
+                && event.status.as_deref() == Some("completed")
+        }));
     }
 }

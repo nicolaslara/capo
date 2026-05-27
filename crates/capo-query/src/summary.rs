@@ -1,7 +1,8 @@
 use capo_state::WorkpadTaskProjection;
 
 use crate::{
-    ProjectDashboard, ProjectDogfoodReadiness, ToolActivitySummary, project_dogfood_readiness,
+    ProjectDashboard, ProjectDogfoodReadiness, SourceTaskProjection, ToolActivitySummary,
+    project_dogfood_readiness,
 };
 
 impl ProjectDashboard {
@@ -58,6 +59,22 @@ impl ProjectDashboard {
             .filter(|task| actionable_workpad_status_rank(&task.observed_status).is_some())
             .filter(|task| task.capo_execution_status == "observed_only")
             .count()
+    }
+
+    pub fn source_tasks(&self) -> Vec<SourceTaskProjection> {
+        self.workpad_tasks
+            .iter()
+            .map(SourceTaskProjection::from_workpad_task)
+            .collect()
+    }
+
+    pub fn next_source_task(&self) -> Option<SourceTaskProjection> {
+        self.next_workpad_task()
+            .map(SourceTaskProjection::from_workpad_task)
+    }
+
+    pub fn next_source_task_candidate_count(&self) -> usize {
+        self.next_workpad_candidate_count()
     }
 }
 

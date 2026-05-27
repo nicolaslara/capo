@@ -10,9 +10,10 @@ use crate::{
     AgentProjection, CapabilityGrantProjection, ConnectivityExposureProjection, EvidenceProjection,
     MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
     PermissionApprovalProjection, ProjectProjection, ProjectionRecord, ReviewFindingProjection,
-    RunProjection, RuntimeTargetProjection, SessionProjection, StateError, StateResult,
-    TaskOutcomeReportProjection, TaskProjection, ToolCallProjection, ToolObservationProjection,
-    WorkpadFileProjection, WorkpadIndexResetProjection, WorkpadTaskProjection, optional_id,
+    RunProjection, RuntimeTargetProjection, SessionProjection, SourceBindingProjection, StateError,
+    StateResult, TaskOutcomeReportProjection, TaskProjection, ToolCallProjection,
+    ToolObservationProjection, WorkpadFileProjection, WorkpadIndexResetProjection,
+    WorkpadTaskProjection, optional_id,
 };
 
 #[derive(Debug)]
@@ -664,6 +665,38 @@ pub(crate) fn projection_record_from_row(
                 updated_sequence: 0,
             },
         )),
+        "source_binding" => Ok(ProjectionRecord::SourceBinding(SourceBindingProjection {
+            source_binding_id: record_id,
+            project_id: ProjectId::new(required_field(
+                &projection_kind,
+                "source_binding",
+                a,
+                "project_id",
+            )?),
+            task_id: TaskId::new(required_field(
+                &projection_kind,
+                "source_binding",
+                b,
+                "task_id",
+            )?),
+            source_kind: required_field(&projection_kind, "source_binding", c, "source_kind")?,
+            source_task_id: required_field(
+                &projection_kind,
+                "source_binding",
+                d,
+                "source_task_id",
+            )?,
+            source_path: required_field(&projection_kind, "source_binding", e, "source_path")?,
+            source_anchor: required_field(&projection_kind, "source_binding", f, "source_anchor")?,
+            source_hash: required_field(&projection_kind, "source_binding", g, "source_hash")?,
+            binding_status: required_field(
+                &projection_kind,
+                "source_binding",
+                h,
+                "binding_status",
+            )?,
+            updated_sequence: 0,
+        })),
         "workpad_file" => Ok(ProjectionRecord::WorkpadFile(WorkpadFileProjection {
             path: record_id,
             project_id: ProjectId::new(required_field(

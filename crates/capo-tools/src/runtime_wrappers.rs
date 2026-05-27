@@ -99,6 +99,17 @@ impl RuntimeToolWrappers {
                 ],
                 "{\"input\":{\"path\":\"string\"}}",
             ),
+            "capo.project_memory_read" => (
+                "Project Memory Read",
+                false,
+                "low",
+                vec![
+                    "tool:invoke:capo.project_memory_read",
+                    "filesystem:read:workspace",
+                    "state:read:task",
+                ],
+                "{\"input\":{\"path\":\"string\"}}",
+            ),
             _ => return None,
         };
 
@@ -245,6 +256,7 @@ impl RuntimeToolWrappers {
             "capo.git_commit" => self.git_commit(request),
             "capo.file_read" => self.file_read(request, "file_read"),
             "capo.file_write" => self.file_write(request),
+            "capo.project_memory_read" => self.project_memory_read(request),
             "capo.workpad_read" => self.workpad_read(request),
             other => Err(format!("unsupported wrapper tool: {other}")),
         }
@@ -396,6 +408,19 @@ impl RuntimeToolWrappers {
             ));
         }
         self.file_read(request, "workpad_read")
+    }
+
+    fn project_memory_read(
+        &self,
+        request: &WrapperToolRequest,
+    ) -> Result<WrapperExecution, String> {
+        let requested = required_input(request, "path")?;
+        if !is_workpad_path(&requested) {
+            return Err(format!(
+                "project_memory_read only supports TASKS.md, project.md, or workpads/*.md paths: {requested}"
+            ));
+        }
+        self.file_read(request, "project_memory_read")
     }
 
     fn file_write(&self, request: &WrapperToolRequest) -> Result<WrapperExecution, String> {

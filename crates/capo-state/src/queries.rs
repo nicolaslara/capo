@@ -11,9 +11,9 @@ use crate::{
     AgentProjection, CapabilityGrantProjection, ConnectivityExposureProjection, EventRecord,
     EvidenceProjection, MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
     PermissionApprovalProjection, ReviewFindingProjection, RunProjection, RuntimeTargetProjection,
-    SessionProjection, SqliteStateStore, StateError, StateResult, TaskOutcomeReportProjection,
-    TaskProjection, ToolCallProjection, ToolObservationProjection, WorkpadFileProjection,
-    WorkpadTaskProjection, optional_id,
+    SessionProjection, SourceBindingProjection, SqliteStateStore, StateError, StateResult,
+    TaskOutcomeReportProjection, TaskProjection, ToolCallProjection, ToolObservationProjection,
+    WorkpadFileProjection, WorkpadTaskProjection, optional_id,
 };
 
 impl SqliteStateStore {
@@ -1306,6 +1306,43 @@ impl SqliteStateStore {
         Ok(task)
     }
 
+    pub fn source_bindings(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<SourceBindingProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT source_binding_id, project_id, task_id, source_kind, source_task_id,
+                    source_path, source_anchor, source_hash, binding_status, updated_sequence
+             FROM source_bindings
+             WHERE project_id = ?1
+             ORDER BY task_id ASC, source_path ASC, source_anchor ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], source_binding_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    pub fn source_binding_for_task(
+        &self,
+        task_id: &TaskId,
+    ) -> StateResult<Option<SourceBindingProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let binding = connection
+            .query_row(
+                "SELECT source_binding_id, project_id, task_id, source_kind, source_task_id,
+                        source_path, source_anchor, source_hash, binding_status, updated_sequence
+                 FROM source_bindings
+                 WHERE task_id = ?1
+                 ORDER BY updated_sequence DESC
+                 LIMIT 1",
+                params![task_id.as_str()],
+                source_binding_from_row,
+            )
+            .optional()?;
+        Ok(binding)
+    }
+
     pub fn recent_events_for_session(
         &self,
         session_id: &SessionId,
@@ -1342,4 +1379,19 @@ impl SqliteStateStore {
         events.reverse();
         Ok(events)
     }
+}
+
+fn source_binding_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceBindingProjection> {
+    Ok(SourceBindingProjection {
+        source_binding_id: row.get(0)?,
+        project_id: ProjectId::new(row.get::<_, String>(1)?),
+        task_id: TaskId::new(row.get::<_, String>(2)?),
+        source_kind: row.get(3)?,
+        source_task_id: row.get(4)?,
+        source_path: row.get(5)?,
+        source_anchor: row.get(6)?,
+        source_hash: row.get(7)?,
+        binding_status: row.get(8)?,
+        updated_sequence: row.get(9)?,
+    })
 }

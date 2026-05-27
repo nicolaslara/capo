@@ -50,6 +50,7 @@ pub fn project_dashboard(
     let adapter_dispatch_prompt_materializations =
         state.adapter_dispatch_prompt_materializations(&query.project_id)?;
     let adapter_dogfood_gate = adapter_dogfood_gate(&adapter_smoke_reports);
+    let source_bindings = state.source_bindings(&query.project_id)?;
     let workpad_tasks = state
         .workpad_tasks(&query.project_id)?
         .into_iter()
@@ -88,6 +89,7 @@ pub fn project_dashboard(
         adapter_dispatch_prompt_sources,
         adapter_dispatch_prompt_materializations,
         adapter_dogfood_gate,
+        source_bindings,
         workpad_tasks,
     })
 }
