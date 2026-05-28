@@ -33,16 +33,25 @@ Usage:
   capo adapter smoke-report status --latest [--adapter codex|claude] [--state PATH]
   capo adapter smoke-report evidence --smoke-report SMOKE_REPORT_ID --out DIR [--state PATH]
   capo adapter smoke-report evidence --latest [--adapter codex|claude] --out DIR [--state PATH]
-  capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR] [--state PATH]
+  capo adapter replay-fixture --adapter codex|claude|acp --fixture PATH --agent NAME --goal GOAL [--out DIR] [--state PATH]  # compatibility bypasses server
   capo adapter replay-dispatch --dispatch-plan DISPATCH_PLAN_ID --fixture PATH [--out DIR] [--state PATH]
+  capo control [--planner none] [--connect ADDR] [--state PATH]
   capo dogfood readiness [--out DIR] [--state PATH]
   capo task send --agent NAME --goal GOAL [--scenario NAME] [--state PATH]
   capo server serve [--addr ADDR] [--max-requests N] [--state PATH]
   capo server agent register --name NAME [--adapter fake --runtime fake] [--request REQUEST_ID] [--client CLIENT_ID] [--actor ACTOR] [--connect ADDR] [--state PATH]
   capo server agent list [--request REQUEST_ID] [--client CLIENT_ID] [--actor ACTOR] [--connect ADDR] [--state PATH]
   capo server agent status --agent NAME [--request REQUEST_ID] [--client CLIENT_ID] [--actor ACTOR] [--connect ADDR] [--state PATH]
+  capo server agent steer --agent NAME --goal GOAL [--request REQUEST_ID] [--client CLIENT_ID] [--actor ACTOR] [--connect ADDR] [--state PATH]
   capo server task send --agent NAME --goal GOAL [--scenario NAME] [--request REQUEST_ID] [--client CLIENT_ID] [--actor ACTOR] [--connect ADDR] [--state PATH]
+  capo server session start --agent NAME --adapter codex|claude|acp --goal GOAL [--session SESSION_ID] [--run RUN_ID] [--request REQUEST_ID] [--client CLIENT_ID] [--actor ACTOR] [--connect ADDR] [--state PATH]
   capo server dashboard [--recent-events N] [--request REQUEST_ID] [--client CLIENT_ID] [--actor ACTOR] [--connect ADDR] [--state PATH]
+  capo server adapter replay-fixture --adapter codex|claude|acp --fixture PATH --session SESSION_ID --run RUN_ID --turn TURN_ID [--request REQUEST_ID] [--client CLIENT_ID] [--actor ACTOR] [--connect ADDR] [--state PATH]
+  capo server dispatch plan --agent NAME --adapter codex|claude|acp --goal GOAL --session SESSION_ID --run RUN_ID --turn TURN_ID [--workspace PATH] [--artifacts PATH] [--request REQUEST_ID] [--client CLIENT_ID] [--actor ACTOR] [--connect ADDR] [--state PATH]
+  capo server dispatch gate --dispatch-plan DISPATCH_PLAN_ID [--request REQUEST_ID] [--client CLIENT_ID] [--actor ACTOR] [--connect ADDR] [--state PATH]
+  capo server dispatch live-preflight --agent NAME --adapter codex|claude --goal GOAL --session SESSION_ID --run RUN_ID --turn TURN_ID [--workspace PATH] [--artifacts PATH] [--capability-profile PROFILE] [--runtime-scope local_process_loopback] [--request REQUEST_ID] [--client CLIENT_ID] [--actor ACTOR] [--connect ADDR] [--state PATH]
+  capo server dispatch run-local --dispatch-plan DISPATCH_PLAN_ID --fixture PATH [--request REQUEST_ID] [--client CLIENT_ID] [--actor ACTOR] [--connect ADDR] [--state PATH]
+  capo server dispatch live-run-local --dispatch-plan DISPATCH_PLAN_ID --goal GOAL [--mock-fixture PATH] [--timeout-seconds N] [--request REQUEST_ID] [--client CLIENT_ID] [--actor ACTOR] [--connect ADDR] [--state PATH]
   capo server recover [--request REQUEST_ID] [--client CLIENT_ID] [--actor ACTOR] [--connect ADDR] [--state PATH]
   capo session status --agent NAME [--state PATH]
   capo session redirect --agent NAME --goal GOAL [--state PATH]
@@ -109,6 +118,10 @@ Compatibility options:
 Safety notes:
   Capo uses command envelopes, controller/state read models, and bounded adapter evidence.
   It does not read provider credentials or inspect vendor subscription state.
+  CAPO_STATE sets the default local state directory; --state overrides it per command.
+  `capo server serve` listens on 127.0.0.1:7878 by default.
+  `capo server ...` client commands use CAPO_SERVER_ADDR when set, otherwise they try 127.0.0.1:7878 and fall back to embedded local handling if no server is running.
+  `capo control --planner none` requires a running Capo server and accepts commands through stdin or an interactive terminal.
 ";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -119,7 +132,11 @@ pub(crate) struct ParsedArgs {
 
 impl ParsedArgs {
     pub(crate) fn new(raw_args: Vec<String>) -> Result<Self, String> {
-        let mut state_root = PathBuf::from(DEFAULT_STATE_ROOT);
+        let mut state_root = std::env::var("CAPO_STATE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_STATE_ROOT));
         let mut args = Vec::new();
         let mut iter = raw_args.into_iter();
 

@@ -12,7 +12,9 @@
 | **features** | Complete | Feature gate passed 2026-05-26 — real connectors, dogfood bridge, dashboard/query, permissions/tools, memory/eval, voice, remote runtime, and maintainability splits |
 | **dogfood** | Complete | Dogfood gate passed 2026-05-26 — Capo-assisted development with markdown/git fallback |
 | **scaffold** | Complete | Completed 2026-05-26 — product-spine alignment, project-memory aliases, deterministic scaffold proofs |
-| **server** | **Active** | Build the Capo server/control plane and CLI-through-server interaction path for mocked agents and Codex |
+| **server** | Complete | Completed 2026-05-27 - Capo server/control plane, CLI-through-server path, mocked-agent tests, mocked Codex path, and manual real Codex smoke |
+| **harness-research** | Complete | Completed 2026-05-28 - best practices for coding-agent harnesses and ACP's role as adapter boundary |
+| **operator-control** | **Active** | Build a human operator REPL/control surface for inspecting and steering running agents through the server |
 
 ## research
 
@@ -259,7 +261,7 @@ workpads/dogfood/knowledge.md
 
 ## server
 
-**Status:** Active.
+**Status:** Complete. Milestone completed 2026-05-27.
 
 **Prerequisites:** Scaffold alignment completed 2026-05-26.
 
@@ -292,6 +294,84 @@ workpads/scaffold/knowledge.md
 - The CLI is a client of the server boundary, not the owner of agent orchestration.
 - Test with deterministic mocked agents first, then prove Codex through the same boundary.
 - Keep tunnel/connectivity, runtime execution, protocol adapters, memory, and input surfaces modular.
+
+## harness-research
+
+**Status:** Complete. Research spike completed 2026-05-28.
+
+**Objective:** Document best-known practices for building coding-agent harnesses,
+compare modern harnesses and agent products, and answer whether ACP is enough
+for Capo's harness architecture.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/harness-research/tasks.md
+workpads/harness-research/knowledge.md
+workpads/harness-research/references.md
+workpads/architecture/boundaries.md
+workpads/architecture/state-model.md
+workpads/architecture/acp-replay-dedupe.md
+workpads/architecture/capability-permissions.md
+workpads/architecture/runtime-tunnel.md
+workpads/architecture/protocol-provider.md
+workpads/architecture/tool-exposure.md
+workpads/architecture/memory-architecture.md
+workpads/architecture/prototype-plan.md
+```
+
+**Quick nav:**
+
+- `knowledge.md` executive answer, ACP coverage/gaps, harness practices,
+  comparison matrix, and Capo recommendations
+- `references.md` dated source links and notes
+
+**Rules:**
+
+- Treat ACP as an adapter/protocol boundary, not the whole harness.
+- Do not inspect or rely on leaked proprietary source.
+- Prefer primary sources and official docs; label closed-product observations as
+  lower confidence.
+
+## operator-control
+
+**Status:** Active.
+
+**Prerequisites:** Server/control-plane milestone completed 2026-05-27.
+
+**Objective:** Give humans an ergonomic operator loop for inspecting and steering running Capo agents through the server boundary, starting with a no-planner command REPL and preserving a path to planner-backed modes.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/operator-control/tasks.md
+workpads/operator-control/knowledge.md
+workpads/operator-control/references.md
+workpads/architecture/boundaries.md
+workpads/architecture/state-model.md
+workpads/architecture/acp-replay-dedupe.md
+workpads/architecture/capability-permissions.md
+workpads/architecture/runtime-tunnel.md
+workpads/architecture/protocol-provider.md
+workpads/architecture/tool-exposure.md
+workpads/architecture/memory-architecture.md
+workpads/architecture/prototype-plan.md
+workpads/server/knowledge.md
+```
+
+**Rules:**
+
+- The REPL is an input surface/client; it must not own orchestration state.
+- `--planner none` is command-driven and deterministic. Future planner modes may call tools/LLMs, but must use the same server/control boundaries.
+- Prefer human-readable summaries inspired by operator CLIs; keep machine-ish evidence available through existing commands.
+- Do not bypass Capo server commands to mutate agent/session/runtime state.
+- Keep live provider execution behind existing explicit opt-in gates.
 
 ## How To Switch Focus
 

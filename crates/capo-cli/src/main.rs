@@ -18,6 +18,7 @@ mod connectivity_evidence;
 mod dashboard;
 mod dogfood;
 mod evidence;
+mod operator_control;
 mod permission;
 mod project_memory;
 mod project_memory_flow;
@@ -55,6 +56,7 @@ use connectivity_evidence::connectivity_exposure_evidence;
 use dashboard::dashboard;
 use dogfood::dogfood_readiness;
 use evidence::{export_evidence, export_task_outcome_report, record_review_finding};
+use operator_control::operator_control;
 use permission::{
     decide_permission_approval, list_permission_approvals, request_permission_approval,
 };
@@ -69,8 +71,10 @@ use runtime_target::{
 };
 use runtime_target_evidence::{runtime_target_evidence, runtime_target_readiness_evidence};
 use server_client::{
-    server_agent_list, server_agent_register, server_agent_status, server_dashboard,
-    server_recover, server_serve, server_task_send,
+    server_adapter_replay_fixture, server_agent_list, server_agent_register, server_agent_status,
+    server_agent_steer, server_dashboard, server_dispatch_gate, server_dispatch_live_preflight,
+    server_dispatch_live_run_local, server_dispatch_plan, server_dispatch_run_local,
+    server_recover, server_serve, server_session_start, server_task_send,
 };
 use tool_wrapper::run_wrapper_tool;
 use voice::submit_voice;
@@ -105,6 +109,7 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             Ok(HELP.to_string())
         }
         [command] if command == "init" => init(&parsed),
+        [command, rest @ ..] if command == "control" => operator_control(&parsed, rest),
         [command, rest @ ..] if command == "dashboard" => dashboard(&parsed, rest),
         [area, command, rest @ ..] if area == "agent" && command == "register" => {
             register_agent(&parsed, rest)
@@ -205,12 +210,52 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             server_agent_status(&parsed, rest)
         }
         [area, domain, command, rest @ ..]
+            if area == "server" && domain == "agent" && command == "steer" =>
+        {
+            server_agent_steer(&parsed, rest)
+        }
+        [area, domain, command, rest @ ..]
             if area == "server" && domain == "task" && command == "send" =>
         {
             server_task_send(&parsed, rest)
         }
+        [area, domain, command, rest @ ..]
+            if area == "server" && domain == "session" && command == "start" =>
+        {
+            server_session_start(&parsed, rest)
+        }
         [area, command, rest @ ..] if area == "server" && command == "dashboard" => {
             server_dashboard(&parsed, rest)
+        }
+        [area, domain, command, rest @ ..]
+            if area == "server" && domain == "adapter" && command == "replay-fixture" =>
+        {
+            server_adapter_replay_fixture(&parsed, rest)
+        }
+        [area, domain, command, rest @ ..]
+            if area == "server" && domain == "dispatch" && command == "plan" =>
+        {
+            server_dispatch_plan(&parsed, rest)
+        }
+        [area, domain, command, rest @ ..]
+            if area == "server" && domain == "dispatch" && command == "gate" =>
+        {
+            server_dispatch_gate(&parsed, rest)
+        }
+        [area, domain, command, rest @ ..]
+            if area == "server" && domain == "dispatch" && command == "live-preflight" =>
+        {
+            server_dispatch_live_preflight(&parsed, rest)
+        }
+        [area, domain, command, rest @ ..]
+            if area == "server" && domain == "dispatch" && command == "run-local" =>
+        {
+            server_dispatch_run_local(&parsed, rest)
+        }
+        [area, domain, command, rest @ ..]
+            if area == "server" && domain == "dispatch" && command == "live-run-local" =>
+        {
+            server_dispatch_live_run_local(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "server" && command == "recover" => {
             server_recover(&parsed, rest)

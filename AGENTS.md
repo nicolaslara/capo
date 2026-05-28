@@ -26,6 +26,7 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 | `workpads/architecture/gate-review.md` | Architecture gate decision, user-sensitive decisions, and prototype residual risks |
 | `workpads/scaffold/tasks.md` | Scaffold alignment tasks: product spine, command naming, memory hierarchy, e2e gate |
 | `workpads/server/tasks.md` | Server/control-plane tasks: server-owned agent tracking, CLI client path, mocked-agent and Codex proofs |
+| `workpads/operator-control/tasks.md` | Human operator control loop tasks: REPL, planner modes, attach/jump agent context, command rendering |
 | `.cursor/commands/next.md` / `.opencode/commands/next.md` | `/next` task-execution command |
 | `.agents/skills/next/SKILL.md` | Codex `$next` task-execution skill |
 
@@ -38,10 +39,11 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 5. If active workpad is `dogfood`, confirm the prototype gate has passed.
 6. If active workpad is `scaffold`, confirm the architecture/prototype/feature/dogfood history is loaded and treat this as an alignment pass before new breadth.
 7. If active workpad is `server`, confirm scaffold alignment is complete and keep work focused on server-owned orchestration before richer clients.
+8. If active workpad is `operator-control`, confirm the server milestone is complete and keep work focused on human input/client surfaces that use the server boundary.
 
 ## Current Phase
 
-**Server/control-plane implementation** is active after scaffold alignment completed. The durable target is to make Capo run as a server that owns controller/state/query behavior while CLI and future clients steer tracked agents through that server boundary. Mocked-agent tests come first; Codex must then be proven through the same path.
+**Operator-control implementation** is active after the server/control-plane milestone completed on 2026-05-27. The durable target is a human-friendly REPL/control loop that talks to the Capo server, starts with `--planner none`, and leaves room for future Codex/Capo/local-model planner modes without moving orchestration state into the client.
 
 ## Mandatory Workflow
 
@@ -61,11 +63,12 @@ Before task work:
 12. `workpads/architecture/prototype-plan.md` for architecture, prototype, features, dogfood, and scaffold work once A7 is complete
 13. `workpads/prototype/spec.md` for prototype, dogfood, and scaffold work
 14. For features work, load the feature source file named by the selected task in `workpads/features/tasks.md`
-15. Pick a pending task and mark it `in_progress`
-16. Complete the acceptance criteria with the smallest correct change
-17. Record findings in `knowledge.md` and source links in `references.md`
-18. Review per `WORKING.md`
-19. Mark complete only after evidence is recorded
+15. For operator-control work, load `workpads/server/knowledge.md` for the current server command evidence
+16. Pick a pending task and mark it `in_progress`
+17. Complete the acceptance criteria with the smallest correct change
+18. Record findings in `knowledge.md` and source links in `references.md`
+19. Review per `WORKING.md`
+20. Mark complete only after evidence is recorded
 
 ## Git Rules
 

@@ -1,9 +1,11 @@
 # Generated research clones and scratch artifacts
 workpads/references/repos/
 workpads/**/references/repos/
+.firecrawl/
 
 # Local runtime state
 .capo/
+.capo-artifacts/
 .capo-dev/
 target/
 .venv/

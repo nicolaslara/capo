@@ -11,10 +11,11 @@ This repository is still early. The current implementation is a Rust scaffold/pr
 ## Current Status
 
 - Scaffold alignment is complete.
-- There is no active workpad selected in `TASKS.md`.
+- The server/control-plane milestone is complete: `capo server ...` can drive mocked agents and Codex-shaped runs through the server boundary.
+- Operator control is active: `capo control --planner none` can list, attach to, inspect, and steer a running mocked agent through a running Capo server.
 - `capo project memory ...` is the preferred markdown-backed project-memory surface.
 - `capo workpad ...` still exists only as compatibility for older local scripts and repo migration.
-- Real Codex/Claude execution paths are opt-in and gated; normal repeatable tests use fake/scripted agents.
+- Real Codex execution is opt-in and gated; normal repeatable tests use fake/scripted agents or mocked Codex output. Claude live execution is still blocked.
 
 See:
 
@@ -29,8 +30,8 @@ See:
 Run commands from the repository root:
 
 ```sh
-cargo run -p capo-cli -- --help
-cargo run -p capo-cli -- init
+cargo run -p capo-cli --bin capo -- --help
+cargo run -p capo-cli --bin capo -- init
 ```
 
 Use a separate state directory while experimenting:
@@ -39,39 +40,122 @@ Use a separate state directory while experimenting:
 export CAPO_STATE=.capo-dev/readme-demo
 ```
 
+### Use The Server
+
+Terminal 1 starts the local Capo server. By default it listens only on loopback at `127.0.0.1:7878`.
+
+```sh
+cargo run -p capo-cli --bin capo -- server serve
+```
+
+Terminal 2 uses normal `capo server ...` commands. When the default local server is running, these commands talk to it automatically.
+
+```sh
+cargo run -p capo-cli --bin capo -- server agent register --name demo
+
+cargo run -p capo-cli --bin capo -- server task send \
+  --agent demo \
+  --goal "Inspect the project and summarize the current state"
+
+cargo run -p capo-cli --bin capo -- server dashboard
+```
+
+### Use The Operator Control Loop
+
+With the server still running from Terminal 1, Terminal 2 can enter a simple command loop. The first version has no LLM planner; it only runs the commands you type against the server.
+
+```sh
+cargo run -p capo-cli --bin capo -- control --planner none
+```
+
+Then type:
+
+```txt
+agents
+attach demo
+status
+send Please report current status and wait for the next instruction
+dashboard
+quit
+```
+
+The same control loop can be scripted:
+
+```sh
+printf '%s\n' \
+  'agents' \
+  'attach demo' \
+  'status' \
+  'send Please report current status and wait for the next instruction' \
+  'dashboard' \
+  'quit' \
+  | cargo run -p capo-cli --bin capo -- control --planner none
+```
+
+For real Codex, start a Codex-backed session and preflight the live provider gate:
+
+```sh
+cargo run -p capo-cli --bin capo -- server agent register --name codex-demo
+
+cargo run -p capo-cli --bin capo -- server session start \
+  --agent codex-demo \
+  --adapter codex \
+  --goal "Say CAPO_REAL_CODEX_OK and nothing else" \
+  --session codex-demo-session \
+  --run codex-demo-run
+
+CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 cargo run -p capo-cli --bin capo -- server dispatch live-preflight \
+  --agent codex-demo \
+  --adapter codex \
+  --goal "Say CAPO_REAL_CODEX_OK and nothing else" \
+  --session codex-demo-session \
+  --run codex-demo-run \
+  --turn codex-demo-turn
+```
+
+Copy the printed `dispatch_plan_id`, then run Codex explicitly:
+
+```sh
+CAPO_SERVER_RUN_CODEX_LIVE=1 cargo run -p capo-cli --bin capo -- server dispatch live-run-local \
+  --dispatch-plan DISPATCH_PLAN_ID_FROM_PREFLIGHT \
+  --goal "Say CAPO_REAL_CODEX_OK and nothing else"
+```
+
+The real Codex run should report `provider_cli_executed=true`. Claude live execution is intentionally still blocked.
+
 ### Start A Fake Agent
 
 ```sh
-cargo run -p capo-cli -- agent register \
+cargo run -p capo-cli --bin capo -- agent register \
   --name demo \
   --adapter fake \
   --runtime fake \
   --state "$CAPO_STATE"
 
-cargo run -p capo-cli -- task send \
+cargo run -p capo-cli --bin capo -- task send \
   --agent demo \
   --goal "Inspect the project and summarize the current state" \
   --state "$CAPO_STATE"
 
-cargo run -p capo-cli -- dashboard --state "$CAPO_STATE"
-cargo run -p capo-cli -- session status --agent demo --state "$CAPO_STATE"
+cargo run -p capo-cli --bin capo -- dashboard --state "$CAPO_STATE"
+cargo run -p capo-cli --bin capo -- session status --agent demo --state "$CAPO_STATE"
 ```
 
 ### Index Project Memory
 
 ```sh
-cargo run -p capo-cli -- project memory index \
+cargo run -p capo-cli --bin capo -- project memory index \
   --root . \
   --state "$CAPO_STATE"
 
-cargo run -p capo-cli -- project memory next \
+cargo run -p capo-cli --bin capo -- project memory next \
   --state "$CAPO_STATE"
 ```
 
 Start the next indexed source task for the fake agent:
 
 ```sh
-cargo run -p capo-cli -- project memory start-next \
+cargo run -p capo-cli --bin capo -- project memory start-next \
   --agent demo \
   --state "$CAPO_STATE"
 ```
@@ -81,7 +165,7 @@ cargo run -p capo-cli -- project memory start-next \
 ```sh
 mkdir -p .capo-dev/readme-artifacts
 
-cargo run -p capo-cli -- tool run-wrapper \
+cargo run -p capo-cli --bin capo -- tool run-wrapper \
   --tool project_memory_read \
   --workspace . \
   --artifacts .capo-dev/readme-artifacts \

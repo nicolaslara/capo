@@ -59,10 +59,12 @@ impl FakeBoundaryController {
                 &start.run_id,
             )
             .with_payload(format!(
-                "{{\"goal\":\"{}\",\"runtime_process_ref\":\"{}\",\"external_session_ref\":\"{}\",\"provider_cli_executed\":true}}",
+                "{{\"goal\":\"{}\",\"runtime_process_ref\":\"{}\",\"external_session_ref\":\"{}\",\"provider_cli_executed\":{},\"adapter_kind\":\"{}\"}}",
                 escape_json(&start.goal),
                 escape_json(&start.runtime_process_ref),
-                escape_json(&start.external_session_ref)
+                escape_json(&start.external_session_ref),
+                start.provider_cli_executed,
+                escape_json(&start.adapter_kind)
             )),
             &[
                 ProjectionRecord::Task(TaskProjection {
@@ -125,4 +127,6 @@ pub struct LocalAdapterDispatchRunStart {
     pub goal: String,
     pub runtime_process_ref: String,
     pub external_session_ref: String,
+    pub provider_cli_executed: bool,
+    pub adapter_kind: String,
 }

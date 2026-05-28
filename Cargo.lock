@@ -94,9 +94,11 @@ dependencies = [
 name = "capo-server"
 version = "0.1.0"
 dependencies = [
+ "capo-adapters",
  "capo-controller",
  "capo-core",
  "capo-query",
+ "capo-runtime",
  "capo-state",
  "serde_json",
 ]

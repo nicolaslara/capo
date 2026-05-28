@@ -18,6 +18,9 @@ use capo_state::{
 fn help_mentions_command_envelopes_and_no_credentials() {
     assert!(HELP.contains("command envelopes"));
     assert!(HELP.contains("does not read provider credentials"));
+    assert!(HELP.contains("CAPO_STATE"));
+    assert!(HELP.contains("127.0.0.1:7878"));
+    assert!(HELP.contains("CAPO_SERVER_ADDR"));
     assert!(HELP.contains("Capo is a local-first controller/server"));
     assert!(HELP.contains("The CLI is one client"));
     assert!(HELP.contains("Markdown-backed planning files enter Capo as project memory"));
@@ -41,7 +44,9 @@ fn help_mentions_command_envelopes_and_no_credentials() {
     assert!(HELP.contains("dogfood readiness"));
     assert!(HELP.contains("server agent register"));
     assert!(HELP.contains("server task send"));
+    assert!(HELP.contains("server session start"));
     assert!(HELP.contains("server dashboard"));
+    assert!(HELP.contains("server adapter replay-fixture"));
     assert!(HELP.contains("server recover"));
     assert!(HELP.contains("runtime target register"));
     assert!(HELP.contains("runtime target set-status"));
@@ -3809,6 +3814,18 @@ fn server_cli_transport_options_fail_closed() {
     ])
     .expect_err("public bind should fail");
     assert!(public_addr.contains("loopback"));
+
+    let public_connect = run_cli(vec![
+        "server".to_string(),
+        "agent".to_string(),
+        "list".to_string(),
+        "--connect".to_string(),
+        "192.0.2.1:4321".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect_err("public connect should fail before sending request");
+    assert!(public_connect.contains("loopback"));
 }
 
 #[test]

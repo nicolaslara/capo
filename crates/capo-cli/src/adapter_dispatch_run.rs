@@ -299,6 +299,8 @@ pub(crate) fn apply_dispatch_adapter_output(
             ),
             runtime_process_ref,
             external_session_ref: format!("local-adapter-session-{}", plan.dispatch_plan_id),
+            provider_cli_executed: true,
+            adapter_kind: plan.adapter_kind.clone(),
         })
         .map_err(debug_error)?;
     if refs.session_id != plan.session_id || refs.run_id != plan.run_id {

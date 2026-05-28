@@ -6,6 +6,15 @@ impl FakeBoundaryController {
         refs: &FakeRunRefs,
         adapter_events: &[NormalizedAdapterEvent],
     ) -> StateResult<AdapterReplayReport> {
+        self.apply_normalized_adapter_events_with_turn(refs, adapter_events, None)
+    }
+
+    pub fn apply_normalized_adapter_events_with_turn(
+        &self,
+        refs: &FakeRunRefs,
+        adapter_events: &[NormalizedAdapterEvent],
+        turn_id_override: Option<&str>,
+    ) -> StateResult<AdapterReplayReport> {
         let session = self
             .state
             .session(&refs.session_id)?
@@ -21,8 +30,13 @@ impl FakeBoundaryController {
 
         for (index, adapter_event) in adapter_events.iter().enumerate() {
             let event_identity = adapter_event_identity(adapter_event, index);
-            let Some((event_kind, projection)) =
-                self.adapter_event_projection(refs, adapter_event, &session, &task)?
+            let Some((event_kind, projection)) = self.adapter_event_projection(
+                refs,
+                adapter_event,
+                &session,
+                &task,
+                turn_id_override,
+            )?
             else {
                 continue;
             };
@@ -40,11 +54,7 @@ impl FakeBoundaryController {
                 &refs.session_id,
                 &refs.run_id,
             );
-            event.turn_id = adapter_event
-                .timeline_key
-                .as_ref()
-                .map(|key| format!("turn-{}", slug(key)))
-                .or_else(|| Some("turn-adapter-replay".to_string()));
+            event.turn_id = adapter_replay_turn_id(adapter_event, turn_id_override);
             event.item_id = adapter_event.external_item_ref.clone();
             event.payload_json = adapter_event_payload_json(adapter_event);
             event.idempotency_key = adapter_event
@@ -85,11 +95,7 @@ impl FakeBoundaryController {
                     &refs.session_id,
                     &refs.run_id,
                 );
-                observation_event.turn_id = adapter_event
-                    .timeline_key
-                    .as_ref()
-                    .map(|key| format!("turn-{}", slug(key)))
-                    .or_else(|| Some("turn-adapter-replay".to_string()));
+                observation_event.turn_id = adapter_replay_turn_id(adapter_event, turn_id_override);
                 observation_event.item_id = adapter_event.external_item_ref.clone();
                 observation_event.payload_json = adapter_event_payload_json(adapter_event);
                 observation_event.idempotency_key = adapter_event
@@ -156,6 +162,7 @@ impl FakeBoundaryController {
         adapter_event: &NormalizedAdapterEvent,
         session: &SessionProjection,
         task: &TaskProjection,
+        turn_id_override: Option<&str>,
     ) -> StateResult<Option<(EventKind, ProjectionRecord)>> {
         match adapter_event.kind.as_str() {
             "adapter.item_completed" | "adapter.item_delta" | "adapter.plan_replaced" => {
@@ -219,10 +226,7 @@ impl FakeBoundaryController {
                     ProjectionRecord::ToolCall(capo_state::ToolCallProjection {
                         tool_call_id,
                         session_id: refs.session_id.clone(),
-                        turn_id: adapter_event
-                            .timeline_key
-                            .as_ref()
-                            .map(|key| format!("turn-{}", slug(key))),
+                        turn_id: adapter_replay_turn_id(adapter_event, turn_id_override),
                         tool_name: adapter_event
                             .tool_name
                             .clone()
@@ -416,6 +420,21 @@ fn adapter_tool_call_id(adapter_event: &NormalizedAdapterEvent) -> ToolCallId {
                 .unwrap_or(&adapter_event.raw_event_hash)
         )
     ))
+}
+
+fn adapter_replay_turn_id(
+    adapter_event: &NormalizedAdapterEvent,
+    turn_id_override: Option<&str>,
+) -> Option<String> {
+    turn_id_override
+        .map(ToString::to_string)
+        .or_else(|| {
+            adapter_event
+                .timeline_key
+                .as_ref()
+                .map(|key| format!("turn-{}", slug(key)))
+        })
+        .or_else(|| Some("turn-adapter-replay".to_string()))
 }
 
 fn tool_observation_projection(
