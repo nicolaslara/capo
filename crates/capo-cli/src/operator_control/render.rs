@@ -1,11 +1,51 @@
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+
 use capo_server::{AgentSummary, ServerDashboardSnapshot};
 
 pub(super) trait AgentRenderer {
     fn render(&self, agent: &AgentSummary) -> String;
 }
 
+pub(super) trait AgentResultRenderer {
+    fn render_result(&self, agent: &AgentSummary) -> String;
+}
+
+trait AgentResultBodyRenderer {
+    fn render_body(&self, view: &AgentResultView, max_chars: usize) -> String;
+}
+
+// Keep provider output parsing and terminal rendering behind Capo-owned types.
+// Current first pass: pulldown-cmark classifies Markdown/code structure, and
+// PlainMarkdownTerminalRenderer prints readable terminal text without ANSI.
+// Later renderer backends to consider:
+// - comrak: richer GFM AST, custom formatters, and code-highlighting hooks.
+// - markdown-to-ansi or termimad: direct ANSI terminal rendering with styled tables/code.
+// - syntect: syntax highlighting for fenced ResultBlock::Code blocks.
+// - ratatui/tui-markdown: full TUI widgets if `capo control` grows beyond a line REPL.
+#[derive(Debug, PartialEq, Eq)]
+struct AgentResultView {
+    source: String,
+    blocks: Vec<ResultBlock>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ResultBlock {
+    Paragraph(String),
+    Markdown(String),
+    Code {
+        language: Option<String>,
+        text: String,
+    },
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct RecentWorkRenderer;
+
+#[derive(Clone, Copy)]
+pub(super) struct ConciseResultRenderer;
+
+#[derive(Clone, Copy)]
+struct PlainMarkdownTerminalRenderer;
 
 #[derive(Clone, Copy)]
 pub(super) struct DetailsRenderer;
@@ -69,6 +109,12 @@ impl AgentRenderer for RecentWorkRenderer {
     }
 }
 
+impl AgentResultRenderer for ConciseResultRenderer {
+    fn render_result(&self, agent: &AgentSummary) -> String {
+        render_agent_reply(agent)
+    }
+}
+
 impl AgentRenderer for DetailsRenderer {
     fn render(&self, agent: &AgentSummary) -> String {
         render_agent_details(agent)
@@ -107,7 +153,7 @@ pub(super) fn render_recent_work(agent: &AgentSummary) -> String {
         display_goal(&session.current_goal)
     );
     if let Some(reply) = display_summary(session.latest_summary.as_deref()) {
-        output.push_str(&format!("reply: {reply}\n"));
+        output.push_str(&render_labeled_display("reply", &reply));
     } else if session.dispatch_provider_cli_executed == Some(true) {
         output.push_str("reply: captured; use `details` for artifact metadata.\n");
     } else {
@@ -128,12 +174,12 @@ pub(super) fn render_recent_work(agent: &AgentSummary) -> String {
     output
 }
 
-pub(super) fn render_agent_reply(agent: &AgentSummary) -> String {
+fn render_agent_reply(agent: &AgentSummary) -> String {
     let Some(session) = agent.session.as_ref() else {
         return format!("{} has no active session.\n", agent.name);
     };
     if let Some(reply) = display_summary(session.latest_summary.as_deref()) {
-        return format!("{}: {reply}\n", agent.name);
+        return render_agent_result_body(&agent.name, &reply);
     }
     if session.dispatch_provider_cli_executed == Some(true) {
         return format!(
@@ -149,6 +195,15 @@ pub(super) fn render_agent_reply(agent: &AgentSummary) -> String {
             session.dispatch_execution_status.as_deref()
         )
     )
+}
+
+pub(super) fn render_agent_result_body(agent: &str, body: &str) -> String {
+    let body = body.trim_end();
+    if body.contains('\n') {
+        format!("{agent}:\n{body}\n")
+    } else {
+        format!("{agent}: {body}\n")
+    }
 }
 
 pub(super) fn render_agent_details(agent: &AgentSummary) -> String {
@@ -265,18 +320,212 @@ fn display_summary(summary: Option<&str>) -> Option<String> {
     if summary.starts_with("Adapter ") && summary.contains("content_hash=") {
         return None;
     }
-    Some(compact_one_line(summary))
+    Some(display_text(summary, 500))
 }
 
 fn compact_one_line(value: &str) -> String {
     let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    const MAX_CHARS: usize = 500;
-    if compact.chars().count() <= MAX_CHARS {
-        return compact;
+    truncate_chars(&compact, 500)
+}
+
+pub(super) fn display_text(value: &str, max_chars: usize) -> String {
+    display_text_with(value, max_chars, PlainMarkdownTerminalRenderer)
+}
+
+fn display_text_with<R: AgentResultBodyRenderer>(
+    value: &str,
+    max_chars: usize,
+    renderer: R,
+) -> String {
+    let view = parse_agent_result_view(value);
+    renderer.render_body(&view, max_chars)
+}
+
+impl AgentResultBodyRenderer for PlainMarkdownTerminalRenderer {
+    fn render_body(&self, view: &AgentResultView, max_chars: usize) -> String {
+        let has_structured_blocks = view
+            .blocks
+            .iter()
+            .any(|block| !matches!(block, ResultBlock::Paragraph(_)));
+        if has_structured_blocks || should_preserve_lines(&view.source) {
+            return truncate_chars(&normalize_display_lines(&view.source), max_chars);
+        }
+        truncate_chars(
+            &view.source.split_whitespace().collect::<Vec<_>>().join(" "),
+            max_chars,
+        )
     }
-    let mut shortened = compact.chars().take(MAX_CHARS).collect::<String>();
+}
+
+fn parse_agent_result_view(value: &str) -> AgentResultView {
+    let source = value.trim().to_string();
+    let mut blocks = Vec::new();
+    let mut paragraph = String::new();
+    let mut code: Option<(Option<String>, String)> = None;
+    let mut saw_markdown_block = false;
+    let parser = Parser::new_ext(
+        &source,
+        Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH,
+    );
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::CodeBlock(kind)) => {
+                flush_paragraph(&mut paragraph, &mut blocks);
+                let language = match kind {
+                    CodeBlockKind::Fenced(info) => {
+                        info.split_whitespace().next().map(str::to_string)
+                    }
+                    CodeBlockKind::Indented => None,
+                };
+                code = Some((language, String::new()));
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some((language, text)) = code.take() {
+                    blocks.push(ResultBlock::Code { language, text });
+                }
+            }
+            Event::Start(Tag::Table(_))
+            | Event::Start(Tag::Heading { .. })
+            | Event::Start(Tag::List(_))
+            | Event::Start(Tag::BlockQuote(_)) => {
+                saw_markdown_block = true;
+            }
+            Event::Text(text) | Event::Code(text) => {
+                if let Some((_, code_text)) = code.as_mut() {
+                    code_text.push_str(&text);
+                } else {
+                    paragraph.push_str(&text);
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                if let Some((_, code_text)) = code.as_mut() {
+                    code_text.push('\n');
+                } else {
+                    paragraph.push('\n');
+                }
+            }
+            _ => {}
+        }
+    }
+    flush_paragraph(&mut paragraph, &mut blocks);
+    if saw_markdown_block {
+        blocks.push(ResultBlock::Markdown(source.clone()));
+    }
+    if blocks.is_empty() && !source.is_empty() {
+        blocks.push(ResultBlock::Paragraph(source.clone()));
+    }
+
+    AgentResultView { source, blocks }
+}
+
+fn flush_paragraph(paragraph: &mut String, blocks: &mut Vec<ResultBlock>) {
+    let text = paragraph.trim();
+    if !text.is_empty() {
+        blocks.push(ResultBlock::Paragraph(text.to_string()));
+    }
+    paragraph.clear();
+}
+
+fn render_labeled_display(label: &str, body: &str) -> String {
+    if body.contains('\n') {
+        format!("{label}:\n{body}\n")
+    } else {
+        format!("{label}: {body}\n")
+    }
+}
+
+fn should_preserve_lines(value: &str) -> bool {
+    if !value.contains('\n') {
+        return false;
+    }
+    let lines = value.lines().map(str::trim).collect::<Vec<_>>();
+    lines.iter().any(|line| line.starts_with("```"))
+        || lines.iter().any(|line| is_markdown_table_separator(line))
+        || lines.iter().filter(|line| is_list_line(line)).count() >= 2
+        || lines.iter().filter(|line| !line.is_empty()).count() > 1
+}
+
+fn is_markdown_table_separator(line: &str) -> bool {
+    line.starts_with('|') && line.ends_with('|') && line.contains("---")
+}
+
+fn is_list_line(line: &str) -> bool {
+    line.starts_with("- ")
+        || line.starts_with("* ")
+        || line.split_once(". ").is_some_and(|(prefix, _)| {
+            !prefix.is_empty() && prefix.chars().all(|ch| ch.is_ascii_digit())
+        })
+}
+
+fn normalize_display_lines(value: &str) -> String {
+    let mut output = String::new();
+    let mut blank_count = 0;
+    for line in value.lines() {
+        let line = line.trim_end();
+        if line.trim().is_empty() {
+            blank_count += 1;
+            if blank_count <= 1 {
+                output.push('\n');
+            }
+            continue;
+        }
+        blank_count = 0;
+        output.push_str(line);
+        output.push('\n');
+    }
+    output.trim_end().to_string()
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut shortened = value.chars().take(max_chars).collect::<String>();
     shortened.push_str("...");
     shortened
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_text_compacts_plain_prose() {
+        assert_eq!(display_text("hello     world", 500), "hello world");
+        assert_eq!(compact_one_line("hello\nworld"), "hello world");
+    }
+
+    #[test]
+    fn display_text_preserves_markdown_tables() {
+        let table = "| Number | Double |\n|---:|---:|\n| 1 | 2 |\n| 2 | 4 |\n";
+
+        assert_eq!(
+            display_text(table, 500),
+            "| Number | Double |\n|---:|---:|\n| 1 | 2 |\n| 2 | 4 |"
+        );
+    }
+
+    #[test]
+    fn display_text_preserves_fenced_code() {
+        let code = "```rust\nfn main() {\n    println!(\"hi\");\n}\n```";
+
+        assert_eq!(display_text(code, 500), code);
+        assert_eq!(
+            parse_agent_result_view(code).blocks,
+            vec![ResultBlock::Code {
+                language: Some("rust".to_string()),
+                text: "fn main() {\n    println!(\"hi\");\n}\n".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn result_body_multiline_starts_on_next_line() {
+        let rendered = render_agent_result_body("demo", "| A | B |\n|---|---|\n| 1 | 2 |");
+
+        assert_eq!(rendered, "demo:\n| A | B |\n|---|---|\n| 1 | 2 |\n");
+    }
 }
 
 fn activity_summary(

@@ -18,9 +18,10 @@ mod server_process;
 
 use planner::{CapoPlanner, NonePlanner, OperatorAction, Planner, PlannerDecisionAudit};
 use render::{
-    AgentRenderer, DetailsRenderer, EvidenceRenderer, RecentWorkRenderer, ReviewNeedsRenderer,
-    ToolActivityRenderer, render_agent_reply, render_dashboard, render_human_agent,
-    render_human_agent_with_marker, render_recent_work,
+    AgentRenderer, AgentResultRenderer, ConciseResultRenderer, DetailsRenderer, EvidenceRenderer,
+    RecentWorkRenderer, ReviewNeedsRenderer, ToolActivityRenderer, display_text,
+    render_agent_result_body, render_dashboard, render_human_agent, render_human_agent_with_marker,
+    render_recent_work,
 };
 use server_process::{AutoServer, ensure_server_running, require_loopback_address, server_address};
 
@@ -296,7 +297,7 @@ impl ControlRepl {
         self.attached_agent = Some(agent.clone());
         Ok(format!(
             "Attached to {agent}.\n{}",
-            render_agent_reply(&summary)
+            self.render_agent_result(&summary, ConciseResultRenderer)
         ))
     }
 
@@ -329,7 +330,7 @@ impl ControlRepl {
         let summary = self.agent_status(&agent)?;
         output.push_str(&format!("Attached to {agent}.\n"));
         if adapter != "codex" {
-            output.push_str(&render_agent_reply(&summary));
+            output.push_str(&self.render_agent_result(&summary, ConciseResultRenderer));
         }
         Ok(output)
     }
@@ -374,13 +375,13 @@ impl ControlRepl {
         };
         Ok(format!(
             "Sent to {agent}.\n{}",
-            render_agent_reply(&summary)
+            self.render_agent_result(&summary, ConciseResultRenderer)
         ))
     }
 
     fn render_live_codex_result(&self, agent: &str, run: &DispatchRunSummary) -> String {
         latest_codex_reply_from_artifact(&self.state_root, run)
-            .map(|reply| format!("{agent}: {reply}\n"))
+            .map(|reply| render_agent_result_body(agent, &reply))
             .unwrap_or_else(|| {
                 if run.status == "exited" {
                     format!("{agent}: reply captured; use `details` for artifact metadata.\n")
@@ -436,6 +437,14 @@ impl ControlRepl {
             output.push_str(&renderer.render(&agent));
         }
         Ok(output)
+    }
+
+    fn render_agent_result<R: AgentResultRenderer>(
+        &self,
+        agent: &AgentSummary,
+        renderer: R,
+    ) -> String {
+        renderer.render_result(agent)
     }
 
     fn list_agent_summaries(&mut self) -> Result<Vec<AgentSummary>, String> {
@@ -663,18 +672,7 @@ fn latest_codex_reply_from_artifact(state_root: &Path, run: &DispatchRunSummary)
         .filter(|event| event.role.as_deref() == Some("assistant"))
         .filter_map(|event| event.content)
         .find(|content| !content.trim().is_empty())
-        .map(|content| bounded_display_text(&content))
-}
-
-fn bounded_display_text(value: &str) -> String {
-    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    const MAX_CHARS: usize = 2_000;
-    if compact.chars().count() <= MAX_CHARS {
-        return compact;
-    }
-    let mut shortened = compact.chars().take(MAX_CHARS).collect::<String>();
-    shortened.push_str("...");
-    shortened
+        .map(|content| display_text(&content, 2_000))
 }
 
 fn strip_surrounding_quotes(value: &str) -> &str {
@@ -807,7 +805,7 @@ mod tests {
         std::fs::write(
             &stdout,
             r#"{"type":"thread.started","thread_id":"codex-thread-render"}
-{"type":"item.completed","thread_id":"codex-thread-render","item":{"id":"codex-item-render","role":"assistant","content":[{"type":"output_text","text":"CAPO_UI_OK"}]}}
+{"type":"item.completed","thread_id":"codex-thread-render","item":{"id":"codex-item-render","role":"assistant","content":[{"type":"output_text","text":"| Number | Double |\n|---:|---:|\n| 1 | 2 |\n| 2 | 4 |\n"}]}}
 {"type":"turn.completed","thread_id":"codex-thread-render"}
 "#,
         )
@@ -835,7 +833,7 @@ mod tests {
 
         assert_eq!(
             latest_codex_reply_from_artifact(&root, &run).as_deref(),
-            Some("CAPO_UI_OK")
+            Some("| Number | Double |\n|---:|---:|\n| 1 | 2 |\n| 2 | 4 |")
         );
         let _ = std::fs::remove_dir_all(root);
     }

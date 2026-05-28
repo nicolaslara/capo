@@ -320,3 +320,48 @@ Evidence:
 - Subagents:
   - xhigh planner reviewed the approach and recommended static dispatch, no persisted history, and removing session ids from normal tool/evidence/review output.
   - medium executor verified the `rustyline` path and focused tests without additional edits.
+
+## OC10 - Result Renderer Boundary
+
+Status: completed on 2026-05-28
+
+Acceptance:
+
+- Move the immediate agent result/reply display behind a typed renderer abstraction.
+- Preserve static dispatch for the result renderer.
+- Keep live Codex artifact rendering separate unless/until dispatch-artifact results get their own typed view model.
+- Preserve existing concise `attach`, `send`, and non-live `start` output.
+
+Evidence:
+
+- Added `AgentResultRenderer` and `ConciseResultRenderer` in `crates/capo-cli/src/operator_control/render.rs`.
+- `ControlRepl` now renders immediate agent results through `render_agent_result<R: AgentResultRenderer>(...)`.
+- Existing `RecentWorkRenderer`, `DetailsRenderer`, `ToolActivityRenderer`, `EvidenceRenderer`, and `ReviewNeedsRenderer` remain the inspection/static-dispatch path.
+
+## OC11 - Markdown Reply Rendering And Live Artifact Logs
+
+Status: completed on 2026-05-28
+
+Acceptance:
+
+- Investigate whether the `/tmp/capo-demo` state root explains the odd `workspace context is loaded, and I'm standing by` reply.
+- Preserve line breaks for structured replies such as markdown tables in immediate agent result rendering.
+- Apply the same structured display behavior to live Codex artifact replies.
+- Record the current live artifact retention gap as a follow-up finding.
+- Add deterministic tests for markdown table rendering.
+- Add a first-pass markdown parser dependency without committing the control surface to one terminal renderer.
+
+Evidence:
+
+- Inspected `/tmp/capo-demo/capo.sqlite` `events` and `adapter_dispatch_executions`; the database recorded dispatch/preflight events, content hashes, and repeated artifact ids, but not the older raw assistant text.
+- Searched `/tmp/capo-demo` for `workspace context`, `standing by`, and table text. Only the latest table reply remained in `control-live-artifacts/run-session-ui-demo-8b7e52f4b93ea487/stdout.txt`, with newlines preserved in the Codex JSONL artifact.
+- Confirmed `adapter_dispatch_executions` reused `artifact-runtime-run-session-ui-demo-8b7e52f4b93ea487-stdout` and the same `stdout.txt` path across multiple turns, so prior turn raw output was overwritten.
+- Added shared display helpers in `crates/capo-cli/src/operator_control/render.rs` to keep concise prose compact while preserving markdown-shaped multiline output.
+- Added `pulldown-cmark` as the first parser for `AgentResultView` classification, including markdown and fenced code detection.
+- Left code comments naming future renderer/parser alternatives: `comrak`, `markdown-to-ansi`, `termimad`, `syntect`, and `ratatui`/`tui-markdown`.
+- Updated live Codex rendering in `crates/capo-cli/src/operator_control.rs` to use the same result-body formatting and structured display helper.
+- Added deterministic coverage:
+  - `cargo fmt --check`
+  - `cargo test -p capo-cli operator_control -- --nocapture`
+  - `cargo test -p capo-cli --test server_transport control -- --nocapture`
+  - `git diff --check`

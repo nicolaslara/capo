@@ -23,5 +23,6 @@ capo-state.workspace = true
 capo-tools.workspace = true
 capo-voice.workspace = true
 capo-workpads.workspace = true
+pulldown-cmark = "0.13.4"
 rustyline = "15.0.0"
 serde_json = "1.0.150"
