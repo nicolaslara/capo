@@ -486,6 +486,32 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     shortened
 }
 
+fn activity_summary(
+    tool_calls: usize,
+    memory_packets: usize,
+    evidence: usize,
+    reviews: usize,
+) -> String {
+    let mut parts = Vec::new();
+    if tool_calls > 0 {
+        parts.push(format!("{tool_calls} tools"));
+    }
+    if memory_packets > 0 {
+        parts.push(format!("{memory_packets} memories"));
+    }
+    if evidence > 0 {
+        parts.push(format!("{evidence} evidence"));
+    }
+    if reviews > 0 {
+        parts.push(format!("{reviews} reviews"));
+    }
+    if parts.is_empty() {
+        "idle".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,31 +551,5 @@ mod tests {
         let rendered = render_agent_result_body("demo", "| A | B |\n|---|---|\n| 1 | 2 |");
 
         assert_eq!(rendered, "demo:\n| A | B |\n|---|---|\n| 1 | 2 |\n");
-    }
-}
-
-fn activity_summary(
-    tool_calls: usize,
-    memory_packets: usize,
-    evidence: usize,
-    reviews: usize,
-) -> String {
-    let mut parts = Vec::new();
-    if tool_calls > 0 {
-        parts.push(format!("{tool_calls} tools"));
-    }
-    if memory_packets > 0 {
-        parts.push(format!("{memory_packets} memories"));
-    }
-    if evidence > 0 {
-        parts.push(format!("{evidence} evidence"));
-    }
-    if reviews > 0 {
-        parts.push(format!("{reviews} reviews"));
-    }
-    if parts.is_empty() {
-        "idle".to_string()
-    } else {
-        parts.join(", ")
     }
 }

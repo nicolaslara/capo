@@ -6,9 +6,9 @@ Read top to bottom. The **first unchecked** item is the active workpad unless No
 
 ## Active Now
 
-**operator-control** - Build the human operator interaction loop for running Capo agents, starting with a no-planner command REPL over the server boundary.
+**goal-orchestration** - Add Capo-owned goal lifecycle, agent reporting, evidence/story projections, continuation scheduling, validation, and historical execution reports after operator-control closure.
 
-**Next planned:** **goal-orchestration** - Add Capo-owned goal lifecycle, agent reporting, evidence/story projections, continuation scheduling, validation, and historical execution reports after operator-control closes.
+**Future planned:** **dashboard-webclient** - Build a browser dashboard/web client through a design-review-acceptance-implementation-screenshot-iteration loop.
 
 ## Workpad Queue
 
@@ -20,8 +20,9 @@ Read top to bottom. The **first unchecked** item is the active workpad unless No
 - [x] **scaffold** - Align the implemented scaffold with the intended product spine before more breadth: Capo server/control plane, ACP-tracked agents, simple DB-backed project memory, minimal CLI client, deterministic e2e tests (completed 2026-05-26)
 - [x] **server** - Implement the server/control plane, CLI-through-server path, mocked-agent tests, and Codex-backed proof (completed 2026-05-27).
 - [x] **harness-research** - Research spike on modern coding-agent harness practice and whether ACP is enough (completed 2026-05-28).
-- [ ] **operator-control** - Create a human operator REPL/control surface for inspecting and steering running agents through the Capo server, with planner modes starting at `none`.
+- [x] **operator-control** - Create a human operator REPL/control surface for inspecting and steering running agents through the Capo server, with planner modes starting at `none` (completed 2026-05-28).
 - [ ] **goal-orchestration** - Add Capo-owned goals, agent-native reporting, evidence/review/validation ledgers, event-driven continuation, and execution-history reports.
+- [ ] **dashboard-webclient** - Build a browser dashboard/web client for Capo with explicit design review, accepted design, implementation, screenshot review, and visual iteration gates.
 
 ## Notes
 
@@ -40,5 +41,6 @@ Read top to bottom. The **first unchecked** item is the active workpad unless No
 - Server work should make the product-spine real: a durable Capo process owns controller/state/query behavior; local CLI commands become clients of that process; agent interactions are tested deterministically with mocked agents before proving Codex behind the same boundary.
 - Server milestone completed 2026-05-27: loopback server, CLI-through-server control, mocked-agent tests, mocked Codex live-run tests, and manual real Codex smoke through the running server are recorded in `workpads/server/tasks.md`.
 - Harness research spike completed 2026-05-28: ACP remains the preferred agent/protocol boundary, but the best harnesses add controller-owned runtime, permission, tool instrumentation, checkpoint/recovery, context/memory, evaluation, observability, and multi-client/server layers around it. See `workpads/harness-research/knowledge.md`.
-- Operator-control work should make the server usable by a human without memorizing low-level dispatch commands. Start with a no-planner REPL that composes existing server commands; later planner modes may use Codex, Capo, or local models to choose tools/actions.
-- Goal-orchestration should be the next controller feature after operator-control closes. It applies the harness-research lesson that Capo owns the outer loop: goals, reporting, evidence, validation, continuation, story projections, and historical reports belong in the server/controller, while provider-native goal modes are optional delegated inner loops.
+- Operator-control completed 2026-05-28. The local control loop is usable through the server boundary with default `--planner none`, tracked deterministic `capo-operator` mode, live-gated Codex, concise rendering, Markdown/code display preservation, and completion audit in `workpads/operator-control/completion-audit.md`.
+- Goal-orchestration is the active controller feature after operator-control closure. It applies the harness-research lesson that Capo owns the outer loop: goals, reporting, evidence, validation, continuation, story projections, and historical reports belong in the server/controller, while provider-native goal modes are optional delegated inner loops.
+- Dashboard-webclient should build on the existing shared dashboard/query work rather than replacing it. The web client is an input/rendering surface: it must consume server/query contracts, avoid owning orchestration state, and pass through a design review plus screenshot iteration loop before completion.

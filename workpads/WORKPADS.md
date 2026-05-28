@@ -14,8 +14,9 @@
 | **scaffold** | Complete | Completed 2026-05-26 — product-spine alignment, project-memory aliases, deterministic scaffold proofs |
 | **server** | Complete | Completed 2026-05-27 - Capo server/control plane, CLI-through-server path, mocked-agent tests, mocked Codex path, and manual real Codex smoke |
 | **harness-research** | Complete | Completed 2026-05-28 - best practices for coding-agent harnesses and ACP's role as adapter boundary |
-| **operator-control** | **Active** | Build a human operator REPL/control surface for inspecting and steering running agents through the server |
-| **goal-orchestration** | Planned | Add Capo-owned goals, agent-native reporting, evidence/story projections, continuation scheduling, validation, and historical execution reports |
+| **operator-control** | Complete | Completed 2026-05-28 - human operator REPL/control surface, tracked deterministic operator-agent mode, and live-gated Codex control |
+| **goal-orchestration** | **Active** | Add Capo-owned goals, agent-native reporting, evidence/story projections, continuation scheduling, validation, and historical execution reports |
+| **dashboard-webclient** | Planned | Build a browser dashboard/web client through design review, accepted design, implementation, screenshot review, and iteration |
 
 ## research
 
@@ -339,7 +340,7 @@ workpads/architecture/prototype-plan.md
 
 ## operator-control
 
-**Status:** Active.
+**Status:** Complete. Completed 2026-05-28.
 
 **Prerequisites:** Server/control-plane milestone completed 2026-05-27.
 
@@ -376,7 +377,7 @@ workpads/server/knowledge.md
 
 ## goal-orchestration
 
-**Status:** Planned. Intended next controller workpad after operator-control is closed.
+**Status:** Active. Started after operator-control closure on 2026-05-28.
 
 **Prerequisites:** Server/control-plane milestone completed, harness-research completed, and operator-control sufficiently stable to inspect goal/report/story state through the server boundary.
 
@@ -419,6 +420,55 @@ workpads/architecture/prototype-plan.md
 - Provider-native goal modes such as Codex `/goal` are delegated inner loops; Capo still mirrors the objective, observes events, and audits completion.
 - Do not add autonomous continuation until goal state, report/evidence records, stop policy, and mocked replay tests exist.
 - Historical reports must be rebuildable from events, projections, and artifacts.
+
+## dashboard-webclient
+
+**Status:** Planned. Intended after goal-orchestration by default, unless the user explicitly pulls forward an earlier web shell/scaffold slice.
+
+**Prerequisites:** Server/control-plane milestone complete, shared dashboard/query contract available, operator-control usable as the CLI comparison surface. Rich goal/story views depend on goal-orchestration projections.
+
+**Objective:** Build a browser dashboard/web client for Capo that lets an operator understand projects, agents, sessions, goals, evidence, validation, reviews, and execution history without reading terminal/debug output. The workpad requires explicit design, design review, accepted design, implementation, screenshot review, and iteration until the UI works and looks good.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/dashboard-webclient/tasks.md
+workpads/dashboard-webclient/knowledge.md
+workpads/dashboard-webclient/references.md
+workpads/features/dashboard.md
+workpads/operator-control/knowledge.md
+workpads/goal-orchestration/knowledge.md
+workpads/server/knowledge.md
+workpads/architecture/boundaries.md
+workpads/architecture/state-model.md
+workpads/architecture/acp-replay-dedupe.md
+workpads/architecture/capability-permissions.md
+workpads/architecture/runtime-tunnel.md
+workpads/architecture/protocol-provider.md
+workpads/architecture/tool-exposure.md
+workpads/architecture/memory-architecture.md
+workpads/architecture/prototype-plan.md
+```
+
+**Quick nav:**
+
+- `tasks.md` design-to-implementation task sequence and visual QA gates.
+- `knowledge.md` design principles, UX model, review policy, screenshot loop, and non-goals.
+- `references.md` local source links and visual QA evidence requirements.
+
+**Rules:**
+
+- The web client is a client/input surface. It must not own controller,
+  scheduler, runtime, permission, or provider state.
+- Consume server/query/read-model APIs; do not read SQLite, artifacts, or raw
+  provider logs directly from frontend code.
+- Start with dense, operational UI rather than a marketing/landing page.
+- Use screenshots and browser checks as required acceptance evidence.
+- Iterate visual design until desktop and mobile layouts are usable, readable,
+  and free of obvious overlap, truncation, or broken states.
 
 ## How To Switch Focus
 

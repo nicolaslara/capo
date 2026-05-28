@@ -16,7 +16,10 @@ mod planner;
 mod render;
 mod server_process;
 
-use planner::{CapoPlanner, NonePlanner, OperatorAction, Planner, PlannerDecisionAudit};
+use planner::{
+    CapoPlanner, NonePlanner, OperatorAction, Planner, PlannerDecision, PlannerDecisionAudit,
+    plan_from_llm_reply,
+};
 use render::{
     AgentRenderer, AgentResultRenderer, ConciseResultRenderer, DetailsRenderer, EvidenceRenderer,
     RecentWorkRenderer, ReviewNeedsRenderer, ToolActivityRenderer, display_text,
@@ -26,6 +29,7 @@ use render::{
 use server_process::{AutoServer, ensure_server_running, require_loopback_address, server_address};
 
 pub(crate) fn operator_control(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    reject_unknown_control_flags(args)?;
     let planner = control_planner(args)?;
     let address = server_address(args)?;
     require_loopback_address(&address)?;
@@ -41,6 +45,24 @@ pub(crate) fn operator_control(parsed: &ParsedArgs, args: &[String]) -> Result<S
             .map_err(debug_error)?;
         repl.run_script(&script)
     }
+}
+
+fn reject_unknown_control_flags(args: &[String]) -> Result<(), String> {
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--planner" | "--connect" | "--state" => {
+                index += 2;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("unknown control option: {flag}"));
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+    Ok(())
 }
 
 const CAPO_PLANNER_AGENT: &str = "capo-operator";
@@ -142,13 +164,8 @@ impl ControlRepl {
             Ok(decision) if decision.action == OperatorAction::Quit => {
                 return LineResult::Quit("bye\n".to_string());
             }
-            Ok(decision) => {
-                if let Err(error) = self.audit_planner_decision(line, decision.audit.as_ref()) {
-                    Err(error)
-                } else {
-                    self.execute(decision.action)
-                }
-            }
+            Ok(decision) => self.execute_planner_decision(line, decision),
+            Err(_) if self.planner.mode() == "capo" => self.plan_with_operator_agent(line),
             Err(_) if self.should_direct_send(line) => self.send(None, line.to_string()),
             Err(error) => Ok(format!("error: {error}\n")),
         };
@@ -174,21 +191,137 @@ impl ControlRepl {
             }
         }
         let planner_status = self.agent_status(CAPO_PLANNER_AGENT)?;
-        if planner_status.session.is_none() {
-            let response = self.send_request(ServerCommand::StartSession {
+        let planner_adapter = planner_status
+            .session
+            .as_ref()
+            .and_then(|session| session.adapter_kind.as_deref());
+        if planner_adapter.is_some() && planner_adapter != Some("codex_exec") {
+            let response = self.send_request(ServerCommand::StopAgent {
                 agent_name: CAPO_PLANNER_AGENT.to_string(),
-                goal: "Capo operator planner mode: inspect operator input and choose server-backed actions".to_string(),
-                adapter: "acp".to_string(),
-                session_id: None,
-                run_id: None,
+                reason: "restart capo-operator with codex planner provider".to_string(),
             })?;
-            if !matches!(response, ServerResponsePayload::SessionStarted(_)) {
-                return Err(
-                    "server returned unexpected response for planner session start".to_string(),
-                );
+            if !matches!(response, ServerResponsePayload::AgentStatus(_)) {
+                return Err("server returned unexpected response for planner restart".to_string());
             }
         }
+        let planner_status = self.agent_status(CAPO_PLANNER_AGENT)?;
+        if planner_status.session.is_none() {
+            self.start_agent_session(
+                CAPO_PLANNER_AGENT,
+                "codex",
+                "Capo operator planner mode: use Codex to map operator input into validated server-backed actions",
+            )?;
+        }
         Ok(())
+    }
+
+    fn execute_planner_decision(
+        &mut self,
+        line: &str,
+        decision: PlannerDecision,
+    ) -> Result<String, String> {
+        if let Err(error) = self.audit_planner_decision(line, decision.audit.as_ref()) {
+            Err(error)
+        } else {
+            self.execute(decision.action)
+        }
+    }
+
+    fn plan_with_operator_agent(&mut self, line: &str) -> Result<String, String> {
+        let provider =
+            std::env::var("CAPO_CONTROL_PLANNER_PROVIDER").unwrap_or_else(|_| "codex".to_string());
+        if provider != "codex" {
+            return Err(format!(
+                "unsupported capo planner provider: {provider}; supported providers: codex"
+            ));
+        }
+        let prompt = self.operator_planner_prompt(line)?;
+        let summary = self.agent_status(CAPO_PLANNER_AGENT)?;
+        let session = summary
+            .session
+            .as_ref()
+            .ok_or_else(|| "capo-operator has no planner session".to_string())?;
+        let mock_jsonl = std::env::var("CAPO_CONTROL_PLANNER_MOCK_CODEX_JSONL").ok();
+        let run = self.run_codex_live_turn_with_options(
+            CAPO_PLANNER_AGENT,
+            &prompt,
+            &session.session_id.to_string(),
+            &session
+                .run_id
+                .as_ref()
+                .ok_or_else(|| "capo-operator has no active planner run".to_string())?
+                .to_string(),
+            mock_jsonl.as_deref(),
+            90,
+        )?;
+        let reply = if let Some(jsonl) = mock_jsonl.as_deref() {
+            latest_codex_reply_from_jsonl(jsonl)
+        } else {
+            latest_codex_reply_from_artifact(&self.state_root, &run)
+        }
+        .ok_or_else(|| "capo planner Codex run produced no assistant action".to_string())?;
+        let decision = plan_from_llm_reply(&reply)?;
+        self.execute_planner_decision(line, decision)
+    }
+
+    fn operator_planner_prompt(&mut self, line: &str) -> Result<String, String> {
+        let agents = self.list_agent_summaries()?;
+        let mut roster = String::new();
+        for agent in agents {
+            if agent.name == CAPO_PLANNER_AGENT {
+                continue;
+            }
+            let status = agent
+                .session
+                .as_ref()
+                .and_then(|session| {
+                    session
+                        .dispatch_execution_status
+                        .as_deref()
+                        .or(session.run_status.as_deref())
+                })
+                .unwrap_or("idle");
+            roster.push_str(&format!("- {}: {status}\n", agent.name));
+        }
+        if roster.is_empty() {
+            roster.push_str("- none\n");
+        }
+        Ok(format!(
+            "\
+You are Capo's operator agent. Convert the operator input into exactly one JSON object.
+Do not include prose, Markdown, or code fences.
+
+Known agents:
+{roster}
+Attached agent: {attached}
+
+Allowed actions:
+- {{\"action\":\"dashboard\",\"summary\":\"...\"}}
+- {{\"action\":\"list_agents\",\"summary\":\"...\"}}
+- {{\"action\":\"status\",\"agent\":\"AGENT\",\"summary\":\"...\"}}
+- {{\"action\":\"recent_work\",\"agent\":\"AGENT\",\"summary\":\"...\"}}
+- {{\"action\":\"details\",\"agent\":\"AGENT\",\"summary\":\"...\"}}
+- {{\"action\":\"tool_activity\",\"agent\":\"AGENT\",\"summary\":\"...\"}}
+- {{\"action\":\"evidence\",\"agent\":\"AGENT\",\"summary\":\"...\"}}
+- {{\"action\":\"review_needs\",\"agent\":\"AGENT\",\"summary\":\"...\"}}
+- {{\"action\":\"attach\",\"agent\":\"AGENT\",\"summary\":\"...\"}}
+- {{\"action\":\"send\",\"agent\":\"AGENT\",\"message\":\"MESSAGE\",\"summary\":\"...\"}}
+- {{\"action\":\"interrupt\",\"agent\":\"AGENT\",\"reason\":\"REASON\",\"summary\":\"...\"}}
+- {{\"action\":\"stop\",\"agent\":\"AGENT\",\"reason\":\"REASON\",\"summary\":\"...\"}}
+- {{\"action\":\"help\",\"summary\":\"...\"}}
+- {{\"action\":\"unknown\",\"message\":\"ask the operator for a clearer request\",\"summary\":\"...\"}}
+
+Rules:
+- Use only listed agents for agent-specific actions.
+- Do not invent agents.
+- For casual greetings or vague prompts like \"what's up?\", choose dashboard.
+- For requests to tell, ask, instruct, or have an agent do work, choose send.
+- If a mutation is unclear or unsafe, choose unknown.
+
+Operator input: {line}
+",
+            attached = self.attached_agent.as_deref().unwrap_or("none")
+        ))
     }
 
     fn audit_planner_decision(
@@ -499,6 +632,18 @@ impl ControlRepl {
         session_id: &str,
         run_id: &str,
     ) -> Result<capo_server::DispatchRunSummary, String> {
+        self.run_codex_live_turn_with_options(agent, goal, session_id, run_id, None, 300)
+    }
+
+    fn run_codex_live_turn_with_options(
+        &mut self,
+        agent: &str,
+        goal: &str,
+        session_id: &str,
+        run_id: &str,
+        mock_provider_output_jsonl: Option<&str>,
+        timeout_seconds: u64,
+    ) -> Result<capo_server::DispatchRunSummary, String> {
         let turn_id = format!("turn-{}-{}", slug(agent), stable_cli_hash(goal));
         let workspace = std::env::current_dir()
             .map_err(debug_error)?
@@ -532,11 +677,12 @@ impl ControlRepl {
         let run = self.send_request(ServerCommand::RunLiveProviderLocal {
             dispatch_plan_id: preflight.dispatch_plan_id,
             goal: goal.to_string(),
-            live_execution_opt_in: true,
-            mock_runtime_opt_in: false,
-            mock_provider_output_name: None,
-            mock_provider_output_jsonl: None,
-            timeout_seconds: 300,
+            live_execution_opt_in: mock_provider_output_jsonl.is_none(),
+            mock_runtime_opt_in: mock_provider_output_jsonl.is_some(),
+            mock_provider_output_name: mock_provider_output_jsonl
+                .map(|_| "capo-control-planner-mock-codex.jsonl".to_string()),
+            mock_provider_output_jsonl: mock_provider_output_jsonl.map(ToString::to_string),
+            timeout_seconds,
         })?;
         let ServerResponsePayload::DispatchRun(run) = run else {
             return Err("server returned unexpected response for Codex live run".to_string());
@@ -649,6 +795,7 @@ Commands:
   quit | exit
 
 When attached, ordinary text is sent directly to the attached agent.
+Run `capo control --planner capo` for the tracked `capo-operator` agent. It uses Codex as the first LLM planner backend, validates the selected action, and executes only known server-backed actions. `CAPO_CONTROL_PLANNER_PROVIDER=codex` is the current/default provider; future providers such as local Gemma can implement the same boundary.
 Codex agents require starting control with CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 and CAPO_SERVER_RUN_CODEX_LIVE=1.
 Use `details` when you need session ids, run ids, dispatch ids, and raw policy metadata.
 "
@@ -664,7 +811,11 @@ fn latest_codex_reply_from_artifact(state_root: &Path, run: &DispatchRunSummary)
         .join(run.run_id.as_str())
         .join("stdout.txt");
     let content = std::fs::read_to_string(stdout).ok()?;
-    let parsed = CodexExecAdapter::parse_jsonl(&content).ok()?;
+    latest_codex_reply_from_jsonl(&content)
+}
+
+fn latest_codex_reply_from_jsonl(content: &str) -> Option<String> {
+    let parsed = CodexExecAdapter::parse_jsonl(content).ok()?;
     parsed
         .deduped_by_idempotency()
         .into_iter()
@@ -776,6 +927,13 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.contains("unsupported planner: codex"));
+    }
+
+    #[test]
+    fn unknown_control_flags_are_rejected_before_defaulting_planner() {
+        let error = reject_unknown_control_flags(&["--planer".to_string(), "capo".to_string()])
+            .expect_err("unknown flag should fail");
+        assert!(error.contains("unknown control option: --planer"));
     }
 
     #[test]

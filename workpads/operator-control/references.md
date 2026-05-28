@@ -24,6 +24,7 @@ Track local and external references used for the operator REPL/control surface.
 - `crates/capo-cli/tests/server_transport/basic.rs` - scripted control-loop integration test against a running server process.
 - `README.md` - current human-facing commands for server and operator control usage.
 - `workpads/operator-control/planner-boundary.md` - planner mode semantics, future tool surface, safety rules, and audit/display requirements.
+- `workpads/operator-control/completion-audit.md` - closure audit proving operator-control is complete enough to hand off to goal-orchestration.
 
 ## External / Prior-Art Inspirations
 

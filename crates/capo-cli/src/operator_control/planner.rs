@@ -1,3 +1,5 @@
+use serde_json::Value;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum OperatorAction {
     Help,
@@ -92,6 +94,121 @@ impl PlannerDecision {
             }),
         }
     }
+}
+
+pub(super) fn plan_from_llm_reply(reply: &str) -> Result<PlannerDecision, String> {
+    let json = extract_json_object(reply)
+        .ok_or_else(|| "capo planner LLM did not return a JSON action object".to_string())?;
+    let value = serde_json::from_str::<Value>(json)
+        .map_err(|error| format!("capo planner LLM returned invalid JSON: {error}"))?;
+    let action = value
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let summary = value
+        .get("summary")
+        .and_then(Value::as_str)
+        .unwrap_or("LLM planner selected a server-backed operator action");
+    match action {
+        "help" => Ok(PlannerDecision::audited(OperatorAction::Help, summary)),
+        "list_agents" => Ok(PlannerDecision::audited(
+            OperatorAction::ListAgents,
+            summary,
+        )),
+        "dashboard" => Ok(PlannerDecision::audited(OperatorAction::Dashboard, summary)),
+        "status" => Ok(PlannerDecision::audited(
+            OperatorAction::Status {
+                agent: optional_field(&value, "agent"),
+            },
+            summary,
+        )),
+        "recent_work" | "recent" | "result" => Ok(PlannerDecision::audited(
+            OperatorAction::RecentWork {
+                agent: optional_field(&value, "agent"),
+            },
+            summary,
+        )),
+        "details" => Ok(PlannerDecision::audited(
+            OperatorAction::Details {
+                agent: optional_field(&value, "agent"),
+            },
+            summary,
+        )),
+        "tool_activity" | "tools" => Ok(PlannerDecision::audited(
+            OperatorAction::ToolActivity {
+                agent: optional_field(&value, "agent"),
+            },
+            summary,
+        )),
+        "evidence" => Ok(PlannerDecision::audited(
+            OperatorAction::Evidence {
+                agent: optional_field(&value, "agent"),
+            },
+            summary,
+        )),
+        "review_needs" | "reviews" => Ok(PlannerDecision::audited(
+            OperatorAction::ReviewNeeds {
+                agent: optional_field(&value, "agent"),
+            },
+            summary,
+        )),
+        "attach" => Ok(PlannerDecision::audited(
+            OperatorAction::Attach {
+                agent: required_field(&value, "agent", action)?,
+            },
+            summary,
+        )),
+        "send" => Ok(PlannerDecision::audited(
+            OperatorAction::Send {
+                agent: Some(required_field(&value, "agent", action)?),
+                message: required_field(&value, "message", action)?,
+            },
+            summary,
+        )),
+        "interrupt" => Ok(PlannerDecision::audited(
+            OperatorAction::Interrupt {
+                agent: optional_field(&value, "agent"),
+                reason: required_field(&value, "reason", action)?,
+            },
+            summary,
+        )),
+        "stop" => Ok(PlannerDecision::audited(
+            OperatorAction::Stop {
+                agent: optional_field(&value, "agent"),
+                reason: required_field(&value, "reason", action)?,
+            },
+            summary,
+        )),
+        "unknown" => Err(value
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("capo planner could not map that input")
+            .to_string()),
+        other => Err(format!(
+            "capo planner LLM selected unsupported action: {other}"
+        )),
+    }
+}
+
+fn extract_json_object(value: &str) -> Option<&str> {
+    let start = value.find('{')?;
+    let end = value.rfind('}')?;
+    (end >= start).then_some(&value[start..=end])
+}
+
+fn optional_field(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn required_field(value: &Value, key: &str, action: &str) -> Result<String, String> {
+    optional_field(value, key).ok_or_else(|| {
+        format!("capo planner LLM action `{action}` is missing required field `{key}`")
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -205,8 +322,16 @@ fn parse_capo_intent(line: &str) -> Result<PlannerDecision, String> {
     let line = line.trim();
     let normalized = line.to_ascii_lowercase();
     match normalized.as_str() {
-        "what happened?" | "what happened" | "what has happened?" | "what has happened"
-        | "what's happened?" | "what's happened" => {
+        "what happened?"
+        | "what happened"
+        | "what has happened?"
+        | "what has happened"
+        | "what's happened?"
+        | "what's happened"
+        | "what are my agents doing?"
+        | "what are my agents doing"
+        | "what are the agents doing?"
+        | "what are the agents doing" => {
             return Ok(PlannerDecision::audited(
                 OperatorAction::Dashboard,
                 "operator asked for a recent state overview",
@@ -238,10 +363,27 @@ fn parse_capo_intent(line: &str) -> Result<PlannerDecision, String> {
             ));
         }
     }
+    if let Some(agent) = line.strip_prefix("summarize ") {
+        let agent = agent.trim();
+        if !agent.is_empty() {
+            return Ok(PlannerDecision::audited(
+                OperatorAction::RecentWork {
+                    agent: Some(agent.to_string()),
+                },
+                "operator asked for one agent's recent work",
+            ));
+        }
+    }
     if let Some(after_steer) = line.strip_prefix("steer ") {
         return parse_capo_steer(after_steer);
     }
-    Err("capo planner could not map that input; try `help`, `what happened?`, `what is blocked?`, or `steer AGENT to ...`".to_string())
+    if let Some(after_tell) = line
+        .strip_prefix("tell ")
+        .or_else(|| line.strip_prefix("ask "))
+    {
+        return parse_capo_steer(after_tell);
+    }
+    Err("capo planner could not map that input; try `help`, `what are my agents doing?`, `what is blocked?`, `summarize AGENT`, or `tell AGENT to ...`".to_string())
 }
 
 fn parse_capo_steer(after_steer: &str) -> Result<PlannerDecision, String> {
@@ -492,14 +634,68 @@ mod tests {
             }
         );
         assert!(decision.audit.expect("audit").mutation);
+
+        let decision = planner
+            .plan("tell mock-control to Run the checks")
+            .expect("planned natural steering");
+        assert_eq!(
+            decision.action,
+            OperatorAction::Send {
+                agent: Some("mock-control".to_string()),
+                message: "Run the checks".to_string()
+            }
+        );
+
+        let decision = planner
+            .plan("what are my agents doing?")
+            .expect("planned agent overview");
+        assert_eq!(decision.action, OperatorAction::Dashboard);
+
+        let decision = planner
+            .plan("summarize mock-control")
+            .expect("planned recent work");
+        assert_eq!(
+            decision.action,
+            OperatorAction::RecentWork {
+                agent: Some("mock-control".to_string())
+            }
+        );
     }
 
     #[test]
-    fn capo_planner_rejects_implicit_mutations() {
+    fn capo_planner_rejects_ambiguous_mutations() {
         let planner = CapoPlanner;
         let error = planner
-            .plan("tell mock-control to continue")
-            .expect_err("implicit steering should fail closed");
+            .plan("please make mock-control continue")
+            .expect_err("ambiguous steering should fail closed");
         assert!(error.contains("could not map"));
+    }
+
+    #[test]
+    fn llm_reply_maps_to_validated_operator_action() {
+        let decision = plan_from_llm_reply(
+            r#"{"action":"send","agent":"mock-control","message":"Please continue","summary":"operator asked mock-control to continue"}"#,
+        )
+        .expect("llm action");
+
+        assert_eq!(
+            decision.action,
+            OperatorAction::Send {
+                agent: Some("mock-control".to_string()),
+                message: "Please continue".to_string()
+            }
+        );
+        assert!(decision.audit.expect("audit").mutation);
+    }
+
+    #[test]
+    fn llm_reply_rejects_unsupported_or_incomplete_action() {
+        let error = plan_from_llm_reply(r#"{"action":"send","agent":"mock-control"}"#)
+            .expect_err("missing message should fail");
+        assert!(error.contains("missing required field `message`"));
+
+        let error = plan_from_llm_reply(r#"{"action":"delete_everything"}"#)
+            .expect_err("unsupported action should fail");
+        assert!(error.contains("unsupported action"));
     }
 }

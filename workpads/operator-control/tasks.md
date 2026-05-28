@@ -386,3 +386,62 @@ Evidence:
   - `git diff --check`
   - `cargo run -p capo-cli --bin capo -- --help`
   - `printf '%s\n' 'quit' | CAPO_STATE=/tmp/capo-readme-verify cargo run -p capo-cli --bin capo --` (rerun outside sandbox after the sandbox blocked loopback server autostart with `Operation not permitted`; observed `Capo`, `server started`, and `bye`)
+
+## OC13 - LLM-Backed Capo Operator Agent Closure
+
+Status: completed on 2026-05-28
+
+Acceptance:
+
+- Make `--planner capo` explicit as Capo's first tracked operator-agent slice.
+- Keep the default `capo` / `capo control` path deterministic with planner `none` unless the operator opts into `--planner capo`.
+- Use an LLM planner backend for free-form operator input, starting with Codex for simplicity.
+- Keep the backend configurable so a fast local model such as Gemma can replace Codex later.
+- Validate LLM output against a small action schema before executing anything.
+- Preserve safe mutation routing: operator-agent actions must lower into typed server commands and remain audited in Capo state.
+- Make the mode discoverable in `help` and README docs.
+
+Evidence:
+
+- `--planner capo` prepares a tracked `capo-operator` Codex-backed session through the server boundary before handling operator-agent input.
+- Exact commands and known safe intents still parse locally, but unknown/free-form operator input falls back to the Codex planner backend.
+- Codex planner prompts include the current agent roster and require one JSON action object.
+- Capo validates the returned action before execution through `plan_from_llm_reply`.
+- Supported actions include dashboard/list/status/recent/details/tools/evidence/reviews/attach/send/interrupt/stop/help/unknown.
+- Unsupported actions and incomplete mutation actions fail closed.
+- `CAPO_CONTROL_PLANNER_PROVIDER=codex` is the current/default provider seam for future Gemma/local-model support.
+- Planner decisions are audited by steering `capo-operator` with a redacted input hash and decision summary.
+- `help` and `README.md` document `capo control --planner capo` as a tracked Codex-backed operator-agent mode.
+- Deterministic coverage:
+  - `cargo test -p capo-cli operator_control -- --nocapture`
+  - `cargo test -p capo-cli --test server_transport capo_planner_tracks_decisions_as_server_state_and_steers_mock_agent -- --nocapture`
+- Real manual check:
+  - `cargo build -p capo-cli`
+  - `printf '%s\n' "what's up?" 'quit' | ./target/debug/capo control --planner capo --state /tmp/capo-planner-live-manual`
+  - Observed `Dashboard`, `agents: 1`, and `capo-operator - finished`.
+  - Verified `/tmp/capo-planner-live-manual/control-live-artifacts/.../stdout.txt` contained Codex JSON action output: `{"action":"dashboard","summary":"Show the dashboard overview."}`.
+
+## OC14 - Operator-Control Completion Audit
+
+Status: completed on 2026-05-28
+
+Acceptance:
+
+- Audit every operator-control task and the workpad objective against current files/tests.
+- Verify the implemented CLI still satisfies the active workpad objective.
+- Confirm remaining open questions are future work rather than blockers for closing operator-control.
+- Move the active queue from `operator-control` to `goal-orchestration` only after evidence supports closure.
+
+Evidence:
+
+- Added `workpads/operator-control/completion-audit.md`.
+- Verified all operator-control tasks OC0 through OC14 are completed with recorded evidence.
+- Verification passed:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test`
+  - `git diff --check`
+- Manual real Codex planner smoke passed:
+  - `printf '%s\n' "what's up?" 'quit' | ./target/debug/capo control --planner capo --state /tmp/capo-planner-live-manual`
+- Updated `TASKS.md` to mark `operator-control` complete and make `goal-orchestration` active.
+- Updated `workpads/WORKPADS.md` status from active `operator-control` to active `goal-orchestration`.

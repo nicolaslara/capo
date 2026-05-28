@@ -322,7 +322,7 @@ quit
 #[test]
 fn capo_planner_tracks_decisions_as_server_state_and_steers_mock_agent() {
     let state_root = temp_root("control-capo-planner-state");
-    let mut server = spawn_server(&state_root, 17);
+    let mut server = spawn_server(&state_root, 26);
     let stdout = server.stdout.take().expect("server stdout");
     let mut reader = BufReader::new(stdout);
     let address = read_server_address(&mut reader);
@@ -357,10 +357,12 @@ fn capo_planner_tracks_decisions_as_server_state_and_steers_mock_agent() {
     assert!(send.contains("server_task_sent=true"));
 
     let script = "\
-list agents
+what are my agents doing?
+what's up?
 status of mock-control
-steer mock-control to Please continue under planner control
+tell mock-control to Please continue under planner control
 what is blocked?
+summarize mock-control
 recent capo-operator
 quit
 ";
@@ -374,11 +376,17 @@ quit
             "--state",
             &state,
         ],
-        [],
+        [(
+            "CAPO_CONTROL_PLANNER_MOCK_CODEX_JSONL",
+            r#"{"type":"item.completed","item":{"id":"planner-item-1","type":"agent_message","text":"{\"action\":\"dashboard\",\"summary\":\"operator asked a casual status question\"}"}}
+{"type":"turn.completed"}
+"#,
+        )],
         script,
     );
     assert!(output.contains("Capo"));
-    assert!(output.contains("Agents (2)"));
+    assert!(output.contains("Dashboard"));
+    assert!(output.contains("agents: 2"));
     assert!(output.contains("- capo-operator"));
     assert!(output.contains("Status\n- mock-control"));
     assert!(output.contains("Sent to mock-control"));

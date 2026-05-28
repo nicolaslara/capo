@@ -28,6 +28,7 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 | `workpads/server/tasks.md` | Server/control-plane tasks: server-owned agent tracking, CLI client path, mocked-agent and Codex proofs |
 | `workpads/operator-control/tasks.md` | Human operator control loop tasks: REPL, planner modes, attach/jump agent context, command rendering |
 | `workpads/goal-orchestration/tasks.md` | Capo-owned goal lifecycle, agent reporting, evidence/story projections, continuation, validation, and historical reports |
+| `workpads/dashboard-webclient/tasks.md` | Browser dashboard/web client tasks: design, review, acceptance, implementation, screenshot review, and iteration |
 | `.cursor/commands/next.md` / `.opencode/commands/next.md` | `/next` task-execution command |
 | `.agents/skills/next/SKILL.md` | Codex `$next` task-execution skill |
 
@@ -42,10 +43,11 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 7. If active workpad is `server`, confirm scaffold alignment is complete and keep work focused on server-owned orchestration before richer clients.
 8. If active workpad is `operator-control`, confirm the server milestone is complete and keep work focused on human input/client surfaces that use the server boundary.
 9. If active workpad is `goal-orchestration`, confirm operator-control is stable enough to inspect goal/report/story state, and keep work focused on server/controller-owned objectives rather than provider-native goal state.
+10. If active workpad is `dashboard-webclient`, confirm server/query contracts are stable enough for the selected slice and keep work focused on browser client UX, visual QA, and screenshot-reviewed iteration.
 
 ## Current Phase
 
-**Operator-control implementation** is active after the server/control-plane milestone completed on 2026-05-27. The durable target is a human-friendly REPL/control loop that talks to the Capo server, starts with `--planner none`, and leaves room for future Codex/Capo/local-model planner modes without moving orchestration state into the client.
+**Goal-orchestration implementation** is active after operator-control closed on 2026-05-28. The durable target is a server/controller-owned goal loop: goals, structured agent reports, evidence/review/validation ledgers, continuation scheduling, completion audit, and historical execution reports. Operator-control remains the human CLI/input surface for inspecting and steering running agents through the server boundary.
 
 ## Mandatory Workflow
 
@@ -67,11 +69,12 @@ Before task work:
 14. For features work, load the feature source file named by the selected task in `workpads/features/tasks.md`
 15. For operator-control work, load `workpads/server/knowledge.md` for the current server command evidence
 16. For goal-orchestration work, load `workpads/harness-research/knowledge.md`, `workpads/operator-control/knowledge.md`, and `workpads/server/knowledge.md`
-17. Pick a pending task and mark it `in_progress`
-18. Complete the acceptance criteria with the smallest correct change
-19. Record findings in `knowledge.md` and source links in `references.md`
-20. Review per `WORKING.md`
-21. Mark complete only after evidence is recorded
+17. For dashboard-webclient work, load `workpads/features/dashboard.md`, `workpads/operator-control/knowledge.md`, and `workpads/goal-orchestration/knowledge.md`
+18. Pick a pending task and mark it `in_progress`
+19. Complete the acceptance criteria with the smallest correct change
+20. Record findings in `knowledge.md` and source links in `references.md`
+21. Review per `WORKING.md`
+22. Mark complete only after evidence is recorded
 
 ## Git Rules
 

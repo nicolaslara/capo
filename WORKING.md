@@ -145,8 +145,9 @@ Prefer clear names. Comment non-obvious invariants: permission boundaries, recov
 | Complete | `features` | `features/tasks.md`, `knowledge.md`, `references.md`, selected feature source file, architecture artifacts, `prototype/knowledge.md` |
 | Complete | `dogfood` | Migration of Capo project execution into Capo |
 | Complete | `server` | `server/tasks.md`, `knowledge.md`, `references.md`, architecture artifacts, scaffold knowledge |
-| Now | `operator-control` | `operator-control/tasks.md`, `knowledge.md`, `references.md`, architecture artifacts, server knowledge |
-| Planned | `goal-orchestration` | `goal-orchestration/tasks.md`, `knowledge.md`, `references.md`, harness research, operator-control knowledge, server knowledge, architecture artifacts |
+| Complete | `operator-control` | `operator-control/tasks.md`, `knowledge.md`, `references.md`, architecture artifacts, server knowledge |
+| Now | `goal-orchestration` | `goal-orchestration/tasks.md`, `knowledge.md`, `references.md`, harness research, operator-control knowledge, server knowledge, architecture artifacts |
+| Planned | `dashboard-webclient` | `dashboard-webclient/tasks.md`, `knowledge.md`, `references.md`, features dashboard query notes, operator-control knowledge, goal-orchestration knowledge, architecture artifacts |
 
 ## Dependency Policy
 

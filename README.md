@@ -13,7 +13,7 @@ This repository is still early. The current implementation is a Rust scaffold/pr
 - Scaffold alignment is complete.
 - The server/control-plane milestone is complete: `capo server ...` can drive mocked agents, server-native sessions, dispatch plans/gates, deterministic local runs, and Codex-shaped runs through the server boundary.
 - Operator control is active and usable: bare `capo` opens `capo control`, defaults to `--planner none`, starts a local loopback server when needed, and can list, attach to, inspect, steer, interrupt, and stop agents through that server.
-- `--planner capo` exists as a deterministic, tracked Capo planner mode. It does not call a live LLM; it audits planner choices through the same Capo state.
+- `--planner capo` exists as a tracked Capo operator-agent mode. It creates or reuses a `capo-operator` Codex-backed session, asks Codex to map free-form operator input into a constrained action JSON shape, validates the action, executes only known server-backed actions, and audits those choices through Capo state. `CAPO_CONTROL_PLANNER_PROVIDER=codex` is the current/default provider; future providers such as local Gemma can implement the same boundary.
 - Control can start and continue Codex-backed sessions only behind explicit live-provider gates. Normal repeatable tests use fake/scripted agents or mocked Codex output, and Claude live execution is still blocked.
 - Result rendering now keeps structured Markdown output readable in the terminal. Durable live-provider raw-output retention remains conservative and artifact-backed.
 - `capo project memory ...` is the preferred markdown-backed project-memory surface.
@@ -107,13 +107,15 @@ printf '%s\n' \
   | cargo run -p capo-cli --bin capo --
 ```
 
-The deterministic Capo planner mode can map a small set of natural-language operator intents to the same server-backed actions while recording its decisions as a tracked `capo-operator` session:
+The Capo operator-agent mode uses Codex as the first LLM planner backend. It can map natural-language operator intents to the same server-backed actions while recording its decisions as a tracked `capo-operator` session:
 
 ```sh
 printf '%s\n' \
-  'what happened?' \
+  'what are my agents doing?' \
+  "what's up?" \
   'what is blocked?' \
-  'steer demo to Please summarize the latest state' \
+  'summarize demo' \
+  'tell demo to Please summarize the latest state' \
   'recent capo-operator' \
   'quit' \
   | cargo run -p capo-cli --bin capo -- control --planner capo

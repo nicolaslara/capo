@@ -111,6 +111,20 @@ Capture decisions and lessons for Capo's human operator REPL/control surface.
 
 ## OC12 Findings
 
+- README status and examples should describe Capo as WIP but usable through the server/control path. The operator-control examples are now the best first manual path for a human trying Capo locally.
+- Product-language docs should keep steering new users toward `capo project memory ...` and treat `capo workpad ...` as compatibility-only.
+
+## OC13 Findings
+
+- Capo's first operator agent is the tracked `capo-operator` session in `--planner capo`. It now uses Codex as the first LLM planner backend for free-form operator input, while exact commands and known safe intents still use the local parser.
+- The product shape is: the human talks to Capo, Capo asks its operator agent to select a constrained action, Capo validates that action, and only then Capo executes server-backed inspection or steering of subagents.
+- `CAPO_CONTROL_PLANNER_PROVIDER=codex` is the current/default provider seam. Future fast local models such as Gemma should implement the same action-selection boundary instead of gaining a new executor path.
+- LLM planner output is not trusted as authority. It must be a JSON action object, it must name a supported action, and mutation actions must include required fields such as `agent`, `message`, or `reason`.
+- The default `capo` path should remain `--planner none` until the operator-agent behavior is richer and more trustworthy. Opt-in `--planner capo` keeps no-surprise direct control for current dogfood use.
+- Closing operator-control leaves deeper autonomy, goal lifecycle, validation, continuations, and historical reporting to `goal-orchestration`.
+
+## OC12 Findings
+
 - README status had lagged behind the active operator-control implementation. It still framed `capo control --planner none` as the main active slice and did not mention the deterministic `--planner capo` path, attached free-text, `new codex`, `details`, or Markdown-preserving result display.
 - The README should keep WIP/product-spine language while showing the most humane current entrypoint: bare `capo` starts the control loop and auto-starts a local loopback server when needed.
 - Live Codex usage belongs in README as a gated control-loop path (`new codex ...` with `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1` and `CAPO_SERVER_RUN_CODEX_LIVE=1`), not as the older low-level dispatch-plan copy/paste flow.
