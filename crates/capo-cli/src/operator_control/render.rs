@@ -45,6 +45,9 @@ pub(super) struct RecentWorkRenderer;
 pub(super) struct ConciseResultRenderer;
 
 #[derive(Clone, Copy)]
+pub(super) struct ResultsAndEvidenceRenderer;
+
+#[derive(Clone, Copy)]
 struct PlainMarkdownTerminalRenderer;
 
 #[derive(Clone, Copy)]
@@ -106,6 +109,12 @@ pub(super) fn render_human_agent_with_marker(agent: &AgentSummary, marker: Optio
 impl AgentRenderer for RecentWorkRenderer {
     fn render(&self, agent: &AgentSummary) -> String {
         render_recent_work(agent)
+    }
+}
+
+impl AgentRenderer for ResultsAndEvidenceRenderer {
+    fn render(&self, agent: &AgentSummary) -> String {
+        render_results_and_evidence(agent)
     }
 }
 
@@ -171,6 +180,40 @@ pub(super) fn render_recent_work(agent: &AgentSummary) -> String {
             session.review_finding_count,
         )
     ));
+    output
+}
+
+pub(super) fn render_results_and_evidence(agent: &AgentSummary) -> String {
+    let Some(session) = agent.session.as_ref() else {
+        return format!(
+            "{}\nstatus: idle\nreply: no active session\nevidence: none\n",
+            agent.name
+        );
+    };
+    let mut output = format!(
+        "{}\nstatus: {}\ngoal: {}\n",
+        agent.name,
+        user_status(
+            session.run_status.as_deref(),
+            session.dispatch_execution_status.as_deref()
+        ),
+        display_goal(&session.current_goal)
+    );
+    if let Some(reply) = display_summary(session.latest_summary.as_deref()) {
+        output.push_str(&render_labeled_display("reply", &reply));
+    } else if session.dispatch_provider_cli_executed == Some(true) {
+        output.push_str("reply: captured; use `details` for artifact metadata.\n");
+    } else {
+        output.push_str("reply: none yet\n");
+    }
+    output.push_str(&format!(
+        "evidence: {}\n",
+        none_if_empty(&session.evidence_refs)
+    ));
+    if let Some(blocker) = session.latest_blocker.as_deref() {
+        output.push_str(&format!("blocker: {blocker}\n"));
+    }
+    output.push('\n');
     output
 }
 

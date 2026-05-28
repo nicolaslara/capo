@@ -12,6 +12,9 @@ pub(super) enum OperatorAction {
     RecentWork {
         agent: Option<String>,
     },
+    ResultsAndEvidence {
+        agent: Option<String>,
+    },
     Details {
         agent: Option<String>,
     },
@@ -128,6 +131,14 @@ pub(super) fn plan_from_llm_reply(reply: &str) -> Result<PlannerDecision, String
             },
             summary,
         )),
+        "results_evidence" | "responses_evidence" | "agent_results" => {
+            Ok(PlannerDecision::audited(
+                OperatorAction::ResultsAndEvidence {
+                    agent: optional_field(&value, "agent"),
+                },
+                summary,
+            ))
+        }
         "details" => Ok(PlannerDecision::audited(
             OperatorAction::Details {
                 agent: optional_field(&value, "agent"),
@@ -278,6 +289,9 @@ fn parse_action(line: &str) -> Result<OperatorAction, String> {
             agent: parts.next().map(ToString::to_string),
         }),
         "state" | "result" => Ok(OperatorAction::RecentWork {
+            agent: parts.next().map(ToString::to_string),
+        }),
+        "results" | "responses" => Ok(OperatorAction::ResultsAndEvidence {
             agent: parts.next().map(ToString::to_string),
         }),
         "send" => parse_send(line),
@@ -471,6 +485,7 @@ impl OperatorAction {
             Self::Dashboard => "dashboard",
             Self::Status { .. } => "status",
             Self::RecentWork { .. } => "recent_work",
+            Self::ResultsAndEvidence { .. } => "results_evidence",
             Self::Details { .. } => "details",
             Self::ToolActivity { .. } => "tool_activity",
             Self::Evidence { .. } => "evidence",
@@ -488,6 +503,7 @@ impl OperatorAction {
         match self {
             Self::Status { agent }
             | Self::RecentWork { agent }
+            | Self::ResultsAndEvidence { agent }
             | Self::Details { agent }
             | Self::ToolActivity { agent }
             | Self::Evidence { agent }
@@ -570,6 +586,16 @@ mod tests {
         assert_eq!(
             parse_action("result"),
             Ok(OperatorAction::RecentWork { agent: None })
+        );
+        assert_eq!(
+            parse_action("results"),
+            Ok(OperatorAction::ResultsAndEvidence { agent: None })
+        );
+        assert_eq!(
+            parse_action("responses demo"),
+            Ok(OperatorAction::ResultsAndEvidence {
+                agent: Some("demo".to_string())
+            })
         );
     }
 
@@ -686,6 +712,15 @@ mod tests {
             }
         );
         assert!(decision.audit.expect("audit").mutation);
+
+        let decision = plan_from_llm_reply(
+            r#"{"action":"results_evidence","summary":"operator asked for all agent responses and evidence"}"#,
+        )
+        .expect("llm all-agent result action");
+        assert_eq!(
+            decision.action,
+            OperatorAction::ResultsAndEvidence { agent: None }
+        );
     }
 
     #[test]

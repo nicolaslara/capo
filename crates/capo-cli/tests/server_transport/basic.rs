@@ -322,7 +322,7 @@ quit
 #[test]
 fn capo_planner_tracks_decisions_as_server_state_and_steers_mock_agent() {
     let state_root = temp_root("control-capo-planner-state");
-    let mut server = spawn_server(&state_root, 26);
+    let mut server = spawn_server(&state_root, 30);
     let stdout = server.stdout.take().expect("server stdout");
     let mut reader = BufReader::new(stdout);
     let address = read_server_address(&mut reader);
@@ -363,6 +363,7 @@ status of mock-control
 tell mock-control to Please continue under planner control
 what is blocked?
 summarize mock-control
+I want their response or evidence
 recent capo-operator
 quit
 ";
@@ -378,7 +379,7 @@ quit
         ],
         [(
             "CAPO_CONTROL_PLANNER_MOCK_CODEX_JSONL",
-            r#"{"type":"item.completed","item":{"id":"planner-item-1","type":"agent_message","text":"{\"action\":\"dashboard\",\"summary\":\"operator asked a casual status question\"}"}}
+            r#"{"type":"item.completed","item":{"id":"planner-item-1","type":"agent_message","text":"{\"action\":\"results_evidence\",\"summary\":\"operator asked for all agent responses and evidence\"}"}}
 {"type":"turn.completed"}
 "#,
         )],
@@ -391,6 +392,7 @@ quit
     assert!(output.contains("Status\n- mock-control"));
     assert!(output.contains("Sent to mock-control"));
     assert!(output.contains("Reviews"));
+    assert!(output.contains("evidence:"));
     assert!(output.contains("capo-operator"));
     assert!(output.contains("capo planner decision input_hash="));
 

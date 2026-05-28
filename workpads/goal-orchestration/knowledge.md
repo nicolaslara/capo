@@ -115,6 +115,20 @@ First projections:
 - `ValidationLedger`: checks, outputs, coverage, skipped reasons, failures.
 - `HistoricalExecutionReport`: rebuildable report over goal/run/session state.
 
+## Operator Agent Lesson From Planner Dogfood
+
+The first Codex-backed `--planner capo` dogfood showed that model quality is
+not the main bottleneck when the action/tool surface is too coarse. The
+operator asked for all agents' "response or evidence"; Capo only exposed
+separate dashboard, recent-work, and evidence actions, with examples biased
+toward one named agent. The planner could list statuses, but it could not select
+a single server-backed read that answered the user's actual question.
+
+The near-term fix is better read/query tools and clearer action schemas:
+combined result/evidence views, story/timeline views, validation/review views,
+and all-agents variants. Fine-tuning or a larger operator agent can help later,
+but it should not compensate for missing Capo-owned state projections.
+
 ## Reporting Cadence
 
 Agents should report at meaningful boundaries:
