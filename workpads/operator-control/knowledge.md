@@ -53,3 +53,4 @@ Capture decisions and lessons for Capo's human operator REPL/control surface.
 - Which commands should require explicit confirmation inside planner-backed modes?
 - Should `send` eventually support multiline input or an editor handoff for longer operator instructions?
 - What should provider-native attach mean later for long-lived ACP/Codex/Claude sessions, and can it be represented as a Capo-controlled stream instead of a raw TTY handoff?
+- For OC4, should `--planner capo` create a dedicated operator-assistant agent per control process, reuse a durable project-level Capo agent, or attach to a user-selected planner agent?

@@ -120,3 +120,21 @@ Evidence:
   - Bare `capo` autostarted a loopback server with `CAPO_SERVER_ADDR=<free-loopback-addr>` and scripted `dashboard`, `quit`; output included `server: ... (started)`, `Dashboard`, `agents: 0`, and `bye`.
   - Against a running server at `127.0.0.1:7878`, registered `demo-a` and `demo-b`, started tasks, then ran bare `capo` with scripted `attach demo-a`, `recent`, `tools`, `evidence`, `reviews`, `interrupt ...`, `attach demo-b`, `stop ...`, `dashboard`, `quit`.
   - Observed recent-work summary, tool counts, evidence refs, review counts, `interrupted demo-a`, `stopped demo-b`, and final dashboard with `active sessions: 0`.
+
+## OC4 - First Capo Planner Mode
+
+Status: pending
+
+Acceptance:
+
+- Add `--planner capo` as the first planner-backed mode.
+- Make the planner run as, or create, a tracked Capo-managed agent/session so its planning and tool use are inspectable in Capo state.
+- Keep planner output lowering into the same `OperatorAction`/server executor path as `none`.
+- Start with a deterministic mocked Capo planner before any live provider or local-model calls.
+- Allow the planner to answer simple operator intents such as "what happened?", "what is blocked?", and "steer AGENT to ...".
+- Require confirmation or a safe deterministic policy before planner-triggered mutations.
+- Add tests proving:
+  - unsupported planners still fail closed;
+  - `--planner capo` does not bypass the server boundary;
+  - planner decisions are audited as Capo state;
+  - mocked planner interaction can list/status/steer without launching live Codex or Claude.
