@@ -12,7 +12,14 @@ pub(super) fn render_dashboard(snapshot: &ServerDashboardSnapshot) -> String {
 }
 
 pub(super) fn render_human_agent(agent: &AgentSummary) -> String {
+    render_human_agent_with_marker(agent, None)
+}
+
+pub(super) fn render_human_agent_with_marker(agent: &AgentSummary, marker: Option<&str>) -> String {
     let mut output = format!("- {} [{}]", agent.name, agent.status);
+    if let Some(marker) = marker {
+        output.push_str(&format!(" {marker}"));
+    }
     if let Some(session) = agent.session.as_ref() {
         output.push_str(&format!(
             " session={} run={} run_status={} tools={} memory={} evidence={} reviews={}",

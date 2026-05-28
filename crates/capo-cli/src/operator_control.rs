@@ -1,6 +1,9 @@
 use std::io::{BufRead, IsTerminal, Read, Write};
+use std::path::PathBuf;
 
-use capo_server::{AgentSummary, ServerCommand, ServerRequest, ServerResponsePayload, send_tcp};
+use capo_server::{
+    AgentSummary, ServerCommand, ServerRequest, ServerResponsePayload, TaskRunSummary, send_tcp,
+};
 
 use crate::cli_surface::ParsedArgs;
 use crate::{debug_error, stable_cli_hash};
@@ -11,8 +14,8 @@ mod server_process;
 
 use planner::{CapoPlanner, NonePlanner, OperatorAction, Planner, PlannerDecisionAudit};
 use render::{
-    render_dashboard, render_evidence_summary, render_human_agent, render_recent_work,
-    render_review_needs, render_tool_activity,
+    render_dashboard, render_evidence_summary, render_human_agent, render_human_agent_with_marker,
+    render_recent_work, render_review_needs, render_tool_activity,
 };
 use server_process::{AutoServer, ensure_server_running, require_loopback_address, server_address};
 
@@ -22,7 +25,7 @@ pub(crate) fn operator_control(parsed: &ParsedArgs, args: &[String]) -> Result<S
     require_loopback_address(&address)?;
     let server = ensure_server_running(&address, parsed)?;
 
-    let mut repl = ControlRepl::new(address, server, planner);
+    let mut repl = ControlRepl::new(address, server, planner, parsed.state_root.clone());
     if std::io::stdin().is_terminal() {
         repl.run_interactive()
     } else {
@@ -52,18 +55,25 @@ struct ControlRepl {
     server_started: bool,
     _server: Option<AutoServer>,
     planner: Box<dyn Planner>,
+    state_root: PathBuf,
     attached_agent: Option<String>,
     request_counter: usize,
 }
 
 impl ControlRepl {
-    fn new(address: String, server: Option<AutoServer>, planner: Box<dyn Planner>) -> Self {
+    fn new(
+        address: String,
+        server: Option<AutoServer>,
+        planner: Box<dyn Planner>,
+        state_root: PathBuf,
+    ) -> Self {
         let server_started = server.is_some();
         Self {
             address,
             server_started,
             _server: server,
             planner,
+            state_root,
             attached_agent: None,
             request_counter: 0,
         }
@@ -112,7 +122,7 @@ impl ControlRepl {
         let stdin = std::io::stdin();
         let mut stdin = stdin.lock();
         loop {
-            print!("capo> ");
+            print!("{}", self.prompt());
             std::io::stdout().flush().map_err(debug_error)?;
             let mut line = String::new();
             let bytes = stdin.read_line(&mut line).map_err(debug_error)?;
@@ -146,6 +156,7 @@ impl ControlRepl {
                     self.execute(decision.action)
                 }
             }
+            Err(_) if self.should_direct_send(line) => self.send(None, line.to_string()),
             Err(error) => Ok(format!("error: {error}\n")),
         };
         LineResult::Continue(match result {
@@ -228,6 +239,11 @@ impl ControlRepl {
                 self.attached_agent = None;
                 Ok("detached\n".to_string())
             }
+            OperatorAction::StartAgent {
+                adapter,
+                agent,
+                goal,
+            } => self.start_agent(adapter, agent, goal),
             OperatorAction::Send { agent, message } => self.send(agent, message),
             OperatorAction::Interrupt { agent, reason } => self.interrupt(agent, reason),
             OperatorAction::Stop { agent, reason } => self.stop(agent, reason),
@@ -238,7 +254,7 @@ impl ControlRepl {
         let agents = self.list_agent_summaries()?;
         let mut output = format!("Agents ({})\n", agents.len());
         for agent in agents {
-            output.push_str(&render_human_agent(&agent));
+            output.push_str(&self.render_agent_line(&agent));
         }
         Ok(output)
     }
@@ -255,7 +271,11 @@ impl ControlRepl {
 
     fn status(&mut self, agent: Option<String>) -> Result<String, String> {
         let summary = self.resolved_agent_status(agent)?;
-        Ok(format!("Status\n{}", render_human_agent(&summary)))
+        Ok(format!(
+            "Status\n{}{}",
+            self.render_agent_line(&summary),
+            render_recent_work(&summary)
+        ))
     }
 
     fn recent_work(&mut self, agent: Option<String>) -> Result<String, String> {
@@ -278,17 +298,94 @@ impl ControlRepl {
         let summary = self.agent_status(&agent)?;
         self.attached_agent = Some(agent.clone());
         Ok(format!(
-            "attached: {agent}\n{}",
-            render_human_agent(&summary)
+            "attached: {agent}\n{}{}",
+            self.render_agent_line(&summary),
+            render_recent_work(&summary)
         ))
     }
 
+    fn start_agent(
+        &mut self,
+        adapter: String,
+        agent: String,
+        goal: String,
+    ) -> Result<String, String> {
+        let adapter = normalized_start_adapter(&adapter)?;
+        let goal = strip_surrounding_quotes(&goal).to_string();
+        if adapter == "codex" {
+            require_codex_live_opt_in()?;
+        }
+        self.ensure_agent_registered(&agent)?;
+        let started = self.start_agent_session(&agent, &adapter, &goal)?;
+        let mut output = format!(
+            "started {adapter} agent {agent}\nsession: {}\nrun: {}\n",
+            started.session_id, started.run_id
+        );
+        if adapter == "codex" {
+            let run = self.run_codex_live_turn(
+                &agent,
+                &goal,
+                &started.session_id.to_string(),
+                &started.run_id.to_string(),
+            )?;
+            output.push_str(&format!(
+                "codex live run: {}\nprovider_cli_executed: {}\nstatus: {}\n",
+                run.dispatch_execution_id, run.provider_cli_executed, run.status
+            ));
+        }
+        self.attached_agent = Some(agent.clone());
+        let summary = self.agent_status(&agent)?;
+        output.push_str(&format!(
+            "attached: {agent}\n{}{}",
+            self.render_agent_line(&summary),
+            render_recent_work(&summary)
+        ));
+        Ok(output)
+    }
+
     fn send(&mut self, agent: Option<String>, message: String) -> Result<String, String> {
-        self.mutate_agent(agent, |agent_name| ServerCommand::SteerAgent {
-            agent_name,
+        let agent = self.resolve_agent(agent)?;
+        let message = strip_surrounding_quotes(&message).to_string();
+        let current = self.agent_status(&agent)?;
+        if current
+            .session
+            .as_ref()
+            .and_then(|session| session.adapter_kind.as_deref())
+            == Some("codex_exec")
+        {
+            require_codex_live_opt_in()?;
+            let session = current
+                .session
+                .as_ref()
+                .ok_or_else(|| format!("agent {agent} has no active session"))?;
+            let run_id = session
+                .run_id
+                .as_ref()
+                .ok_or_else(|| format!("agent {agent} has no active run"))?
+                .to_string();
+            let run = self.run_codex_live_turn(
+                &agent,
+                &message,
+                &session.session_id.to_string(),
+                &run_id,
+            )?;
+            let summary = self.agent_status(&agent)?;
+            return Ok(format!(
+                "sent to {agent}\ncodex live run: {}\nprovider_cli_executed: {}\nstatus: {}\n{}",
+                run.dispatch_execution_id,
+                run.provider_cli_executed,
+                run.status,
+                render_recent_work(&summary)
+            ));
+        }
+        let response = self.send_request(ServerCommand::SteerAgent {
+            agent_name: agent.clone(),
             goal: message,
-        })
-        .map(|(agent, summary)| format!("sent to {agent}\n{}", render_human_agent(&summary)))
+        })?;
+        let ServerResponsePayload::AgentStatus(summary) = response else {
+            return Err("server returned unexpected response for agent mutation".to_string());
+        };
+        Ok(format!("sent to {agent}\n{}", render_recent_work(&summary)))
     }
 
     fn interrupt(&mut self, agent: Option<String>, reason: String) -> Result<String, String> {
@@ -347,6 +444,95 @@ impl ControlRepl {
         Ok(agents)
     }
 
+    fn ensure_agent_registered(&mut self, agent: &str) -> Result<(), String> {
+        if self
+            .list_agent_summaries()?
+            .iter()
+            .any(|summary| summary.name == agent)
+        {
+            return Ok(());
+        }
+        let response = self.send_request(ServerCommand::RegisterAgent {
+            name: agent.to_string(),
+        })?;
+        if matches!(response, ServerResponsePayload::AgentRegistered(_)) {
+            Ok(())
+        } else {
+            Err("server returned unexpected response for agent registration".to_string())
+        }
+    }
+
+    fn start_agent_session(
+        &mut self,
+        agent: &str,
+        adapter: &str,
+        goal: &str,
+    ) -> Result<TaskRunSummary, String> {
+        let response = self.send_request(ServerCommand::StartSession {
+            agent_name: agent.to_string(),
+            goal: goal.to_string(),
+            adapter: adapter.to_string(),
+            session_id: None,
+            run_id: None,
+        })?;
+        let ServerResponsePayload::SessionStarted(started) = response else {
+            return Err("server returned unexpected response for session start".to_string());
+        };
+        Ok(started)
+    }
+
+    fn run_codex_live_turn(
+        &mut self,
+        agent: &str,
+        goal: &str,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<capo_server::DispatchRunSummary, String> {
+        let turn_id = format!("turn-{}-{}", slug(agent), stable_cli_hash(goal));
+        let workspace = std::env::current_dir()
+            .map_err(debug_error)?
+            .display()
+            .to_string();
+        let artifacts = self
+            .state_root
+            .join("control-live-artifacts")
+            .display()
+            .to_string();
+        let preflight = self.send_request(ServerCommand::PreflightLiveProvider {
+            agent_name: agent.to_string(),
+            adapter: "codex".to_string(),
+            goal: goal.to_string(),
+            workspace,
+            artifacts,
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
+            turn_id,
+            capability_profile: "trusted-local".to_string(),
+            runtime_scope: "local_process_loopback".to_string(),
+            credential_scan_policy: "metadata_only_no_secret_read".to_string(),
+            raw_prompt_policy: "not_rendered".to_string(),
+            raw_output_policy: "artifacts_scanned_redacted".to_string(),
+            tool_wrapper_policy: "capo_wrapped_required".to_string(),
+            live_provider_opt_in: true,
+        })?;
+        let ServerResponsePayload::LiveProviderPreflighted(preflight) = preflight else {
+            return Err("server returned unexpected response for Codex preflight".to_string());
+        };
+        let run = self.send_request(ServerCommand::RunLiveProviderLocal {
+            dispatch_plan_id: preflight.dispatch_plan_id,
+            goal: goal.to_string(),
+            live_execution_opt_in: true,
+            mock_runtime_opt_in: false,
+            mock_provider_output_name: None,
+            mock_provider_output_jsonl: None,
+            timeout_seconds: 300,
+        })?;
+        let ServerResponsePayload::DispatchRun(run) = run else {
+            return Err("server returned unexpected response for Codex live run".to_string());
+        };
+        Ok(run)
+    }
+
     fn agent_status(&mut self, agent: &str) -> Result<AgentSummary, String> {
         let response = self.send_request(ServerCommand::AgentStatus {
             agent_name: agent.to_string(),
@@ -398,6 +584,23 @@ impl ControlRepl {
             self.attached_agent = None;
         }
     }
+
+    fn render_agent_line(&self, agent: &AgentSummary) -> String {
+        let marker =
+            (self.attached_agent.as_deref() == Some(agent.name.as_str())).then_some("(attached)");
+        render_human_agent_with_marker(agent, marker)
+    }
+
+    fn prompt(&self) -> String {
+        match self.attached_agent.as_deref() {
+            Some(agent) => format!("capo[{agent}]> "),
+            None => "capo> ".to_string(),
+        }
+    }
+
+    fn should_direct_send(&self, line: &str) -> bool {
+        self.attached_agent.is_some() && !looks_like_control_command(line)
+    }
 }
 
 enum LineResult {
@@ -411,10 +614,12 @@ Commands:
   agents | ls
   dashboard | overview
   status [AGENT]
+  state [AGENT] | result [AGENT]
   recent [AGENT] | work [AGENT]
   tools [AGENT]
   evidence [AGENT]
   reviews [AGENT]
+  new codex AGENT GOAL | start codex AGENT GOAL
   attach AGENT | jump AGENT
   send [--agent AGENT] MESSAGE
   interrupt [--agent AGENT] REASON
@@ -422,8 +627,85 @@ Commands:
   detach | back
   help
   quit | exit
+
+When attached, ordinary text is sent directly to the attached agent.
+Codex agents require starting control with CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 and CAPO_SERVER_RUN_CODEX_LIVE=1.
 "
     .to_string()
+}
+
+fn strip_surrounding_quotes(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
+    {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    }
+}
+
+fn normalized_start_adapter(adapter: &str) -> Result<String, String> {
+    match adapter {
+        "codex" | "codex-exec" | "codex_exec" => Ok("codex".to_string()),
+        other => Err(format!(
+            "unsupported start adapter: {other}; currently only `codex` is supported"
+        )),
+    }
+}
+
+fn require_codex_live_opt_in() -> Result<(), String> {
+    let preflight = std::env::var("CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT").as_deref() == Ok("1");
+    let run = std::env::var("CAPO_SERVER_RUN_CODEX_LIVE").as_deref() == Ok("1");
+    if preflight && run {
+        return Ok(());
+    }
+    Err("Codex live execution from control requires starting capo control with CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 and CAPO_SERVER_RUN_CODEX_LIVE=1".to_string())
+}
+
+fn slug(value: &str) -> String {
+    let mut slug = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+fn looks_like_control_command(line: &str) -> bool {
+    let command = line.split_whitespace().next().unwrap_or_default();
+    matches!(
+        command,
+        "help"
+            | "?"
+            | "quit"
+            | "exit"
+            | "agents"
+            | "ls"
+            | "dashboard"
+            | "overview"
+            | "recent"
+            | "work"
+            | "state"
+            | "result"
+            | "tools"
+            | "evidence"
+            | "reviews"
+            | "detach"
+            | "back"
+            | "attach"
+            | "jump"
+            | "new"
+            | "start"
+            | "status"
+            | "send"
+            | "interrupt"
+            | "stop"
+    )
 }
 
 fn optional_value(args: &[String], key: &str) -> Result<Option<String>, String> {

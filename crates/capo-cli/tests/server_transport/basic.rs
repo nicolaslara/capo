@@ -158,7 +158,7 @@ fn cli_uses_running_server_from_default_address_env_without_connect_flags() {
 #[test]
 fn control_repl_lists_attaches_and_steers_mock_agent_over_server() {
     let state_root = temp_root("control-repl-state");
-    let mut server = spawn_server(&state_root, 7);
+    let mut server = spawn_server(&state_root, 10);
     let stdout = server.stdout.take().expect("server stdout");
     let mut reader = BufReader::new(stdout);
     let address = read_server_address(&mut reader);
@@ -195,8 +195,10 @@ fn control_repl_lists_attaches_and_steers_mock_agent_over_server() {
     let script = "\
 agents
 attach mock-control
+agents
 status
-send Please report current status
+Please report current status
+result
 dashboard
 quit
 ";
@@ -216,7 +218,12 @@ quit
     assert!(output.contains("Capo control"));
     assert!(output.contains("Agents (1)"));
     assert!(output.contains("attached: mock-control"));
+    assert!(output.contains("- mock-control [running] (attached)"));
     assert!(output.contains("sent to mock-control"));
+    assert!(output.contains("goal: Please report current status"));
+    assert!(output.contains(
+        "summary: Fake adapter processed goal for mock-control: Please report current status"
+    ));
     assert!(output.contains("Dashboard"));
     assert!(output.contains("active sessions: 1"));
 
@@ -316,7 +323,7 @@ quit
 #[test]
 fn capo_planner_tracks_decisions_as_server_state_and_steers_mock_agent() {
     let state_root = temp_root("control-capo-planner-state");
-    let mut server = spawn_server(&state_root, 16);
+    let mut server = spawn_server(&state_root, 17);
     let stdout = server.stdout.take().expect("server stdout");
     let mut reader = BufReader::new(stdout);
     let address = read_server_address(&mut reader);
@@ -380,6 +387,61 @@ quit
     assert!(output.contains("Recent work"));
     assert!(output.contains("agent: capo-operator"));
     assert!(output.contains("capo planner decision input_hash="));
+
+    assert!(server.wait().expect("server wait").success());
+}
+
+#[test]
+fn control_repl_refuses_to_fake_codex_attached_chat_without_live_opt_in() {
+    let state_root = temp_root("control-codex-no-opt-in-state");
+    let mut server = spawn_server(&state_root, 4);
+    let stdout = server.stdout.take().expect("server stdout");
+    let mut reader = BufReader::new(stdout);
+    let address = read_server_address(&mut reader);
+    let state = state_root.display().to_string();
+
+    let register = capo([
+        "server",
+        "agent",
+        "register",
+        "--name",
+        "codex-control",
+        "--connect",
+        &address,
+        "--state",
+        &state,
+    ]);
+    assert!(register.contains("server_agent_registered=true"));
+
+    let start = capo([
+        "server",
+        "session",
+        "start",
+        "--agent",
+        "codex-control",
+        "--adapter",
+        "codex",
+        "--goal",
+        "Initial Codex control test",
+        "--session",
+        "session-codex-control",
+        "--run",
+        "run-codex-control",
+        "--connect",
+        &address,
+        "--state",
+        &state,
+    ]);
+    assert!(start.contains("server_session_started=true"));
+
+    let output = capo_with_env_and_stdin(
+        ["control", "--connect", &address, "--state", &state],
+        [],
+        "attach codex-control\nsay hi\nquit\n",
+    );
+    assert!(output.contains("attached: codex-control"));
+    assert!(output.contains("Codex live execution from control requires"));
+    assert!(!output.contains("Fake adapter processed goal for codex-control: say hi"));
 
     assert!(server.wait().expect("server wait").success());
 }

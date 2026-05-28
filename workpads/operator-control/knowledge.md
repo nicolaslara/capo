@@ -57,6 +57,27 @@ Capture decisions and lessons for Capo's human operator REPL/control surface.
 - Planner-triggered mutations use a safe deterministic policy: natural language may read state, while steering requires the explicit syntax `steer AGENT to MESSAGE`.
 - Read commands without an attached agent now aggregate over tracked agents, which makes planner answers like `what is blocked?` useful before the operator attaches to a specific agent.
 
+## OC5 Findings
+
+- Attach was functionally working but visually weak: the selected agent context was not shown in later list output, so it felt like nothing changed.
+- `status` and `send` should show recent-work state, not just the compact agent row. The compact row is good for scanning, but it does not answer "what did the agent do?"
+- `result` / `state` should be discoverable aliases for recent work because humans naturally ask for the result after sending an instruction.
+- Stripping a single surrounding quote pair from one-line `send` input matches normal shell habits without adding a full shell parser.
+
+## OC6 Findings
+
+- Attached mode should feel like talking to the agent directly, closer to an agent-native CLI. Requiring `send` after `attach` makes attachment feel decorative instead of modal.
+- The direct-send fallback belongs in the control loop because the planner/parser should keep failing closed on malformed commands; only the attached UI state decides whether unknown free text is safe to forward.
+- The fallback must not intercept known Capo command words. For example, malformed `attach` or `status` inputs should still return command errors instead of being sent to the agent.
+- The prompt should carry context (`capo[agent]>`) so the operator can see when free text will be routed to an agent.
+
+## OC7 Findings
+
+- A Codex-backed session must not be treated like a fake session. If the attached session has `adapter_kind=codex_exec`, ordinary attached text needs to run through server live-provider dispatch or fail closed.
+- Starting Codex from control should compose existing server commands instead of creating another launch path: register agent, start session, live preflight, live run, attach, inspect.
+- Keep the existing safety gates visible in the REPL. `new codex ...` and Codex attached text require `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1` and `CAPO_SERVER_RUN_CODEX_LIVE=1` when control starts.
+- The current Codex live result renders redacted summary metadata rather than raw provider text. That is expected under the current `raw_output_policy`, but future UX should add a safe artifact/result viewer.
+
 ## Open Questions
 
 - Which commands should require explicit confirmation inside planner-backed modes?

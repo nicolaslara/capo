@@ -23,6 +23,11 @@ pub(super) enum OperatorAction {
         agent: String,
     },
     Detach,
+    StartAgent {
+        adapter: String,
+        agent: String,
+        goal: String,
+    },
     Send {
         agent: Option<String>,
         message: String,
@@ -137,6 +142,7 @@ fn parse_action(line: &str) -> Result<OperatorAction, String> {
             agent: parts.next().map(ToString::to_string),
         }),
         "detach" | "back" => Ok(OperatorAction::Detach),
+        "new" | "start" => parse_start_agent(line, command),
         "attach" | "jump" => {
             let agent = parts
                 .next()
@@ -146,6 +152,9 @@ fn parse_action(line: &str) -> Result<OperatorAction, String> {
             })
         }
         "status" => Ok(OperatorAction::Status {
+            agent: parts.next().map(ToString::to_string),
+        }),
+        "state" | "result" => Ok(OperatorAction::RecentWork {
             agent: parts.next().map(ToString::to_string),
         }),
         "send" => parse_send(line),
@@ -158,6 +167,32 @@ fn parse_action(line: &str) -> Result<OperatorAction, String> {
         }),
         other => Err(format!("unknown command `{other}`")),
     }
+}
+
+fn parse_start_agent(line: &str, command: &str) -> Result<OperatorAction, String> {
+    let rest = line
+        .strip_prefix(command)
+        .expect("parse_start_agent is only called for matching commands")
+        .trim();
+    let mut split = rest.splitn(3, char::is_whitespace);
+    let adapter = split
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{command} requires an adapter, agent name, and goal"))?;
+    let agent = split
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{command} requires an agent name and goal"))?;
+    let goal = split
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{command} requires a goal"))?;
+    Ok(OperatorAction::StartAgent {
+        adapter: adapter.to_string(),
+        agent: agent.to_string(),
+        goal: goal.to_string(),
+    })
 }
 
 fn parse_capo_intent(line: &str) -> Result<PlannerDecision, String> {
@@ -292,6 +327,7 @@ impl OperatorAction {
             Self::Evidence { .. } => "evidence",
             Self::ReviewNeeds { .. } => "review_needs",
             Self::Attach { .. } => "attach",
+            Self::StartAgent { .. } => "start_agent",
             Self::Detach => "detach",
             Self::Send { .. } => "send",
             Self::Interrupt { .. } => "interrupt",
@@ -310,6 +346,7 @@ impl OperatorAction {
             | Self::Interrupt { agent, .. }
             | Self::Stop { agent, .. } => agent.clone(),
             Self::Attach { agent } => Some(agent.clone()),
+            Self::StartAgent { agent, .. } => Some(agent.clone()),
             _ => None,
         }
     }
@@ -318,6 +355,7 @@ impl OperatorAction {
         matches!(
             self,
             Self::Attach { .. }
+                | Self::StartAgent { .. }
                 | Self::Detach
                 | Self::Send { .. }
                 | Self::Interrupt { .. }
@@ -367,6 +405,16 @@ mod tests {
             parse_action("tools"),
             Ok(OperatorAction::ToolActivity { agent: None })
         );
+        assert_eq!(
+            parse_action("state demo"),
+            Ok(OperatorAction::RecentWork {
+                agent: Some("demo".to_string())
+            })
+        );
+        assert_eq!(
+            parse_action("result"),
+            Ok(OperatorAction::RecentWork { agent: None })
+        );
     }
 
     #[test]
@@ -383,6 +431,26 @@ mod tests {
             Ok(OperatorAction::Stop {
                 agent: None,
                 reason: "completed".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn parser_supports_starting_adapter_agents() {
+        assert_eq!(
+            parse_action("new codex codex-demo Say hello"),
+            Ok(OperatorAction::StartAgent {
+                adapter: "codex".to_string(),
+                agent: "codex-demo".to_string(),
+                goal: "Say hello".to_string()
+            })
+        );
+        assert_eq!(
+            parse_action("start codex codex-demo Say hello"),
+            Ok(OperatorAction::StartAgent {
+                adapter: "codex".to_string(),
+                agent: "codex-demo".to_string(),
+                goal: "Say hello".to_string()
             })
         );
     }

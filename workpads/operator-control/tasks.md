@@ -180,3 +180,79 @@ Evidence:
   - Registered `demo-planner` and sent `Manual Capo planner check`.
   - Ran `./target/debug/capo control --planner capo --connect <addr>` with `what happened?`, `status of demo-planner`, `steer demo-planner to Please continue and summarize status`, `recent capo-operator`, `quit`.
   - Observed `planner: capo`, `capo-operator` tracked as a running session, `sent to demo-planner`, and `Recent work` for `capo-operator` showing `capo planner decision input_hash=...`.
+
+## OC5 - Attached Context And Result Visibility
+
+Status: completed on 2026-05-28
+
+Acceptance:
+
+- Make attached agent context visible after `attach`, especially in subsequent `agents` / `ls` output.
+- Make `status` show enough state to answer "what is this agent doing and what happened last?"
+- Make `send` immediately show the resulting latest work summary instead of only repeating the terse agent line.
+- Add an obvious command alias for seeing the last result/state after a send.
+- Keep all reads and mutations going through the server boundary.
+- Preserve scripted test coverage and manually verify the user-reported transcript shape.
+
+Evidence:
+
+- `agents` / `ls` now marks the selected agent with `(attached)`.
+- `attach AGENT` and `status [AGENT]` render both the one-line state and the recent-work summary.
+- `send MESSAGE` renders `Recent work` immediately after the server-backed `SteerAgent` response.
+- Added `state [AGENT]` and `result [AGENT]` aliases for `recent [AGENT]`.
+- Quoted one-line sends such as `send "print something"` strip the surrounding quotes before steering.
+- Added deterministic coverage in `crates/capo-cli/tests/server_transport/basic.rs` for attached marker visibility and immediate send-result rendering.
+- Manual direct run:
+  - Started `./target/debug/capo server serve --addr 127.0.0.1:0 --max-requests 10`.
+  - Registered `demo`, started `Manual attach/result test`, then ran scripted control with `agents`, `ls`, `attach demo`, `ls`, `status`, `tools`, `send "print something"`, `result`, `quit`.
+  - Observed `- demo [running] (attached) ...` after attach and `goal: print something` / `summary: Fake adapter processed goal for demo: print something` after send.
+
+## OC6 - Direct Attached Agent Interaction
+
+Status: completed on 2026-05-28
+
+Acceptance:
+
+- Once attached to an agent, allow ordinary text to be sent directly to that agent without requiring `send`.
+- Preserve Capo control commands while attached: `status`, `result`, `tools`, `detach`, `quit`, etc. should still behave as commands.
+- Make the interactive prompt show the attached context.
+- After `detach`, ordinary unknown text should no longer be sent to the previous agent.
+- Verify with a scripted attached-mode transcript.
+
+Evidence:
+
+- `ControlRepl::run_line` now falls back to direct `send` only when an agent is attached and the input does not look like a Capo control command.
+- Interactive prompts now render as `capo[AGENT]>` while attached and `capo>` otherwise.
+- `help` now states: "When attached, ordinary text is sent directly to the attached agent."
+- Updated `crates/capo-cli/tests/server_transport/basic.rs` so attached-mode free text sends to the selected mocked agent.
+- Manual direct run:
+  - Started `./target/debug/capo server serve --addr 127.0.0.1:0`.
+  - Registered `demo`, started `Manual attached chat test`, then ran scripted control with `attach demo`, `print something`, `result`, `detach`, `print after detach`, `quit`.
+  - Observed `print something` was sent to `demo` and produced a recent-work summary; after `detach`, `print after detach` returned `error: unknown command`.
+
+## OC7 - Start Codex From Control
+
+Status: completed on 2026-05-28
+
+Acceptance:
+
+- Allow an operator inside `capo control` to start a new Codex-backed agent without leaving the REPL.
+- Do not silently route Codex attached-chat messages through the fake `SteerAgent` path.
+- Require the existing explicit Codex live-provider opt-ins before launching Codex.
+- After starting Codex, attach to the new agent and make `result` / direct attached text use Codex live-provider dispatch.
+- Preserve deterministic tests that prove Codex without opt-in fails closed instead of producing fake output.
+
+Evidence:
+
+- Added `new codex AGENT GOAL` / `start codex AGENT GOAL` control commands.
+- Starting a Codex agent from control registers the agent if needed, starts a Codex adapter session, runs live preflight, runs live Codex dispatch, attaches to the agent, and renders recent work.
+- Attached text for an existing `codex_exec` session now goes through live Codex dispatch when `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1` and `CAPO_SERVER_RUN_CODEX_LIVE=1` are set.
+- Attached text for `codex_exec` without those env vars fails closed with an explicit error and does not render fake adapter output.
+- Added deterministic coverage in `crates/capo-cli/tests/server_transport/basic.rs`: `control_repl_refuses_to_fake_codex_attached_chat_without_live_opt_in`.
+- Manual no-opt-in run:
+  - Registered `codex-demo`, started a `codex` session, attached in control, typed `say hi`.
+  - Observed `Codex live execution from control requires...` and no `Fake adapter processed goal...` output.
+- Manual real Codex run:
+  - Ran control with `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 CAPO_SERVER_RUN_CODEX_LIVE=1`.
+  - Scripted `new codex codex-repl Say CAPO_REPL_CODEX_OK and nothing else`, `result`, `quit`.
+  - Observed `provider_cli_executed: true`, `status: exited`, attached `codex-repl`, and recent work with `adapter codex_exec` summary metadata.
