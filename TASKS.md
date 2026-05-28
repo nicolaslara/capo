@@ -8,6 +8,8 @@ Read top to bottom. The **first unchecked** item is the active workpad unless No
 
 **operator-control** - Build the human operator interaction loop for running Capo agents, starting with a no-planner command REPL over the server boundary.
 
+**Next planned:** **goal-orchestration** - Add Capo-owned goal lifecycle, agent reporting, evidence/story projections, continuation scheduling, validation, and historical execution reports after operator-control closes.
+
 ## Workpad Queue
 
 - [x] **research** - ACP, prior art, subscriptions, local models, memory systems, voice, tunnel/connectivity, and language stack (gate passed 2026-05-25)
@@ -19,6 +21,7 @@ Read top to bottom. The **first unchecked** item is the active workpad unless No
 - [x] **server** - Implement the server/control plane, CLI-through-server path, mocked-agent tests, and Codex-backed proof (completed 2026-05-27).
 - [x] **harness-research** - Research spike on modern coding-agent harness practice and whether ACP is enough (completed 2026-05-28).
 - [ ] **operator-control** - Create a human operator REPL/control surface for inspecting and steering running agents through the Capo server, with planner modes starting at `none`.
+- [ ] **goal-orchestration** - Add Capo-owned goals, agent-native reporting, evidence/review/validation ledgers, event-driven continuation, and execution-history reports.
 
 ## Notes
 
@@ -38,3 +41,4 @@ Read top to bottom. The **first unchecked** item is the active workpad unless No
 - Server milestone completed 2026-05-27: loopback server, CLI-through-server control, mocked-agent tests, mocked Codex live-run tests, and manual real Codex smoke through the running server are recorded in `workpads/server/tasks.md`.
 - Harness research spike completed 2026-05-28: ACP remains the preferred agent/protocol boundary, but the best harnesses add controller-owned runtime, permission, tool instrumentation, checkpoint/recovery, context/memory, evaluation, observability, and multi-client/server layers around it. See `workpads/harness-research/knowledge.md`.
 - Operator-control work should make the server usable by a human without memorizing low-level dispatch commands. Start with a no-planner REPL that composes existing server commands; later planner modes may use Codex, Capo, or local models to choose tools/actions.
+- Goal-orchestration should be the next controller feature after operator-control closes. It applies the harness-research lesson that Capo owns the outer loop: goals, reporting, evidence, validation, continuation, story projections, and historical reports belong in the server/controller, while provider-native goal modes are optional delegated inner loops.

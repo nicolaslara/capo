@@ -15,6 +15,7 @@
 | **server** | Complete | Completed 2026-05-27 - Capo server/control plane, CLI-through-server path, mocked-agent tests, mocked Codex path, and manual real Codex smoke |
 | **harness-research** | Complete | Completed 2026-05-28 - best practices for coding-agent harnesses and ACP's role as adapter boundary |
 | **operator-control** | **Active** | Build a human operator REPL/control surface for inspecting and steering running agents through the server |
+| **goal-orchestration** | Planned | Add Capo-owned goals, agent-native reporting, evidence/story projections, continuation scheduling, validation, and historical execution reports |
 
 ## research
 
@@ -372,6 +373,52 @@ workpads/server/knowledge.md
 - Prefer human-readable summaries inspired by operator CLIs; keep machine-ish evidence available through existing commands.
 - Do not bypass Capo server commands to mutate agent/session/runtime state.
 - Keep live provider execution behind existing explicit opt-in gates.
+
+## goal-orchestration
+
+**Status:** Planned. Intended next controller workpad after operator-control is closed.
+
+**Prerequisites:** Server/control-plane milestone completed, harness-research completed, and operator-control sufficiently stable to inspect goal/report/story state through the server boundary.
+
+**Objective:** Make Capo own long-running objectives and the evidence-backed story of execution: goal lifecycle, agent reports, requirement/evidence/review/validation ledgers, event-driven continuation, completion audit, parent/child agent reporting, provider-native goal delegation, and historical execution reports.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/goal-orchestration/tasks.md
+workpads/goal-orchestration/knowledge.md
+workpads/goal-orchestration/references.md
+workpads/harness-research/knowledge.md
+workpads/harness-research/references.md
+workpads/operator-control/knowledge.md
+workpads/server/knowledge.md
+workpads/architecture/boundaries.md
+workpads/architecture/state-model.md
+workpads/architecture/acp-replay-dedupe.md
+workpads/architecture/capability-permissions.md
+workpads/architecture/runtime-tunnel.md
+workpads/architecture/protocol-provider.md
+workpads/architecture/tool-exposure.md
+workpads/architecture/memory-architecture.md
+workpads/architecture/prototype-plan.md
+```
+
+**Quick nav:**
+
+- `tasks.md` ordered implementation slices from schema/design through mocked e2e and delegated Codex goal mode.
+- `knowledge.md` scope decision, controller-loop design, agent-reporting semantics, story/report projections, and non-goals.
+- `references.md` local architecture and harness-research source links.
+
+**Rules:**
+
+- The Capo server/controller owns the goal lifecycle, continuation policy, evidence ledger, and completion decision.
+- Agent reports are structured operational data, not freeform transcript truth. Prose summaries are derived views.
+- Provider-native goal modes such as Codex `/goal` are delegated inner loops; Capo still mirrors the objective, observes events, and audits completion.
+- Do not add autonomous continuation until goal state, report/evidence records, stop policy, and mocked replay tests exist.
+- Historical reports must be rebuildable from events, projections, and artifacts.
 
 ## How To Switch Focus
 
