@@ -84,6 +84,19 @@ Source policy:
 
 ### OpenAI Codex
 
+- https://developers.openai.com/codex/use-cases/follow-goals
+  - Observed 2026-05-28.
+  - Key facts: `/goal` gives Codex a durable objective for long-running work;
+    good goals need a clear stopping condition and validation loop; command
+    surface includes `/goal <objective>`, `/goal`, `/goal pause`,
+    `/goal resume`, and `/goal clear`; if unavailable, enable `features.goals`
+    or run `codex features enable goals`.
+- https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex
+  - Observed 2026-05-28.
+  - Key facts: Goals are persisted thread state, not global memory or project
+    instructions; they record objective, lifecycle, budget, and progress
+    accounting; continuation is event-driven at safe idle boundaries; completion
+    requires an evidence audit; budget exhaustion is not completion.
 - https://openai.com/index/running-codex-safely/
   - Observed 2026-05-28.
   - Key facts: sandboxing and approvals are paired; managed network policies;
@@ -94,6 +107,37 @@ Source policy:
   - Observed 2026-05-28.
   - Key facts: open-source Codex CLI repository; useful for adapter/source
     comparison in later implementation-specific research.
+- https://github.com/openai/codex/issues/19910
+  - Observed 2026-05-28.
+  - Confidence: public issue report and discussion, not stable documentation.
+  - Key facts: reports a failure mode where goal continuation and completion
+    audit requirements can be weakened after compaction; proposes reattaching
+    continuation context from persisted active goal state rather than relying on
+    compacted summaries.
+- https://github.com/openai/codex/issues/20536
+  - Observed 2026-05-28.
+  - Confidence: public issue report.
+  - Key facts: documents a discoverability gap around `/goal`; reports local
+    `codex-cli 0.128.0` strings for `/goal <objective>`, pause, resume, clear,
+    and states such as pursuing, paused, achieved, unmet, and budget-limited;
+    issue later closed as completed.
+- https://github.com/openai/codex/issues/22049
+  - Observed 2026-05-28.
+  - Confidence: public issue report.
+  - Key facts: describes CLI `/goal` as able to set/view/pause/resume/clear a
+    durable objective attached to the active thread; records desktop-app
+    discoverability and parity concerns; later comments suggest native goal UI
+    may exist in some builds even when slash-command discovery is unclear.
+
+Local observations:
+
+- `codex --help` and `codex exec --help` did not expose a top-level `goal`
+  subcommand on 2026-05-28, consistent with `/goal` being an interactive
+  slash-command surface.
+- The installed npm wrapper at
+  `/Users/nicolas/.nvm/versions/node/v24.10.0/lib/node_modules/@openai/codex`
+  did not contain readable goal strings in the JavaScript wrapper; the usable
+  implementation appears to be in a platform binary or upstream source.
 
 ### Cursor
 

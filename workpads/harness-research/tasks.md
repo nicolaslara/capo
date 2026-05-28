@@ -60,6 +60,38 @@ Evidence:
 - `workpads/harness-research/knowledge.md`
 - `workpads/harness-research/references.md`
 
+### HRS-004 - Analyze Codex Goals as a harness pattern
+
+Status: completed on 2026-05-28.
+
+Acceptance:
+
+- Cover the documented `/goal` lifecycle and feature gate.
+- Separate official Codex documentation from public reverse-engineering and
+  issue-report evidence.
+- Explain how goal continuation, completion audit, compaction, and budget
+  handling affect Capo design.
+
+Evidence:
+
+- `workpads/harness-research/knowledge.md`
+- `workpads/harness-research/references.md`
+
+### HRS-005 - Place the Capo controller loop architecturally
+
+Status: completed on 2026-05-28.
+
+Acceptance:
+
+- State where the objective/continuation loop lives.
+- Distinguish Capo's outer controller loop from adapter, ACP, CLI, and
+  provider-native goal loops.
+- List the orchestrator functions Capo should own.
+
+Evidence:
+
+- `workpads/harness-research/knowledge.md`
+
 ## Verification
 
 - Primary and official documentation links are recorded in

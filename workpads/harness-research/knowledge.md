@@ -215,6 +215,138 @@ Design rule for Capo:
   run, turn, memory, context, evidence.
 - Add ACP exposure later only where it improves interoperability.
 
+## Codex Goals As A Harness Pattern
+
+OpenAI's current Codex Goals documentation makes `/goal` directly relevant to
+Capo. It describes a Goal as a durable objective for long-running work, with
+set/view/pause/resume/clear controls, explicit validation, and a stop condition.
+The feature is exposed as a Codex slash command, not as a top-level `codex`
+subcommand. Local observation on 2026-05-28 matched that shape: `codex --help`
+and `codex exec --help` did not list a `goal` subcommand.
+
+Documented Codex mechanics:
+
+- A Goal is persisted thread state, not global memory and not project-level
+  instructions.
+- The state records objective, lifecycle, budget, and progress accounting.
+- States include active, paused, complete, and budget-limited.
+- Continuation is event-driven, not a simple local loop.
+- Codex checks continuation only at safe boundaries: after a turn finishes,
+  when no other work is pending, no user input is queued, and the thread is
+  idle.
+- The dispatcher is intentionally conservative: plan-only work should not
+  trigger continuation, interruptions pause the objective, and a continuation
+  that makes no tool call suppresses the next automatic continuation to avoid
+  spin.
+- Completion requires an audit against concrete evidence: files, commands,
+  tests, benchmark output, generated artifacts, or research citations.
+- Budget exhaustion is not completion. The system should stop substantive work,
+  summarize progress and blockers, and identify the next useful step.
+- Lifecycle authority is bounded. The model can mark an existing goal complete
+  only when the evidence supports completion; pause/resume/clear and
+  budget-limited transitions remain user- or system-controlled.
+
+Public issue and reverse-engineering evidence adds useful failure modes but
+should be treated as lower confidence than official docs:
+
+- GitHub issue reports around `/goal` describe cases where compaction can lose
+  or weaken the active-goal continuation prompt, especially the requirement to
+  audit completion against actual current state.
+- The proposed remedy in that public discussion is to reattach goal context
+  from persisted state after compaction, rather than trusting a compacted
+  summary to preserve the objective and audit contract.
+- Other issues show discoverability and surface-parity problems: `/goal` existed
+  in CLI builds before all docs and desktop surfaces exposed the same controls.
+
+Capo implications:
+
+- Treat the objective as structured Capo state and reinject it after resume,
+  compaction, adapter restart, or provider transcript loss.
+- Keep a requirement/evidence ledger outside the model transcript. The final
+  answer is not the proof; the proof is the ledger of files, commands, tests,
+  review findings, and citations.
+- Make completion a state transition guarded by evidence, not by model
+  confidence.
+- Add an explicit no-progress guard. If a continuation does not inspect or
+  change anything material, Capo should stop automatic continuation until the
+  user or planner changes strategy.
+- Feature-probe provider-native goal support. Do not assume `/goal` is available
+  across Codex CLI, desktop, mobile, remote, or future API surfaces.
+
+## Where Capo's Loop Lives
+
+The loop should live in the Capo server/controller, not in the CLI, not in ACP,
+not inside an adapter, and not solely inside a vendor-specific agent.
+
+That loop is not a tight `while true`. It is an event-driven continuation
+dispatcher over Capo-owned state:
+
+1. A `CapoGoal` record stores the objective, success criteria, constraints,
+   budget, lifecycle state, progress summary, and evidence requirements.
+2. Capo records events such as `TurnFinished`, `PermissionRequested`,
+   `PermissionResolved`, `RuntimeIdle`, `UserInputQueued`, `BudgetUpdated`,
+   `CheckpointCreated`, and `VerificationResult`.
+3. The continuation scheduler wakes only at safe boundaries: active goal,
+   runtime idle, no queued user input, no pending permission, no conflicting
+   workspace lock, budget available, and no recent no-progress suppression.
+4. The planner builds the next command envelope: target session, adapter mode,
+   context packet, continuation prompt, allowed tools, permission profile, and
+   requested validation.
+5. The runtime runner and agent adapter execute that envelope and stream raw
+   provider updates back into Capo.
+6. The auditor updates the requirement/evidence ledger and chooses the next
+   state: continue, paused, blocked, budget-limited, or complete.
+
+The CLI, dashboard, mobile UI, or remote-control surface should only create
+commands and display state. They should not own continuation policy. ACP should
+remain a transport/protocol adapter. It can carry prompts, updates, tool calls,
+and permission requests, but Capo should still own goal lifecycle and evidence.
+
+Provider-native loops are nested loops. Codex `/goal`, Claude Code routines,
+OpenCode subagents, or future provider task modes can be useful execution
+strategies, but Capo should treat them as delegated runtimes:
+
+- Default mode: Capo-owned goal. Capo sends ordinary turns with Capo's
+  continuation context and verifies completion itself. This works across
+  providers.
+- Delegated mode: Capo asks a provider-native goal/task mode to pursue a
+  bounded subgoal. Capo still mirrors the objective, watches events, and audits
+  completion before marking the Capo goal complete.
+- Hybrid mode: Capo uses provider-native goal state for deep local coding while
+  preserving a parent Capo goal, checkpoints, permission policy, and external
+  evidence ledger.
+
+The design rule is simple: the vendor agent may loop internally, but Capo owns
+the outer loop and the decision that the work is actually done.
+
+## Controller And Orchestrator Functions For Capo
+
+Capo's controller/orchestrator should serve these functions:
+
+- Goal lifecycle: create, view, pause, resume, clear, block, budget-limit, and
+  complete objectives as durable events.
+- Work scheduling: decide when another turn may run, which session gets it, and
+  whether to use a primary agent, subagent, or provider-native goal mode.
+- Evidence and completion audit: maintain requirement checklists, verification
+  commands, manual smoke records, review findings, artifacts, and citations.
+- Context assembly: build sourced packets from workpads, architecture docs,
+  memory, recent events, files, and evidence without dumping whole transcripts.
+- Capability and permission policy: map adapter/tool requests through Capo
+  scopes, grants, revocations, approvals, and audit logs.
+- Runtime supervision: start, stop, restart, reconnect, and recover agent
+  processes, containers, worktrees, terminals, and tunnels.
+- Tool mediation: prefer Capo-owned wrappers for file, search, test, patch,
+  browser, network, and artifact tools when Capo needs redaction, provenance, or
+  policy enforcement.
+- Checkpoint and rollback: create reviewable snapshots before broad unattended
+  changes and tie them to sessions, turns, and tool events.
+- Provider abstraction: feature-probe Codex, Claude Code, OpenCode, ACP agents,
+  and others; normalize their events without erasing provider-specific evidence.
+- Observability: expose active objective, current turn, pending decisions,
+  progress evidence, blockers, budgets, and raw-update links to every client.
+- Stop policy: suppress spin, surface repeated blockers, stop on unsafe state,
+  and require user input when the next action would exceed the granted scope.
+
 ## Harness Comparison Notes
 
 | System | What matters for Capo | Confidence |
@@ -222,7 +354,7 @@ Design rule for Capo:
 | ACP | Good protocol for client-agent turns, tool updates, permission requests, file/terminal capabilities. Not a controller. | High |
 | Claude Code | Strong official docs around settings scopes, permissions, hooks, MCP, memory, subagents, remote surfaces, and enterprise controls. Leaked source not used. | High for documented behavior |
 | OpenCode | Open-source, server/client split, OpenAPI surface, sessions, permissions, agents/subagents, MCP, default local server. Directly relevant to Capo. | High |
-| Codex CLI | Strong safety/control guidance: sandbox, approvals, network policy, identity, credential stores, rules, OpenTelemetry/compliance logs. | High |
+| Codex CLI | Strong safety/control guidance plus `/goal` prior art: durable thread-scoped objectives, event-driven continuation, budgets, and evidence-based completion. | High |
 | Cursor | Product docs show tools, checkpoints, queued messages, rules, MCP, ACP mode, CLI worktrees, command approval, and cloud-agent handoff. Internals closed. | Medium-high |
 | OpenHands | Sandbox/runtime discipline, Docker isolation, custom images, SDLC/CI workflows. Good for runtime and workflow patterns. | High |
 | SWE-agent / SWE-ReX | Best source on ACI design, shell-in-container execution, history processors, custom tools, and benchmark-driven ACI tuning. | High |
@@ -256,15 +388,19 @@ Design rule for Capo:
 1. Keep ACP as an adapter/protocol layer, not the Capo domain model.
 2. Keep Capo server/controller authoritative for task, session, run, turn,
    permission, tool, memory, evidence, and recovery state.
-3. Prioritize Capo-owned tool wrappers before advertising broad ACP file or
+3. Add Capo-owned goal/objective state and an event-driven continuation
+   dispatcher before relying on provider-native long-running task modes.
+4. Treat Codex `/goal` as a useful prior-art and optional delegation mode, not
+   as Capo's source of truth.
+5. Prioritize Capo-owned tool wrappers before advertising broad ACP file or
    terminal client capabilities.
-4. Add checkpoint/rollback semantics before increasing auto-approve or
+6. Add checkpoint/rollback semantics before increasing auto-approve or
    unattended source-writing behavior.
-5. Treat context selection as a product feature: memory packets should be
+7. Treat context selection as a product feature: memory packets should be
    scoped, sourced, and budgeted.
-6. Build a verification/evaluation layer around test/lint/smoke/review evidence
+8. Build a verification/evaluation layer around test/lint/smoke/review evidence
    and outcome scoring.
-7. Make observability agent-native from the start, with prompt/output raw-data
+9. Make observability agent-native from the start, with prompt/output raw-data
    policies and redaction states.
-8. Include OpenCode and Cline as the closest inspectable product comparables for
+10. Include OpenCode and Cline as the closest inspectable product comparables for
    Capo's server/client plus agent-core direction.
