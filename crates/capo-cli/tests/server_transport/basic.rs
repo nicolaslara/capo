@@ -215,17 +215,17 @@ quit
         [],
         script,
     );
-    assert!(output.contains("Capo control"));
+    assert!(output.contains("Capo"));
     assert!(output.contains("Agents (1)"));
-    assert!(output.contains("attached: mock-control"));
-    assert!(output.contains("- mock-control [running] (attached)"));
-    assert!(output.contains("sent to mock-control"));
+    assert!(output.contains("Attached to mock-control."));
+    assert!(output.contains("- mock-control (attached) - running"));
+    assert!(output.contains("Sent to mock-control"));
     assert!(output.contains("goal: Please report current status"));
     assert!(output.contains(
-        "summary: Fake adapter processed goal for mock-control: Please report current status"
+        "reply: Fake adapter processed goal for mock-control: Please report current status"
     ));
     assert!(output.contains("Dashboard"));
-    assert!(output.contains("active sessions: 1"));
+    assert!(output.contains("active: 1"));
 
     assert!(server.wait().expect("server wait").success());
 }
@@ -241,8 +241,7 @@ fn bare_capo_starts_control_and_autostarts_server_when_needed() {
         "dashboard\nquit\n",
     );
 
-    assert!(output.contains("Capo control"));
-    assert!(output.contains(&format!("server: {address} (started)")));
+    assert!(output.contains("Capo"));
     assert!(output.contains("Dashboard"));
     assert!(output.contains("agents: 0"));
     assert!(output.contains("bye"));
@@ -310,7 +309,7 @@ quit
         [],
         script,
     );
-    assert!(output.contains("Recent work"));
+    assert!(output.contains("mock-interrupt"));
     assert!(output.contains("Tool activity"));
     assert!(output.contains("Evidence"));
     assert!(output.contains("Reviews"));
@@ -378,14 +377,13 @@ quit
         [],
         script,
     );
-    assert!(output.contains("planner: capo"));
+    assert!(output.contains("Capo"));
     assert!(output.contains("Agents (2)"));
-    assert!(output.contains("- capo-operator [running] session=session-capo-operator-"));
+    assert!(output.contains("- capo-operator"));
     assert!(output.contains("Status\n- mock-control"));
-    assert!(output.contains("sent to mock-control"));
+    assert!(output.contains("Sent to mock-control"));
     assert!(output.contains("Reviews"));
-    assert!(output.contains("Recent work"));
-    assert!(output.contains("agent: capo-operator"));
+    assert!(output.contains("capo-operator"));
     assert!(output.contains("capo planner decision input_hash="));
 
     assert!(server.wait().expect("server wait").success());
@@ -439,7 +437,7 @@ fn control_repl_refuses_to_fake_codex_attached_chat_without_live_opt_in() {
         [],
         "attach codex-control\nsay hi\nquit\n",
     );
-    assert!(output.contains("attached: codex-control"));
+    assert!(output.contains("Attached to codex-control."));
     assert!(output.contains("Codex live execution from control requires"));
     assert!(!output.contains("Fake adapter processed goal for codex-control: say hi"));
 

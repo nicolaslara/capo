@@ -54,8 +54,15 @@ fn parse_codex_record(raw: &Value) -> Vec<NormalizedAdapterEvent> {
         }
         "item.completed" | "item.updated" => {
             let item_ref = string_at(raw, &["item", "id"]).or_else(|| string_at(raw, &["id"]));
-            let role = string_at(raw, &["item", "role"]);
-            let content = text_from_content_array(raw.pointer("/item/content"));
+            let item_type = string_at(raw, &["item", "type"]);
+            let role = string_at(raw, &["item", "role"]).or_else(|| {
+                (item_type.as_deref() == Some("agent_message")).then(|| "assistant".to_string())
+            });
+            let content = text_from_content_array(raw.pointer("/item/content")).or_else(|| {
+                (item_type.as_deref() == Some("agent_message"))
+                    .then(|| string_at(raw, &["item", "text"]))
+                    .flatten()
+            });
             let timeline_key = item_ref
                 .clone()
                 .map(|item| format!("codex:item:{item}"))

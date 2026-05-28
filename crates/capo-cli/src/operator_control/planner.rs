@@ -10,6 +10,9 @@ pub(super) enum OperatorAction {
     RecentWork {
         agent: Option<String>,
     },
+    Details {
+        agent: Option<String>,
+    },
     ToolActivity {
         agent: Option<String>,
     },
@@ -130,6 +133,9 @@ fn parse_action(line: &str) -> Result<OperatorAction, String> {
         "agents" | "ls" => Ok(OperatorAction::ListAgents),
         "dashboard" | "overview" => Ok(OperatorAction::Dashboard),
         "recent" | "work" => Ok(OperatorAction::RecentWork {
+            agent: parts.next().map(ToString::to_string),
+        }),
+        "details" | "debug" => Ok(OperatorAction::Details {
             agent: parts.next().map(ToString::to_string),
         }),
         "tools" => Ok(OperatorAction::ToolActivity {
@@ -323,6 +329,7 @@ impl OperatorAction {
             Self::Dashboard => "dashboard",
             Self::Status { .. } => "status",
             Self::RecentWork { .. } => "recent_work",
+            Self::Details { .. } => "details",
             Self::ToolActivity { .. } => "tool_activity",
             Self::Evidence { .. } => "evidence",
             Self::ReviewNeeds { .. } => "review_needs",
@@ -339,6 +346,7 @@ impl OperatorAction {
         match self {
             Self::Status { agent }
             | Self::RecentWork { agent }
+            | Self::Details { agent }
             | Self::ToolActivity { agent }
             | Self::Evidence { agent }
             | Self::ReviewNeeds { agent }
@@ -408,6 +416,12 @@ mod tests {
         assert_eq!(
             parse_action("state demo"),
             Ok(OperatorAction::RecentWork {
+                agent: Some("demo".to_string())
+            })
+        );
+        assert_eq!(
+            parse_action("details demo"),
+            Ok(OperatorAction::Details {
                 agent: Some("demo".to_string())
             })
         );

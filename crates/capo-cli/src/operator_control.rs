@@ -1,9 +1,13 @@
-use std::io::{BufRead, IsTerminal, Read, Write};
-use std::path::PathBuf;
+use std::io::{IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
 
+use capo_adapters::CodexExecAdapter;
 use capo_server::{
-    AgentSummary, ServerCommand, ServerRequest, ServerResponsePayload, TaskRunSummary, send_tcp,
+    AgentSummary, DispatchRunSummary, ServerCommand, ServerRequest, ServerResponsePayload,
+    TaskRunSummary, send_tcp,
 };
+use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 
 use crate::cli_surface::ParsedArgs;
 use crate::{debug_error, stable_cli_hash};
@@ -14,8 +18,9 @@ mod server_process;
 
 use planner::{CapoPlanner, NonePlanner, OperatorAction, Planner, PlannerDecisionAudit};
 use render::{
-    render_dashboard, render_evidence_summary, render_human_agent, render_human_agent_with_marker,
-    render_recent_work, render_review_needs, render_tool_activity,
+    AgentRenderer, DetailsRenderer, EvidenceRenderer, RecentWorkRenderer, ReviewNeedsRenderer,
+    ToolActivityRenderer, render_agent_reply, render_dashboard, render_human_agent,
+    render_human_agent_with_marker, render_recent_work,
 };
 use server_process::{AutoServer, ensure_server_running, require_loopback_address, server_address};
 
@@ -81,16 +86,7 @@ impl ControlRepl {
 
     fn run_script(&mut self, script: &str) -> Result<String, String> {
         self.prepare_planner()?;
-        let mut output = format!(
-            "Capo control\nplanner: {}\nserver: {}{}\n\nType `help` for commands.\n",
-            self.planner.mode(),
-            self.address,
-            if self.server_started {
-                " (started)"
-            } else {
-                ""
-            }
-        );
+        let mut output = self.render_banner();
         for line in script.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -109,31 +105,26 @@ impl ControlRepl {
 
     fn run_interactive(&mut self) -> Result<String, String> {
         self.prepare_planner()?;
-        println!(
-            "Capo control\nplanner: {}\nserver: {}{}\n\nType `help` for commands.",
-            self.planner.mode(),
-            self.address,
-            if self.server_started {
-                " (started)"
-            } else {
-                ""
-            }
-        );
-        let stdin = std::io::stdin();
-        let mut stdin = stdin.lock();
+        print!("{}", self.render_banner());
+        let mut editor = DefaultEditor::new().map_err(debug_error)?;
         loop {
-            print!("{}", self.prompt());
-            std::io::stdout().flush().map_err(debug_error)?;
-            let mut line = String::new();
-            let bytes = stdin.read_line(&mut line).map_err(debug_error)?;
-            if bytes == 0 {
-                println!();
-                return Ok(String::new());
-            }
+            let line = match editor.readline(&self.prompt()) {
+                Ok(line) => line,
+                Err(ReadlineError::Interrupted) => {
+                    println!("Use `quit` to exit.");
+                    continue;
+                }
+                Err(ReadlineError::Eof) => {
+                    println!();
+                    return Ok(String::new());
+                }
+                Err(error) => return Err(debug_error(error)),
+            };
             let line = line.trim();
             if line.is_empty() {
                 continue;
             }
+            let _ = editor.add_history_entry(line);
             match self.run_line(line) {
                 LineResult::Continue(rendered) => print!("{rendered}"),
                 LineResult::Quit(rendered) => {
@@ -141,6 +132,7 @@ impl ControlRepl {
                     return Ok(String::new());
                 }
             }
+            std::io::stdout().flush().map_err(debug_error)?;
         }
     }
 
@@ -231,6 +223,7 @@ impl ControlRepl {
             OperatorAction::Dashboard => self.dashboard(),
             OperatorAction::Status { agent } => self.status(agent),
             OperatorAction::RecentWork { agent } => self.recent_work(agent),
+            OperatorAction::Details { agent } => self.details(agent),
             OperatorAction::ToolActivity { agent } => self.tool_activity(agent),
             OperatorAction::Evidence { agent } => self.evidence(agent),
             OperatorAction::ReviewNeeds { agent } => self.review_needs(agent),
@@ -279,28 +272,31 @@ impl ControlRepl {
     }
 
     fn recent_work(&mut self, agent: Option<String>) -> Result<String, String> {
-        self.read_agent_or_all(agent, render_recent_work)
+        self.read_agent_or_all(agent, RecentWorkRenderer)
+    }
+
+    fn details(&mut self, agent: Option<String>) -> Result<String, String> {
+        self.read_agent_or_all(agent, DetailsRenderer)
     }
 
     fn tool_activity(&mut self, agent: Option<String>) -> Result<String, String> {
-        self.read_agent_or_all(agent, render_tool_activity)
+        self.read_agent_or_all(agent, ToolActivityRenderer)
     }
 
     fn evidence(&mut self, agent: Option<String>) -> Result<String, String> {
-        self.read_agent_or_all(agent, render_evidence_summary)
+        self.read_agent_or_all(agent, EvidenceRenderer)
     }
 
     fn review_needs(&mut self, agent: Option<String>) -> Result<String, String> {
-        self.read_agent_or_all(agent, render_review_needs)
+        self.read_agent_or_all(agent, ReviewNeedsRenderer)
     }
 
     fn attach(&mut self, agent: String) -> Result<String, String> {
         let summary = self.agent_status(&agent)?;
         self.attached_agent = Some(agent.clone());
         Ok(format!(
-            "attached: {agent}\n{}{}",
-            self.render_agent_line(&summary),
-            render_recent_work(&summary)
+            "Attached to {agent}.\n{}",
+            render_agent_reply(&summary)
         ))
     }
 
@@ -317,10 +313,7 @@ impl ControlRepl {
         }
         self.ensure_agent_registered(&agent)?;
         let started = self.start_agent_session(&agent, &adapter, &goal)?;
-        let mut output = format!(
-            "started {adapter} agent {agent}\nsession: {}\nrun: {}\n",
-            started.session_id, started.run_id
-        );
+        let mut output = String::new();
         if adapter == "codex" {
             let run = self.run_codex_live_turn(
                 &agent,
@@ -328,18 +321,16 @@ impl ControlRepl {
                 &started.session_id.to_string(),
                 &started.run_id.to_string(),
             )?;
-            output.push_str(&format!(
-                "codex live run: {}\nprovider_cli_executed: {}\nstatus: {}\n",
-                run.dispatch_execution_id, run.provider_cli_executed, run.status
-            ));
+            output.push_str(&self.render_live_codex_result(&agent, &run));
+        } else {
+            output.push_str(&format!("Started {adapter} agent `{agent}`.\n"));
         }
         self.attached_agent = Some(agent.clone());
         let summary = self.agent_status(&agent)?;
-        output.push_str(&format!(
-            "attached: {agent}\n{}{}",
-            self.render_agent_line(&summary),
-            render_recent_work(&summary)
-        ));
+        output.push_str(&format!("Attached to {agent}.\n"));
+        if adapter != "codex" {
+            output.push_str(&render_agent_reply(&summary));
+        }
         Ok(output)
     }
 
@@ -369,13 +360,9 @@ impl ControlRepl {
                 &session.session_id.to_string(),
                 &run_id,
             )?;
-            let summary = self.agent_status(&agent)?;
             return Ok(format!(
-                "sent to {agent}\ncodex live run: {}\nprovider_cli_executed: {}\nstatus: {}\n{}",
-                run.dispatch_execution_id,
-                run.provider_cli_executed,
-                run.status,
-                render_recent_work(&summary)
+                "Sent to {agent}.\n{}",
+                self.render_live_codex_result(&agent, &run)
             ));
         }
         let response = self.send_request(ServerCommand::SteerAgent {
@@ -385,7 +372,22 @@ impl ControlRepl {
         let ServerResponsePayload::AgentStatus(summary) = response else {
             return Err("server returned unexpected response for agent mutation".to_string());
         };
-        Ok(format!("sent to {agent}\n{}", render_recent_work(&summary)))
+        Ok(format!(
+            "Sent to {agent}.\n{}",
+            render_agent_reply(&summary)
+        ))
+    }
+
+    fn render_live_codex_result(&self, agent: &str, run: &DispatchRunSummary) -> String {
+        latest_codex_reply_from_artifact(&self.state_root, run)
+            .map(|reply| format!("{agent}: {reply}\n"))
+            .unwrap_or_else(|| {
+                if run.status == "exited" {
+                    format!("{agent}: reply captured; use `details` for artifact metadata.\n")
+                } else {
+                    format!("{agent}: Codex run did not finish cleanly.\n")
+                }
+            })
     }
 
     fn interrupt(&mut self, agent: Option<String>, reason: String) -> Result<String, String> {
@@ -415,15 +417,15 @@ impl ControlRepl {
         self.agent_status(&agent)
     }
 
-    fn read_agent_or_all(
+    fn read_agent_or_all<R: AgentRenderer>(
         &mut self,
         agent: Option<String>,
-        render: fn(&AgentSummary) -> String,
+        renderer: R,
     ) -> Result<String, String> {
         if agent.is_some() || self.attached_agent.is_some() {
             return self
                 .resolved_agent_status(agent)
-                .map(|summary| render(&summary));
+                .map(|summary| renderer.render(&summary));
         }
         let agents = self.list_agent_summaries()?;
         if agents.is_empty() {
@@ -431,7 +433,7 @@ impl ControlRepl {
         }
         let mut output = String::new();
         for agent in agents {
-            output.push_str(&render(&agent));
+            output.push_str(&renderer.render(&agent));
         }
         Ok(output)
     }
@@ -601,6 +603,14 @@ impl ControlRepl {
     fn should_direct_send(&self, line: &str) -> bool {
         self.attached_agent.is_some() && !looks_like_control_command(line)
     }
+
+    fn render_banner(&self) -> String {
+        if self.server_started {
+            "Capo\nserver started\nType `help` for commands.\n".to_string()
+        } else {
+            "Capo\nType `help` for commands.\n".to_string()
+        }
+    }
 }
 
 enum LineResult {
@@ -616,6 +626,7 @@ Commands:
   status [AGENT]
   state [AGENT] | result [AGENT]
   recent [AGENT] | work [AGENT]
+  details [AGENT]
   tools [AGENT]
   evidence [AGENT]
   reviews [AGENT]
@@ -630,8 +641,40 @@ Commands:
 
 When attached, ordinary text is sent directly to the attached agent.
 Codex agents require starting control with CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 and CAPO_SERVER_RUN_CODEX_LIVE=1.
+Use `details` when you need session ids, run ids, dispatch ids, and raw policy metadata.
 "
     .to_string()
+}
+
+fn latest_codex_reply_from_artifact(state_root: &Path, run: &DispatchRunSummary) -> Option<String> {
+    if !run.provider_cli_executed || run.credential_scan_status != "clean" {
+        return None;
+    }
+    let stdout = state_root
+        .join("control-live-artifacts")
+        .join(run.run_id.as_str())
+        .join("stdout.txt");
+    let content = std::fs::read_to_string(stdout).ok()?;
+    let parsed = CodexExecAdapter::parse_jsonl(&content).ok()?;
+    parsed
+        .deduped_by_idempotency()
+        .into_iter()
+        .rev()
+        .filter(|event| event.role.as_deref() == Some("assistant"))
+        .filter_map(|event| event.content)
+        .find(|content| !content.trim().is_empty())
+        .map(|content| bounded_display_text(&content))
+}
+
+fn bounded_display_text(value: &str) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHARS: usize = 2_000;
+    if compact.chars().count() <= MAX_CHARS {
+        return compact;
+    }
+    let mut shortened = compact.chars().take(MAX_CHARS).collect::<String>();
+    shortened.push_str("...");
+    shortened
 }
 
 fn strip_surrounding_quotes(value: &str) -> &str {
@@ -690,6 +733,8 @@ fn looks_like_control_command(line: &str) -> bool {
             | "overview"
             | "recent"
             | "work"
+            | "details"
+            | "debug"
             | "state"
             | "result"
             | "tools"
@@ -745,5 +790,53 @@ mod tests {
             session: None,
         };
         assert!(render_agent_line(&agent).contains("agent=demo"));
+    }
+
+    #[test]
+    fn codex_reply_renderer_reads_scanned_stdout_artifact_without_state_summary() {
+        let root = std::env::temp_dir().join(format!(
+            "capo-codex-reply-render-{}",
+            stable_cli_hash("codex-reply-render")
+        ));
+        let run_id = capo_core::RunId::new("run-codex-render");
+        let stdout = root
+            .join("control-live-artifacts")
+            .join(run_id.as_str())
+            .join("stdout.txt");
+        std::fs::create_dir_all(stdout.parent().expect("stdout parent")).expect("mkdir");
+        std::fs::write(
+            &stdout,
+            r#"{"type":"thread.started","thread_id":"codex-thread-render"}
+{"type":"item.completed","thread_id":"codex-thread-render","item":{"id":"codex-item-render","role":"assistant","content":[{"type":"output_text","text":"CAPO_UI_OK"}]}}
+{"type":"turn.completed","thread_id":"codex-thread-render"}
+"#,
+        )
+        .expect("write stdout");
+        let run = DispatchRunSummary {
+            dispatch_plan_id: "plan-codex-render".to_string(),
+            dispatch_execution_id: "execution-codex-render".to_string(),
+            adapter: "codex_exec".to_string(),
+            session_id: capo_core::SessionId::new("session-codex-render"),
+            run_id,
+            provider_cli_execution_allowed: true,
+            provider_cli_executed: true,
+            status: "exited".to_string(),
+            runtime_process_ref: Some("process-codex-render".to_string()),
+            credential_scan_status: "clean".to_string(),
+            raw_prompt_policy: "not_rendered".to_string(),
+            raw_output_policy: "bounded_redacted_artifacts".to_string(),
+            reason_codes: "provider_cli_executed_and_artifacts_scanned".to_string(),
+            input_event_count: 3,
+            appended_event_count: 3,
+            tool_event_count: 0,
+            summary_event_count: 1,
+            completed_turn_count: 1,
+        };
+
+        assert_eq!(
+            latest_codex_reply_from_artifact(&root, &run).as_deref(),
+            Some("CAPO_UI_OK")
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

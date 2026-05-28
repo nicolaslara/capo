@@ -256,3 +256,67 @@ Evidence:
   - Ran control with `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 CAPO_SERVER_RUN_CODEX_LIVE=1`.
   - Scripted `new codex codex-repl Say CAPO_REPL_CODEX_OK and nothing else`, `result`, `quit`.
   - Observed `provider_cli_executed: true`, `status: exited`, attached `codex-repl`, and recent work with `adapter codex_exec` summary metadata.
+
+## OC8 - User-Facing Control UI
+
+Status: completed on 2026-05-28
+
+Acceptance:
+
+- Make the default control transcript readable to an operator who does not know Capo internals.
+- Hide session ids, run ids, dispatch ids, hash-only goals, provider execution flags, and raw policy details from normal `agents`, `status`, `result`, `send`, and `dashboard` output.
+- Preserve a discoverable `details [AGENT]` command for debugging and audit metadata.
+- For live Codex turns, render the latest assistant message from the scanned stdout artifact when available, without changing the durable state summary policy.
+- Keep deterministic tests for parser/render behavior, mocked control, no-opt-in Codex failure, and the Codex artifact reply renderer.
+- Manually run the user-facing CLI path and verify the transcript no longer reads like debug output.
+
+Evidence:
+
+- `agents` now renders compact rows such as `- demo-ui [running] - running (1 tools, 1 memories, 1 evidence)`.
+- `status`, `result`, and `send` render conversation-shaped fields: status, goal, reply, and activity.
+- Added `details [AGENT]` / `debug [AGENT]` for session ids, run ids, dispatch ids, CLI execution flags, and raw output policy metadata.
+- `new codex ...` and attached Codex text now render `Codex finished.` plus `Reply: ...` from the scanned live stdout artifact when a display message exists.
+- Added focused deterministic coverage:
+  - `cargo test -p capo-adapters codex_exec_agent_message_text_maps_to_assistant_content -- --nocapture`
+  - `cargo test -p capo-cli operator_control -- --nocapture`
+  - `cargo test -p capo-cli --test server_transport control -- --nocapture`
+- Manual direct run:
+  - Started `./target/debug/capo server serve --addr 127.0.0.1:17880`.
+  - Registered `demo-ui`, sent `Initial UI test`, then ran control with `agents`, `attach demo-ui`, attached free text, `result`, and `details`.
+  - Observed the normal transcript showing human-readable status/reply/activity; `details` remained the debug path.
+  - Ran real Codex with `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 CAPO_SERVER_RUN_CODEX_LIVE=1 ./target/debug/capo --state /tmp/capo-ui-live-codex2`, scripted `new codex ui-live Reply with exactly CAPO_UI_LIVE_OK and nothing else`, `quit`.
+  - Observed `Codex finished.` and `Reply: CAPO_UI_LIVE_OK` in the control transcript.
+
+## OC9 - Concise Display And Interactive REPL Ergonomics
+
+Status: completed on 2026-05-28
+
+Acceptance:
+
+- Make the default UI less verbose than OC8: avoid repeating full status/goal/activity blocks after every attach/start/send.
+- Keep detailed state available through explicit inspection commands rather than default output.
+- Represent display rendering as a typed static-dispatch boundary so future views can be added without passing loose render function pointers.
+- Add real terminal line editing/history behavior so arrow keys work in interactive `capo control`.
+- Do not persist operator input history by default.
+- Preserve scripted stdin behavior for deterministic tests.
+- Commit and push after verification.
+
+Evidence:
+
+- The control banner now renders as `Capo` plus a short `server started` line only when autostart occurs.
+- `agents` rows now omit debug-like status brackets and adapter/session metadata.
+- `attach`, `new codex`, and `send` now render concise reply lines such as `demo-ui: ...` instead of repeating the full state block.
+- `status` / `result` still render status, goal, reply, and activity; `details` remains the session/run/dispatch metadata path.
+- Added `AgentRenderer` plus zero-sized concrete renderers in `operator_control/render.rs`, and `read_agent_or_all` now uses generic static dispatch.
+- Added `rustyline` for interactive terminal input; scripted stdin still uses the deterministic non-interactive path.
+- Manual mock run showed concise default output for `agents`, `attach`, attached free text, `result`, and `tools`.
+- Manual TTY run used `rustyline`: typed `help`, pressed up-arrow, reran `help`, then `quit`; no `control-history.txt` was written under the state root.
+- Manual live Codex run with `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 CAPO_SERVER_RUN_CODEX_LIVE=1` showed concise output: `ui-live: CAPO_UI_CONCISE_OK` followed by `Attached to ui-live.`
+- Full verification passed:
+  - `cargo fmt`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test`
+  - `git diff --check`
+- Subagents:
+  - xhigh planner reviewed the approach and recommended static dispatch, no persisted history, and removing session ids from normal tool/evidence/review output.
+  - medium executor verified the `rustyline` path and focused tests without additional edits.

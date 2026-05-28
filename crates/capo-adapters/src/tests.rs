@@ -66,6 +66,22 @@ fn codex_jsonl_fixture_maps_to_normalized_events() {
 }
 
 #[test]
+fn codex_exec_agent_message_text_maps_to_assistant_content() {
+    let parsed = CodexExecAdapter::parse_jsonl(
+        r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"CAPO_UI_LIVE_OK"}}"#,
+    )
+    .unwrap();
+
+    let message = parsed
+        .events
+        .iter()
+        .find(|event| event.kind == "adapter.item_completed")
+        .expect("message event");
+    assert_eq!(message.role.as_deref(), Some("assistant"));
+    assert_eq!(message.content.as_deref(), Some("CAPO_UI_LIVE_OK"));
+}
+
+#[test]
 fn claude_stream_json_fixture_maps_to_normalized_events() {
     let parsed =
         ClaudeCodeAdapter::parse_stream_json(include_str!("../fixtures/claude-code-stream.jsonl"))

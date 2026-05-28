@@ -76,7 +76,22 @@ Capture decisions and lessons for Capo's human operator REPL/control surface.
 - A Codex-backed session must not be treated like a fake session. If the attached session has `adapter_kind=codex_exec`, ordinary attached text needs to run through server live-provider dispatch or fail closed.
 - Starting Codex from control should compose existing server commands instead of creating another launch path: register agent, start session, live preflight, live run, attach, inspect.
 - Keep the existing safety gates visible in the REPL. `new codex ...` and Codex attached text require `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1` and `CAPO_SERVER_RUN_CODEX_LIVE=1` when control starts.
-- The current Codex live result renders redacted summary metadata rather than raw provider text. That is expected under the current `raw_output_policy`, but future UX should add a safe artifact/result viewer.
+- Codex live results used to render redacted summary metadata rather than provider text. OC8 added a safe artifact-backed display path for the current control turn while leaving durable summaries conservative.
+
+## OC8 Findings
+
+- Normal control output should be an operator UI, not a transport debugger. Session ids, run ids, dispatch ids, provider flags, hash-only goals, and raw policy names belong behind `details`.
+- The durable read model can remain conservative while the current CLI renders a live Codex reply from the scanned stdout artifact after dispatch. This gives the human a usable conversation without storing raw provider content in `latest_summary`.
+- `details [AGENT]` is the release valve for debugging and auditability. It keeps the old metadata available without forcing every operator transcript to expose implementation details.
+- `dashboard` should scan like a product view: agent count, active count, and readable agent rows. The project id is useful for debug paths later, but it is not the primary first-screen signal for the operator.
+- Current Codex `exec --json` emits assistant text as `{"item":{"type":"agent_message","text":"..."}}`; the adapter parser must support that alongside the older `item.role` plus `item.content[]` shape.
+
+## OC9 Findings
+
+- Default output should optimize for repeated use, not first-run explanation. `attach`, `send`, and `new codex` should confirm routing and show the latest reply; `status`/`result` are the explicit fuller read commands.
+- Static dispatch is enough for the display boundary in this slice. A generic `AgentRenderer` keeps call sites typed without introducing a renderer registry or boxed dynamic dispatch.
+- Terminal history should be in-memory only for now. Persisting operator input under the state root would create a new retention surface for potentially sensitive instructions.
+- `rustyline` is a pragmatic REPL dependency for arrows, editing, Ctrl-C, and Ctrl-D behavior. Scripted stdin must stay separate so tests and docs remain deterministic.
 
 ## Open Questions
 
@@ -84,3 +99,4 @@ Capture decisions and lessons for Capo's human operator REPL/control surface.
 - Should `send` eventually support multiline input or an editor handoff for longer operator instructions?
 - What should provider-native attach mean later for long-lived ACP/Codex/Claude sessions, and can it be represented as a Capo-controlled stream instead of a raw TTY handoff?
 - For OC4, should `--planner capo` create a dedicated operator-assistant agent per control process, reuse a durable project-level Capo agent, or attach to a user-selected planner agent?
+- How should `result` retrieve prior live-provider replies after process restart if the artifact path is not local to the current client?
