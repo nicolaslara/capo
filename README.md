@@ -6,16 +6,18 @@ The intended product shape is a durable Capo server/control plane with clients. 
 
 Tracked agents are represented through protocol boundaries, with ACP-compatible interaction as the target direction. Project memory starts simple: Capo indexes markdown-backed project/task records into its local state and exposes relevant context to agents through governed tools and context packets.
 
-This repository is still early. The current implementation is a Rust scaffold/prototype with deterministic fake/scripted-agent paths, bounded real local connector proof, and transitional compatibility surfaces. It is not yet a polished end-user product or a full live ACP server.
+This repository is still early. The current implementation is a Rust scaffold/prototype with deterministic fake/scripted-agent paths, server-owned dispatch, a human control loop, bounded real local Codex proof, and transitional compatibility surfaces. It is not yet a polished end-user product, unattended goal orchestrator, or full live ACP server.
 
 ## Current Status
 
 - Scaffold alignment is complete.
-- The server/control-plane milestone is complete: `capo server ...` can drive mocked agents and Codex-shaped runs through the server boundary.
-- Operator control is active: `capo control --planner none` can list, attach to, inspect, and steer a running mocked agent through a running Capo server.
+- The server/control-plane milestone is complete: `capo server ...` can drive mocked agents, server-native sessions, dispatch plans/gates, deterministic local runs, and Codex-shaped runs through the server boundary.
+- Operator control is active and usable: bare `capo` opens `capo control`, defaults to `--planner none`, starts a local loopback server when needed, and can list, attach to, inspect, steer, interrupt, and stop agents through that server.
+- `--planner capo` exists as a deterministic, tracked Capo planner mode. It does not call a live LLM; it audits planner choices through the same Capo state.
+- Control can start and continue Codex-backed sessions only behind explicit live-provider gates. Normal repeatable tests use fake/scripted agents or mocked Codex output, and Claude live execution is still blocked.
+- Result rendering now keeps structured Markdown output readable in the terminal. Durable live-provider raw-output retention remains conservative and artifact-backed.
 - `capo project memory ...` is the preferred markdown-backed project-memory surface.
 - `capo workpad ...` still exists only as compatibility for older local scripts and repo migration.
-- Real Codex execution is opt-in and gated; normal repeatable tests use fake/scripted agents or mocked Codex output. Claude live execution is still blocked.
 
 See:
 
@@ -23,7 +25,8 @@ See:
 - [`TASKS.md`](./TASKS.md) for current phase/workpad state
 - [`WORKING.md`](./WORKING.md) for the agent workflow
 - [`workpads/WORKPADS.md`](./workpads/WORKPADS.md) for workpad load lists
-- [`workpads/scaffold/completion-audit.md`](./workpads/scaffold/completion-audit.md) for the latest alignment audit
+- [`workpads/operator-control/tasks.md`](./workpads/operator-control/tasks.md) for current control-loop evidence
+- [`workpads/scaffold/completion-audit.md`](./workpads/scaffold/completion-audit.md) for the completed scaffold alignment audit
 
 ## Try The CLI
 
@@ -62,25 +65,26 @@ cargo run -p capo-cli --bin capo -- server dashboard
 
 ### Use The Operator Control Loop
 
-With the server still running from Terminal 1, Terminal 2 can enter a simple command loop. The first version has no LLM planner; it only runs the commands you type against the server.
+Bare `capo` enters the default control loop. It starts a local loopback server when one is not already running and then sends commands through the server boundary.
 
 ```sh
 cargo run -p capo-cli --bin capo --
 ```
 
-Bare `capo` aliases to `capo control --planner none`. If the default loopback server is not running, control starts it for the current command.
+This aliases to `capo control --planner none`. The default planner is deterministic: it only runs the commands you type. After `attach`, ordinary text is sent directly to the attached agent; Capo commands such as `status`, `result`, `details`, `tools`, `detach`, and `quit` still behave as commands.
 
 Then type:
 
 ```txt
 agents
 attach demo
+Please report current status and wait for the next instruction
+result
 status
-recent
 tools
 evidence
 reviews
-send Please report current status and wait for the next instruction
+details
 dashboard
 quit
 ```
@@ -91,47 +95,43 @@ The same control loop can be scripted:
 printf '%s\n' \
   'agents' \
   'attach demo' \
+  'Please report current status and wait for the next instruction' \
+  'result' \
   'status' \
-  'recent' \
   'tools' \
   'evidence' \
   'reviews' \
-  'send Please report current status and wait for the next instruction' \
+  'details' \
   'dashboard' \
   'quit' \
   | cargo run -p capo-cli --bin capo --
 ```
 
-For real Codex, start a Codex-backed session and preflight the live provider gate:
+The deterministic Capo planner mode can map a small set of natural-language operator intents to the same server-backed actions while recording its decisions as a tracked `capo-operator` session:
 
 ```sh
-cargo run -p capo-cli --bin capo -- server agent register --name codex-demo
-
-cargo run -p capo-cli --bin capo -- server session start \
-  --agent codex-demo \
-  --adapter codex \
-  --goal "Say CAPO_REAL_CODEX_OK and nothing else" \
-  --session codex-demo-session \
-  --run codex-demo-run
-
-CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 cargo run -p capo-cli --bin capo -- server dispatch live-preflight \
-  --agent codex-demo \
-  --adapter codex \
-  --goal "Say CAPO_REAL_CODEX_OK and nothing else" \
-  --session codex-demo-session \
-  --run codex-demo-run \
-  --turn codex-demo-turn
+printf '%s\n' \
+  'what happened?' \
+  'what is blocked?' \
+  'steer demo to Please summarize the latest state' \
+  'recent capo-operator' \
+  'quit' \
+  | cargo run -p capo-cli --bin capo -- control --planner capo
 ```
 
-Copy the printed `dispatch_plan_id`, then run Codex explicitly:
+For real Codex from control, start the REPL with both live-provider gates enabled and use `new codex`:
 
 ```sh
-CAPO_SERVER_RUN_CODEX_LIVE=1 cargo run -p capo-cli --bin capo -- server dispatch live-run-local \
-  --dispatch-plan DISPATCH_PLAN_ID_FROM_PREFLIGHT \
-  --goal "Say CAPO_REAL_CODEX_OK and nothing else"
+printf '%s\n' \
+  'new codex codex-demo Say CAPO_REAL_CODEX_OK and nothing else' \
+  'result' \
+  'details' \
+  'quit' \
+  | CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 CAPO_SERVER_RUN_CODEX_LIVE=1 \
+    cargo run -p capo-cli --bin capo --
 ```
 
-The real Codex run should report `provider_cli_executed=true`. Claude live execution is intentionally still blocked.
+The real Codex path should render the latest assistant reply when a scanned stdout artifact contains one. Attached text for an existing Codex session also requires the same live-provider gates; otherwise control fails closed instead of pretending Codex output came from a fake adapter. Claude live execution is intentionally still blocked.
 
 ### Start A Fake Agent
 

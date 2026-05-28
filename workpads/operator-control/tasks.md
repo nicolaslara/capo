@@ -365,3 +365,24 @@ Evidence:
   - `cargo test -p capo-cli operator_control -- --nocapture`
   - `cargo test -p capo-cli --test server_transport control -- --nocapture`
   - `git diff --check`
+
+## OC12 - README Operator-Control Sync
+
+Status: completed on 2026-05-28
+
+Acceptance:
+
+- Check whether `README.md` matches the current server and operator-control implementation.
+- Update README status and usage examples if they lag the checked-in CLI/workpad behavior.
+- Keep the README clearly marked as WIP and avoid presenting Capo as a polished product.
+- Preserve the current product-language guidance around `capo project memory ...` and compatibility-only `capo workpad ...`.
+
+Evidence:
+
+- Compared `README.md` against `TASKS.md`, `workpads/WORKPADS.md`, `workpads/operator-control/tasks.md`, `workpads/operator-control/knowledge.md`, `workpads/server/knowledge.md`, `crates/capo-cli/src/cli_surface.rs`, and the operator-control source modules.
+- Updated README status and examples for bare `capo`, `capo control --planner none`, deterministic `--planner capo`, attached free-text, `result`/`details`, Markdown result rendering, and live-gated `new codex`.
+- Preserved WIP language, the server/control-plane framing, and `capo project memory ...` as the preferred memory surface with `capo workpad ...` compatibility-only.
+- Validation:
+  - `git diff --check`
+  - `cargo run -p capo-cli --bin capo -- --help`
+  - `printf '%s\n' 'quit' | CAPO_STATE=/tmp/capo-readme-verify cargo run -p capo-cli --bin capo --` (rerun outside sandbox after the sandbox blocked loopback server autostart with `Operation not permitted`; observed `Capo`, `server started`, and `bye`)

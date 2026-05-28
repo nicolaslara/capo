@@ -109,6 +109,12 @@ Capture decisions and lessons for Capo's human operator REPL/control surface.
 - `pulldown-cmark` is a good first parser because it is small, fast, and event-based. Capo should still keep its own `AgentResultView`/`ResultBlock` boundary so parser and renderer choices remain swappable.
 - Future alternatives are likely useful for different renderers: `comrak` for a richer GFM AST and transformations, `markdown-to-ansi` or `termimad` for styled terminal output, `syntect` for code highlighting, and `ratatui`/`tui-markdown` for a full TUI.
 
+## OC12 Findings
+
+- README status had lagged behind the active operator-control implementation. It still framed `capo control --planner none` as the main active slice and did not mention the deterministic `--planner capo` path, attached free-text, `new codex`, `details`, or Markdown-preserving result display.
+- The README should keep WIP/product-spine language while showing the most humane current entrypoint: bare `capo` starts the control loop and auto-starts a local loopback server when needed.
+- Live Codex usage belongs in README as a gated control-loop path (`new codex ...` with `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1` and `CAPO_SERVER_RUN_CODEX_LIVE=1`), not as the older low-level dispatch-plan copy/paste flow.
+
 ## Open Questions
 
 - Which commands should require explicit confirmation inside planner-backed modes?

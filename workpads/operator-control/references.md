@@ -12,6 +12,7 @@ Track local and external references used for the operator REPL/control surface.
 - `workpads/server/tasks.md` - completed server/control-plane milestone and server command evidence.
 - `workpads/server/knowledge.md` - server command behavior and live Codex proof notes.
 - `crates/capo-cli/src/main.rs` - current CLI command routing.
+- `crates/capo-cli/src/cli_surface.rs` - current top-level CLI help and safety notes.
 - `crates/capo-cli/src/server_client.rs` - current server-backed CLI client commands.
 - `crates/capo-cli/src/operator_control.rs` - no-planner operator control loop and command parser.
 - `crates/capo-cli/src/operator_control/planner.rs` - no-planner parser, deterministic Capo planner, and planner decision audit metadata.
