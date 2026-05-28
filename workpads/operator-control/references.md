@@ -14,7 +14,7 @@ Track local and external references used for the operator REPL/control surface.
 - `crates/capo-cli/src/main.rs` - current CLI command routing.
 - `crates/capo-cli/src/server_client.rs` - current server-backed CLI client commands.
 - `crates/capo-cli/src/operator_control.rs` - no-planner operator control loop and command parser.
-- `crates/capo-cli/src/operator_control/planner.rs` - no-planner parser and future planner boundary.
+- `crates/capo-cli/src/operator_control/planner.rs` - no-planner parser, deterministic Capo planner, and planner decision audit metadata.
 - `crates/capo-cli/src/operator_control/render.rs` - human-readable control output rendering.
 - `crates/capo-cli/src/operator_control/server_process.rs` - control-loop server discovery and autostart.
 - `crates/capo-server/src/types.rs` - typed server request/response command boundary.

@@ -9,7 +9,7 @@ mod planner;
 mod render;
 mod server_process;
 
-use planner::{NonePlanner, OperatorAction, Planner};
+use planner::{CapoPlanner, NonePlanner, OperatorAction, Planner, PlannerDecisionAudit};
 use render::{
     render_dashboard, render_evidence_summary, render_human_agent, render_recent_work,
     render_review_needs, render_tool_activity,
@@ -34,27 +34,30 @@ pub(crate) fn operator_control(parsed: &ParsedArgs, args: &[String]) -> Result<S
     }
 }
 
-fn control_planner(args: &[String]) -> Result<NonePlanner, String> {
+const CAPO_PLANNER_AGENT: &str = "capo-operator";
+
+fn control_planner(args: &[String]) -> Result<Box<dyn Planner>, String> {
     let planner = optional_value(args, "--planner")?.unwrap_or_else(|| "none".to_string());
-    if planner != "none" {
-        return Err(format!(
-            "unsupported planner: {planner}; only --planner none is implemented"
-        ));
+    match planner.as_str() {
+        "none" => Ok(Box::new(NonePlanner)),
+        "capo" => Ok(Box::new(CapoPlanner)),
+        _ => Err(format!(
+            "unsupported planner: {planner}; supported planners: none, capo"
+        )),
     }
-    Ok(NonePlanner)
 }
 
 struct ControlRepl {
     address: String,
     server_started: bool,
     _server: Option<AutoServer>,
-    planner: NonePlanner,
+    planner: Box<dyn Planner>,
     attached_agent: Option<String>,
     request_counter: usize,
 }
 
 impl ControlRepl {
-    fn new(address: String, server: Option<AutoServer>, planner: NonePlanner) -> Self {
+    fn new(address: String, server: Option<AutoServer>, planner: Box<dyn Planner>) -> Self {
         let server_started = server.is_some();
         Self {
             address,
@@ -67,8 +70,10 @@ impl ControlRepl {
     }
 
     fn run_script(&mut self, script: &str) -> Result<String, String> {
+        self.prepare_planner()?;
         let mut output = format!(
-            "Capo control\nplanner: none\nserver: {}{}\n\nType `help` for commands.\n",
+            "Capo control\nplanner: {}\nserver: {}{}\n\nType `help` for commands.\n",
+            self.planner.mode(),
             self.address,
             if self.server_started {
                 " (started)"
@@ -93,8 +98,10 @@ impl ControlRepl {
     }
 
     fn run_interactive(&mut self) -> Result<String, String> {
+        self.prepare_planner()?;
         println!(
-            "Capo control\nplanner: none\nserver: {}{}\n\nType `help` for commands.",
+            "Capo control\nplanner: {}\nserver: {}{}\n\nType `help` for commands.",
+            self.planner.mode(),
             self.address,
             if self.server_started {
                 " (started)"
@@ -129,14 +136,80 @@ impl ControlRepl {
 
     fn run_line(&mut self, line: &str) -> LineResult {
         let result = match self.planner.plan(line) {
-            Ok(OperatorAction::Quit) => return LineResult::Quit("bye\n".to_string()),
-            Ok(action) => self.execute(action),
+            Ok(decision) if decision.action == OperatorAction::Quit => {
+                return LineResult::Quit("bye\n".to_string());
+            }
+            Ok(decision) => {
+                if let Err(error) = self.audit_planner_decision(line, decision.audit.as_ref()) {
+                    Err(error)
+                } else {
+                    self.execute(decision.action)
+                }
+            }
             Err(error) => Ok(format!("error: {error}\n")),
         };
         LineResult::Continue(match result {
             Ok(output) => output,
             Err(error) => format!("error: {error}\n"),
         })
+    }
+
+    fn prepare_planner(&mut self) -> Result<(), String> {
+        if self.planner.mode() != "capo" {
+            return Ok(());
+        }
+        let agents = self.list_agent_summaries()?;
+        if !agents.iter().any(|agent| agent.name == CAPO_PLANNER_AGENT) {
+            let response = self.send_request(ServerCommand::RegisterAgent {
+                name: CAPO_PLANNER_AGENT.to_string(),
+            })?;
+            if !matches!(response, ServerResponsePayload::AgentRegistered(_)) {
+                return Err(
+                    "server returned unexpected response for planner registration".to_string(),
+                );
+            }
+        }
+        let planner_status = self.agent_status(CAPO_PLANNER_AGENT)?;
+        if planner_status.session.is_none() {
+            let response = self.send_request(ServerCommand::StartSession {
+                agent_name: CAPO_PLANNER_AGENT.to_string(),
+                goal: "Capo operator planner mode: inspect operator input and choose server-backed actions".to_string(),
+                adapter: "acp".to_string(),
+                session_id: None,
+                run_id: None,
+            })?;
+            if !matches!(response, ServerResponsePayload::SessionStarted(_)) {
+                return Err(
+                    "server returned unexpected response for planner session start".to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn audit_planner_decision(
+        &mut self,
+        line: &str,
+        audit: Option<&PlannerDecisionAudit>,
+    ) -> Result<(), String> {
+        let Some(audit) = audit else {
+            return Ok(());
+        };
+        let target = audit.target_agent.as_deref().unwrap_or("none");
+        let input_hash = stable_cli_hash(line);
+        let decision = format!(
+            "capo planner decision input_hash={input_hash} action={} target_agent={target} mutation={} summary={}",
+            audit.action_label, audit.mutation, audit.summary
+        );
+        let response = self.send_request(ServerCommand::SteerAgent {
+            agent_name: CAPO_PLANNER_AGENT.to_string(),
+            goal: decision,
+        })?;
+        if matches!(response, ServerResponsePayload::AgentStatus(_)) {
+            Ok(())
+        } else {
+            Err("server returned unexpected response for planner audit".to_string())
+        }
     }
 
     fn execute(&mut self, action: OperatorAction) -> Result<String, String> {
@@ -162,10 +235,7 @@ impl ControlRepl {
     }
 
     fn list_agents(&mut self) -> Result<String, String> {
-        let response = self.send_request(ServerCommand::ListAgents)?;
-        let ServerResponsePayload::Agents(agents) = response else {
-            return Err("server returned unexpected response for agents".to_string());
-        };
+        let agents = self.list_agent_summaries()?;
         let mut output = format!("Agents ({})\n", agents.len());
         for agent in agents {
             output.push_str(&render_human_agent(&agent));
@@ -189,23 +259,19 @@ impl ControlRepl {
     }
 
     fn recent_work(&mut self, agent: Option<String>) -> Result<String, String> {
-        self.resolved_agent_status(agent)
-            .map(|summary| render_recent_work(&summary))
+        self.read_agent_or_all(agent, render_recent_work)
     }
 
     fn tool_activity(&mut self, agent: Option<String>) -> Result<String, String> {
-        self.resolved_agent_status(agent)
-            .map(|summary| render_tool_activity(&summary))
+        self.read_agent_or_all(agent, render_tool_activity)
     }
 
     fn evidence(&mut self, agent: Option<String>) -> Result<String, String> {
-        self.resolved_agent_status(agent)
-            .map(|summary| render_evidence_summary(&summary))
+        self.read_agent_or_all(agent, render_evidence_summary)
     }
 
     fn review_needs(&mut self, agent: Option<String>) -> Result<String, String> {
-        self.resolved_agent_status(agent)
-            .map(|summary| render_review_needs(&summary))
+        self.read_agent_or_all(agent, render_review_needs)
     }
 
     fn attach(&mut self, agent: String) -> Result<String, String> {
@@ -250,6 +316,35 @@ impl ControlRepl {
     fn resolved_agent_status(&mut self, agent: Option<String>) -> Result<AgentSummary, String> {
         let agent = self.resolve_agent(agent)?;
         self.agent_status(&agent)
+    }
+
+    fn read_agent_or_all(
+        &mut self,
+        agent: Option<String>,
+        render: fn(&AgentSummary) -> String,
+    ) -> Result<String, String> {
+        if agent.is_some() || self.attached_agent.is_some() {
+            return self
+                .resolved_agent_status(agent)
+                .map(|summary| render(&summary));
+        }
+        let agents = self.list_agent_summaries()?;
+        if agents.is_empty() {
+            return Ok("no agents\n".to_string());
+        }
+        let mut output = String::new();
+        for agent in agents {
+            output.push_str(&render(&agent));
+        }
+        Ok(output)
+    }
+
+    fn list_agent_summaries(&mut self) -> Result<Vec<AgentSummary>, String> {
+        let response = self.send_request(ServerCommand::ListAgents)?;
+        let ServerResponsePayload::Agents(agents) = response else {
+            return Err("server returned unexpected response for agents".to_string());
+        };
+        Ok(agents)
     }
 
     fn agent_status(&mut self, agent: &str) -> Result<AgentSummary, String> {
@@ -351,8 +446,10 @@ mod tests {
 
     #[test]
     fn unsupported_planner_is_rejected_before_server_connect() {
-        let error = control_planner(&["--planner".to_string(), "codex".to_string()])
-            .expect_err("unsupported planner should fail");
+        let error = match control_planner(&["--planner".to_string(), "codex".to_string()]) {
+            Ok(_) => panic!("unsupported planner should fail"),
+            Err(error) => error,
+        };
         assert!(error.contains("unsupported planner: codex"));
     }
 

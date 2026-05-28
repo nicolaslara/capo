@@ -121,9 +121,29 @@ Evidence:
   - Against a running server at `127.0.0.1:7878`, registered `demo-a` and `demo-b`, started tasks, then ran bare `capo` with scripted `attach demo-a`, `recent`, `tools`, `evidence`, `reviews`, `interrupt ...`, `attach demo-b`, `stop ...`, `dashboard`, `quit`.
   - Observed recent-work summary, tool counts, evidence refs, review counts, `interrupted demo-a`, `stopped demo-b`, and final dashboard with `active sessions: 0`.
 
+## OC3a - Discoverable Capo Entrypoint
+
+Status: completed on 2026-05-28
+
+Acceptance:
+
+- Treat bare `capo` as an alias for `capo control`.
+- Default the planner to `none` when `--planner` is not set.
+- If the configured/default local loopback server is not running, start it before entering control.
+- Keep explicit command help discoverable through `capo --help`.
+- Preserve the server boundary: autostart should launch `capo server serve`, not create a client-local controller.
+- Add this requirement to the operator-control task sequence so future planner modes do not regress the intuitive entrypoint.
+
+Evidence:
+
+- `crates/capo-cli/src/main.rs` routes empty args to `operator_control(&parsed, &[])`, while `--help` still renders the command reference.
+- `crates/capo-cli/src/operator_control.rs` defaults missing `--planner` to `none`.
+- `crates/capo-cli/src/operator_control/server_process.rs` resolves `--connect` / `CAPO_SERVER_ADDR` / default address, requires loopback, detects whether the port is bound, and starts `capo server serve` when needed.
+- `crates/capo-cli/tests/server_transport/basic.rs` covers bare `capo` autostarting control and reporting the started server.
+
 ## OC4 - First Capo Planner Mode
 
-Status: pending
+Status: completed on 2026-05-28
 
 Acceptance:
 
@@ -138,3 +158,25 @@ Acceptance:
   - `--planner capo` does not bypass the server boundary;
   - planner decisions are audited as Capo state;
   - mocked planner interaction can list/status/steer without launching live Codex or Claude.
+
+Evidence:
+
+- Added deterministic `CapoPlanner` mode in `crates/capo-cli/src/operator_control/planner.rs`.
+- `--planner capo` maps direct commands plus simple operator intents:
+  - `what happened?` -> dashboard overview;
+  - `what is blocked?` -> review-needs query;
+  - `status of AGENT` -> agent status;
+  - `steer AGENT to MESSAGE` -> explicit server-backed steering.
+- `crates/capo-cli/src/operator_control.rs` now prepares a tracked `capo-operator` agent/session through the server before `capo` planner use.
+- Planner decisions are audited by steering `capo-operator` with a redacted decision summary containing an input hash, action label, target agent, mutation flag, and short summary.
+- Planner output still lowers into the same `OperatorAction` executor used by `none`; all mutations use typed server commands.
+- Unsupported planners still fail closed.
+- Added deterministic tests:
+  - `cargo test -p capo-cli operator_control -- --nocapture`;
+  - `cargo test -p capo-cli --test server_transport capo_planner_tracks_decisions_as_server_state_and_steers_mock_agent -- --nocapture`;
+  - `cargo test -p capo-cli --test server_transport -- --nocapture`.
+- Manual direct run:
+  - Started `./target/debug/capo server serve --addr 127.0.0.1:0 --max-requests 14`.
+  - Registered `demo-planner` and sent `Manual Capo planner check`.
+  - Ran `./target/debug/capo control --planner capo --connect <addr>` with `what happened?`, `status of demo-planner`, `steer demo-planner to Please continue and summarize status`, `recent capo-operator`, `quit`.
+  - Observed `planner: capo`, `capo-operator` tracked as a running session, `sent to demo-planner`, and `Recent work` for `capo-operator` showing `capo planner decision input_hash=...`.

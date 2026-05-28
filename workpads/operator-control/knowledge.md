@@ -25,6 +25,7 @@ Capture decisions and lessons for Capo's human operator REPL/control surface.
 - Planner execution and server request execution should remain separate so a future LLM planner can choose an action without bypassing `capo-server`.
 - Bare `capo` should enter the no-planner control loop. `--help` remains the explicit way to show the full command reference.
 - `capo control` should auto-start a local loopback server when the configured/default address is free. This makes the product feel like one entrypoint while preserving the server boundary internally.
+- Treat this entrypoint behavior as a product requirement, not just a smoke-test convenience: future planner modes should layer on top of `capo` / `capo control` and keep `none` as the default when no planner is configured.
 
 ## OC1 Findings
 
@@ -47,6 +48,14 @@ Capture decisions and lessons for Capo's human operator REPL/control surface.
 - Richer read commands can initially use the server dashboard/session summaries: `recent`/`work`, `tools`, `evidence`, and `reviews` render concise status without exposing raw event dumps.
 - `interrupt` and `stop` are typed server commands, not compatibility CLI calls. They clear the attached agent context when applied to the attached agent.
 - The operator-control module is split into planner/parser, executor, renderer, and server-process concerns so future `codex`/`capo` planners can plug in without bypassing execution.
+
+## OC4 Findings
+
+- `--planner capo` starts as a deterministic mocked planner, not a live model or provider call.
+- The first Capo planner agent is the durable `capo-operator` agent/session. This makes planner behavior inspectable through the same dashboard/status/recent-work surfaces as other agents.
+- Planner decisions are currently audited by steering `capo-operator` with a redacted summary. This reuses existing server state and avoids adding a second audit channel before the event model needs it.
+- Planner-triggered mutations use a safe deterministic policy: natural language may read state, while steering requires the explicit syntax `steer AGENT to MESSAGE`.
+- Read commands without an attached agent now aggregate over tracked agents, which makes planner answers like `what is blocked?` useful before the operator attaches to a specific agent.
 
 ## Open Questions
 

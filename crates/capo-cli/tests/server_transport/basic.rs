@@ -312,3 +312,74 @@ quit
 
     assert!(server.wait().expect("server wait").success());
 }
+
+#[test]
+fn capo_planner_tracks_decisions_as_server_state_and_steers_mock_agent() {
+    let state_root = temp_root("control-capo-planner-state");
+    let mut server = spawn_server(&state_root, 16);
+    let stdout = server.stdout.take().expect("server stdout");
+    let mut reader = BufReader::new(stdout);
+    let address = read_server_address(&mut reader);
+    let state = state_root.display().to_string();
+
+    let register = capo([
+        "server",
+        "agent",
+        "register",
+        "--name",
+        "mock-control",
+        "--connect",
+        &address,
+        "--state",
+        &state,
+    ]);
+    assert!(register.contains("server_agent_registered=true"));
+
+    let send = capo([
+        "server",
+        "task",
+        "send",
+        "--agent",
+        "mock-control",
+        "--goal",
+        "Start Capo planner test",
+        "--connect",
+        &address,
+        "--state",
+        &state,
+    ]);
+    assert!(send.contains("server_task_sent=true"));
+
+    let script = "\
+list agents
+status of mock-control
+steer mock-control to Please continue under planner control
+what is blocked?
+recent capo-operator
+quit
+";
+    let output = capo_with_env_and_stdin(
+        [
+            "control",
+            "--planner",
+            "capo",
+            "--connect",
+            &address,
+            "--state",
+            &state,
+        ],
+        [],
+        script,
+    );
+    assert!(output.contains("planner: capo"));
+    assert!(output.contains("Agents (2)"));
+    assert!(output.contains("- capo-operator [running] session=session-capo-operator-"));
+    assert!(output.contains("Status\n- mock-control"));
+    assert!(output.contains("sent to mock-control"));
+    assert!(output.contains("Reviews"));
+    assert!(output.contains("Recent work"));
+    assert!(output.contains("agent: capo-operator"));
+    assert!(output.contains("capo planner decision input_hash="));
+
+    assert!(server.wait().expect("server wait").success());
+}
