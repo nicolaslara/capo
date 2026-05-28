@@ -48,6 +48,10 @@ impl CapoServer {
                         run_status: session.run.map(|run| run.status),
                         adapter_kind: adapter_kind_for_events(&session.recent_events)
                             .or_else(|| latest_plan.map(|plan| plan.adapter_kind.clone())),
+                        current_goal: session.session.current_goal,
+                        latest_summary: session.session.latest_summary,
+                        latest_blocker: session.session.latest_blocker,
+                        latest_confidence: session.session.latest_confidence,
                         recent_event_count: session.recent_events.len(),
                         evidence_count: session.evidence.len(),
                         evidence_refs: session
@@ -55,6 +59,8 @@ impl CapoServer {
                             .iter()
                             .map(|evidence| evidence.evidence_id.to_string())
                             .collect(),
+                        review_finding_count: session.review_findings.len(),
+                        task_outcome_report_count: session.task_outcome_reports.len(),
                         turn_count: turn_ids.len(),
                         turn_ids,
                         latest_dispatch_plan_id: latest_plan

@@ -185,6 +185,120 @@ impl CapoServer {
                     ServerResponsePayload::AgentStatus(agent),
                 )
             }
+            ServerCommand::InterruptAgent { agent_name, reason } => {
+                let agent =
+                    self.agent_by_name(&agent_name)?
+                        .ok_or_else(|| ServerError::UnknownAgent {
+                            agent_name: agent_name.clone(),
+                        })?;
+                let session =
+                    agent
+                        .session
+                        .ok_or_else(|| ServerError::AgentHasNoActiveSession {
+                            agent_name: agent_name.clone(),
+                        })?;
+                let run_id =
+                    session
+                        .run_id
+                        .ok_or_else(|| ServerError::AgentHasNoActiveSession {
+                            agent_name: agent_name.clone(),
+                        })?;
+                let (_, _, _, refs) =
+                    self.run_refs_for_session_run(&session.session_id, &run_id)?;
+                let reason_hash = stable_hash(reason.as_bytes());
+                let command_hash =
+                    command_identity_hash(format!("interrupt_agent:{agent_name}:{reason_hash}"));
+                let mut command = self.command_envelope(
+                    &request_id,
+                    &origin,
+                    &command_hash,
+                    CommandTarget::Agent(AgentId::new(format!("agent-{agent_name}"))),
+                    CommandIntent::InterruptSession,
+                    Some(reason),
+                );
+                command
+                    .structured_args
+                    .push(("agent".to_string(), agent_name.clone()));
+                self.controller
+                    .interrupt_command(&command)
+                    .map_err(ServerError::State)?;
+                self.record_server_request_handled(
+                    &command,
+                    &origin,
+                    "interrupt_agent",
+                    Some(&refs),
+                    Some(serde_json::json!({
+                        "reason_hash": reason_hash,
+                        "raw_reason_policy": "not_rendered"
+                    })),
+                )
+                .map_err(ServerError::State)?;
+                let agent = self
+                    .agent_by_name(&agent_name)?
+                    .ok_or(ServerError::UnknownAgent { agent_name })?;
+                self.response(
+                    request_id,
+                    origin,
+                    ServerResponsePayload::AgentStatus(agent),
+                )
+            }
+            ServerCommand::StopAgent { agent_name, reason } => {
+                let agent =
+                    self.agent_by_name(&agent_name)?
+                        .ok_or_else(|| ServerError::UnknownAgent {
+                            agent_name: agent_name.clone(),
+                        })?;
+                let session =
+                    agent
+                        .session
+                        .ok_or_else(|| ServerError::AgentHasNoActiveSession {
+                            agent_name: agent_name.clone(),
+                        })?;
+                let run_id =
+                    session
+                        .run_id
+                        .ok_or_else(|| ServerError::AgentHasNoActiveSession {
+                            agent_name: agent_name.clone(),
+                        })?;
+                let (_, _, _, refs) =
+                    self.run_refs_for_session_run(&session.session_id, &run_id)?;
+                let reason_hash = stable_hash(reason.as_bytes());
+                let command_hash =
+                    command_identity_hash(format!("stop_agent:{agent_name}:{reason_hash}"));
+                let mut command = self.command_envelope(
+                    &request_id,
+                    &origin,
+                    &command_hash,
+                    CommandTarget::Agent(AgentId::new(format!("agent-{agent_name}"))),
+                    CommandIntent::InterruptSession,
+                    Some(reason),
+                );
+                command
+                    .structured_args
+                    .push(("agent".to_string(), agent_name.clone()));
+                self.controller
+                    .stop_command(&command)
+                    .map_err(ServerError::State)?;
+                self.record_server_request_handled(
+                    &command,
+                    &origin,
+                    "stop_agent",
+                    Some(&refs),
+                    Some(serde_json::json!({
+                        "reason_hash": reason_hash,
+                        "raw_reason_policy": "not_rendered"
+                    })),
+                )
+                .map_err(ServerError::State)?;
+                let agent = self
+                    .agent_by_name(&agent_name)?
+                    .ok_or(ServerError::UnknownAgent { agent_name })?;
+                self.response(
+                    request_id,
+                    origin,
+                    ServerResponsePayload::AgentStatus(agent),
+                )
+            }
             ServerCommand::ListAgents => {
                 let agents = self.dashboard_snapshot()?.agents;
                 self.response(request_id, origin, ServerResponsePayload::Agents(agents))

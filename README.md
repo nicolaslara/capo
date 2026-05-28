@@ -65,8 +65,10 @@ cargo run -p capo-cli --bin capo -- server dashboard
 With the server still running from Terminal 1, Terminal 2 can enter a simple command loop. The first version has no LLM planner; it only runs the commands you type against the server.
 
 ```sh
-cargo run -p capo-cli --bin capo -- control --planner none
+cargo run -p capo-cli --bin capo --
 ```
+
+Bare `capo` aliases to `capo control --planner none`. If the default loopback server is not running, control starts it for the current command.
 
 Then type:
 
@@ -74,6 +76,10 @@ Then type:
 agents
 attach demo
 status
+recent
+tools
+evidence
+reviews
 send Please report current status and wait for the next instruction
 dashboard
 quit
@@ -86,10 +92,14 @@ printf '%s\n' \
   'agents' \
   'attach demo' \
   'status' \
+  'recent' \
+  'tools' \
+  'evidence' \
+  'reviews' \
   'send Please report current status and wait for the next instruction' \
   'dashboard' \
   'quit' \
-  | cargo run -p capo-cli --bin capo -- control --planner none
+  | cargo run -p capo-cli --bin capo --
 ```
 
 For real Codex, start a Codex-backed session and preflight the live provider gate:

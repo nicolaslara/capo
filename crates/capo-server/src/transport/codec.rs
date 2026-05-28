@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 use super::{
     TransportError, TransportResult,
     wire::{
-        input_origin_name, optional_bool, optional_string, parse_input_origin, parse_value,
-        required_bool, required_string, required_string_array, required_usize, required_value,
-        transport_error_wire,
+        input_origin_name, optional_bool, optional_i64, optional_string, parse_input_origin,
+        parse_value, required_bool, required_string, required_string_array, required_usize,
+        required_value, transport_error_wire,
     },
 };
 use crate::{
@@ -122,6 +122,16 @@ fn encode_command(command: &ServerCommand) -> Value {
             "type": "steer_agent",
             "agent_name": agent_name,
             "goal": goal,
+        }),
+        ServerCommand::InterruptAgent { agent_name, reason } => json!({
+            "type": "interrupt_agent",
+            "agent_name": agent_name,
+            "reason": reason,
+        }),
+        ServerCommand::StopAgent { agent_name, reason } => json!({
+            "type": "stop_agent",
+            "agent_name": agent_name,
+            "reason": reason,
         }),
         ServerCommand::ListAgents => json!({ "type": "list_agents" }),
         ServerCommand::AgentStatus { agent_name } => json!({
@@ -267,6 +277,14 @@ fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
         "steer_agent" => Ok(ServerCommand::SteerAgent {
             agent_name: required_string(value, "agent_name")?,
             goal: required_string(value, "goal")?,
+        }),
+        "interrupt_agent" => Ok(ServerCommand::InterruptAgent {
+            agent_name: required_string(value, "agent_name")?,
+            reason: required_string(value, "reason")?,
+        }),
+        "stop_agent" => Ok(ServerCommand::StopAgent {
+            agent_name: required_string(value, "agent_name")?,
+            reason: required_string(value, "reason")?,
         }),
         "list_agents" => Ok(ServerCommand::ListAgents),
         "agent_status" => Ok(ServerCommand::AgentStatus {
@@ -627,9 +645,15 @@ fn encode_session(session: &SessionSummary) -> Value {
         "run_id": session.run_id.as_ref().map(ToString::to_string),
         "run_status": session.run_status,
         "adapter_kind": session.adapter_kind,
+        "current_goal": session.current_goal,
+        "latest_summary": session.latest_summary,
+        "latest_blocker": session.latest_blocker,
+        "latest_confidence": session.latest_confidence,
         "recent_event_count": session.recent_event_count,
         "evidence_count": session.evidence_count,
         "evidence_refs": session.evidence_refs,
+        "review_finding_count": session.review_finding_count,
+        "task_outcome_report_count": session.task_outcome_report_count,
         "turn_count": session.turn_count,
         "turn_ids": session.turn_ids,
         "latest_dispatch_plan_id": session.latest_dispatch_plan_id,
@@ -658,9 +682,15 @@ fn decode_session(value: &Value) -> TransportResult<SessionSummary> {
         run_id: optional_string(value, "run_id")?.map(RunId::new),
         run_status: optional_string(value, "run_status")?,
         adapter_kind: optional_string(value, "adapter_kind")?,
+        current_goal: required_string(value, "current_goal")?,
+        latest_summary: optional_string(value, "latest_summary")?,
+        latest_blocker: optional_string(value, "latest_blocker")?,
+        latest_confidence: optional_i64(value, "latest_confidence")?,
         recent_event_count: required_usize(value, "recent_event_count")?,
         evidence_count: required_usize(value, "evidence_count")?,
         evidence_refs: required_string_array(value, "evidence_refs")?,
+        review_finding_count: required_usize(value, "review_finding_count")?,
+        task_outcome_report_count: required_usize(value, "task_outcome_report_count")?,
         turn_count: required_usize(value, "turn_count")?,
         turn_ids: required_string_array(value, "turn_ids")?,
         latest_dispatch_plan_id: optional_string(value, "latest_dispatch_plan_id")?,

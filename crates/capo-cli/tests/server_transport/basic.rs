@@ -222,3 +222,93 @@ quit
 
     assert!(server.wait().expect("server wait").success());
 }
+
+#[test]
+fn bare_capo_starts_control_and_autostarts_server_when_needed() {
+    let state_root = temp_root("control-autostart-state");
+    let state = state_root.display().to_string();
+    let address = unused_loopback_address();
+    let output = capo_with_env_and_stdin(
+        ["--state", &state],
+        [("CAPO_SERVER_ADDR", address.as_str())],
+        "dashboard\nquit\n",
+    );
+
+    assert!(output.contains("Capo control"));
+    assert!(output.contains(&format!("server: {address} (started)")));
+    assert!(output.contains("Dashboard"));
+    assert!(output.contains("agents: 0"));
+    assert!(output.contains("bye"));
+}
+
+#[test]
+fn control_repl_reports_richer_agent_state_and_interrupts_or_stops_agents() {
+    let state_root = temp_root("control-rich-state");
+    let mut server = spawn_server(&state_root, 12);
+    let stdout = server.stdout.take().expect("server stdout");
+    let mut reader = BufReader::new(stdout);
+    let address = read_server_address(&mut reader);
+    let state = state_root.display().to_string();
+
+    for name in ["mock-interrupt", "mock-stop"] {
+        let register = capo([
+            "server",
+            "agent",
+            "register",
+            "--name",
+            name,
+            "--connect",
+            &address,
+            "--state",
+            &state,
+        ]);
+        assert!(register.contains("server_agent_registered=true"));
+        let send = capo([
+            "server",
+            "task",
+            "send",
+            "--agent",
+            name,
+            "--goal",
+            "Start rich control test",
+            "--connect",
+            &address,
+            "--state",
+            &state,
+        ]);
+        assert!(send.contains("server_task_sent=true"));
+    }
+
+    let script = "\
+attach mock-interrupt
+recent
+tools
+evidence
+reviews
+interrupt operator needs to inspect state
+attach mock-stop
+stop operator completed the task
+quit
+";
+    let output = capo_with_env_and_stdin(
+        [
+            "control",
+            "--planner",
+            "none",
+            "--connect",
+            &address,
+            "--state",
+            &state,
+        ],
+        [],
+        script,
+    );
+    assert!(output.contains("Recent work"));
+    assert!(output.contains("Tool activity"));
+    assert!(output.contains("Evidence"));
+    assert!(output.contains("Reviews"));
+    assert!(output.contains("interrupted mock-interrupt"));
+    assert!(output.contains("stopped mock-stop"));
+
+    assert!(server.wait().expect("server wait").success());
+}

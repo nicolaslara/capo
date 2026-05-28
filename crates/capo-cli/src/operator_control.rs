@@ -1,27 +1,28 @@
 use std::io::{BufRead, IsTerminal, Read, Write};
-use std::net::ToSocketAddrs;
 
-use capo_server::{
-    AgentSummary, ServerCommand, ServerDashboardSnapshot, ServerRequest, ServerResponsePayload,
-    send_tcp,
-};
+use capo_server::{AgentSummary, ServerCommand, ServerRequest, ServerResponsePayload, send_tcp};
 
 use crate::cli_surface::ParsedArgs;
-use crate::server_client::DEFAULT_SERVER_ADDR;
 use crate::{debug_error, stable_cli_hash};
 
-pub(crate) fn operator_control(_parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
-    let planner = optional_value(args, "--planner")?.unwrap_or_else(|| "none".to_string());
-    if planner != "none" {
-        return Err(format!(
-            "unsupported planner: {planner}; only --planner none is implemented"
-        ));
-    }
+mod planner;
+mod render;
+mod server_process;
 
+use planner::{NonePlanner, OperatorAction, Planner};
+use render::{
+    render_dashboard, render_evidence_summary, render_human_agent, render_recent_work,
+    render_review_needs, render_tool_activity,
+};
+use server_process::{AutoServer, ensure_server_running, require_loopback_address, server_address};
+
+pub(crate) fn operator_control(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
+    let planner = control_planner(args)?;
     let address = server_address(args)?;
     require_loopback_address(&address)?;
+    let server = ensure_server_running(&address, parsed)?;
 
-    let mut repl = ControlRepl::new(address);
+    let mut repl = ControlRepl::new(address, server, planner);
     if std::io::stdin().is_terminal() {
         repl.run_interactive()
     } else {
@@ -33,16 +34,33 @@ pub(crate) fn operator_control(_parsed: &ParsedArgs, args: &[String]) -> Result<
     }
 }
 
+fn control_planner(args: &[String]) -> Result<NonePlanner, String> {
+    let planner = optional_value(args, "--planner")?.unwrap_or_else(|| "none".to_string());
+    if planner != "none" {
+        return Err(format!(
+            "unsupported planner: {planner}; only --planner none is implemented"
+        ));
+    }
+    Ok(NonePlanner)
+}
+
 struct ControlRepl {
     address: String,
+    server_started: bool,
+    _server: Option<AutoServer>,
+    planner: NonePlanner,
     attached_agent: Option<String>,
     request_counter: usize,
 }
 
 impl ControlRepl {
-    fn new(address: String) -> Self {
+    fn new(address: String, server: Option<AutoServer>, planner: NonePlanner) -> Self {
+        let server_started = server.is_some();
         Self {
             address,
+            server_started,
+            _server: server,
+            planner,
             attached_agent: None,
             request_counter: 0,
         }
@@ -50,8 +68,13 @@ impl ControlRepl {
 
     fn run_script(&mut self, script: &str) -> Result<String, String> {
         let mut output = format!(
-            "Capo control\nplanner: none\nserver: {}\n\nType `help` for commands.\n",
-            self.address
+            "Capo control\nplanner: none\nserver: {}{}\n\nType `help` for commands.\n",
+            self.address,
+            if self.server_started {
+                " (started)"
+            } else {
+                ""
+            }
         );
         for line in script.lines() {
             let line = line.trim();
@@ -71,8 +94,13 @@ impl ControlRepl {
 
     fn run_interactive(&mut self) -> Result<String, String> {
         println!(
-            "Capo control\nplanner: none\nserver: {}\n\nType `help` for commands.",
-            self.address
+            "Capo control\nplanner: none\nserver: {}{}\n\nType `help` for commands.",
+            self.address,
+            if self.server_started {
+                " (started)"
+            } else {
+                ""
+            }
         );
         let stdin = std::io::stdin();
         let mut stdin = stdin.lock();
@@ -100,24 +128,37 @@ impl ControlRepl {
     }
 
     fn run_line(&mut self, line: &str) -> LineResult {
-        let result = match parse_action(line) {
-            Ok(OperatorAction::Help) => Ok(help_text()),
+        let result = match self.planner.plan(line) {
             Ok(OperatorAction::Quit) => return LineResult::Quit("bye\n".to_string()),
-            Ok(OperatorAction::ListAgents) => self.list_agents(),
-            Ok(OperatorAction::Dashboard) => self.dashboard(),
-            Ok(OperatorAction::Status { agent }) => self.status(agent),
-            Ok(OperatorAction::Attach { agent }) => self.attach(agent),
-            Ok(OperatorAction::Detach) => {
-                self.attached_agent = None;
-                Ok("detached\n".to_string())
-            }
-            Ok(OperatorAction::Send { agent, message }) => self.send(agent, message),
+            Ok(action) => self.execute(action),
             Err(error) => Ok(format!("error: {error}\n")),
         };
         LineResult::Continue(match result {
             Ok(output) => output,
             Err(error) => format!("error: {error}\n"),
         })
+    }
+
+    fn execute(&mut self, action: OperatorAction) -> Result<String, String> {
+        match action {
+            OperatorAction::Help => Ok(help_text()),
+            OperatorAction::Quit => unreachable!("quit is handled before execution"),
+            OperatorAction::ListAgents => self.list_agents(),
+            OperatorAction::Dashboard => self.dashboard(),
+            OperatorAction::Status { agent } => self.status(agent),
+            OperatorAction::RecentWork { agent } => self.recent_work(agent),
+            OperatorAction::ToolActivity { agent } => self.tool_activity(agent),
+            OperatorAction::Evidence { agent } => self.evidence(agent),
+            OperatorAction::ReviewNeeds { agent } => self.review_needs(agent),
+            OperatorAction::Attach { agent } => self.attach(agent),
+            OperatorAction::Detach => {
+                self.attached_agent = None;
+                Ok("detached\n".to_string())
+            }
+            OperatorAction::Send { agent, message } => self.send(agent, message),
+            OperatorAction::Interrupt { agent, reason } => self.interrupt(agent, reason),
+            OperatorAction::Stop { agent, reason } => self.stop(agent, reason),
+        }
     }
 
     fn list_agents(&mut self) -> Result<String, String> {
@@ -143,9 +184,28 @@ impl ControlRepl {
     }
 
     fn status(&mut self, agent: Option<String>) -> Result<String, String> {
-        let agent = self.resolve_agent(agent)?;
-        let summary = self.agent_status(&agent)?;
+        let summary = self.resolved_agent_status(agent)?;
         Ok(format!("Status\n{}", render_human_agent(&summary)))
+    }
+
+    fn recent_work(&mut self, agent: Option<String>) -> Result<String, String> {
+        self.resolved_agent_status(agent)
+            .map(|summary| render_recent_work(&summary))
+    }
+
+    fn tool_activity(&mut self, agent: Option<String>) -> Result<String, String> {
+        self.resolved_agent_status(agent)
+            .map(|summary| render_tool_activity(&summary))
+    }
+
+    fn evidence(&mut self, agent: Option<String>) -> Result<String, String> {
+        self.resolved_agent_status(agent)
+            .map(|summary| render_evidence_summary(&summary))
+    }
+
+    fn review_needs(&mut self, agent: Option<String>) -> Result<String, String> {
+        self.resolved_agent_status(agent)
+            .map(|summary| render_review_needs(&summary))
     }
 
     fn attach(&mut self, agent: String) -> Result<String, String> {
@@ -158,15 +218,38 @@ impl ControlRepl {
     }
 
     fn send(&mut self, agent: Option<String>, message: String) -> Result<String, String> {
-        let agent = self.resolve_agent(agent)?;
-        let response = self.send_request(ServerCommand::SteerAgent {
-            agent_name: agent.clone(),
+        self.mutate_agent(agent, |agent_name| ServerCommand::SteerAgent {
+            agent_name,
             goal: message,
-        })?;
-        let ServerResponsePayload::AgentStatus(summary) = response else {
-            return Err("server returned unexpected response for send".to_string());
-        };
-        Ok(format!("sent to {agent}\n{}", render_human_agent(&summary)))
+        })
+        .map(|(agent, summary)| format!("sent to {agent}\n{}", render_human_agent(&summary)))
+    }
+
+    fn interrupt(&mut self, agent: Option<String>, reason: String) -> Result<String, String> {
+        self.mutate_agent(agent, |agent_name| ServerCommand::InterruptAgent {
+            agent_name,
+            reason,
+        })
+        .map(|(agent, summary)| {
+            self.clear_attached_if(&agent);
+            format!("interrupted {agent}\n{}", render_human_agent(&summary))
+        })
+    }
+
+    fn stop(&mut self, agent: Option<String>, reason: String) -> Result<String, String> {
+        self.mutate_agent(agent, |agent_name| ServerCommand::StopAgent {
+            agent_name,
+            reason,
+        })
+        .map(|(agent, summary)| {
+            self.clear_attached_if(&agent);
+            format!("stopped {agent}\n{}", render_human_agent(&summary))
+        })
+    }
+
+    fn resolved_agent_status(&mut self, agent: Option<String>) -> Result<AgentSummary, String> {
+        let agent = self.resolve_agent(agent)?;
+        self.agent_status(&agent)
     }
 
     fn agent_status(&mut self, agent: &str) -> Result<AgentSummary, String> {
@@ -177,6 +260,19 @@ impl ControlRepl {
             return Err("server returned unexpected response for status".to_string());
         };
         Ok(summary)
+    }
+
+    fn mutate_agent(
+        &mut self,
+        agent: Option<String>,
+        command: impl FnOnce(String) -> ServerCommand,
+    ) -> Result<(String, AgentSummary), String> {
+        let agent = self.resolve_agent(agent)?;
+        let response = self.send_request(command(agent.clone()))?;
+        let ServerResponsePayload::AgentStatus(summary) = response else {
+            return Err("server returned unexpected response for agent mutation".to_string());
+        };
+        Ok((agent, summary))
     }
 
     fn send_request(&mut self, command: ServerCommand) -> Result<ServerResponsePayload, String> {
@@ -201,117 +297,17 @@ impl ControlRepl {
                 "no agent selected; use `attach NAME` or `send --agent NAME ...`".to_string()
             })
     }
+
+    fn clear_attached_if(&mut self, agent: &str) {
+        if self.attached_agent.as_deref() == Some(agent) {
+            self.attached_agent = None;
+        }
+    }
 }
 
 enum LineResult {
     Continue(String),
     Quit(String),
-}
-
-enum OperatorAction {
-    Help,
-    Quit,
-    ListAgents,
-    Dashboard,
-    Status {
-        agent: Option<String>,
-    },
-    Attach {
-        agent: String,
-    },
-    Detach,
-    Send {
-        agent: Option<String>,
-        message: String,
-    },
-}
-
-fn parse_action(line: &str) -> Result<OperatorAction, String> {
-    let mut parts = line.split_whitespace();
-    let command = parts.next().unwrap_or_default();
-    match command {
-        "help" | "?" => Ok(OperatorAction::Help),
-        "quit" | "exit" => Ok(OperatorAction::Quit),
-        "agents" | "ls" => Ok(OperatorAction::ListAgents),
-        "dashboard" | "overview" => Ok(OperatorAction::Dashboard),
-        "detach" | "back" => Ok(OperatorAction::Detach),
-        "attach" | "jump" => {
-            let agent = parts
-                .next()
-                .ok_or_else(|| "attach requires an agent name".to_string())?;
-            Ok(OperatorAction::Attach {
-                agent: agent.to_string(),
-            })
-        }
-        "status" => Ok(OperatorAction::Status {
-            agent: parts.next().map(ToString::to_string),
-        }),
-        "send" => parse_send(line),
-        other => Err(format!("unknown command `{other}`")),
-    }
-}
-
-fn parse_send(line: &str) -> Result<OperatorAction, String> {
-    let rest = line
-        .strip_prefix("send")
-        .expect("parse_send is only called for send")
-        .trim();
-    if rest.is_empty() {
-        return Err("send requires a message".to_string());
-    }
-    if let Some(after_flag) = rest.strip_prefix("--agent ") {
-        let mut split = after_flag.splitn(2, char::is_whitespace);
-        let agent = split
-            .next()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| "send --agent requires an agent name".to_string())?;
-        let message = split
-            .next()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| "send requires a message".to_string())?;
-        return Ok(OperatorAction::Send {
-            agent: Some(agent.to_string()),
-            message: message.to_string(),
-        });
-    }
-    Ok(OperatorAction::Send {
-        agent: None,
-        message: rest.to_string(),
-    })
-}
-
-fn render_dashboard(snapshot: &ServerDashboardSnapshot) -> String {
-    let mut output = format!(
-        "Dashboard\nproject: {}\nagents: {}\nactive sessions: {}\n",
-        snapshot.project_id, snapshot.agent_count, snapshot.active_session_count
-    );
-    for agent in &snapshot.agents {
-        output.push_str(&render_human_agent(agent));
-    }
-    output
-}
-
-fn render_human_agent(agent: &AgentSummary) -> String {
-    let mut output = format!("- {} [{}]", agent.name, agent.status);
-    if let Some(session) = agent.session.as_ref() {
-        output.push_str(&format!(
-            " session={} run={} run_status={} tools={} memory={}",
-            session.session_id,
-            session
-                .run_id
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "none".to_string()),
-            session.run_status.as_deref().unwrap_or("none"),
-            session.tool_call_count,
-            session.memory_packet_count
-        ));
-    } else {
-        output.push_str(" session=none");
-    }
-    output.push('\n');
-    output
 }
 
 fn help_text() -> String {
@@ -320,24 +316,19 @@ Commands:
   agents | ls
   dashboard | overview
   status [AGENT]
+  recent [AGENT] | work [AGENT]
+  tools [AGENT]
+  evidence [AGENT]
+  reviews [AGENT]
   attach AGENT | jump AGENT
   send [--agent AGENT] MESSAGE
+  interrupt [--agent AGENT] REASON
+  stop [--agent AGENT] REASON
   detach | back
   help
   quit | exit
 "
     .to_string()
-}
-
-fn server_address(args: &[String]) -> Result<String, String> {
-    optional_value(args, "--connect")?
-        .or_else(|| {
-            std::env::var("CAPO_SERVER_ADDR")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .or_else(|| Some(DEFAULT_SERVER_ADDR.to_string()))
-        .ok_or_else(|| "missing server address".to_string())
 }
 
 fn optional_value(args: &[String], key: &str) -> Result<Option<String>, String> {
@@ -353,22 +344,6 @@ fn optional_value(args: &[String], key: &str) -> Result<Option<String>, String> 
     Ok(Some(value.clone()))
 }
 
-fn require_loopback_address(address: &str) -> Result<(), String> {
-    let resolved = address
-        .to_socket_addrs()
-        .map_err(debug_error)?
-        .collect::<Vec<_>>();
-    if resolved.is_empty() {
-        return Err(format!("server address did not resolve: {address}"));
-    }
-    if !resolved.iter().all(|address| address.ip().is_loopback()) {
-        return Err(format!(
-            "server address must resolve only to loopback addresses, got {address}"
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,35 +351,9 @@ mod tests {
 
     #[test]
     fn unsupported_planner_is_rejected_before_server_connect() {
-        let parsed = ParsedArgs::new(vec![]).expect("parsed");
-        let error = operator_control(&parsed, &["--planner".to_string(), "codex".to_string()])
+        let error = control_planner(&["--planner".to_string(), "codex".to_string()])
             .expect_err("unsupported planner should fail");
         assert!(error.contains("unsupported planner: codex"));
-    }
-
-    #[test]
-    fn parser_keeps_send_message_text_together() {
-        let Ok(OperatorAction::Send {
-            agent: Some(agent),
-            message,
-        }) = parse_send("send --agent demo please inspect the current status")
-        else {
-            panic!("expected send action");
-        };
-        assert_eq!(agent, "demo");
-        assert_eq!(message, "please inspect the current status");
-    }
-
-    #[test]
-    fn parser_supports_attached_agent_send() {
-        let Ok(OperatorAction::Send {
-            agent: None,
-            message,
-        }) = parse_send("send please continue")
-        else {
-            panic!("expected send action");
-        };
-        assert_eq!(message, "please continue");
     }
 
     #[test]

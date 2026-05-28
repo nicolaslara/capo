@@ -111,3 +111,8 @@ pub(crate) fn temp_root(name: &str) -> PathBuf {
         .as_nanos();
     std::env::temp_dir().join(format!("capo-{name}-{nanos}"))
 }
+
+pub(crate) fn unused_loopback_address() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind unused address");
+    listener.local_addr().expect("local address").to_string()
+}

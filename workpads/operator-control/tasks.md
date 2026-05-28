@@ -91,10 +91,32 @@ Evidence:
 
 ## OC3 - Richer Agent Interaction Commands
 
-Status: pending
+Status: completed on 2026-05-28
 
 Acceptance:
 
+- Make control discoverable: bare `capo` should enter `capo control`, `--planner` should default to `none`, and control should start a local loopback server when the default server is not running.
 - Add commands for recent work, tool activity, evidence, review needs, and interruption/stop.
 - Decide what "jump into a running agent" means for mocked, ACP, Codex, and Claude adapters.
 - Preserve deterministic mocked-agent tests before adding provider-specific behavior.
+
+Evidence:
+
+- Bare `capo` now routes to `capo control --planner none`; `capo --help` still shows the full command reference.
+- `capo control` auto-starts a local loopback server when the configured/default address is free.
+- Added control commands:
+  - `recent [AGENT]` / `work [AGENT]`;
+  - `tools [AGENT]`;
+  - `evidence [AGENT]`;
+  - `reviews [AGENT]`;
+  - `interrupt [--agent AGENT] REASON`;
+  - `stop [--agent AGENT] REASON`.
+- Added typed server commands for `InterruptAgent` and `StopAgent`.
+- Split `operator_control` into planner/parser, executor, renderer, and server-process modules.
+- Added deterministic tests:
+  - `cargo test -p capo-cli operator_control`
+  - `cargo test -p capo-cli --test server_transport control -- --nocapture`
+- Manual dogfood/use path:
+  - Bare `capo` autostarted a loopback server with `CAPO_SERVER_ADDR=<free-loopback-addr>` and scripted `dashboard`, `quit`; output included `server: ... (started)`, `Dashboard`, `agents: 0`, and `bye`.
+  - Against a running server at `127.0.0.1:7878`, registered `demo-a` and `demo-b`, started tasks, then ran bare `capo` with scripted `attach demo-a`, `recent`, `tools`, `evidence`, `reviews`, `interrupt ...`, `attach demo-b`, `stop ...`, `dashboard`, `quit`.
+  - Observed recent-work summary, tool counts, evidence refs, review counts, `interrupted demo-a`, `stopped demo-b`, and final dashboard with `active sessions: 0`.

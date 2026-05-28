@@ -23,6 +23,8 @@ Capture decisions and lessons for Capo's human operator REPL/control surface.
 - In a terminal, `capo control` streams prompts/responses. With piped stdin, it runs as a deterministic scripted control loop for tests and docs.
 - Future planner modes must lower into the same operator action/tool surface as `none`; they should not gain a separate execution path.
 - Planner execution and server request execution should remain separate so a future LLM planner can choose an action without bypassing `capo-server`.
+- Bare `capo` should enter the no-planner control loop. `--help` remains the explicit way to show the full command reference.
+- `capo control` should auto-start a local loopback server when the configured/default address is free. This makes the product feel like one entrypoint while preserving the server boundary internally.
 
 ## OC1 Findings
 
@@ -39,8 +41,15 @@ Capture decisions and lessons for Capo's human operator REPL/control surface.
 - Local small-model planners should fail closed to help/status behavior when confidence is low or output is malformed.
 - The next code refactor should extract a planner boundary from `operator_control.rs` before adding any LLM-backed planner.
 
+## OC3 Findings
+
+- "Jump into" means selecting the current Capo agent context for all adapter kinds. For mocked, ACP, Codex, and Claude adapters, the REPL still sends typed Capo server commands; it does not attach to a provider-native TTY.
+- Richer read commands can initially use the server dashboard/session summaries: `recent`/`work`, `tools`, `evidence`, and `reviews` render concise status without exposing raw event dumps.
+- `interrupt` and `stop` are typed server commands, not compatibility CLI calls. They clear the attached agent context when applied to the attached agent.
+- The operator-control module is split into planner/parser, executor, renderer, and server-process concerns so future `codex`/`capo` planners can plug in without bypassing execution.
+
 ## Open Questions
 
-- What should "jump into a running Codex/Claude agent" mean once provider-native sessions are long-lived rather than one-shot dispatches?
 - Which commands should require explicit confirmation inside planner-backed modes?
 - Should `send` eventually support multiline input or an editor handoff for longer operator instructions?
+- What should provider-native attach mean later for long-lived ACP/Codex/Claude sessions, and can it be represented as a Capo-controlled stream instead of a raw TTY handoff?

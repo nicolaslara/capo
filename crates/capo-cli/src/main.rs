@@ -100,7 +100,7 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
     let args = parsed.args.as_slice();
 
     match args {
-        [] => Ok(HELP.to_string()),
+        [] => operator_control(&parsed, &[]),
         [flag] if flag == "--help" || flag == "-h" || flag == "help" => Ok(HELP.to_string()),
         [flag] if flag == "version" || flag == "--version" || flag == "-V" => {
             Ok(format!("capo {}\n", env!("CARGO_PKG_VERSION")))

@@ -67,6 +67,16 @@ pub(super) fn optional_bool(value: &Value, key: &str) -> TransportResult<Option<
     }
 }
 
+pub(super) fn optional_i64(value: &Value, key: &str) -> TransportResult<Option<i64>> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| TransportError::Protocol(format!("{key} must be an integer"))),
+    }
+}
+
 pub(super) fn required_string_array(value: &Value, key: &str) -> TransportResult<Vec<String>> {
     value
         .get(key)

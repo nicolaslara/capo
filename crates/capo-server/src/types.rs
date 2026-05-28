@@ -117,6 +117,14 @@ pub enum ServerCommand {
         agent_name: String,
         goal: String,
     },
+    InterruptAgent {
+        agent_name: String,
+        reason: String,
+    },
+    StopAgent {
+        agent_name: String,
+        reason: String,
+    },
     ListAgents,
     AgentStatus {
         agent_name: String,
@@ -243,9 +251,15 @@ pub struct SessionSummary {
     pub run_id: Option<RunId>,
     pub run_status: Option<String>,
     pub adapter_kind: Option<String>,
+    pub current_goal: String,
+    pub latest_summary: Option<String>,
+    pub latest_blocker: Option<String>,
+    pub latest_confidence: Option<i64>,
     pub recent_event_count: usize,
     pub evidence_count: usize,
     pub evidence_refs: Vec<String>,
+    pub review_finding_count: usize,
+    pub task_outcome_report_count: usize,
     pub turn_count: usize,
     pub turn_ids: Vec<String>,
     pub latest_dispatch_plan_id: Option<String>,
@@ -457,6 +471,20 @@ fn default_request_id(command: &ServerCommand) -> String {
                 "server-agent-steer-{}-{}",
                 slug(agent_name),
                 stable_hash(goal.as_bytes())
+            )
+        }
+        ServerCommand::InterruptAgent { agent_name, reason } => {
+            format!(
+                "server-agent-interrupt-{}-{}",
+                slug(agent_name),
+                stable_hash(reason.as_bytes())
+            )
+        }
+        ServerCommand::StopAgent { agent_name, reason } => {
+            format!(
+                "server-agent-stop-{}-{}",
+                slug(agent_name),
+                stable_hash(reason.as_bytes())
             )
         }
         ServerCommand::ListAgents => "server-agent-list".to_string(),

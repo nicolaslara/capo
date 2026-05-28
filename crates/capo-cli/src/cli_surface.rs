@@ -6,6 +6,7 @@ pub(crate) const HELP: &str = "\
 Capo - local controller for coding-agent sessions
 
 Usage:
+  capo
   capo --help
   capo version
   capo init [--state PATH]
@@ -121,7 +122,8 @@ Safety notes:
   CAPO_STATE sets the default local state directory; --state overrides it per command.
   `capo server serve` listens on 127.0.0.1:7878 by default.
   `capo server ...` client commands use CAPO_SERVER_ADDR when set, otherwise they try 127.0.0.1:7878 and fall back to embedded local handling if no server is running.
-  `capo control --planner none` requires a running Capo server and accepts commands through stdin or an interactive terminal.
+  Bare `capo` aliases to `capo control --planner none`.
+  `capo control --planner none` starts a local loopback server when one is not already running, then accepts commands through stdin or an interactive terminal.
 ";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
