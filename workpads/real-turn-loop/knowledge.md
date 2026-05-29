@@ -80,12 +80,33 @@ Design rationale:
   (`preflight_live_provider`, `live_provider.rs:62`). No `RealBoundaryController`
   method may run a provider without passing through that gate/preflight - this is
   recorded as a code-review non-goal assertion, not just prose.
-- Open question resolved-leaning: the loop invokes the dispatch
-  `ServerCommand`s/server methods rather than re-implementing them, so the typed
-  boundary stays the single definition of plan/gate/run. The alternative
-  (demoting the dispatch primitives to internal loop functions) is recorded as
-  the fallback if the call shape proves awkward; the chosen shape is documented
-  here in `knowledge.md` per RTL4.
+- Open question RESOLVED (RTL4): the loop INVOKES the dispatch
+  `ServerCommand`s rather than re-implementing them, so the typed boundary stays
+  the single definition of plan/gate/run. The RTL4 reconciliation point is
+  `CapoServer::run_dispatch_turn` (`crates/capo-server/src/turn_orchestration.rs`):
+  a thin orchestrator that sequences the existing commands through
+  `CapoServer::handle` (deterministic: `PlanDispatch` -> `GateDispatch` ->
+  `RunDispatchLocal`; live: `PreflightLiveProvider` -> `RunLiveProviderLocal`)
+  and then ANNOTATES the run it just drove with a `TurnFinished` derived from the
+  SAME normalized batch the dispatch run ingested
+  (`FakeBoundaryController::derive_turn_finished`, the public outcome classifier
+  shared with `run_turn`). It adds no new event kind, no second gate, and no
+  second run-completion model. A loop turn produces the IDENTICAL dispatch
+  plan/gate/execution event sequence as the direct command path for a scripted
+  run (proven by `loop_turn_drives_the_same_dispatch_sequence_as_the_direct_command_path`).
+  The alternative (demoting the dispatch primitives to internal loop functions)
+  remains the documented fallback if the call shape proves awkward, but the
+  command-driving shape held: the orchestrator owns no provider-spawn or
+  gate-bypass path of its own, only command forwarding.
+- NON-GOAL ASSERTION (code-review contract, RTL4): no `run_dispatch_turn` path --
+  and, by inheritance, no future `RealBoundaryController` method -- runs a
+  provider without passing through the existing gate/preflight. The deterministic
+  arm goes through `dispatch_gate_for_plan` via `GateDispatch`; the live arm goes
+  through `preflight_live_provider` via `PreflightLiveProvider`. Both reuse the
+  existing checks unchanged. This is enforced by construction (the orchestrator
+  only forwards `ServerCommand`s) and exercised by
+  `loop_turn_does_not_run_provider_without_passing_the_gate` (a gate-blocked turn
+  ingests no batch, runs no provider, and emits a no-ref `TurnFinished`).
 
 ## The AgentAdapter Trait Seam
 
@@ -253,10 +274,11 @@ artifacts quarantined per the `state-model.md` artifact privacy contract.
 
 ## Open Questions
 
-- Does the loop call the dispatch `ServerCommand`s directly, or are the dispatch
-  primitives demoted to internal loop functions? The decision leans toward the
-  loop driving the commands so the typed boundary stays the single definition;
-  RTL4 records the final chosen shape.
+- RESOLVED (RTL4): the loop calls the dispatch `ServerCommand`s directly via
+  `CapoServer::run_dispatch_turn`, so the typed boundary stays the single
+  definition of plan/gate/run. See "The Loop Drives Dispatch Rather Than Running
+  Beside It" above for the recorded shape, the non-goal assertion, and the
+  parity test.
 - Is the pre-write checkpoint a git-stash, a tar copy, or a worktree snapshot for
   Phase 1? Full shadow-git is `safety-gates`; this floor only needs one
   reversible single-snapshot mechanism with a documented restore.

@@ -1162,6 +1162,50 @@ fn turn_loop_projected_turn_rebuilds_identically_after_restart_replay() {
     );
 }
 
+#[test]
+fn turn_loop_dispatch_derivation_matches_run_turn_for_the_same_batch() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    // RTL4: the dispatch substrate ingests the normalized batch and then the
+    // loop ANNOTATES that run with a TurnFinished. The server reuses
+    // `derive_turn_finished` (the public outcome classifier) over the same
+    // batch the dispatch run projected. This proves the dispatch-driven
+    // annotation cannot drift from the in-loop `run_turn` outcome: both call the
+    // one pure derivation, so there is a single completion model.
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("loop-session"));
+    let controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open controller");
+    let registration = controller.register_agent("loop-worker").expect("agent");
+    let refs = controller
+        .send_task(&registration, "Reconcile loop outcome with dispatch")
+        .expect("send task");
+
+    let turn_id = TurnId::new("turn-reconcile-1");
+    let batch = ScriptedMockTurn::new("turn-reconcile-1")
+        .message_delta("msg-1", "inspecting state")
+        .tool_requested("tool-1", "capo.agent_status")
+        .tool_completed("tool-1", "capo.agent_status", "agent is running")
+        .message_completed("msg-2", "state inspected")
+        .turn_completed("done-1")
+        .normalized_events(&refs.external_session_ref);
+
+    // The loop's in-controller path: observe -> project -> emit.
+    let via_loop = controller
+        .run_turn(&refs, &turn_id, &batch)
+        .expect("run turn");
+
+    // The dispatch path's emit step: the server derives the outcome from the
+    // same batch (with the dispatch run's replay counts) AFTER the dispatch
+    // primitives ingested it. Equality-significant fields must match exactly.
+    let via_dispatch =
+        FakeBoundaryController::derive_turn_finished(&turn_id, &batch, via_loop.replay.clone());
+    assert_eq!(via_dispatch, via_loop);
+}
+
 fn temp_root() -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

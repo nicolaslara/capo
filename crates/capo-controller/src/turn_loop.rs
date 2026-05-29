@@ -157,7 +157,27 @@ impl FakeBoundaryController {
             Some(turn_id.as_str()),
         )?;
         // Emit: derive the outcome from the same batch we just projected.
-        Ok(finish_turn(turn_id, adapter_events, replay))
+        Ok(Self::derive_turn_finished(turn_id, adapter_events, replay))
+    }
+
+    /// Derive the [`TurnFinished`] outcome from an ALREADY-projected normalized
+    /// batch plus the projection's replay report.
+    ///
+    /// RTL4 reuses this from the server's dispatch path: the existing dispatch
+    /// pipeline (`PlanDispatch`/`PreflightLiveProvider` -> `GateDispatch` ->
+    /// `RunDispatchLocal`/`RunLiveProviderLocal`) is the loop's single execution
+    /// substrate, so once the dispatch run has ingested the batch through
+    /// [`Self::apply_normalized_adapter_events_with_turn`], the loop ANNOTATES
+    /// that run with a `TurnFinished` derived from the *same* batch -- it does
+    /// not fork a second completion model. Keeping the derivation here means
+    /// [`Self::run_turn`] and the dispatch path agree on the outcome by
+    /// construction, because they call the same pure classifier.
+    pub fn derive_turn_finished(
+        turn_id: &TurnId,
+        adapter_events: &[NormalizedAdapterEvent],
+        replay: AdapterReplayReport,
+    ) -> TurnFinished {
+        finish_turn(turn_id, adapter_events, replay)
     }
 
     /// Reconstruct the equality-significant `TurnFinished` for a turn purely

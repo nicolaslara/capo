@@ -20,6 +20,7 @@ mod live_provider;
 mod replay;
 mod sessions;
 mod transport;
+mod turn_orchestration;
 
 static TEMP_ROOT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 

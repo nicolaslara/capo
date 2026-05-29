@@ -290,7 +290,58 @@ Verification:
 
 ## RTL4 - Reconcile The Turn Loop With The Existing Dispatch Pipeline
 
-Status: pending.
+Status: done (gate green). The reconciliation point is
+`CapoServer::run_dispatch_turn` (`crates/capo-server/src/turn_orchestration.rs`):
+the loop's emit step DRIVES the existing dispatch primitives as its single
+execution substrate. It invokes the typed dispatch `ServerCommand`s through
+`CapoServer::handle` (deterministic: `PlanDispatch` -> `GateDispatch` ->
+`RunDispatchLocal`; live: `PreflightLiveProvider` -> `RunLiveProviderLocal`) and
+then ANNOTATES the run it drove with a `TurnFinished` derived from the SAME
+normalized batch the dispatch run ingested, via the new public
+`FakeBoundaryController::derive_turn_finished` (the outcome classifier `run_turn`
+already uses, so loop and dispatch agree by construction -- one completion
+model, no parallel pipeline, no new `EventKind`). The live Codex execution that
+flows through `run_live_provider_local` is now a step inside the loop (live arm),
+not a separately invoked command sequence. The chosen call shape (loop invokes
+commands) and the non-goal assertion (no path runs a provider without the
+existing gate/preflight) are recorded in `knowledge.md`.
+
+Evidence:
+
+- Reconciliation orchestrator + types:
+  `crates/capo-server/src/turn_orchestration.rs` (`run_dispatch_turn`,
+  `DispatchTurnRequest`/`DispatchTurnMode`/`DispatchTurnOutcome`,
+  `turn_finished_for_run`, `dispatch_plan_id_for_turn`); module wired and types
+  re-exported in `crates/capo-server/src/lib.rs`.
+- Shared outcome classifier: `crates/capo-controller/src/turn_loop.rs` exposes
+  `FakeBoundaryController::derive_turn_finished` (was the private free `finish_turn`),
+  now called by both `run_turn` and the server's dispatch path.
+- Decision + non-goal assertion recorded in
+  `workpads/real-turn-loop/knowledge.md` ("The Loop Drives Dispatch Rather Than
+  Running Beside It" and "Open Questions" RESOLVED).
+- New deterministic tests:
+  `crates/capo-server/src/tests/turn_orchestration.rs` --
+  `loop_turn_drives_the_same_dispatch_sequence_as_the_direct_command_path`
+  (the loop-driven turn produces the IDENTICAL dispatch plan/gate/
+  prompt-materialization/execution-request/executed/run.exited/replayed event
+  sequence as the direct `PlanDispatch`/`GateDispatch`/`RunDispatchLocal`
+  command path, with matching run status/counts/provider flags),
+  `loop_turn_does_not_run_provider_without_passing_the_gate` (a gate-blocked
+  turn passes through the gate, ingests no batch, runs no provider, and emits a
+  no-ref `TurnFinished`), and
+  `loop_turn_drives_the_live_substrate_through_preflight_and_run` (the live arm
+  goes through `PreflightLiveProvider` and ingests the mock provider output).
+  `crates/capo-controller/src/tests.rs` --
+  `turn_loop_dispatch_derivation_matches_run_turn_for_the_same_batch`
+  (the dispatch-path derivation equals the in-loop `run_turn` outcome).
+- Commands run from `/Users/nicolas/devel/capo-wt/real-turn-loop`:
+  `cargo test -p capo-controller -p capo-server` -> ok (capo-controller 17,
+  capo-server 32, 0 failed). Objective gate: `cargo fmt --check` -> clean;
+  `cargo clippy --all-targets --all-features -- -D warnings` -> clean (exit 0);
+  `cargo test --workspace` -> 0 failed across all binaries (capo-server 32,
+  capo-controller 17, capo-adapters 27, capo-state 31, capo-runtime 12,
+  capo-tools 18, capo-query 21, capo-voice 19, capo cli 63 + server_transport
+  11, etc.). `git diff --check` -> clean (exit 0).
 
 Acceptance:
 

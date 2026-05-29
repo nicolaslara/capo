@@ -16,12 +16,14 @@ mod dispatch;
 mod live_provider;
 mod server_core;
 mod transport;
+mod turn_orchestration;
 mod types;
 mod util;
 
 use dispatch::DispatchExecutionOutcome;
 use live_provider::{LiveProviderLocalRunRequest, LiveProviderPreflightRequest};
 pub use transport::{TransportError, send_tcp, serve_tcp};
+pub use turn_orchestration::{DispatchTurnMode, DispatchTurnOutcome, DispatchTurnRequest};
 pub use types::*;
 use util::{
     adapter_label, command_identity_hash, parse_adapter_events, provider_kind_for_adapter, slug,
