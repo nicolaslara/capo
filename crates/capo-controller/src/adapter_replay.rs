@@ -66,16 +66,17 @@ impl FakeBoundaryController {
             self.state.append_event(event, &[projection])?;
             if self.state.event_count()? > before {
                 appended_event_count += 1;
-                match adapter_event.kind.as_str() {
-                    "adapter.tool_call_requested"
-                    | "adapter.tool_call_started"
-                    | "adapter.tool_call_completed"
-                    | "adapter.tool_call_failed" => tool_event_count += 1,
-                    "adapter.item_completed" | "adapter.item_delta" | "adapter.plan_replaced" => {
-                        summary_event_count += 1
-                    }
-                    "adapter.turn_completed" => completed_turn_count += 1,
-                    _ => {}
+                // Classify the appended event through the SAME taxonomy the
+                // turn-loop outcome uses (NormalizedAdapterEvent::is_*), so the
+                // two classifiers cannot drift.
+                if adapter_event.is_tool_event() {
+                    tool_event_count += 1;
+                } else if adapter_event.is_summary_event() {
+                    summary_event_count += 1;
+                } else if adapter_event.terminal_outcome()
+                    == Some(capo_adapters::AdapterTerminalOutcome::Completed)
+                {
+                    completed_turn_count += 1;
                 }
             }
             if let Some(observation_projection) =

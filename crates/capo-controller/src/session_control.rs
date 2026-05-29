@@ -164,6 +164,22 @@ impl FakeBoundaryController {
         refs: &FakeRunRefs,
         reason: &str,
     ) -> StateResult<FakeReadModelObservation> {
+        self.interrupt_with_turn(registration, refs, reason, None)
+    }
+
+    /// `interrupt`, keying the persisted `session.interrupted` event to a turn.
+    ///
+    /// The turn-loop `interrupt_turn` path passes the turn id so the terminal
+    /// event carries the same `turn_id` the returned `TurnFinished` reports;
+    /// an observer/replay querying events by that turn id then finds the
+    /// interrupt. The plain `interrupt` command path passes `None`.
+    pub(crate) fn interrupt_with_turn(
+        &self,
+        registration: &FakeAgentRegistration,
+        refs: &FakeRunRefs,
+        reason: &str,
+        turn_id: Option<&TurnId>,
+    ) -> StateResult<FakeReadModelObservation> {
         let session = self
             .state
             .session(&refs.session_id)?
@@ -181,17 +197,20 @@ impl FakeBoundaryController {
             .attach_session(refs.session_id.clone(), refs.external_session_ref.clone());
         let adapter_output = self.adapter.interrupt(&adapter_session, reason);
 
+        let mut interrupted_event = scoped_event(
+            &format!("event-session-interrupted-{}", refs.session_id),
+            EventKind::SessionInterrupted,
+            &self.project_id,
+            &refs.task_id,
+            &registration.agent_id,
+            &refs.session_id,
+            &refs.run_id,
+        );
+        if let Some(turn_id) = turn_id {
+            interrupted_event = interrupted_event.with_turn(turn_id.as_str());
+        }
         self.state.append_event(
-            scoped_event(
-                &format!("event-session-interrupted-{}", refs.session_id),
-                EventKind::SessionInterrupted,
-                &self.project_id,
-                &refs.task_id,
-                &registration.agent_id,
-                &refs.session_id,
-                &refs.run_id,
-            )
-            .with_payload(format!(
+            interrupted_event.with_payload(format!(
                 "{{\"reason\":\"{}\",\"adapter_summary\":\"{}\"}}",
                 escape_json(reason),
                 escape_json(&adapter_output.summary)
@@ -248,6 +267,21 @@ impl FakeBoundaryController {
         refs: &FakeRunRefs,
         reason: &str,
     ) -> StateResult<FakeReadModelObservation> {
+        self.stop_with_turn(registration, refs, reason, None)
+    }
+
+    /// `stop`, keying the persisted `session.stopped` event to a turn.
+    ///
+    /// The turn-loop `stop_turn` path passes the turn id so the terminal event
+    /// carries the same `turn_id` the returned `TurnFinished` reports. The plain
+    /// `stop` command path passes `None`.
+    pub(crate) fn stop_with_turn(
+        &self,
+        registration: &FakeAgentRegistration,
+        refs: &FakeRunRefs,
+        reason: &str,
+        turn_id: Option<&TurnId>,
+    ) -> StateResult<FakeReadModelObservation> {
         let session = self
             .state
             .session(&refs.session_id)?
@@ -265,17 +299,20 @@ impl FakeBoundaryController {
             .attach_session(refs.session_id.clone(), refs.external_session_ref.clone());
         let adapter_output = self.adapter.stop(&adapter_session, reason);
 
+        let mut stopped_event = scoped_event(
+            &format!("event-session-stopped-{}", refs.session_id),
+            EventKind::SessionStopped,
+            &self.project_id,
+            &refs.task_id,
+            &registration.agent_id,
+            &refs.session_id,
+            &refs.run_id,
+        );
+        if let Some(turn_id) = turn_id {
+            stopped_event = stopped_event.with_turn(turn_id.as_str());
+        }
         self.state.append_event(
-            scoped_event(
-                &format!("event-session-stopped-{}", refs.session_id),
-                EventKind::SessionStopped,
-                &self.project_id,
-                &refs.task_id,
-                &registration.agent_id,
-                &refs.session_id,
-                &refs.run_id,
-            )
-            .with_payload(format!(
+            stopped_event.with_payload(format!(
                 "{{\"reason\":\"{}\",\"adapter_summary\":\"{}\"}}",
                 escape_json(reason),
                 escape_json(&adapter_output.summary)

@@ -43,6 +43,22 @@ pub enum AdapterTimelineConfidence {
     None,
 }
 
+/// The terminal classification of a normalized adapter event.
+///
+/// This is the single source of truth for "this event ends a turn, and how".
+/// Both the projection path and the turn-loop outcome derive their terminal
+/// signal from [`NormalizedAdapterEvent::terminal_outcome`] so the two never
+/// drift on which `adapter.turn_*` kinds are terminal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdapterTerminalOutcome {
+    /// `adapter.turn_completed`: the turn finished normally.
+    Completed,
+    /// `adapter.turn_failed`: the turn failed.
+    Failed,
+    /// `adapter.turn_interrupted`: the turn was interrupted in flight.
+    Interrupted,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NormalizedAdapterEvent {
     pub adapter_kind: NormalizedAdapterKind,
@@ -110,14 +126,42 @@ impl NormalizedAdapterEvent {
         self
     }
 
-    pub fn tool_observation(&self) -> Option<AdapterToolObservation> {
-        if !matches!(
+    /// `true` for the item/summary kinds the projection records as
+    /// `session.summary_updated`. Single source of truth for the summary
+    /// taxonomy (shared by the projection path and the turn-loop outcome).
+    pub fn is_summary_event(&self) -> bool {
+        matches!(
+            self.kind.as_str(),
+            "adapter.item_completed" | "adapter.item_delta" | "adapter.plan_replaced"
+        )
+    }
+
+    /// `true` for the tool-call kinds the projection records as `tool.*`.
+    /// Single source of truth for the tool taxonomy.
+    pub fn is_tool_event(&self) -> bool {
+        matches!(
             self.kind.as_str(),
             "adapter.tool_call_requested"
                 | "adapter.tool_call_started"
                 | "adapter.tool_call_completed"
                 | "adapter.tool_call_failed"
-        ) {
+        )
+    }
+
+    /// The terminal outcome this event carries, if any. `None` for non-terminal
+    /// events. Single source of truth for which `adapter.turn_*` kinds end a
+    /// turn, shared by the projection path and the turn-loop outcome.
+    pub fn terminal_outcome(&self) -> Option<AdapterTerminalOutcome> {
+        match self.kind.as_str() {
+            "adapter.turn_completed" => Some(AdapterTerminalOutcome::Completed),
+            "adapter.turn_failed" => Some(AdapterTerminalOutcome::Failed),
+            "adapter.turn_interrupted" => Some(AdapterTerminalOutcome::Interrupted),
+            _ => None,
+        }
+    }
+
+    pub fn tool_observation(&self) -> Option<AdapterToolObservation> {
+        if !self.is_tool_event() {
             return None;
         }
         Some(AdapterToolObservation {

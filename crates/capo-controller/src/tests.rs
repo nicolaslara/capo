@@ -884,19 +884,32 @@ fn turn_loop_interrupt_and_stop_commands_map_onto_finished_outcomes() {
     let refs = controller
         .send_task(&registration, "interrupt me")
         .expect("send");
+    let interrupt_turn_id = TurnId::new("turn-int-1");
     let interrupted = controller
-        .interrupt_turn(
-            &registration,
-            &refs,
-            &TurnId::new("turn-int-1"),
-            "operator paused",
-        )
+        .interrupt_turn(&registration, &refs, &interrupt_turn_id, "operator paused")
         .expect("interrupt turn");
+    // The whole new behavior is mapping the command's turn identity onto the
+    // loop, so assert the full TurnFinished shape (not just stop_reason, which
+    // the underlying interrupt command already determines).
+    assert_eq!(interrupted.turn_id, interrupt_turn_id);
     assert_eq!(interrupted.stop_reason, TurnStopReason::Interrupted);
+    assert!(interrupted.observed_terminal_event());
+    assert!(interrupted.summary_refs.is_empty());
+    assert!(interrupted.observed_tool_refs.is_empty());
+    assert_eq!(interrupted.replay, AdapterReplayReport::default());
     assert_eq!(
         controller.observe(&refs).expect("observe").session.status,
         "canceled"
     );
+    // The turn id is persisted onto the terminal event, not cosmetic: an
+    // observer querying events by this turn finds the interrupt.
+    let interrupt_events = controller
+        .state()
+        .recent_events_for_session(&refs.session_id, 32)
+        .expect("events");
+    assert!(interrupt_events.iter().any(|event| {
+        event.kind == "session.interrupted" && event.turn_id.as_deref() == Some("turn-int-1")
+    }));
 
     // Stop: drive a turn to a Finished/Stopped outcome.
     let stop_controller = FakeBoundaryController::open_with_adapter(
@@ -911,15 +924,21 @@ fn turn_loop_interrupt_and_stop_commands_map_onto_finished_outcomes() {
     let stop_refs = stop_controller
         .send_task(&stop_registration, "stop me")
         .expect("send");
+    let stop_turn_id = TurnId::new("turn-stop-1");
     let stopped = stop_controller
         .stop_turn(
             &stop_registration,
             &stop_refs,
-            &TurnId::new("turn-stop-1"),
+            &stop_turn_id,
             "operator stopped",
         )
         .expect("stop turn");
+    assert_eq!(stopped.turn_id, stop_turn_id);
     assert_eq!(stopped.stop_reason, TurnStopReason::Stopped);
+    assert!(stopped.observed_terminal_event());
+    assert!(stopped.summary_refs.is_empty());
+    assert!(stopped.observed_tool_refs.is_empty());
+    assert_eq!(stopped.replay, AdapterReplayReport::default());
     assert_eq!(
         stop_controller
             .observe(&stop_refs)
@@ -928,6 +947,84 @@ fn turn_loop_interrupt_and_stop_commands_map_onto_finished_outcomes() {
             .status,
         "completed"
     );
+    let stop_events = stop_controller
+        .state()
+        .recent_events_for_session(&stop_refs.session_id, 32)
+        .expect("events");
+    assert!(stop_events.iter().any(|event| {
+        event.kind == "session.stopped" && event.turn_id.as_deref() == Some("turn-stop-1")
+    }));
+}
+
+#[test]
+fn turn_loop_run_turn_maps_terminal_adapter_events_onto_stop_reasons() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    // RTL3: a scripted batch ending in adapter.turn_failed resolves to
+    // TurnStopReason::Failed (and projects run.exited keyed to the turn); a batch
+    // ending in adapter.turn_interrupted resolves to Interrupted (and projects
+    // session.interrupted). These terminal arms of finish_turn are otherwise only
+    // reachable through the command path.
+    // Failed branch.
+    let fail_controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("loop-session-fail")),
+    )
+    .expect("open controller");
+    let fail_registration = fail_controller
+        .register_agent("loop-worker")
+        .expect("agent");
+    let fail_refs = fail_controller
+        .send_task(&fail_registration, "fail this turn")
+        .expect("send task");
+    let fail_turn = TurnId::new("turn-fail-1");
+    let fail_batch = ScriptedMockTurn::new("turn-fail-1")
+        .message_delta("msg-f1", "working")
+        .failed("err-1", "boom")
+        .normalized_events(&fail_refs.external_session_ref);
+    let failed = fail_controller
+        .run_turn(&fail_refs, &fail_turn, &fail_batch)
+        .expect("run failed turn");
+    assert_eq!(failed.stop_reason, TurnStopReason::Failed);
+    assert!(failed.observed_terminal_event());
+    let fail_events = fail_controller
+        .state()
+        .recent_events_for_session(&fail_refs.session_id, 32)
+        .expect("events");
+    assert!(fail_events.iter().any(|event| {
+        event.kind == "run.exited" && event.turn_id.as_deref() == Some("turn-fail-1")
+    }));
+
+    // Interrupted branch via a scripted terminal event (not the command path).
+    let int_controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("loop-session-aint")),
+    )
+    .expect("open controller");
+    let int_registration = int_controller.register_agent("loop-worker").expect("agent");
+    let int_refs = int_controller
+        .send_task(&int_registration, "interrupt this turn")
+        .expect("send task");
+    let int_turn = TurnId::new("turn-adapter-int-1");
+    let int_batch = ScriptedMockTurn::new("turn-adapter-int-1")
+        .message_delta("msg-i1", "working")
+        .interrupted("int-1", "halted")
+        .normalized_events(&int_refs.external_session_ref);
+    let interrupted = int_controller
+        .run_turn(&int_refs, &int_turn, &int_batch)
+        .expect("run interrupted turn");
+    assert_eq!(interrupted.stop_reason, TurnStopReason::Interrupted);
+    assert!(interrupted.observed_terminal_event());
+    let int_events = int_controller
+        .state()
+        .recent_events_for_session(&int_refs.session_id, 32)
+        .expect("events");
+    assert!(int_events.iter().any(|event| {
+        event.kind == "session.interrupted"
+            && event.turn_id.as_deref() == Some("turn-adapter-int-1")
+    }));
 }
 
 #[test]
@@ -1016,18 +1113,49 @@ fn turn_loop_projected_turn_rebuilds_identically_after_restart_replay() {
         event_count_before
     );
 
-    // Re-running the loop over the same batch is idempotent (idempotency keys on
-    // every projected event), so the re-derived TurnFinished outcome is
-    // identical modulo the replay append-count (which is 0 on the second pass
-    // because nothing new is persisted).
+    // Reconstruct the outcome from PERSISTED STATE on a fresh controller that
+    // never saw the in-memory batch: open a new controller over the rebuilt
+    // store and re-derive TurnFinished purely from the turn-keyed event log.
+    // This is the genuine replay-stability proof -- nothing here re-feeds the
+    // original `batch`, so equality cannot hold by construction.
+    let reconstructed_controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        &state_root,
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("loop-session")),
+    )
+    .expect("reopen controller");
+    let reconstructed = reconstructed_controller
+        .reconstruct_turn_finished(&refs, &turn_id)
+        .expect("reconstruct outcome");
+    // The equality-significant outcome matches the live one (the volatile
+    // `replay` append-count diagnostic is excluded by construction: the
+    // reconstruction reports a default report, the live run reports the
+    // first-pass counts).
+    assert_eq!(reconstructed.turn_id, finished.turn_id);
+    assert_eq!(reconstructed.stop_reason, finished.stop_reason);
+    assert_eq!(
+        reconstructed.observed_terminal_event(),
+        finished.observed_terminal_event()
+    );
+    assert_eq!(reconstructed.summary_refs, finished.summary_refs);
+    assert_eq!(
+        reconstructed.observed_tool_refs,
+        finished.observed_tool_refs
+    );
+    let mut expected_stable = finished.clone();
+    expected_stable.replay = AdapterReplayReport::default();
+    assert_eq!(reconstructed, expected_stable);
+
+    // Re-running the loop over the same batch is also idempotent (idempotency
+    // keys on every projected event): no new events are appended, and only the
+    // volatile replay append-count changes.
     let replayed = controller
         .run_turn(&refs, &turn_id, &batch)
         .expect("replay turn");
-    assert_eq!(replayed.turn_id, finished.turn_id);
-    assert_eq!(replayed.stop_reason, finished.stop_reason);
-    assert_eq!(replayed.summary_refs, finished.summary_refs);
-    assert_eq!(replayed.observed_tool_refs, finished.observed_tool_refs);
     assert_eq!(replayed.replay.appended_event_count, 0);
+    let mut replayed_stable = replayed.clone();
+    replayed_stable.replay = AdapterReplayReport::default();
+    assert_eq!(replayed_stable, expected_stable);
     assert_eq!(
         controller.state().event_count().expect("event count"),
         event_count_before

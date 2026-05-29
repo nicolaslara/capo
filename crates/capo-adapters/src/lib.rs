@@ -17,8 +17,9 @@ pub use adapter::{
     FakeProviderConnector, FakeProviderInfo, ProviderConnector, TurnOutput, TurnRequest,
 };
 pub use event::{
-    AdapterFixtureParse, AdapterParseError, AdapterParseResult, AdapterTimelineConfidence,
-    AdapterToolObservation, NormalizedAdapterEvent, NormalizedAdapterKind,
+    AdapterFixtureParse, AdapterParseError, AdapterParseResult, AdapterTerminalOutcome,
+    AdapterTimelineConfidence, AdapterToolObservation, NormalizedAdapterEvent,
+    NormalizedAdapterKind,
 };
 pub use local_subscription::{
     LocalAdapterLaunchPlan, LocalAdapterSmokeError, LocalAdapterSmokePlan, LocalAdapterSmokeResult,
