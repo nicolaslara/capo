@@ -61,6 +61,7 @@ impl FakeBoundaryController {
                 &adapter_output.status,
                 adapter_output.confidence,
                 &adapter_output.summary,
+                &adapter_session.external_session_ref,
                 &permission,
                 &permission_event_suffix,
             )?;
@@ -229,6 +230,7 @@ impl FakeBoundaryController {
                     latest_summary: Some(adapter_output.summary.clone()),
                     latest_confidence: Some(adapter_output.confidence),
                     latest_blocker: None,
+                    external_session_ref: Some(adapter_session.external_session_ref.clone()),
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Run(RunProjection {
@@ -485,6 +487,7 @@ impl FakeBoundaryController {
         adapter_status: &str,
         adapter_confidence: i64,
         adapter_summary: &str,
+        external_session_ref: &str,
         permission: &PermissionDecision,
         permission_event_suffix: &str,
     ) -> StateResult<()> {
@@ -534,6 +537,7 @@ impl FakeBoundaryController {
                     latest_summary: Some(adapter_summary.to_string()),
                     latest_confidence: Some(adapter_confidence),
                     latest_blocker: Some(permission.explanation.clone()),
+                    external_session_ref: Some(external_session_ref.to_string()),
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Run(RunProjection {

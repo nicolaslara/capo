@@ -83,8 +83,9 @@ pub(crate) fn apply_projection_record(
         ProjectionRecord::Session(session) => transaction.execute(
             "INSERT INTO sessions(
                 session_id, project_id, task_id, agent_id, title, status, current_goal,
-                latest_summary, latest_confidence, latest_blocker, updated_sequence
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                latest_summary, latest_confidence, latest_blocker, external_session_ref,
+                updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(session_id) DO UPDATE SET
                 project_id = excluded.project_id,
                 task_id = excluded.task_id,
@@ -95,6 +96,7 @@ pub(crate) fn apply_projection_record(
                 latest_summary = excluded.latest_summary,
                 latest_confidence = excluded.latest_confidence,
                 latest_blocker = excluded.latest_blocker,
+                external_session_ref = excluded.external_session_ref,
                 updated_sequence = excluded.updated_sequence",
             params![
                 session.session_id.as_str(),
@@ -107,6 +109,7 @@ pub(crate) fn apply_projection_record(
                 session.latest_summary,
                 session.latest_confidence,
                 session.latest_blocker,
+                session.external_session_ref,
                 sequence,
             ],
         )?,

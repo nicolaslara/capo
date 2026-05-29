@@ -71,24 +71,33 @@ pub(crate) fn projection_record_from_row(
             current_session_id: optional_id(d),
             updated_sequence: 0,
         })),
-        "session" => Ok(ProjectionRecord::Session(SessionProjection {
-            session_id: SessionId::new(record_id),
-            project_id: ProjectId::new(required_field(
-                &projection_kind,
-                "session",
-                a,
-                "project_id",
-            )?),
-            task_id: optional_id(b),
-            agent_id: AgentId::new(required_field(&projection_kind, "session", c, "agent_id")?),
-            title: required_field(&projection_kind, "session", d, "title")?,
-            status: required_field(&projection_kind, "session", e, "status")?,
-            current_goal: required_field(&projection_kind, "session", f, "current_goal")?,
-            latest_summary: g,
-            latest_confidence: optional_i64(&projection_kind, "session", h, "latest_confidence")?,
-            latest_blocker: None,
-            updated_sequence: 0,
-        })),
+        "session" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::Session(SessionProjection {
+                session_id: SessionId::new(record_id),
+                project_id: ProjectId::new(required_field(
+                    &projection_kind,
+                    "session",
+                    a,
+                    "project_id",
+                )?),
+                task_id: optional_id(b),
+                agent_id: AgentId::new(required_field(&projection_kind, "session", c, "agent_id")?),
+                title: required_field(&projection_kind, "session", d, "title")?,
+                status: required_field(&projection_kind, "session", e, "status")?,
+                current_goal: required_field(&projection_kind, "session", f, "current_goal")?,
+                latest_summary: g,
+                latest_confidence: optional_i64(
+                    &projection_kind,
+                    "session",
+                    h,
+                    "latest_confidence",
+                )?,
+                latest_blocker: None,
+                external_session_ref: payload_string(&payload, "external_session_ref"),
+                updated_sequence: 0,
+            }))
+        }
         "run" => Ok(ProjectionRecord::Run(RunProjection {
             run_id: RunId::new(record_id),
             session_id: SessionId::new(required_field(&projection_kind, "run", a, "session_id")?),

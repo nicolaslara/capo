@@ -94,6 +94,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             latest_summary TEXT,
             latest_confidence INTEGER,
             latest_blocker TEXT,
+            external_session_ref TEXT,
             updated_sequence INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS runs (

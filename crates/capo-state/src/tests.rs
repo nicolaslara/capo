@@ -73,6 +73,7 @@ fn sqlite_store_persists_events_and_core_projections() {
                     latest_summary: Some("booting".to_string()),
                     latest_confidence: Some(70),
                     latest_blocker: None,
+                    external_session_ref: Some("adapter-session-fake".to_string()),
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Run(RunProjection {
@@ -92,8 +93,24 @@ fn sqlite_store_persists_events_and_core_projections() {
     let session = store.session(&session_id).unwrap().expect("session");
     assert_eq!(session.current_goal, "prove state");
     assert_eq!(session.latest_confidence, Some(70));
+    assert_eq!(
+        session.external_session_ref.as_deref(),
+        Some("adapter-session-fake")
+    );
     let task = store.task(&task_id).unwrap().expect("task");
     assert_eq!(task.latest_summary.as_deref(), Some("state scaffold"));
+
+    // external_session_ref rides in payload_json, so confirm it survives a
+    // full projection rebuild from the persisted projection records.
+    store.rebuild_projections().expect("rebuild projections");
+    let rebuilt = store
+        .session(&session_id)
+        .unwrap()
+        .expect("rebuilt session");
+    assert_eq!(
+        rebuilt.external_session_ref.as_deref(),
+        Some("adapter-session-fake")
+    );
 }
 
 #[test]
@@ -333,6 +350,7 @@ fn recovery_marks_active_looking_runs_exited_unknown_once() {
                     latest_summary: None,
                     latest_confidence: None,
                     latest_blocker: None,
+                    external_session_ref: None,
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Run(RunProjection {

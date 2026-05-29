@@ -664,6 +664,116 @@ fn controller_drives_injected_scripted_mock_adapter_behind_the_trait() {
 }
 
 #[test]
+fn command_path_re_derives_injected_adapter_external_session_ref() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    // The command-driven loop (interrupt/stop_agent_name -> refs_for_agent_name)
+    // must stay adapter-neutral: it re-derives refs from the persisted read
+    // model, so the external session ref handed to the injected adapter is the
+    // value that adapter reported at session.started, not a fake-adapter naming
+    // template (`fake-adapter-session-{agent_name}`).
+    let scripted = AgentAdapterHandle::scripted_mock(
+        ScriptedMockAgent::new("scripted-injected-session").with_turn(
+            ScriptedMockTurn::new("turn-mock-worker")
+                .message_completed("msg-1", "scripted injected summary"),
+        ),
+    );
+    let controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open controller with injected adapter");
+    let registration = controller.register_agent("mock-worker").expect("agent");
+    let direct_refs = controller
+        .send_task(&registration, "Run a deterministic scripted mock turn")
+        .expect("send task");
+
+    // The command path re-derives refs purely from persisted state. It resolves
+    // the injected adapter's ref, never the fake template the old code baked in.
+    let rederived = controller
+        .refs_for_agent_name("mock-worker")
+        .expect("re-derive refs from read model");
+    assert_eq!(rederived.external_session_ref, "scripted-injected-session");
+    assert_ne!(
+        rederived.external_session_ref,
+        "fake-adapter-session-mock-worker"
+    );
+    assert_eq!(
+        rederived.external_session_ref,
+        direct_refs.external_session_ref
+    );
+
+    // Driving interrupt_agent_name (the command entry point) attaches to the
+    // injected ref and routes through the scripted mock's trait methods.
+    let interrupted = controller
+        .interrupt_agent_name("mock-worker", "operator paused")
+        .expect("interrupt via command path");
+    assert_eq!(interrupted.session.status, "canceled");
+    assert_eq!(
+        interrupted.session.external_session_ref.as_deref(),
+        Some("scripted-injected-session")
+    );
+    assert!(
+        controller
+            .state()
+            .recent_events_for_session(&direct_refs.session_id, 32)
+            .expect("events")
+            .iter()
+            .any(|event| {
+                event.kind == "session.interrupted"
+                    && event
+                        .payload_json
+                        .contains("Scripted mock interrupted session: operator paused")
+            })
+    );
+}
+
+#[test]
+fn command_path_stop_re_derives_injected_adapter_external_session_ref() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    let scripted = AgentAdapterHandle::scripted_mock(
+        ScriptedMockAgent::new("scripted-injected-session").with_turn(
+            ScriptedMockTurn::new("turn-mock-worker")
+                .message_completed("msg-1", "scripted injected summary"),
+        ),
+    );
+    let controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open controller with injected adapter");
+    let registration = controller.register_agent("mock-worker").expect("agent");
+    let direct_refs = controller
+        .send_task(&registration, "Run a deterministic scripted mock turn")
+        .expect("send task");
+
+    let stopped = controller
+        .stop_agent_name("mock-worker", "operator stopped")
+        .expect("stop via command path");
+    assert_eq!(stopped.session.status, "completed");
+    assert_eq!(
+        stopped.session.external_session_ref.as_deref(),
+        Some("scripted-injected-session")
+    );
+    assert!(
+        controller
+            .state()
+            .recent_events_for_session(&direct_refs.session_id, 32)
+            .expect("events")
+            .iter()
+            .any(|event| {
+                event.kind == "session.stopped"
+                    && event
+                        .payload_json
+                        .contains("Scripted mock stopped session: operator stopped")
+            })
+    );
+}
+
+#[test]
 fn controller_default_open_keeps_fake_adapter_output_byte_for_byte() {
     // The default `open` constructor still injects the fake adapter, so its
     // deterministic summary/confidence/status are unchanged after the RTL2

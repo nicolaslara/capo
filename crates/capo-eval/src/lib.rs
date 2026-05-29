@@ -311,6 +311,7 @@ mod tests {
                 latest_summary: Some("done".to_string()),
                 latest_confidence: Some(82),
                 latest_blocker: Some("review found no blockers".to_string()),
+                external_session_ref: Some("adapter-session-me2".to_string()),
                 updated_sequence: 6,
             },
             run: RunProjection {

@@ -34,7 +34,8 @@ impl SqliteStateStore {
         let session = connection
             .query_row(
                 "SELECT session_id, project_id, task_id, agent_id, title, status, current_goal,
-                        latest_summary, latest_confidence, latest_blocker, updated_sequence
+                        latest_summary, latest_confidence, latest_blocker, external_session_ref,
+                        updated_sequence
                  FROM sessions
                  WHERE session_id = ?1",
                 params![session_id.as_str()],
@@ -50,7 +51,8 @@ impl SqliteStateStore {
                         latest_summary: row.get(7)?,
                         latest_confidence: row.get(8)?,
                         latest_blocker: row.get(9)?,
-                        updated_sequence: row.get(10)?,
+                        external_session_ref: row.get(10)?,
+                        updated_sequence: row.get(11)?,
                     })
                 },
             )

@@ -18,6 +18,13 @@ impl FakeBoundaryController {
             .state
             .run_for_session(&session_id)?
             .ok_or_else(|| missing_read_model("run.session_id", &session_id))?;
+        // Re-derive refs from the persisted read model so the command path stays
+        // adapter-neutral: the external session ref is the value the injected
+        // adapter reported at session.started, not a fake-adapter naming template.
+        let external_session_ref = session
+            .external_session_ref
+            .clone()
+            .ok_or_else(|| missing_read_model("session.external_session_ref", &session_id))?;
         Ok(FakeRunRefs {
             task_id: session
                 .task_id
@@ -26,7 +33,7 @@ impl FakeBoundaryController {
             session_id,
             run_id: run.run_id,
             runtime_process_ref: format!("fake-runtime-process-{agent_name}"),
-            external_session_ref: format!("fake-adapter-session-{agent_name}"),
+            external_session_ref,
         })
     }
 
@@ -122,6 +129,7 @@ impl FakeBoundaryController {
                     latest_summary: Some(adapter_output.summary),
                     latest_confidence: Some(78),
                     latest_blocker: None,
+                    external_session_ref: Some(refs.external_session_ref.clone()),
                     updated_sequence: 0,
                 }),
             ],
@@ -218,6 +226,7 @@ impl FakeBoundaryController {
                     latest_summary: Some(format!("Interrupted: {reason}")),
                     latest_confidence: Some(70),
                     latest_blocker: None,
+                    external_session_ref: Some(refs.external_session_ref.clone()),
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Run(RunProjection {
@@ -301,6 +310,7 @@ impl FakeBoundaryController {
                     latest_summary: Some(format!("Stopped: {reason}")),
                     latest_confidence: Some(70),
                     latest_blocker: None,
+                    external_session_ref: Some(refs.external_session_ref.clone()),
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Run(RunProjection {

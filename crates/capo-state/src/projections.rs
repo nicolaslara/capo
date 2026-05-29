@@ -80,6 +80,12 @@ pub struct SessionProjection {
     pub latest_summary: Option<String>,
     pub latest_confidence: Option<i64>,
     pub latest_blocker: Option<String>,
+    /// Adapter-owned external session handle this session is bound to.
+    ///
+    /// First-class on the read model so adapter-neutral re-derivation (e.g.
+    /// `refs_for_agent_name`) reads the real injected value instead of baking
+    /// in a concrete adapter's naming convention.
+    pub external_session_ref: Option<String>,
     pub updated_sequence: i64,
 }
 

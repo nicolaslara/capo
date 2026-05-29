@@ -192,6 +192,7 @@ impl FakeBoundaryController {
                             capo_adapters::AdapterTimelineConfidence::None => 40,
                         }),
                         latest_blocker: None,
+                        external_session_ref: session.external_session_ref.clone(),
                         updated_sequence: 0,
                     }),
                 )))
@@ -288,6 +289,7 @@ impl FakeBoundaryController {
                             .map(|content| stable_hash(content.as_bytes()))
                             .unwrap_or_else(|| adapter_event.raw_event_hash.clone())
                     )),
+                    external_session_ref: session.external_session_ref.clone(),
                     updated_sequence: 0,
                 }),
             ))),
@@ -330,6 +332,7 @@ impl FakeBoundaryController {
                                 stable_hash(content.as_bytes())
                             )
                         }),
+                        external_session_ref: session.external_session_ref.clone(),
                         updated_sequence: 0,
                     }),
                 )))

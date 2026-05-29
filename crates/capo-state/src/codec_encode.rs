@@ -68,7 +68,10 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             f: Some(session.current_goal.clone()),
             g: session.latest_summary.clone(),
             h: session.latest_confidence.map(|value| value.to_string()),
-            payload_json: "{}".to_string(),
+            // Positional slots a..h are exhausted, so the adapter-owned external
+            // session ref rides in the payload to survive projection rebuilds.
+            payload_json: json!({ "external_session_ref": session.external_session_ref })
+                .to_string(),
         },
         ProjectionRecord::Run(run) => ProjectionRecordRow {
             kind: "run",

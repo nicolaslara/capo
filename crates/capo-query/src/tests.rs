@@ -74,6 +74,7 @@ fn project_dashboard_aggregates_agents_sessions_runs_evidence_and_events() {
                     latest_summary: Some("working".to_string()),
                     latest_confidence: Some(80),
                     latest_blocker: None,
+                    external_session_ref: Some("adapter-session-demo".to_string()),
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Run(RunProjection {
@@ -1229,6 +1230,7 @@ fn append_minimal_session(
                     latest_summary: None,
                     latest_confidence: None,
                     latest_blocker: None,
+                    external_session_ref: None,
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Run(RunProjection {

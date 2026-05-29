@@ -175,6 +175,7 @@ fn record_wrapper_tool_result(
                     latest_summary: Some(result.summary.clone()),
                     latest_confidence: Some(if result.status == "denied" { 40 } else { 80 }),
                     latest_blocker: (result.status == "denied").then(|| result.summary.clone()),
+                    external_session_ref: None,
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Run(RunProjection {
