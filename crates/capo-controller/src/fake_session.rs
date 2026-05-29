@@ -27,13 +27,13 @@ impl FakeBoundaryController {
             run_id: run_id.clone(),
             agent_name: registration.agent_name.clone(),
         });
-        let adapter_session = self.adapter.open_session(FakeAdapterSessionRequest {
+        let adapter_session = self.adapter.open_session(AdapterSessionRequest {
             session_id: session_id.clone(),
             agent_name: registration.agent_name.clone(),
         });
         let adapter_output = self.adapter.send_turn(
             &adapter_session,
-            FakeAdapterTurnRequest {
+            TurnRequest {
                 turn_id: turn_id.clone(),
                 agent_name: registration.agent_name.clone(),
                 goal: goal.to_string(),

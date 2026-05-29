@@ -65,7 +65,7 @@ impl FakeBoundaryController {
         let turn_id = TurnId::new(format!("redirect-{}", refs.session_id));
         let adapter_output = self.adapter.send_turn(
             &adapter_session,
-            FakeAdapterTurnRequest {
+            TurnRequest {
                 turn_id: turn_id.clone(),
                 agent_name: registration.agent_name.clone(),
                 goal: goal.to_string(),

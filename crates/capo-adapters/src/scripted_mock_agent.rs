@@ -2,8 +2,8 @@ use capo_core::{BoundaryBinding, BoundaryKind, SessionId, TurnId};
 use serde_json::json;
 
 use crate::{
-    AdapterTimelineConfidence, FakeAdapterSession, FakeAdapterSessionRequest,
-    FakeAdapterTurnOutput, FakeAdapterTurnRequest, NormalizedAdapterEvent, NormalizedAdapterKind,
+    AdapterSession, AdapterSessionRequest, AdapterTimelineConfidence, AgentAdapter,
+    NormalizedAdapterEvent, NormalizedAdapterKind, TurnOutput, TurnRequest,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -61,8 +61,10 @@ impl ScriptedMockAgent {
                 )
             })
     }
+}
 
-    pub fn binding(&self) -> BoundaryBinding {
+impl AgentAdapter for ScriptedMockAgent {
+    fn binding(&self) -> BoundaryBinding {
         match self.adapter_kind {
             NormalizedAdapterKind::Acp => {
                 BoundaryBinding::fake(BoundaryKind::AgentAdapter, "scripted-acp-mock-agent")
@@ -71,31 +73,27 @@ impl ScriptedMockAgent {
         }
     }
 
-    pub fn open_session(&self, request: FakeAdapterSessionRequest) -> FakeAdapterSession {
-        FakeAdapterSession {
+    fn open_session(&self, request: AdapterSessionRequest) -> AdapterSession {
+        AdapterSession {
             session_id: request.session_id,
             external_session_ref: self.external_session_ref.clone(),
             adapter_capability: self.adapter_capability.clone(),
         }
     }
 
-    pub fn attach_session(
+    fn attach_session(
         &self,
         session_id: SessionId,
         external_session_ref: String,
-    ) -> FakeAdapterSession {
-        FakeAdapterSession {
+    ) -> AdapterSession {
+        AdapterSession {
             session_id,
             external_session_ref,
             adapter_capability: self.adapter_capability.clone(),
         }
     }
 
-    pub fn send_turn(
-        &self,
-        session: &FakeAdapterSession,
-        request: FakeAdapterTurnRequest,
-    ) -> FakeAdapterTurnOutput {
+    fn send_turn(&self, session: &AdapterSession, request: TurnRequest) -> TurnOutput {
         let events = self
             .turn_events(request.turn_id.as_str())
             .or_else(|| {
@@ -123,7 +121,7 @@ impl ScriptedMockAgent {
             .iter()
             .find_map(|event| event.tool_name.clone())
             .unwrap_or_else(|| "capo.session_summary".to_string());
-        FakeAdapterTurnOutput {
+        TurnOutput {
             turn_id: request.turn_id,
             external_session_ref: session.external_session_ref.clone(),
             summary,
@@ -133,8 +131,8 @@ impl ScriptedMockAgent {
         }
     }
 
-    pub fn interrupt(&self, session: &FakeAdapterSession, reason: &str) -> FakeAdapterTurnOutput {
-        FakeAdapterTurnOutput {
+    fn interrupt(&self, session: &AdapterSession, reason: &str) -> TurnOutput {
+        TurnOutput {
             turn_id: TurnId::new(format!("interrupt-{}", session.session_id)),
             external_session_ref: session.external_session_ref.clone(),
             summary: format!("Scripted mock interrupted session: {reason}"),
@@ -144,8 +142,8 @@ impl ScriptedMockAgent {
         }
     }
 
-    pub fn stop(&self, session: &FakeAdapterSession, reason: &str) -> FakeAdapterTurnOutput {
-        FakeAdapterTurnOutput {
+    fn stop(&self, session: &AdapterSession, reason: &str) -> TurnOutput {
+        TurnOutput {
             turn_id: TurnId::new(format!("stop-{}", session.session_id)),
             external_session_ref: session.external_session_ref.clone(),
             summary: format!("Scripted mock stopped session: {reason}"),
@@ -153,6 +151,10 @@ impl ScriptedMockAgent {
             status: "completed".to_string(),
             tool_name: "capo.session_summary".to_string(),
         }
+    }
+
+    fn scripted_turn_events(&self, turn_ref: &str) -> Option<Vec<NormalizedAdapterEvent>> {
+        self.turn_events(turn_ref)
     }
 }
 
@@ -512,20 +514,20 @@ mod tests {
 
     #[test]
     fn scripted_mock_agent_routes_through_static_adapter_dispatch() {
-        let adapter = crate::AgentAdapter::scripted_mock(
+        let adapter = crate::AgentAdapterHandle::scripted_mock(
             ScriptedMockAgent::new("mock-session").with_turn(
                 ScriptedMockTurn::new("turn-mock-worker")
                     .message_completed("msg-1", "scripted turn completed"),
             ),
         );
 
-        let session = adapter.open_session(FakeAdapterSessionRequest {
+        let session = adapter.open_session(AdapterSessionRequest {
             session_id: SessionId::new("session-mock"),
             agent_name: "mock-worker".to_string(),
         });
         let output = adapter.send_turn(
             &session,
-            FakeAdapterTurnRequest {
+            TurnRequest {
                 turn_id: TurnId::new("turn-mock-worker"),
                 agent_name: "mock-worker".to_string(),
                 goal: "run scripted turn".to_string(),

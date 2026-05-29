@@ -68,7 +68,62 @@ Evidence:
 
 ## RTL1 - Provider-Neutral Session/Turn/Result Types And The AgentAdapter Trait
 
-Status: pending.
+Status: done (gate green; autostart flake in `server_transport` repaired - see
+Evidence). `AgentAdapter` is now a provider-neutral trait
+(`crates/capo-adapters/src/adapter.rs`) over `AdapterSessionRequest`/
+`TurnRequest`/`TurnOutput`/`AdapterSession`; `FakeAdapter` and
+`ScriptedMockAgent` are its first two implementations. The old `AgentAdapter`
+dispatch enum is renamed `AgentAdapterHandle` (a thin dispatch enum over trait
+impls, also implementing the trait) so RTL2's "enum becomes trait object or thin
+dispatch enum" stays open. No non-fake call site names a `Fake*` request/output
+type anymore; the controller imports the renamed neutral types. The turn output
+shape (`turn_id`/`external_session_ref`/`summary`/`confidence`/`status`/
+`tool_name`) is unchanged, and `scripted_turn_events` still returns
+`Vec<NormalizedAdapterEvent>` feeding `apply_normalized_adapter_events_with_turn`.
+
+Evidence:
+
+- Trait + neutral types + handle: `crates/capo-adapters/src/adapter.rs`;
+  exports updated in `crates/capo-adapters/src/lib.rs`;
+  `ScriptedMockAgent` now `impl AgentAdapter` in
+  `crates/capo-adapters/src/scripted_mock_agent.rs`.
+- Callers migrated off `Fake*`-named seam types:
+  `crates/capo-controller/src/{lib.rs,fake_session.rs,session_control.rs,adapter_replay.rs}`
+  and `crates/capo-adapters/src/tests.rs` (now `AgentAdapterHandle::fake()`).
+- New deterministic trait-construction/dispatch tests in `adapter.rs`
+  (`fake_adapter_implements_provider_neutral_trait`,
+  `handle_dispatches_through_the_trait`,
+  `scripted_mock_routes_through_handle_and_trait`).
+- Commands run from `/Users/nicolas/devel/capo-wt/real-turn-loop`:
+  `cargo test -p capo-adapters` -> ok, 27 passed / 2 ignored.
+  `cargo fmt --check` -> clean. `git diff --check` -> clean.
+  Objective gate: `cargo fmt --check` clean; `cargo clippy --all-targets
+  --all-features -- -D warnings` clean; `cargo test --workspace` -> all
+  binaries ok, 0 failed (capo-adapters 27, capo-controller 8, capo-server 29,
+  capo-state 31, capo-runtime 12, capo cli 63 + server_transport 11, etc.).
+
+- Gate repair (autostart flake): the objective gate intermittently failed in
+  `crates/capo-cli/tests/server_transport/basic.rs`
+  (`bare_capo_starts_control_and_autostarts_server_when_needed`,
+  `assertion failed: output.contains("Dashboard")`). Root cause was a port race
+  in the control-REPL autostart
+  (`crates/capo-cli/src/operator_control/server_process.rs`): the throwaway-bind
+  probe could see the env address transiently held by a peer loopback test
+  server and wrongly conclude an already-running server existed, then connect to
+  a port whose owner had exited, so the `dashboard` command rendered `error:`
+  instead of a snapshot. Fix: `ensure_server_running` now distinguishes an
+  explicit `--connect` (never autostart, never probe -> never consume a
+  `--max-requests` budget) from an env/default address we own; for owned
+  addresses it retries the bind with a bounded deadline so transiently held
+  ports (peer servers, `TIME_WAIT`) ride out and only persistent occupancy is
+  treated as a real server to connect to. `AutoServer` also keeps the child
+  server's stdout pipe attached for the session. The probe stays a bare
+  `TcpListener::bind`, so budgeted `--connect` transport tests are unaffected.
+  Commands run from `/Users/nicolas/devel/capo-wt/real-turn-loop`:
+  `cargo test -p capo-cli --test server_transport` -> ok, 11 passed, run 80x
+  with 0 failures; full objective gate (`cargo fmt --check` && `cargo clippy
+  --all-targets --all-features -- -D warnings` && `cargo test --workspace`) ->
+  passed twice, exit 0, server_transport 11/11 each time.
 
 Acceptance:
 

@@ -13,9 +13,8 @@ mod scripted_mock_agent;
 
 pub use acp_client::{AcpClientCall, AcpSessionSetupPlan};
 pub use adapter::{
-    AgentAdapter, FakeAdapter, FakeAdapterSession, FakeAdapterSessionRequest,
-    FakeAdapterTurnOutput, FakeAdapterTurnRequest, FakeProviderConnector, FakeProviderInfo,
-    ProviderConnector,
+    AdapterSession, AdapterSessionRequest, AgentAdapter, AgentAdapterHandle, FakeAdapter,
+    FakeProviderConnector, FakeProviderInfo, ProviderConnector, TurnOutput, TurnRequest,
 };
 pub use event::{
     AdapterFixtureParse, AdapterParseError, AdapterParseResult, AdapterTimelineConfidence,

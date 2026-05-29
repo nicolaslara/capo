@@ -32,10 +32,10 @@ pub(crate) fn operator_control(parsed: &ParsedArgs, args: &[String]) -> Result<S
     reject_unknown_control_flags(args)?;
     let planner = control_planner(args)?;
     let address = server_address(args)?;
-    require_loopback_address(&address)?;
+    require_loopback_address(&address.address)?;
     let server = ensure_server_running(&address, parsed)?;
 
-    let mut repl = ControlRepl::new(address, server, planner, parsed.state_root.clone());
+    let mut repl = ControlRepl::new(address.address, server, planner, parsed.state_root.clone());
     if std::io::stdin().is_terminal() {
         repl.run_interactive()
     } else {

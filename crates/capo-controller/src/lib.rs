@@ -7,9 +7,9 @@
 use std::path::{Path, PathBuf};
 
 use capo_adapters::{
-    AdapterToolObservation, AgentAdapter, ClaudeCodeAdapter, CodexExecAdapter,
-    FakeAdapterSessionRequest, FakeAdapterTurnRequest, LocalAdapterLaunchPlan,
-    NormalizedAdapterEvent, ProviderConnector, ScriptedMockAgent, ScriptedMockTurn,
+    AdapterSessionRequest, AdapterToolObservation, AgentAdapter, AgentAdapterHandle,
+    ClaudeCodeAdapter, CodexExecAdapter, LocalAdapterLaunchPlan, NormalizedAdapterEvent,
+    ProviderConnector, ScriptedMockAgent, ScriptedMockTurn, TurnRequest,
 };
 use capo_core::{
     AgentId, CommandEnvelope, CommandIntent, EvidenceId, MemoryPacketId, ProjectId, RunId,
@@ -40,7 +40,7 @@ pub use local_dispatch::LocalAdapterDispatchRunStart;
 pub struct FakeBoundaryController {
     project_id: ProjectId,
     state: SqliteStateStore,
-    adapter: AgentAdapter,
+    adapter: AgentAdapterHandle,
     runtime: RuntimeRunner,
     provider: ProviderConnector,
     permission_policy: PermissionPolicy,
@@ -65,7 +65,7 @@ impl FakeBoundaryController {
         Ok(Self {
             project_id,
             state: SqliteStateStore::open(state_root)?,
-            adapter: AgentAdapter::fake(),
+            adapter: AgentAdapterHandle::fake(),
             runtime: RuntimeRunner::fake(),
             provider: ProviderConnector::fake(),
             permission_policy,

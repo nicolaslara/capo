@@ -132,7 +132,7 @@ impl FakeBoundaryController {
         refs: &FakeRunRefs,
         turn: &ScriptedMockTurn,
     ) -> StateResult<AdapterReplayReport> {
-        let adapter = AgentAdapter::scripted_mock(
+        let adapter = AgentAdapterHandle::scripted_mock(
             ScriptedMockAgent::new(refs.external_session_ref.clone()).with_turn(turn.clone()),
         );
         let events = adapter
@@ -146,7 +146,7 @@ impl FakeBoundaryController {
         refs: &FakeRunRefs,
         turn: &ScriptedMockTurn,
     ) -> StateResult<AdapterReplayReport> {
-        let adapter = AgentAdapter::scripted_mock(
+        let adapter = AgentAdapterHandle::scripted_mock(
             ScriptedMockAgent::acp_shaped(refs.external_session_ref.clone())
                 .with_turn(turn.clone()),
         );

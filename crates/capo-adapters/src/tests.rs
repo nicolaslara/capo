@@ -20,7 +20,7 @@ fn planned_adapters_include_fake_and_first_real_targets() {
 #[test]
 fn fake_adapter_reports_adapter_boundary() {
     assert_eq!(
-        AgentAdapter::fake().binding().kind,
+        AgentAdapterHandle::fake().binding().kind,
         BoundaryKind::AgentAdapter
     );
 }
