@@ -62,10 +62,45 @@ impl FakeBoundaryController {
         state_root: impl AsRef<Path>,
         permission_policy: PermissionPolicy,
     ) -> StateResult<Self> {
+        Self::open_with_permission_policy_and_adapter(
+            project_id,
+            state_root,
+            permission_policy,
+            AgentAdapterHandle::fake(),
+        )
+    }
+
+    /// Open the controller over an injected adapter handle.
+    ///
+    /// The controller drives the adapter purely through the [`AgentAdapter`]
+    /// trait (`open_session`/`send_turn`/`attach_session`/`interrupt`/`stop`),
+    /// so the concrete implementation behind [`AgentAdapterHandle`] is
+    /// substitutable. The default constructors inject
+    /// [`AgentAdapterHandle::fake`]; the scripted-mock handle is the explicit
+    /// deterministic fallback used by the parity suites.
+    pub fn open_with_adapter(
+        project_id: ProjectId,
+        state_root: impl AsRef<Path>,
+        adapter: AgentAdapterHandle,
+    ) -> StateResult<Self> {
+        Self::open_with_permission_policy_and_adapter(
+            project_id,
+            state_root,
+            PermissionPolicy::allow_trusted_local(),
+            adapter,
+        )
+    }
+
+    pub fn open_with_permission_policy_and_adapter(
+        project_id: ProjectId,
+        state_root: impl AsRef<Path>,
+        permission_policy: PermissionPolicy,
+        adapter: AgentAdapterHandle,
+    ) -> StateResult<Self> {
         Ok(Self {
             project_id,
             state: SqliteStateStore::open(state_root)?,
-            adapter: AgentAdapterHandle::fake(),
+            adapter,
             runtime: RuntimeRunner::fake(),
             provider: ProviderConnector::fake(),
             permission_policy,

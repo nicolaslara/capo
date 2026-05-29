@@ -600,6 +600,96 @@ fn claude_fixture_replay_updates_controller_read_models_without_raw_content_payl
     }
 }
 
+#[test]
+fn controller_drives_injected_scripted_mock_adapter_behind_the_trait() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    // The controller holds the adapter behind the `AgentAdapter` trait via the
+    // thin dispatch handle, so the scripted-mock implementation is substituted
+    // for the fake default without naming a concrete `Fake*` request/output
+    // type at the call site.
+    let scripted = AgentAdapterHandle::scripted_mock(
+        ScriptedMockAgent::new("scripted-injected-session").with_turn(
+            ScriptedMockTurn::new("turn-mock-worker")
+                .message_completed("msg-1", "scripted injected summary"),
+        ),
+    );
+    let controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open controller with injected adapter");
+    let registration = controller.register_agent("mock-worker").expect("agent");
+
+    let refs = controller
+        .send_task(&registration, "Run a deterministic scripted mock turn")
+        .expect("send task");
+
+    // The send-turn output flows through the provider-neutral `TurnOutput`:
+    // external session ref and summary come from the injected scripted mock,
+    // confidence is the scripted-mock deterministic value (88, not the fake 82).
+    assert_eq!(refs.external_session_ref, "scripted-injected-session");
+    let observation = controller.observe(&refs).expect("observe");
+    assert_eq!(
+        observation.session.latest_summary.as_deref(),
+        Some("scripted injected summary")
+    );
+    assert_eq!(observation.session.latest_confidence, Some(88));
+    // The scripted mock derives status from its last event; a completed message
+    // yields a "completed" turn status, distinct from the fake adapter's
+    // "active". This proves the controller observes the injected adapter's
+    // deterministic output rather than the fake default.
+    assert_eq!(observation.session.status, "completed");
+
+    // Interrupt and stop route through the injected adapter's trait methods,
+    // producing the scripted-mock deterministic summaries.
+    let interrupted = controller
+        .interrupt(&registration, &refs, "operator paused")
+        .expect("interrupt");
+    assert_eq!(interrupted.session.status, "canceled");
+    assert!(
+        controller
+            .state()
+            .recent_events_for_session(&refs.session_id, 32)
+            .expect("events")
+            .iter()
+            .any(|event| {
+                event.kind == "session.interrupted"
+                    && event
+                        .payload_json
+                        .contains("Scripted mock interrupted session: operator paused")
+            })
+    );
+}
+
+#[test]
+fn controller_default_open_keeps_fake_adapter_output_byte_for_byte() {
+    // The default `open` constructor still injects the fake adapter, so its
+    // deterministic summary/confidence/status are unchanged after the RTL2
+    // injection refactor.
+    let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), temp_root())
+        .expect("open controller");
+    let registration = controller.register_agent("fake-codex").expect("agent");
+    let refs = controller
+        .send_task(
+            &registration,
+            "Inspect the project and write a status summary",
+        )
+        .expect("send task");
+
+    assert_eq!(refs.external_session_ref, "fake-adapter-session-fake-codex");
+    let observation = controller.observe(&refs).expect("observe");
+    assert_eq!(
+        observation.session.latest_summary.as_deref(),
+        Some(
+            "Fake adapter processed goal for fake-codex: Inspect the project and write a status summary"
+        )
+    );
+    assert_eq!(observation.session.latest_confidence, Some(82));
+    assert_eq!(observation.session.status, "active");
+}
+
 fn temp_root() -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

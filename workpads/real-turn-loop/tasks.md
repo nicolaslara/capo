@@ -153,7 +153,48 @@ Verification:
 
 ## RTL2 - Reimplement Fake/ScriptedMock Against The Trait And Migrate Callers
 
-Status: pending.
+Status: done (gate green). `FakeAdapter` and `ScriptedMockAgent` are
+`AgentAdapter` trait impls (landed in RTL1) and the controller now holds the
+adapter behind the trait: it stores the thin `AgentAdapterHandle` dispatch enum
+(the explicitly-allowed shape over trait impls) and drives it only through the
+`AgentAdapter` trait methods (`open_session`/`send_turn`/`attach_session`/
+`interrupt`/`stop`). No non-fake call site names a `Fake*` request/output type
+(`rg FakeAdapterSessionRequest|FakeAdapterTurnRequest|FakeAdapterTurnOutput|
+FakeAdapterSession` -> none). The adapter is now injectable via
+`open_with_adapter` / `open_with_permission_policy_and_adapter` so the
+scripted-mock fallback can be substituted for the parity suites; `open` /
+`open_with_permission_policy` still inject `AgentAdapterHandle::fake()` so the
+fake path is byte-for-byte unchanged. `scripted_turn_events` and
+`apply_scripted_mock_turn` remain available for deterministic multi-turn
+fixtures.
+
+Evidence:
+
+- Controller injection behind the trait:
+  `crates/capo-controller/src/lib.rs` adds `open_with_adapter` and
+  `open_with_permission_policy_and_adapter(.., adapter: AgentAdapterHandle)`;
+  `open`/`open_with_permission_policy` delegate with `AgentAdapterHandle::fake()`
+  so existing construction is unchanged.
+- New deterministic controller tests in `crates/capo-controller/src/tests.rs`:
+  `controller_drives_injected_scripted_mock_adapter_behind_the_trait` (scripted
+  mock substituted via the neutral `TurnOutput`: external_session_ref/summary/
+  confidence=88/status="completed" all from the injected adapter, and
+  interrupt routes through the scripted-mock trait method) and
+  `controller_default_open_keeps_fake_adapter_output_byte_for_byte` (fake
+  default summary/confidence=82/status="active" unchanged).
+- Migration check: `rg 'FakeAdapterSessionRequest|FakeAdapterTurnRequest|
+  FakeAdapterTurnOutput|FakeAdapterSession' crates/` -> no matches; the
+  controller imports only neutral seam types (`AdapterSessionRequest`,
+  `AgentAdapter`, `AgentAdapterHandle`, `TurnRequest`).
+- Commands run from `/Users/nicolas/devel/capo-wt/real-turn-loop`:
+  `cargo test -p capo-adapters -p capo-controller` -> ok (capo-adapters 27
+  passed / 2 ignored; capo-controller 10 passed). Objective gate
+  (`cargo fmt --check` && `cargo clippy --all-targets --all-features -- -D
+  warnings` && `cargo test --workspace`) -> all green, exit 0: fmt clean,
+  clippy clean, every binary ok / 0 failed (capo-adapters 27, capo-controller
+  10, capo-server 29, capo-state 31, capo-runtime 12, capo-tools 18, capo-query
+  21, capo-voice 19, capo cli 63 + server_transport 11, etc.).
+  `git diff --check` -> clean.
 
 Acceptance:
 
