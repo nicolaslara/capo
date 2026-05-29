@@ -220,7 +220,51 @@ Verification:
 
 ## RTL3 - Normalized Turn-Loop Contract: Observe -> Project -> TurnFinished
 
-Status: pending.
+Status: done (gate green). The turn-loop contract lives in
+`crates/capo-controller/src/turn_loop.rs`: `run_turn(refs, turn_id, batch)` is
+one pure, synchronous observe -> project -> emit cycle. It observes a
+`&[NormalizedAdapterEvent]` batch, projects it through the EXISTING
+`apply_normalized_adapter_events_with_turn` path (keyed to `turn_id`, no new
+ingestion route), and emits a `TurnFinished` carrying `stop_reason`
+(`TurnStopReason::{Completed,Interrupted,Stopped,Failed}`), `summary_refs` (item
+event refs), `observed_tool_refs` (deduped tool event refs), and the reused
+`AdapterReplayReport`. The lifecycle maps onto existing event kinds only -
+terminal `adapter.turn_completed`/`turn_interrupted`/`turn_failed` already
+project onto `evidence.recorded`/`session.interrupted`/`run.exited`, and
+item/tool events onto `session.summary_updated`/`tool.*` - so NO new `EventKind`
+was added (the ceiling/recovery kinds remain RTL7/RTL10). `interrupt_turn` /
+`stop_turn` drive the existing `interrupt`/`stop` controller commands and
+annotate them with `Interrupted`/`Stopped` outcomes, so the existing commands
+map onto the loop without a second completion model. `TurnFinished` is derived
+purely from the batch, and projection re-application is idempotent (idempotency
+keys), so a restart/replay rebuilds identical read models and re-derives an
+identical outcome.
+
+Evidence:
+
+- Contract + types: `crates/capo-controller/src/turn_loop.rs` (`TurnFinished`,
+  `TurnStopReason`, `run_turn`, `interrupt_turn`, `stop_turn`, pure
+  `finish_turn`); module wired and types re-exported in
+  `crates/capo-controller/src/lib.rs`; `AdapterReplayReport` gained `Default`
+  for the interrupt/stop outcomes.
+- New deterministic tests in `crates/capo-controller/src/tests.rs`:
+  `turn_loop_runs_a_scripted_single_turn_observe_project_emit_cycle` (scripted
+  single-turn cycle: Completed outcome, `summary_refs=[msg-1,msg-2]`,
+  `observed_tool_refs=[tool-1]`, per-turn-keyed `session.summary_updated`/
+  `evidence.recorded`/tool projections),
+  `turn_loop_interrupt_and_stop_commands_map_onto_finished_outcomes` (interrupt
+  -> Interrupted/canceled, stop -> Stopped/completed), and
+  `turn_loop_projected_turn_rebuilds_identically_after_restart_replay`
+  (reopen state + `rebuild_projections` yields byte-identical
+  session/tool_calls/observations/evidence and event count; re-running the loop
+  appends 0 events and re-derives the same `TurnFinished`).
+- Commands run from `/Users/nicolas/devel/capo-wt/real-turn-loop`:
+  `cargo test -p capo-controller` -> ok, 15 passed / 0 failed (the 3 new RTL3
+  tests included). Objective gate: `cargo fmt --check` -> clean;
+  `cargo clippy --all-targets --all-features -- -D warnings` -> clean;
+  `cargo test --workspace` -> 0 failed across all binaries (capo-controller 15,
+  capo-adapters/capo-server 29, capo-state 31, capo-runtime 12, capo-tools 18,
+  capo-query 21, capo cli 63 + server_transport 11, etc.; 259 passed total).
 
 Acceptance:
 

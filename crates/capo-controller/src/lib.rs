@@ -33,8 +33,10 @@ mod adapter_replay;
 mod fake_session;
 mod local_dispatch;
 mod session_control;
+mod turn_loop;
 
 pub use local_dispatch::LocalAdapterDispatchRunStart;
+pub use turn_loop::{TurnFinished, TurnStopReason};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FakeBoundaryController {
@@ -323,7 +325,7 @@ pub struct RecoveryReport {
     pub recovered_run_count: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AdapterReplayReport {
     pub input_event_count: usize,
     pub appended_event_count: usize,

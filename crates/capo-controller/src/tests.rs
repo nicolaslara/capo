@@ -800,6 +800,240 @@ fn controller_default_open_keeps_fake_adapter_output_byte_for_byte() {
     assert_eq!(observation.session.status, "active");
 }
 
+#[test]
+fn turn_loop_runs_a_scripted_single_turn_observe_project_emit_cycle() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    // RTL3: a turn opens, the adapter produces normalized events, the controller
+    // projects them, and the loop emits a TurnFinished carrying the stop reason,
+    // summary refs, and observed tool refs.
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("loop-session"));
+    let controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open controller");
+    let registration = controller.register_agent("loop-worker").expect("agent");
+    let refs = controller
+        .send_task(&registration, "Run one observe->project->emit cycle")
+        .expect("send task");
+
+    let turn_id = TurnId::new("turn-loop-1");
+    let batch = ScriptedMockTurn::new("turn-loop-1")
+        .message_delta("msg-1", "inspecting state")
+        .tool_requested("tool-1", "capo.agent_status")
+        .tool_completed("tool-1", "capo.agent_status", "agent is running")
+        .message_completed("msg-2", "state inspected")
+        .turn_completed("done-1")
+        .normalized_events(&refs.external_session_ref);
+
+    let finished = controller
+        .run_turn(&refs, &turn_id, &batch)
+        .expect("run turn");
+
+    // Emit: the outcome reports normal completion and is keyed to this turn.
+    assert_eq!(finished.turn_id, turn_id);
+    assert_eq!(finished.stop_reason, TurnStopReason::Completed);
+    assert!(finished.observed_terminal_event());
+    // Summary refs are the item events' refs (two: delta msg-1, completed msg-2);
+    // observed tool refs are the tool event refs, deduped to one (tool-1).
+    assert_eq!(finished.summary_refs, vec!["msg-1", "msg-2"]);
+    assert_eq!(finished.observed_tool_refs, vec!["tool-1"]);
+    // The replay report comes straight from the existing projection path.
+    assert_eq!(finished.replay.input_event_count, 5);
+    assert_eq!(finished.replay.summary_event_count, 2);
+    assert_eq!(finished.replay.tool_event_count, 2);
+    assert_eq!(finished.replay.completed_turn_count, 1);
+
+    // Project: the loop drove the existing ingestion path, so the read models
+    // are keyed to this turn and observe the scripted tool.
+    let tools = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    assert!(tools.iter().any(|tool| {
+        tool.tool_name == "capo.agent_status"
+            && tool.status == "completed"
+            && tool.turn_id.as_deref() == Some("turn-loop-1")
+    }));
+    let events = controller
+        .state()
+        .recent_events_for_session(&refs.session_id, 32)
+        .expect("events");
+    assert!(events.iter().any(|event| {
+        event.kind == "session.summary_updated" && event.turn_id.as_deref() == Some("turn-loop-1")
+    }));
+    assert!(events.iter().any(|event| {
+        event.kind == "evidence.recorded" && event.turn_id.as_deref() == Some("turn-loop-1")
+    }));
+}
+
+#[test]
+fn turn_loop_interrupt_and_stop_commands_map_onto_finished_outcomes() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+
+    // Interrupt: drive a turn to a Finished/Interrupted outcome.
+    let controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("loop-session-int")),
+    )
+    .expect("open controller");
+    let registration = controller.register_agent("loop-worker").expect("agent");
+    let refs = controller
+        .send_task(&registration, "interrupt me")
+        .expect("send");
+    let interrupted = controller
+        .interrupt_turn(
+            &registration,
+            &refs,
+            &TurnId::new("turn-int-1"),
+            "operator paused",
+        )
+        .expect("interrupt turn");
+    assert_eq!(interrupted.stop_reason, TurnStopReason::Interrupted);
+    assert_eq!(
+        controller.observe(&refs).expect("observe").session.status,
+        "canceled"
+    );
+
+    // Stop: drive a turn to a Finished/Stopped outcome.
+    let stop_controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("loop-session-stop")),
+    )
+    .expect("open controller");
+    let stop_registration = stop_controller
+        .register_agent("loop-worker")
+        .expect("agent");
+    let stop_refs = stop_controller
+        .send_task(&stop_registration, "stop me")
+        .expect("send");
+    let stopped = stop_controller
+        .stop_turn(
+            &stop_registration,
+            &stop_refs,
+            &TurnId::new("turn-stop-1"),
+            "operator stopped",
+        )
+        .expect("stop turn");
+    assert_eq!(stopped.stop_reason, TurnStopReason::Stopped);
+    assert_eq!(
+        stop_controller
+            .observe(&stop_refs)
+            .expect("observe")
+            .session
+            .status,
+        "completed"
+    );
+}
+
+#[test]
+fn turn_loop_projected_turn_rebuilds_identically_after_restart_replay() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    let state_root = temp_root();
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("loop-session"));
+    let controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        &state_root,
+        scripted,
+    )
+    .expect("open controller");
+    let registration = controller.register_agent("loop-worker").expect("agent");
+    let refs = controller
+        .send_task(&registration, "Run a replay-stable turn")
+        .expect("send task");
+    let turn_id = TurnId::new("turn-replay-1");
+    let batch = ScriptedMockTurn::new("turn-replay-1")
+        .message_delta("msg-1", "inspecting state")
+        .tool_requested("tool-1", "capo.agent_status")
+        .tool_completed("tool-1", "capo.agent_status", "agent is running")
+        .message_completed("msg-2", "state inspected")
+        .turn_completed("done-1")
+        .normalized_events(&refs.external_session_ref);
+
+    let finished = controller
+        .run_turn(&refs, &turn_id, &batch)
+        .expect("run turn");
+
+    // Capture the projected read models the turn produced.
+    let session_before = controller
+        .state()
+        .session(&refs.session_id)
+        .expect("session")
+        .expect("session present");
+    let tools_before = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    let observations_before = controller
+        .state()
+        .tool_observations_for_session(&refs.session_id)
+        .expect("tool observations");
+    let evidence_before = controller
+        .state()
+        .evidence_for_session(&refs.session_id)
+        .expect("evidence");
+    let event_count_before = controller.state().event_count().expect("event count");
+
+    // Restart: reopen the state store from the same root and rebuild projections
+    // purely from the persisted event log.
+    let reopened = SqliteStateStore::open(&state_root).expect("reopen state");
+    reopened.rebuild_projections().expect("rebuild projections");
+
+    // The rebuilt read models are byte-identical: events are the source of
+    // truth, the projection is a pure fold.
+    assert_eq!(
+        reopened
+            .session(&refs.session_id)
+            .expect("session")
+            .expect("session present"),
+        session_before
+    );
+    assert_eq!(
+        reopened
+            .tool_calls_for_session(&refs.session_id)
+            .expect("tool calls"),
+        tools_before
+    );
+    assert_eq!(
+        reopened
+            .tool_observations_for_session(&refs.session_id)
+            .expect("tool observations"),
+        observations_before
+    );
+    assert_eq!(
+        reopened
+            .evidence_for_session(&refs.session_id)
+            .expect("evidence"),
+        evidence_before
+    );
+    assert_eq!(
+        reopened.event_count().expect("event count"),
+        event_count_before
+    );
+
+    // Re-running the loop over the same batch is idempotent (idempotency keys on
+    // every projected event), so the re-derived TurnFinished outcome is
+    // identical modulo the replay append-count (which is 0 on the second pass
+    // because nothing new is persisted).
+    let replayed = controller
+        .run_turn(&refs, &turn_id, &batch)
+        .expect("replay turn");
+    assert_eq!(replayed.turn_id, finished.turn_id);
+    assert_eq!(replayed.stop_reason, finished.stop_reason);
+    assert_eq!(replayed.summary_refs, finished.summary_refs);
+    assert_eq!(replayed.observed_tool_refs, finished.observed_tool_refs);
+    assert_eq!(replayed.replay.appended_event_count, 0);
+    assert_eq!(
+        controller.state().event_count().expect("event count"),
+        event_count_before
+    );
+}
+
 fn temp_root() -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
