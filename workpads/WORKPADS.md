@@ -15,8 +15,14 @@
 | **server** | Complete | Completed 2026-05-27 - Capo server/control plane, CLI-through-server path, mocked-agent tests, mocked Codex path, and manual real Codex smoke |
 | **harness-research** | Complete | Completed 2026-05-28 - best practices for coding-agent harnesses and ACP's role as adapter boundary |
 | **operator-control** | Complete | Completed 2026-05-28 - human operator REPL/control surface, tracked deterministic operator-agent mode, and live-gated Codex control |
-| **goal-orchestration** | **Active** | Add Capo-owned goals, agent-native reporting, evidence/story projections, continuation scheduling, validation, and historical execution reports |
-| **dashboard-webclient** | Planned | Build a browser dashboard/web client through design review, accepted design, implementation, screenshot review, and iteration |
+| **goal-orchestration** | Design source | Canonical goal-loop DESIGN (GO0-GO14); implementation realized by goal-autonomy + tools-aci on the real-turn-loop substrate; closes as "design realized" |
+| **dashboard-webclient** | Complete | Completed 2026-05-28 - first browser dashboard slice with design gate, mocked server-command API, and screenshot-reviewed browser smoke |
+| **real-turn-loop** | **Active** | Real observe->decide->emit turn loop + one real workspace-write Codex adapter + provider-neutral AgentAdapter trait + minimal safety floor |
+| **streaming-transport** | Planned | Streaming runtime + JSON-RPC framing + event-tail Subscribe + multi-turn thread + interrupt + server-side SSE/HTTP contract (evolves capo-web; not the web client) |
+| **tools-aci** | Planned | Wire the real tool path + typed narrow tool I/O + edit/patch/search/test ACI quality + provenance/redaction instrumentation + GO2 reporting tools |
+| **safety-gates** | Planned | PermissionPolicy wired into the loop + grant read-back/revoke + real VerificationRunner + checkpoint/rollback + liveness-aware recovery |
+| **goal-autonomy** | Planned | Implements the goal-orchestration design: goal/evidence model + continuation scheduler + evidence-gated completion auditor + reattach-after-compaction |
+| **depth** | Planned | Live ACP/Claude adapters + real memory packet/FTS5 retrieval + OS sandbox/worktrees + optional OTel; differentiated per-task prerequisites |
 
 ## research
 
@@ -423,7 +429,7 @@ workpads/architecture/prototype-plan.md
 
 ## dashboard-webclient
 
-**Status:** Planned. Intended after goal-orchestration by default, unless the user explicitly pulls forward an earlier web shell/scaffold slice.
+**Status:** Complete. First browser slice completed 2026-05-28 after the user explicitly pulled dashboard work forward.
 
 **Prerequisites:** Server/control-plane milestone complete, shared dashboard/query contract available, operator-control usable as the CLI comparison surface. Rich goal/story views depend on goal-orchestration projections.
 
@@ -438,6 +444,8 @@ workpads/architecture/prototype-plan.md
 workpads/dashboard-webclient/tasks.md
 workpads/dashboard-webclient/knowledge.md
 workpads/dashboard-webclient/references.md
+workpads/dashboard-webclient/design.md
+workpads/dashboard-webclient/completion-audit.md
 workpads/features/dashboard.md
 workpads/operator-control/knowledge.md
 workpads/goal-orchestration/knowledge.md
@@ -455,9 +463,12 @@ workpads/architecture/prototype-plan.md
 
 **Quick nav:**
 
-- `tasks.md` design-to-implementation task sequence and visual QA gates.
-- `knowledge.md` design principles, UX model, review policy, screenshot loop, and non-goals.
+- `tasks.md` completed design-to-implementation task sequence and visual QA gates.
+- `design.md` accepted product brief, IA, visual design, and review decision.
+- `knowledge.md` design principles, implementation decisions, screenshot loop, and residual risks.
+- `completion-audit.md` requirement-by-requirement closure audit.
 - `references.md` local source links and visual QA evidence requirements.
+- `web/dashboard/` dependency-free static browser client and dev server.
 
 **Rules:**
 
@@ -469,6 +480,186 @@ workpads/architecture/prototype-plan.md
 - Use screenshots and browser checks as required acceptance evidence.
 - Iterate visual design until desktop and mobile layouts are usable, readable,
   and free of obvious overlap, truncation, or broken states.
+
+## real-turn-loop
+
+**Status:** Active. First workpad of the daily-driver harness track (started 2026-05-29).
+
+**Prerequisites:** operator-control complete; the event-sourced SQLite state core; the typed `ServerCommand` boundary; the existing dispatch state machine (`PlanDispatch`/`PreflightLiveProvider`/`GateDispatch`/`RunDispatchLocal`/`RunLiveProviderLocal`).
+
+**Objective:** Replace `FakeBoundaryController` with a genuine controller turn loop that observes normalized adapter events, updates projections, and emits `TurnFinished` while driving the existing dispatch primitives as a single orchestration path; run one real workspace-write Codex adapter end-to-end behind a minimal safety floor; and extract a provider-neutral `AgentAdapter` trait. This is the substrate every later workpad attaches to.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/real-turn-loop/tasks.md
+workpads/real-turn-loop/knowledge.md
+workpads/real-turn-loop/references.md
+workpads/harness-research/daily-driver-review.md
+workpads/architecture/boundaries.md
+workpads/architecture/state-model.md
+workpads/architecture/protocol-provider.md
+workpads/architecture/capability-permissions.md
+workpads/architecture/tool-exposure.md
+workpads/goal-orchestration/knowledge.md
+```
+
+**Rules:**
+
+- The loop drives the dispatch primitives; do not create a second/parallel execution pipeline.
+- The first real workspace write must be confined, reversible, bounded, and dry-run by default; full enforcement lands in safety-gates.
+- Deterministic fake/scripted tests before live providers; live Codex stays behind explicit opt-in gates.
+- No task closes on operator self-attestation alone; pair every manual smoke with a deterministic assertion (wire snapshot, exit status, or restart/replay).
+
+## streaming-transport
+
+**Status:** Planned. Depends on real-turn-loop.
+
+**Objective:** Make the interactive loop real: a tokio streaming runtime (incremental output deltas + stdin), JSON-RPC framing with a notification/event variant, a `Subscribe{session_id, from_sequence}` tail over the append-only event log via a broadcast channel, a concurrent serve loop with timeouts and in-band cancel, a multi-turn thread read model, and a typed mid-turn interrupt. Deliver the server-side SSE/HTTP contract the web client consumes by evolving the in-tree `crates/capo-web` bridge.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/streaming-transport/tasks.md
+workpads/streaming-transport/knowledge.md
+workpads/streaming-transport/references.md
+workpads/harness-research/daily-driver-review.md
+workpads/architecture/state-model.md
+workpads/architecture/acp-replay-dedupe.md
+workpads/architecture/boundaries.md
+workpads/real-turn-loop/knowledge.md
+```
+
+**Rules:**
+
+- Deliver the streaming CONTRACT (schema + wire-snapshot tests), not the browser client; `web/app` and `web/dashboard` are owned by a separate agent.
+- Tail the event log by sequence; do not re-introduce the dashboard-poll antipattern.
+- Redact on emit; never stream sensitive/unknown-redaction content.
+- Document the Dashboard-poll -> Subscribe migration handoff for the web agent.
+
+## tools-aci
+
+**Status:** Planned. Depends on real-turn-loop; runs in parallel with streaming-transport.
+
+**Objective:** Raise the agent-computer interface to daily-driver quality. Wire the real tool path (the registry, runtime wrappers, and path containment already exist but are routed to a fake), extend `ToolDefinition` with input/output schemas plus risk/scope/redaction metadata, give file/search/edit/patch/test tools narrow typed decision-grade output with lint-on-edit, add artifact+provenance+redaction instrumentation, and implement the GO2 agent-reporting/evidence tools that goal-autonomy needs.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/tools-aci/tasks.md
+workpads/tools-aci/knowledge.md
+workpads/tools-aci/references.md
+workpads/harness-research/daily-driver-review.md
+workpads/architecture/tool-exposure.md
+workpads/goal-orchestration/tasks.md
+workpads/real-turn-loop/knowledge.md
+```
+
+**Rules:**
+
+- Build on the existing registry/wrappers/containment; do not greenfield a parallel tool system.
+- Every governed tool call becomes a durable, provenance-tagged, redaction-aware event.
+- The GO2 reporting/evidence tools are agent-published claims, not authoritative truth; correlate with observed events.
+- Deterministic tests before live; secrets stripped from artifacts and logs.
+
+## safety-gates
+
+**Status:** Planned. Depends on real-turn-loop, streaming-transport, tools-aci.
+
+**Objective:** Convert built-but-inert safety machinery into real enforcement, sub-phased as enforcement | verification | checkpoint-recovery. Wire `PermissionPolicy` + `ToolExposure` into the live loop with inline permission cards over the stream and ACP `request_permission` handling; add grant read-back, revoke, and expiry; build a `VerificationRunner` that actually runs lint/test and records real exit-status evidence; add controller-owned checkpoint/rollback; and replace mark-all-exited recovery with liveness-aware reattach.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/safety-gates/tasks.md
+workpads/safety-gates/knowledge.md
+workpads/safety-gates/references.md
+workpads/harness-research/daily-driver-review.md
+workpads/architecture/capability-permissions.md
+workpads/architecture/state-model.md
+workpads/real-turn-loop/knowledge.md
+workpads/tools-aci/knowledge.md
+```
+
+**Rules:**
+
+- Permissions are durable policy, not UI prompts; store requests, decisions, grants, and revocations as events.
+- Verification means running checks and recording the real exit status, not trusting `--status passed`.
+- Checkpoint/rollback must exist before any broadening of auto-approve or unattended writing.
+- Keep enforcement in the controller; clients only render and request.
+
+## goal-autonomy
+
+**Status:** Planned. Depends on real-turn-loop, tools-aci, safety-gates. Implements the goal-orchestration design.
+
+**Objective:** Realize the goal-orchestration design (GO0-GO14) on the now-real substrate. Milestone M1 builds the goal/evidence/report event model, projections, and lifecycle/server/read commands (depends on real-turn-loop + tools-aci). Milestone M2 adds the event-driven safe-boundary continuation scheduler, the evidence-gated completion auditor, and reattach-objective-after-compaction (hard-gated on safety-gates checkpoint/rollback + verification). Closes goal-orchestration as "design realized."
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/goal-autonomy/tasks.md
+workpads/goal-autonomy/knowledge.md
+workpads/goal-autonomy/references.md
+workpads/goal-orchestration/knowledge.md
+workpads/goal-orchestration/tasks.md
+workpads/harness-research/daily-driver-review.md
+workpads/architecture/state-model.md
+workpads/real-turn-loop/knowledge.md
+workpads/safety-gates/knowledge.md
+```
+
+**Rules:**
+
+- goal-orchestration is the design source; cite it, do not duplicate or re-specify it.
+- The completion auditor is the only path to goal-complete; agents may propose completion but never assert it.
+- No automatic continuation until checkpoint/rollback, verification, stop policy, and mocked replay exist.
+- The continuation scheduler lives in the controller, never in a client.
+
+## depth
+
+**Status:** Planned. Differentiated per-task prerequisites (real-turn-loop + tools-aci for ACP/Claude/memory; safety-gates for sandbox; goal-autonomy for worktree-per-goal).
+
+**Objective:** Deepen the harness once the core loop is trustworthy: a live ACP JSON-RPC adapter (with session/load + resume and replay/dedupe), a Claude workspace-write adapter as a second real provider, the real memory packet path (MarkdownMemoryBackend + FTS5 retrieval, killing the hardcoded strings) with extraction/staleness jobs, a first OS sandbox tier (seatbelt/landlock+bwrap), git worktree isolation, and an optional OTel exporter. These tasks deepen rather than unblock.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/depth/tasks.md
+workpads/depth/knowledge.md
+workpads/depth/references.md
+workpads/harness-research/daily-driver-review.md
+workpads/architecture/memory-architecture.md
+workpads/architecture/runtime-tunnel.md
+workpads/architecture/protocol-provider.md
+workpads/architecture/acp-replay-dedupe.md
+workpads/real-turn-loop/knowledge.md
+workpads/safety-gates/knowledge.md
+```
+
+**Rules:**
+
+- These tasks deepen the harness; do not let them block or precede the core loop, streaming, tools, or safety work.
+- Live ACP/Claude/sandbox work stays behind explicit opt-in gates with deterministic fake/replay tests first.
+- Keep runtime, connectivity/tunnel, protocol, and memory boundaries modular and swappable.
+- Real memory packets are fractional, sourced, and staleness-tracked; do not dump whole transcripts.
 
 ## How To Switch Focus
 

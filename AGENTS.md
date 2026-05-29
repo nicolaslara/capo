@@ -29,6 +29,13 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 | `workpads/operator-control/tasks.md` | Human operator control loop tasks: REPL, planner modes, attach/jump agent context, command rendering |
 | `workpads/goal-orchestration/tasks.md` | Capo-owned goal lifecycle, agent reporting, evidence/story projections, continuation, validation, and historical reports |
 | `workpads/dashboard-webclient/tasks.md` | Browser dashboard/web client tasks: design, review, acceptance, implementation, screenshot review, and iteration |
+| `workpads/harness-research/daily-driver-review.md` | Systematic per-dimension daily-driver review and phased roadmap that motivates the harness track |
+| `workpads/real-turn-loop/tasks.md` | Real controller turn loop, provider-neutral `AgentAdapter` trait, one real Codex workspace-write adapter, and the minimal safety floor (active) |
+| `workpads/streaming-transport/tasks.md` | Streaming runtime, JSON-RPC framing, event-tail subscribe, multi-turn thread, interrupt, and the server-side SSE/HTTP contract |
+| `workpads/tools-aci/tasks.md` | Real tool path, typed narrow tool I/O, edit/patch/search/test ACI quality, instrumentation, and the GO2 reporting/evidence tools |
+| `workpads/safety-gates/tasks.md` | Permission enforcement in the loop, grant read-back/revoke, real verification runner, checkpoint/rollback, and liveness recovery |
+| `workpads/goal-autonomy/tasks.md` | Implementation of the goal-orchestration design: goal/evidence model, continuation scheduler, evidence-gated auditor, reattach-after-compaction |
+| `workpads/depth/tasks.md` | Live ACP/Claude adapters, real memory packet/FTS5 retrieval, OS sandbox/worktrees, and optional OTel observability |
 | `.cursor/commands/next.md` / `.opencode/commands/next.md` | `/next` task-execution command |
 | `.agents/skills/next/SKILL.md` | Codex `$next` task-execution skill |
 
@@ -47,7 +54,15 @@ Repository for **Capo**, a modular controller and harness for managing coding LL
 
 ## Current Phase
 
-**Goal-orchestration implementation** is active after operator-control closed on 2026-05-28. The durable target is a server/controller-owned goal loop: goals, structured agent reports, evidence/review/validation ledgers, continuation scheduling, completion audit, and historical execution reports. Operator-control remains the human CLI/input surface for inspecting and steering running agents through the server boundary.
+**real-turn-loop** is active as of 2026-05-29, the first workpad of the **daily-driver harness track** (server/CLI): real-turn-loop -> (streaming-transport || tools-aci) -> safety-gates -> goal-autonomy -> depth. The track comes from the systematic daily-driver review in `workpads/harness-research/daily-driver-review.md` (verdict: disciplined bones, unbuilt loop) and was decomposed and adversarially reviewed on 2026-05-29. The critical path is a real controller turn loop plus one real workspace-write adapter, because the controller is currently fake-only and no provider can edit code end-to-end yet.
+
+**goal-orchestration** is now the canonical goal-loop DESIGN source (GO0-GO14); its implementation is realized by `goal-autonomy` (and the GO2 reporting tools in `tools-aci`) on the real-turn-loop substrate, and it closes as "design realized" after goal-autonomy. Operator-control remains the human CLI/input surface for inspecting and steering running agents through the server boundary.
+
+The web UI (`web/app`, `web/dashboard`) is owned by a separate agent and is out of scope for the harness track; those workpads deliver only the server-side streaming contract (evolving `crates/capo-web`).
+
+Dashboard-webclient first slice is complete as of 2026-05-28. It is a
+dependency-free static webclient under `web/dashboard/` with fixture-backed
+read models, a mocked server-command API, and browser screenshot evidence.
 
 ## Mandatory Workflow
 

@@ -146,12 +146,20 @@ Prefer clear names. Comment non-obvious invariants: permission boundaries, recov
 | Complete | `dogfood` | Migration of Capo project execution into Capo |
 | Complete | `server` | `server/tasks.md`, `knowledge.md`, `references.md`, architecture artifacts, scaffold knowledge |
 | Complete | `operator-control` | `operator-control/tasks.md`, `knowledge.md`, `references.md`, architecture artifacts, server knowledge |
-| Now | `goal-orchestration` | `goal-orchestration/tasks.md`, `knowledge.md`, `references.md`, harness research, operator-control knowledge, server knowledge, architecture artifacts |
-| Planned | `dashboard-webclient` | `dashboard-webclient/tasks.md`, `knowledge.md`, `references.md`, features dashboard query notes, operator-control knowledge, goal-orchestration knowledge, architecture artifacts |
+| Design source | `goal-orchestration` | `goal-orchestration/tasks.md`, `knowledge.md`, `references.md`, harness research, operator-control knowledge, server knowledge, architecture artifacts |
+| Complete | `dashboard-webclient` | `dashboard-webclient/tasks.md`, `knowledge.md`, `references.md`, `design.md`, browser screenshots, web/dashboard artifacts |
+| Now | `real-turn-loop` | `real-turn-loop/{tasks,knowledge,references}.md`, `harness-research/daily-driver-review.md`, `boundaries.md`, `state-model.md`, `protocol-provider.md`, `tool-exposure.md` |
+| Planned | `streaming-transport` | `streaming-transport/{tasks,knowledge,references}.md`, `daily-driver-review.md`, `state-model.md`, `acp-replay-dedupe.md`, `real-turn-loop/knowledge.md` |
+| Planned | `tools-aci` | `tools-aci/{tasks,knowledge,references}.md`, `daily-driver-review.md`, `tool-exposure.md`, `goal-orchestration/tasks.md`, `real-turn-loop/knowledge.md` |
+| Planned | `safety-gates` | `safety-gates/{tasks,knowledge,references}.md`, `daily-driver-review.md`, `capability-permissions.md`, `state-model.md`, `real-turn-loop/knowledge.md`, `tools-aci/knowledge.md` |
+| Planned | `goal-autonomy` | `goal-autonomy/{tasks,knowledge,references}.md`, `goal-orchestration/{tasks,knowledge}.md`, `daily-driver-review.md`, `state-model.md`, `safety-gates/knowledge.md` |
+| Planned | `depth` | `depth/{tasks,knowledge,references}.md`, `daily-driver-review.md`, `memory-architecture.md`, `runtime-tunnel.md`, `protocol-provider.md`, `acp-replay-dedupe.md` |
 
 ## Dependency Policy
 
-When adding or bumping a dependency, check the current upstream release and license first. Record intentional pins and ecosystem constraints in the relevant workpad.
+Use libraries freely. Capo is happy to depend on well-maintained Rust crates (for example `tokio`, `axum`, `serde`, `rusqlite`, and similar) and should reach for a mature crate rather than hand-roll equivalent functionality. There is no rule to minimize or avoid dependencies anywhere in this project. Async work standardizes on `tokio`.
+
+Light hygiene only: prefer actively maintained, compatibly licensed crates, and record intentional version pins or ecosystem constraints in the relevant workpad.
 
 ## Research Vs Implementation
 

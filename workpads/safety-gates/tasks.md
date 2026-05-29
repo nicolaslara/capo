@@ -1,0 +1,421 @@
+# Safety Gates Tasks
+
+## Objective
+
+Make Capo's real turn loop safe to run unattended-capable. Wire the existing
+`PermissionPolicy`/`ToolExposure` engine into the loop's decide step with grant
+read-back, revoke, and expiry; fix the `TrustedLocal` critical-scope hole; add a
+real `VerificationRunner` that runs check/lint/test and a `score_run` computed
+from OBSERVED evidence only; add a single-writer workspace lock; and add
+controller-owned shadow-git checkpoint/rollback plus liveness-aware restart
+recovery. The hard machinery (scope engine, path containment, durable grant
+store, event-sourced state) is already built; this workpad makes it enforce.
+
+## Status
+
+Planned. Phase 4 - Make it safe, sub-phased as enforcement | verification |
+checkpoint-recovery. Depends on `real-turn-loop`, `streaming-transport`, and
+`tools-aci`. `SG0` defines routing and scope. All implementation tasks pending.
+
+## Feature Set
+
+- Loop-level permission enforcement with grant read-back, revoke, and expiry.
+- `AgentAdapter` permission round-trip and ACP option mapping against fakes.
+- A `CapabilityGrantRevoked` (and optional `CapabilityGrantExpired`) event kind
+  plus `created_at`/`expires_at`/`revoked_at` projection columns.
+- A `TrustedLocal` fix that denies un-granted critical scopes.
+- A single-writer workspace lock / session-scoped write lease.
+- A real `VerificationRunner` emitting true exit-status pass/fail evidence.
+- `score_run` computed from observed evidence and wall-clock timing.
+- Controller-owned shadow-git checkpoint/rollback upgrading the RTL floor.
+- Liveness-aware restart recovery replacing blunt `exited_unknown`.
+
+## SG0 - Workpad, Routing, Scope, Sub-Phase Milestones, And Acceptance Invariant
+
+Status: pending.
+
+Acceptance:
+
+- Confirm this is its own workpad (not folded into `real-turn-loop`,
+  `tools-aci`, or `goal-autonomy`) and record the scope decision in
+  `knowledge.md`.
+- State the safety boundary: the server/controller owns enforcement, grant
+  lifecycle, the verification gate, the workspace lock, checkpoint/rollback, and
+  recovery; ACP `request_permission` is an adapter round-trip below the
+  `AgentAdapter` boundary; clients only render permission cards and verification
+  progress and never own enforcement state.
+- Define the three sub-phase milestones (enforcement, verification,
+  checkpoint-recovery) and the task-to-sub-phase mapping.
+- Record the relation to `workpads/architecture/capability-permissions.md`: this
+  workpad IMPLEMENTS that design (lifecycle steps 1-8, the ACP option mapping
+  table, and the critical-scope exclusion rule), it does not redesign it; list
+  which designed events (`capability.grant_revoked`, `capability.grant_expired`)
+  and projection columns graduate from design to code here.
+- Declare the seam to `tools-aci` (ACI defines/instruments tools and emits typed
+  test/lint evidence; safety-gates enforces permissions and computes `score_run`
+  over that evidence) and to `goal-autonomy` (safety-gates ships the
+  single-writer lock and checkpoint/rollback that `GO8` consumes).
+- Record the acceptance+verification invariant: no task in this workpad
+  completes on operator self-attestation alone; every manual smoke is paired
+  with a deterministic assertion (event/wire snapshot, exit status, or replay).
+
+Verification:
+
+- `workpads/safety-gates/tasks.md`, `knowledge.md`, and `references.md` exist and
+  follow the conventional format.
+- Scope decision and seams cross-checked against `goal-orchestration/tasks.md`
+  (`GO8`) and `workpads/architecture/capability-permissions.md`.
+- `git diff --check`.
+
+## SG1 - Wire PermissionPolicy And ToolExposure Enforcement Into The Decide Step
+
+Status: pending.
+
+Acceptance:
+
+- In the real turn loop's decide step (the `RealBoundaryController` introduced by
+  `real-turn-loop`, replacing the inert path where `FakeBoundaryController` holds
+  `PermissionPolicy::allow_trusted_local()` and `ToolExposure::fake()` in
+  `crates/capo-controller/src/lib.rs:55-74`), call
+  `PermissionPolicy::decide(PermissionRequest)` before any tool invocation or
+  workspace write proceeds.
+- Follow the documented lifecycle from `capability-permissions.md`: append
+  `permission.requested`, evaluate, append `permission.decided`, and on allow
+  with non-observational persistence create the grant and append
+  `capability.grant_created`; the tool/runtime layer proceeds only after the
+  decision is recorded.
+- A `deny` decision blocks the invocation: no tool runs, no workspace write
+  occurs, and the loop surfaces the denial as a typed decide outcome rather than
+  silently continuing.
+- Map a `deny` for an ACI write tool to a structured, agent-readable refusal the
+  loop can reflect on, not a raw error string.
+- Record `decision_source`, `persistence`, and `explanation` from
+  `PermissionDecision` on every emitted decision event so the audit trail is
+  complete even when everything is allowed.
+- The `Static` and `TrustedLocal` policies are both reachable through the real
+  loop; the fake policy is an explicit test-only variant, not the real default.
+
+Verification:
+
+- Focused `cargo test -p capo-controller` proving an allowed request emits the
+  requested/decided/grant-created sequence and a denied request emits no tool
+  invocation event.
+- `cargo fmt`.
+- `git diff --check`.
+
+Must not do:
+
+- Do not let the decide step pass requests straight to the runtime without a
+  recorded `permission.decided` event.
+
+## SG2 - AgentAdapter Permission Round-Trip And ACP Option Mapping Against Fakes
+
+Status: pending.
+
+Acceptance:
+
+- Handle the `AgentAdapter`-trait permission round-trip: a fake/scripted adapter
+  raises a permission request, the controller decides it, and the chosen outcome
+  is returned to the adapter using the provider-neutral adapter types introduced
+  by `real-turn-loop` (not `Fake*`-named structs).
+- Implement the ACP option mapping from `capability-permissions.md` as
+  fixture/option-mapping logic only: `allow_once` -> allow once/turn-scoped,
+  `allow_always` -> allow downscoped to `until_session_end` under TrustedLocal,
+  `reject_once`/`reject_always` -> reject with the correct returned `optionId`,
+  cancellation -> `cancelled` outcome plus a `permission.decided` with
+  `decision = cancel`.
+- Persist the ACP option list and chosen option ID as adapter options/response
+  on the decision record.
+- When no selectable option exists, treat it as adapter error: record
+  `permission.decided` with `cancel` and fail the adapter request rather than
+  inventing an ACP outcome.
+- State the fixture-only verification standard in the task and in `knowledge.md`:
+  the live ACP JSON-RPC wire round-trip is explicitly out of scope and lands in
+  the depth workpad.
+
+Verification:
+
+- Focused `cargo test -p capo-controller` (and `-p capo-adapters` if the trait
+  types move) covering each ACP option-kind mapping against scripted fixtures.
+- `cargo fmt`.
+- `git diff --check`.
+
+Must not do:
+
+- Do not implement or depend on a live ACP JSON-RPC adapter; this task is
+  fixture and option-mapping only.
+
+## SG3 - Grant Read-Back, Revoke/Expire Events, Projection Columns, And Revoke Command
+
+Status: pending.
+
+Acceptance:
+
+- Add grant read-back in decide: before authorizing, query the durable grant
+  store and treat an existing valid grant as authorization (grants are not
+  write-only), and treat a revoked or expired grant as absent.
+- Add a `CapabilityGrantRevoked` (and optionally `CapabilityGrantExpired`)
+  `EventKind` in `crates/capo-state/src/event.rs`; today only
+  `CapabilityGrantCreated`/`CapabilityGrantUsed` exist and the only `*Revoked`
+  kind is `ConnectivityExposureRevoked` (event.rs:16-17,70-74).
+- Add `created_at`, `expires_at`, and `revoked_at` columns to
+  `CapabilityGrantProjection` in `crates/capo-state/src/projections.rs:96-106`
+  (these fields exist today only on `ConnectivityExposureProjection`,
+  projections.rs:139), and project the new events onto them.
+- Add a typed revoke command/flow at the server/controller boundary that emits
+  `capability.grant_revoked` with a revocation reason; future grant use of a
+  revoked grant is denied while old events remain unchanged.
+- Treat expiry as a denial input in decide: a grant past `expires_at` does not
+  authorize, even if never explicitly revoked.
+
+Verification:
+
+- Focused `cargo test -p capo-state` for the new event kind and projection
+  columns, including a rebuild/replay test that reconstructs revoked/expired
+  state identically from the event log.
+- Focused `cargo test -p capo-controller` proving revoke then re-request is
+  denied and that old grant-created/used events are preserved.
+- `cargo fmt`.
+
+## SG4 - Fix TrustedLocal Critical-Scope Exclusion
+
+Status: pending.
+
+Acceptance:
+
+- Enumerate the critical scopes in
+  `workpads/architecture/capability-permissions.md`: source-write outside the
+  workspace (`filesystem:write:path` beyond the workspace root), network egress
+  (`network:connect:internet`, `network:expose:public`), secret/credential read
+  (`secret:read:credential_material`), and arbitrary shell
+  (`shell:execute:path` outside the workspace).
+- Change `AllowTrustedLocalProfilePolicy::decide()`
+  (`crates/capo-tools/src/permission.rs:87-94`, currently a literal allow-all
+  returning `effect = "allow"` with `decision_source =
+  "allow_trusted_local_profile"`) so that a request whose scope is critical
+  returns `deny` unless an explicit grant for that scope is present.
+- Keep the non-critical TrustedLocal audit-only allow behavior intact: ordinary
+  workspace read/write, git status/diff, and Capo tool invocation still allow and
+  still emit the same durable request/decision/grant records.
+- `PermissionPolicy::allow_trusted_local()` remains the controller default
+  (`crates/capo-controller/src/lib.rs:56`), but the default is no longer
+  blanket-allow on critical scopes.
+
+Verification:
+
+- Focused `cargo test -p capo-tools` asserting
+  `AllowTrustedLocalProfilePolicy::decide()` DENIES an un-granted critical-scope
+  request (one test per enumerated critical scope) and still ALLOWS a
+  non-critical workspace request.
+- Focused `cargo test -p capo-tools` asserting that with an explicit grant
+  present, the same critical-scope request allows.
+- `cargo fmt`.
+
+## SG5 - Single-Writer Workspace Lock / Session-Scoped Write Lease
+
+Status: pending.
+
+Acceptance:
+
+- Add a controller-owned single-writer workspace lock (a session-scoped write
+  lease) that gates all tool writes and workspace mutations in the real loop.
+- The lock REJECTS a second concurrent writer rather than interleaving: while a
+  session holds the lease, a write request from another session/run is denied
+  with a typed conflict outcome.
+- Acquire/release is event-sourced so the lock survives restart and rebuilds from
+  the event log; a stale lease from a dead holder is reclaimable through the
+  liveness-aware recovery path (SG9).
+- Read-only tools and reads are not blocked by the write lease.
+- This is the primitive `goal-autonomy` `GO8` consumes as its "no conflicting
+  workspace lock" continuation precondition; record that contract in
+  `knowledge.md`.
+
+Verification:
+
+- Focused `cargo test -p capo-controller` for lock contention: one holder, a
+  second writer rejected, holder releases, second writer then succeeds.
+- Restart/replay test proving lease state rebuilds from events.
+- `cargo fmt`.
+
+Must not do:
+
+- Do not interleave concurrent writers or silently queue them; reject explicitly.
+
+## SG6 - VerificationRunner: Run Check/Lint/Test And Emit Real Pass/Fail Evidence
+
+Status: pending.
+
+Acceptance:
+
+- Add a `VerificationRunner` that executes the project's configured check/lint/
+  test commands through the existing `capo-runtime` local process runner and
+  records the real exit status.
+- Emit verification evidence with true pass/fail derived from exit status, never
+  from operator assertion or agent-reported claims; the evidence carries the
+  command, exit status, and a redacted output artifact ref.
+- Consume the typed test/check evidence produced by `tools-aci` (the
+  `capo.test_run`/`capo.check` typed result) as an input; the runner owns the
+  verification GATE, the ACI tool owns evidence emission.
+- A successful run whose output exceeds the runtime cap is NOT classified as
+  failed: output is truncated with truncation recorded as metadata and pass/fail
+  still keyed off exit status.
+- Persist verification evidence as observed evidence (source distinct from
+  agent-reported) so SG7 can score against it.
+- Decide and record where the runner lives (`capo-eval`, currently a stub at
+  `crates/capo-eval/src/lib.rs`, vs `capo-server`); resolve the open question in
+  `knowledge.md`.
+
+Verification:
+
+- Focused `cargo test` (target crate per the SG0 decision) with a fake/scripted
+  command for both pass and fail, asserting exit-status-derived classification.
+- A deterministic over-cap-successful-run test proving a long successful run is
+  recorded passed-and-truncated, not failed.
+- `cargo fmt`.
+
+## SG7 - score_run Over Observed Evidence And Wall-Clock Timing
+
+Status: pending.
+
+Acceptance:
+
+- Add `score_run` that compares acceptance criteria to verification evidence and
+  produces the run outcome signal.
+- `score_run` consumes OBSERVED evidence only (verification exit status, observed
+  tool results, runtime events); it never reads agent-reported claims as a score
+  input.
+- Replace the descriptive-only roll-up: today the only eval artifact is a
+  markdown report whose "duration" is an event-sequence delta
+  (`crates/capo-eval/src/lib.rs`, `duration_sequence_span`); add real wall-clock
+  timing (`started_at`/`completed_at`) to the scored outcome.
+- The score is reproducible: rebuilding from the event log yields the same score
+  for the same observed evidence.
+- Record the score and its inputs as a durable event/projection so the outcome
+  is queryable and survives restart.
+
+Verification:
+
+- Focused `cargo test` (target crate per SG0) proving a passing-evidence run and
+  a failing-evidence run produce the expected scores, and that injecting only
+  agent-reported claims (no observed evidence) does not raise the score.
+- Wall-clock timing assertion using a controlled clock or fixture timestamps.
+- `cargo fmt`.
+
+Must not do:
+
+- Do not let any agent-reported field contribute to the computed score.
+
+## SG8 - Controller-Owned Shadow-Git Checkpoint/Rollback
+
+Status: pending.
+
+Acceptance:
+
+- Implement controller-owned checkpoint/rollback as shadow-git, emitting the
+  designed `checkpoint.created` / `checkpoint.restored` events and a `Restore`
+  command (state-model.md:894-896; the `checkpoints` projection/table is
+  designed-only today).
+- A checkpoint is created before a real workspace write so any write is
+  reversible by one `Restore` command; restore returns the workspace to the
+  checkpointed state.
+- Upgrade the `real-turn-loop` single-snapshot safety floor: the RTL pre-write
+  snapshot (tar/copy/stash) is replaced by per-turn shadow-git checkpoints that
+  are restorable per-turn and survive restart.
+- Resolve the open question in `knowledge.md`: whether shadow-git is a separate
+  `.git` worktree/index or a stash-ring; the chosen mechanism must be restorable
+  per-turn and survive a server restart.
+- Checkpoint artifacts and restore are recorded as observed evidence/events so a
+  rollback is auditable.
+
+Verification:
+
+- Focused `cargo test -p capo-controller` proving create-checkpoint, write,
+  restore returns the workspace to the prior state.
+- Restart/replay test proving checkpoint refs survive restart and a checkpoint
+  taken before restart is still restorable after.
+- `cargo fmt`.
+
+## SG9 - Liveness-Aware Restart Recovery Replacing exited_unknown
+
+Status: pending.
+
+Acceptance:
+
+- Persist `runtime.start_requested` (plus pid/process-group) before spawn so an
+  in-flight run is recoverable after restart (state-model.md:786,1140).
+- On restart, probe the liveness/health of runs that look live and classify into
+  `run.recovered` (still alive, reattached), `run.orphaned`, or `run.exited`
+  based on the probe, replacing the blunt path that marks all live-looking runs
+  `exited_unknown` (the `exited_unknown` status is referenced in
+  `crates/capo-eval/src/lib.rs:177`).
+- Reattach to a still-alive run in place when attachable, distinct from
+  relaunching a new run with `recovery_of_run_id` (state-model.md:203-207).
+- Reclaim a stale single-writer lease (SG5) held by a dead run during recovery.
+- Recovery events are idempotent: a repeated restart does not create a second
+  recovery event for the same stable observation (idempotency keyed by
+  `(run_id, recovery_observation_kind, observed_runtime_state_hash)`,
+  state-model.md:1179).
+
+Verification:
+
+- Focused `cargo test -p capo-controller` (and `-p capo-runtime` for liveness
+  probing) covering recovered, orphaned, and exited classifications.
+- Restart/replay test proving recovery idempotency on repeated restart.
+- `cargo fmt`.
+
+## SG10 - Deterministic Safety Test Suite Plus Restart/Replay
+
+Status: pending.
+
+Acceptance:
+
+- Add a deterministic suite, with no live providers, covering: denied request,
+  granted request, revoked grant denied on re-request, expired grant denied,
+  critical-scope denial under TrustedLocal, verification pass, verification fail,
+  workspace-lock contention, and checkpoint rollback restoring prior state.
+- Add restart/replay coverage proving grant lifecycle (created/revoked/expired),
+  lock leases, checkpoint refs, score outcomes, and recovery classifications all
+  rebuild identically from the event log.
+- Every state-changing safety behavior in SG1-SG9 has at least one deterministic
+  assertion (event/wire snapshot, exit status, or replay), honoring the SG0
+  invariant.
+- Tests use fakes/scripted adapters and fake/scripted verification commands so
+  the suite is hermetic and reproducible.
+
+Verification:
+
+- `cargo fmt`.
+- Focused `cargo test -p capo-state -p capo-tools -p capo-controller -p capo-eval`
+  for the changed safety behaviors.
+- `git diff --check`.
+
+## SG11 - Live Opt-In Safety Smoke Paired With Deterministic Assertions And E2E Gate
+
+Status: pending.
+
+Acceptance:
+
+- Add a live opt-in safety smoke behind an explicit env gate (mirroring the
+  existing `CAPO_SERVER_RUN_CODEX_LIVE` opt-in), separate from ordinary test
+  runs, that drives one real gated write: permission decided, checkpoint taken,
+  write performed under the workspace lock, verification run, and `score_run`
+  computed.
+- The smoke strips secrets from any captured output and persists only redacted
+  artifacts (`RedactionState::Safe`/`Redacted`).
+- The smoke is PAIRED with deterministic assertions: the same path is also
+  proven by event/wire snapshots and exit-status checks so completion is never
+  solely operator-attested.
+- Add an E2E gate that runs the deterministic safety suite (SG10) and reviews
+  architecture fit, the safety boundary, test adequacy, and whether to proceed to
+  `goal-autonomy`.
+- Record review notes covering enforcement correctness, verification honesty,
+  rollback reliability, and recovery safety.
+
+Verification:
+
+- `cargo fmt`.
+- Focused `cargo test` for changed crates, widening to `cargo test` if shared
+  controller/state behavior changed broadly.
+- Manual live smoke transcript with secrets stripped, paired with the
+  deterministic assertions above.
+- `git diff --check`.
