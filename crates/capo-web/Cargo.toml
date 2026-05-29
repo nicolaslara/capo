@@ -1,0 +1,24 @@
+[package]
+name = "capo-web"
+description = "HTTP/SSE facade over the Capo server boundary for the web operator console."
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "capo-web"
+path = "src/main.rs"
+
+[dependencies]
+capo-server.workspace = true
+capo-core.workspace = true
+capo-query.workspace = true
+capo-state.workspace = true
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["fs", "cors", "trace"] }
+tokio-stream = "0.1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.150"

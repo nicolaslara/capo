@@ -1,0 +1,1414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Capo — Operator Dashboard</title>
+<style>
+  /* ============================================================
+     CAPO — Operator Dashboard
+     Direction: "Refined minimal" (Linear / Vercel), light mode
+     key=linear-graphite
+     ============================================================ */
+
+  /* ---- Design tokens ---- */
+  :root {
+    /* Neutral graphite/zinc ramp */
+    --zinc-0:  #ffffff;
+    --zinc-25: #fbfbfc;
+    --zinc-50: #f7f7f9;
+    --zinc-75: #f2f2f5;
+    --zinc-100:#ededf1;
+    --zinc-150:#e6e6ec;
+    --zinc-200:#dddde4;
+    --zinc-300:#c9c9d2;
+    --zinc-400:#a6a6b3;
+    --zinc-500:#86868f;
+    --zinc-600:#6a6a74;
+    --zinc-700:#52525b;
+    --zinc-800:#3a3a42;
+    --zinc-900:#26262c;
+    --zinc-950:#18181b;
+
+    /* Surfaces */
+    --bg-app:    var(--zinc-50);
+    --bg-panel:  var(--zinc-0);
+    --bg-sunken: var(--zinc-75);
+    --bg-rail:   #fcfcfd;
+
+    /* Text */
+    --text-strong: var(--zinc-950);
+    --text:        var(--zinc-800);
+    --text-muted:  var(--zinc-600);
+    --text-faint:  var(--zinc-500);
+    --text-ghost:  var(--zinc-400);
+
+    /* Borders (hairline, low-contrast) */
+    --border:        #e7e7ee;
+    --border-strong: #dcdce4;
+    --border-faint:  #efeff3;
+
+    /* Single restrained accent — indigo/violet */
+    --accent:        #5b5bd6;
+    --accent-hover:  #4f4fcb;
+    --accent-weak:   #eeeefb;
+    --accent-weak-b: #dcdcf6;
+    --accent-text:   #4a4ac0;
+
+    /* Desaturated, precise status colors */
+    --ok:        #3f8f5f;   /* finished / passed / validated / accepted */
+    --ok-weak:   #eaf4ed;
+    --ok-weak-b: #cfe6d6;
+    --ok-text:   #2f7a4d;
+
+    --warn:        #b06a1c;  /* timed out / blocked / needs follow-up */
+    --warn-weak:   #fbf0e2;
+    --warn-weak-b: #f1ddbf;
+    --warn-text:   #92560f;
+
+    --danger:      #c4493f;  /* destructive */
+    --danger-weak: #fbecea;
+    --danger-weak-b:#f3d2cd;
+    --danger-text: #a93a31;
+
+    --info:        #4f6bd6;  /* running / pending (in-progress) */
+    --info-weak:   #eceffb;
+    --info-weak-b: #d4ddf6;
+    --info-text:   #3f57b8;
+
+    --caution:     #9a7d22;  /* partial / pending caution */
+    --caution-weak:#f8f1d8;
+
+    /* Type scale (tight, deliberate) */
+    --fs-11: 11px;
+    --fs-12: 12px;
+    --fs-13: 13px;
+    --fs-14: 14px;
+    --fs-16: 16px;
+    --fs-20: 20px;
+    --fs-26: 26px;
+
+    /* Spacing */
+    --sp-1: 4px;
+    --sp-2: 8px;
+    --sp-3: 12px;
+    --sp-4: 16px;
+    --sp-5: 20px;
+    --sp-6: 24px;
+    --sp-8: 32px;
+
+    /* Radii */
+    --r-sm: 5px;
+    --r-md: 7px;
+    --r-lg: 10px;
+    --r-pill: 999px;
+
+    /* Elevation (faint shadows) */
+    --sh-1: 0 1px 2px rgba(24,24,27,0.04), 0 1px 1px rgba(24,24,27,0.03);
+    --sh-2: 0 1px 2px rgba(24,24,27,0.05), 0 4px 12px rgba(24,24,27,0.05);
+    --sh-pop: 0 4px 16px rgba(24,24,27,0.10), 0 1px 3px rgba(24,24,27,0.06);
+
+    --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    font-family: var(--font-sans);
+    background: var(--bg-app);
+    color: var(--text);
+    font-size: var(--fs-13);
+    line-height: 1.5;
+    letter-spacing: -0.006em;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+  .mono { font-family: var(--font-mono); font-feature-settings: "tnum" 1; }
+
+  /* ============================================================
+     APP SHELL
+     ============================================================ */
+  .app {
+    max-width: 1440px;
+    margin: 0 auto;
+    min-height: 100vh;
+    background: var(--bg-app);
+  }
+
+  /* ---- Top bar ---- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-4);
+    height: 52px;
+    padding: 0 var(--sp-6);
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+  }
+  .mark {
+    width: 24px; height: 24px;
+    border-radius: 6px;
+    background: var(--zinc-950);
+    color: #fff;
+    display: grid; place-items: center;
+    box-shadow: var(--sh-1);
+  }
+  .mark svg { display:block; }
+  .brand-name {
+    font-size: var(--fs-14);
+    font-weight: 600;
+    color: var(--text-strong);
+    letter-spacing: -0.02em;
+  }
+  .divider-v {
+    width: 1px; height: 18px;
+    background: var(--border-strong);
+    margin: 0 2px;
+  }
+  .view-label {
+    font-size: var(--fs-13);
+    font-weight: 500;
+    color: var(--text-muted);
+  }
+
+  .topbar-spacer { flex: 1; }
+
+  /* server / mode badge */
+  .server-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-2);
+    height: 28px;
+    padding: 0 10px 0 8px;
+    background: var(--bg-sunken);
+    border: 1px solid var(--border);
+    border-radius: var(--r-pill);
+    font-size: var(--fs-12);
+    color: var(--text-muted);
+  }
+  .server-badge .dot-live {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--info);
+    box-shadow: 0 0 0 3px var(--info-weak);
+  }
+  .server-badge .sep { color: var(--zinc-300); }
+  .server-badge .mode-tag {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--accent-text);
+    background: var(--accent-weak);
+    border: 1px solid var(--accent-weak-b);
+    border-radius: var(--r-sm);
+    padding: 1px 6px;
+    letter-spacing: 0;
+  }
+
+  /* tabs */
+  .tabs {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    background: var(--bg-sunken);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: 3px;
+  }
+  .tab {
+    appearance: none;
+    border: none;
+    background: transparent;
+    font: inherit;
+    font-size: var(--fs-13);
+    font-weight: 500;
+    color: var(--text-muted);
+    padding: 5px 12px;
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    line-height: 1;
+  }
+  .tab[aria-current="page"] {
+    background: var(--bg-panel);
+    color: var(--text-strong);
+    box-shadow: var(--sh-1);
+  }
+
+  /* top controls */
+  .controls { display: flex; align-items: center; gap: var(--sp-2); }
+  .btn {
+    appearance: none;
+    font: inherit;
+    font-size: var(--fs-13);
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 11px;
+    border-radius: var(--r-md);
+    border: 1px solid var(--border-strong);
+    background: var(--bg-panel);
+    color: var(--text);
+    cursor: pointer;
+    box-shadow: var(--sh-1);
+    white-space: nowrap;
+  }
+  .btn:hover { background: var(--zinc-50); border-color: var(--zinc-300); }
+  .btn svg { color: var(--text-faint); }
+  .btn-icon { width: 30px; padding: 0; justify-content: center; }
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    box-shadow: 0 1px 2px rgba(91,91,214,0.30);
+  }
+  .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .btn-primary svg { color: rgba(255,255,255,0.85); }
+
+  .btn-danger {
+    color: var(--danger-text);
+    border-color: var(--danger-weak-b);
+    background: var(--bg-panel);
+  }
+  .btn-danger:hover { background: var(--danger-weak); border-color: #e9b8b1; }
+  .btn-danger svg { color: var(--danger); }
+
+  /* ============================================================
+     STATUS STRIP
+     ============================================================ */
+  .statusstrip {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .metric {
+    padding: 14px var(--sp-6);
+    border-right: 1px solid var(--border-faint);
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    position: relative;
+  }
+  .metric:last-child { border-right: none; }
+  .metric-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-11);
+    font-weight: 500;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .metric-value {
+    font-size: var(--fs-26);
+    font-weight: 600;
+    color: var(--text-strong);
+    line-height: 1;
+    letter-spacing: -0.03em;
+  }
+  .metric-sub {
+    font-size: var(--fs-11);
+    color: var(--text-ghost);
+    line-height: 1;
+  }
+  .metric .tick {
+    width: 7px; height: 7px; border-radius: 2px;
+    background: var(--zinc-300);
+  }
+  .metric.is-active .tick   { background: var(--info); }
+  .metric.is-good .tick     { background: var(--ok); }
+  /* Blocked metric reads as warning */
+  .metric.is-warn {
+    background: linear-gradient(0deg, var(--warn-weak) 0%, transparent 70%);
+  }
+  .metric.is-warn .tick { background: var(--warn); border-radius: 50%; }
+  .metric.is-warn .metric-value { color: var(--warn-text); }
+  .metric.is-warn .metric-label { color: var(--warn-text); }
+  .metric.is-warn::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 2px;
+    background: var(--warn);
+  }
+
+  /* ============================================================
+     MAIN GRID
+     ============================================================ */
+  .main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 392px;
+    gap: 1px;
+    background: var(--border);
+    align-items: start;
+  }
+  .col {
+    background: var(--bg-app);
+    min-width: 0;
+  }
+  .col-left  { padding: var(--sp-6); display: flex; flex-direction: column; gap: var(--sp-5); }
+  .col-right { padding: var(--sp-6) var(--sp-6) var(--sp-6) var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-5); background: var(--bg-rail); }
+
+  /* ---- Section header ---- */
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-3);
+    margin-bottom: 2px;
+  }
+  .section-title {
+    font-size: var(--fs-13);
+    font-weight: 600;
+    color: var(--text-strong);
+    letter-spacing: -0.01em;
+  }
+  .section-meta {
+    font-size: var(--fs-12);
+    color: var(--text-faint);
+  }
+  .section-head .grow { flex: 1; }
+  .section-link {
+    font-size: var(--fs-12);
+    font-weight: 500;
+    color: var(--accent-text);
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .section-link:hover { text-decoration: underline; }
+
+  /* ---- Panel ---- */
+  .panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    box-shadow: var(--sh-1);
+  }
+
+  /* ============================================================
+     AGENT TABLE
+     ============================================================ */
+  .agents-table { width: 100%; border-collapse: collapse; }
+  .agents-table thead th {
+    text-align: left;
+    font-size: var(--fs-11);
+    font-weight: 500;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 9px var(--sp-4);
+    border-bottom: 1px solid var(--border);
+    background: var(--zinc-25);
+    white-space: nowrap;
+  }
+  .agents-table thead th:first-child { border-top-left-radius: var(--r-lg); }
+  .agents-table thead th:last-child  { border-top-right-radius: var(--r-lg); text-align: right; }
+  .agents-table th.col-num { text-align: right; }
+
+  .agents-table tbody tr {
+    border-bottom: 1px solid var(--border-faint);
+    cursor: pointer;
+  }
+  .agents-table tbody tr:last-child { border-bottom: none; }
+  .agents-table tbody tr:hover { background: var(--zinc-25); }
+  .agents-table tbody tr.is-selected {
+    background: var(--accent-weak);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .agents-table tbody tr.is-selected:hover { background: var(--accent-weak); }
+  .agents-table td {
+    padding: 11px var(--sp-4);
+    vertical-align: middle;
+  }
+  .agents-table td.col-num { text-align: right; }
+
+  .agent-name {
+    display: flex; align-items: center; gap: 9px;
+  }
+  .agent-name .nm {
+    font-family: var(--font-mono);
+    font-size: var(--fs-13);
+    font-weight: 500;
+    color: var(--text-strong);
+    letter-spacing: -0.01em;
+  }
+  .agent-result {
+    color: var(--text-muted);
+    font-size: var(--fs-13);
+    max-width: 380px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .adapter {
+    font-family: var(--font-mono);
+    font-size: var(--fs-12);
+    color: var(--text-faint);
+  }
+  .adapter.is-fake { color: var(--caution); }
+
+  /* status dot for the agent-name leading indicator */
+  .lead {
+    width: 8px; height: 8px; flex: none;
+    border-radius: 50%;
+    box-shadow: 0 0 0 3px var(--zinc-100);
+  }
+  .lead.s-running  { background: var(--info);   box-shadow: 0 0 0 3px var(--info-weak); }
+  .lead.s-finished { background: var(--ok);     box-shadow: 0 0 0 3px var(--ok-weak); }
+  .lead.s-timeout  { background: var(--warn);   box-shadow: 0 0 0 3px var(--warn-weak); border-radius: 2px; }
+  .lead.s-blocked  { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-weak); }
+
+  /* ============================================================
+     STATUS PILL (shared)
+     ============================================================ */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 21px;
+    padding: 0 8px 0 7px;
+    border-radius: var(--r-pill);
+    font-size: var(--fs-12);
+    font-weight: 500;
+    line-height: 1;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .pill svg { flex: none; }
+  .pill .gl { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+
+  .pill.running  { background: var(--info-weak);   color: var(--info-text);   border-color: var(--info-weak-b); }
+  .pill.running .gl { background: var(--info); }
+  .pill.finished { background: var(--ok-weak);     color: var(--ok-text);     border-color: var(--ok-weak-b); }
+  .pill.timeout  { background: var(--warn-weak);   color: var(--warn-text);   border-color: var(--warn-weak-b); }
+  .pill.blocked  { background: var(--danger-weak); color: var(--danger-text); border-color: var(--danger-weak-b); }
+
+  .pill.good     { background: var(--ok-weak);     color: var(--ok-text);     border-color: var(--ok-weak-b); }
+  .pill.good .gl { background: var(--ok); }
+  .pill.caution  { background: var(--warn-weak);   color: var(--warn-text);   border-color: var(--warn-weak-b); }
+  .pill.caution .gl { background: var(--warn); }
+  .pill.pending  { background: var(--info-weak);   color: var(--info-text);   border-color: var(--info-weak-b); }
+  .pill.pending .gl { background: var(--info); }
+  .pill.partial  { background: var(--caution-weak); color: #7d6312; border-color: #e9da9f; }
+  .pill.neutral  { background: var(--zinc-75);     color: var(--text-muted);  border-color: var(--border); }
+  .pill.neutral .gl { background: var(--zinc-400); }
+
+  /* running animated dot */
+  .pill.running .gl, .lead.s-running {
+    position: relative;
+  }
+  @keyframes pulse {
+    0%,100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+  .pill.running .gl { animation: pulse 1.8s ease-in-out infinite; }
+
+  /* count chips in table */
+  .countchip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: var(--fs-12);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .countchip svg { color: var(--text-ghost); }
+  .countchip.zero { color: var(--text-ghost); }
+  .count-cell { display: inline-flex; gap: 12px; justify-content: flex-end; }
+
+  .conf {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: var(--fs-12);
+    color: var(--text-muted);
+  }
+  .conf-bars { display: inline-flex; gap: 2px; align-items: flex-end; height: 11px; }
+  .conf-bars i { width: 3px; background: var(--zinc-300); border-radius: 1px; display: block; }
+  .conf-bars i:nth-child(1){ height: 4px; }
+  .conf-bars i:nth-child(2){ height: 7px; }
+  .conf-bars i:nth-child(3){ height: 11px; }
+  .conf.high .conf-bars i { background: var(--ok); }
+  .conf.medium .conf-bars i:nth-child(1),
+  .conf.medium .conf-bars i:nth-child(2) { background: var(--info); }
+  .conf.low .conf-bars i:nth-child(1) { background: var(--warn); }
+
+  /* ============================================================
+     LANES (Evidence / Reviews / Validations)
+     ============================================================ */
+  .lanes {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--sp-4);
+  }
+  .lane {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    box-shadow: var(--sh-1);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .lane-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 13px;
+    border-bottom: 1px solid var(--border-faint);
+    background: var(--zinc-25);
+  }
+  .lane-head .lane-title {
+    font-size: var(--fs-12);
+    font-weight: 600;
+    color: var(--text-strong);
+    letter-spacing: 0;
+  }
+  .lane-head .lane-count {
+    margin-left: auto;
+    font-size: var(--fs-11);
+    font-weight: 600;
+    color: var(--text-faint);
+    background: var(--zinc-100);
+    border-radius: var(--r-pill);
+    padding: 1px 7px;
+    font-variant-numeric: tabular-nums;
+  }
+  .lane-head svg { color: var(--text-faint); }
+  .lane-body { display: flex; flex-direction: column; }
+  .lane-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 13px;
+    border-bottom: 1px solid var(--border-faint);
+  }
+  .lane-row:last-child { border-bottom: none; }
+  .lane-row .id {
+    font-family: var(--font-mono);
+    font-size: var(--fs-12);
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+  }
+  .lane-row .meta {
+    font-size: var(--fs-11);
+    color: var(--text-ghost);
+    white-space: nowrap;
+  }
+  .lane-row .pill { margin-left: auto; }
+
+  /* ============================================================
+     RIGHT RAIL — SESSION DETAIL
+     ============================================================ */
+  .detail-head {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 2px;
+  }
+  .detail-head .nm {
+    font-family: var(--font-mono);
+    font-size: var(--fs-16);
+    font-weight: 600;
+    color: var(--text-strong);
+    letter-spacing: -0.02em;
+  }
+  .detail-head .grow { flex: 1; }
+
+  .detail-card { padding: var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-4); }
+
+  .kv-row { display: flex; flex-direction: column; gap: 4px; }
+  .kv-label {
+    font-size: var(--fs-11);
+    font-weight: 500;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .kv-value { font-size: var(--fs-13); color: var(--text); }
+  .kv-value.strong { color: var(--text-strong); font-weight: 500; }
+
+  .result-quote {
+    font-size: var(--fs-13);
+    color: var(--text-strong);
+    line-height: 1.5;
+    padding-left: 11px;
+    border-left: 2px solid var(--accent-weak-b);
+  }
+
+  .detail-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border-faint);
+    border: 1px solid var(--border-faint);
+    border-radius: var(--r-md);
+    overflow: hidden;
+  }
+  .detail-stat {
+    background: var(--zinc-25);
+    padding: 9px 11px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .detail-stat .v {
+    font-size: var(--fs-16);
+    font-weight: 600;
+    color: var(--text-strong);
+    line-height: 1;
+  }
+  .detail-stat .l {
+    font-size: var(--fs-11);
+    color: var(--text-faint);
+  }
+
+  .hr { height: 1px; background: var(--border-faint); border: none; }
+
+  .chiplist { display: flex; flex-wrap: wrap; gap: 6px; }
+  .evchip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--font-mono);
+    font-size: var(--fs-12);
+    color: var(--text);
+    background: var(--zinc-50);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    padding: 3px 8px;
+  }
+  .evchip .gl { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+
+  .blocker-note {
+    display: flex; gap: 9px;
+    background: var(--warn-weak);
+    border: 1px solid var(--warn-weak-b);
+    border-radius: var(--r-md);
+    padding: 10px 12px;
+    font-size: var(--fs-12);
+    color: var(--warn-text);
+    line-height: 1.45;
+  }
+  .blocker-note svg { flex: none; margin-top: 1px; color: var(--warn); }
+  .blocker-note .bl-title { font-weight: 600; display: block; margin-bottom: 1px; }
+
+  /* ============================================================
+     COMMAND PANEL
+     ============================================================ */
+  .cmd-card { padding: var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-3); }
+  .cmd-target {
+    font-size: var(--fs-12);
+    color: var(--text-faint);
+  }
+  .cmd-target .mono { color: var(--accent-text); }
+  .steer-wrap { position: relative; }
+  .steer {
+    width: 100%;
+    min-height: 74px;
+    resize: vertical;
+    font: inherit;
+    font-size: var(--fs-13);
+    color: var(--text-strong);
+    background: var(--zinc-25);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-md);
+    padding: 10px 12px;
+    line-height: 1.5;
+  }
+  .steer::placeholder { color: var(--text-ghost); }
+  .steer:focus {
+    outline: none;
+    border-color: var(--accent);
+    background: var(--bg-panel);
+    box-shadow: 0 0 0 3px var(--accent-weak);
+  }
+  .cmd-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+  }
+  .cmd-actions .grow { flex: 1; }
+  .cmd-actions .btn { height: 32px; }
+
+  .cmd-log {
+    display: flex; align-items: center; gap: 8px;
+    font-size: var(--fs-12);
+    color: var(--text-faint);
+    padding-top: 2px;
+  }
+  .cmd-log .gl { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none; }
+  .cmd-log .mono { color: var(--text-muted); }
+  .cmd-log .ts { margin-left: auto; color: var(--text-ghost); }
+
+  /* ============================================================
+     ACTIVITY TIMELINE
+     ============================================================ */
+  .timeline-card { padding: var(--sp-5) var(--sp-5) 6px; }
+  .tl { list-style: none; position: relative; }
+  .tl::before {
+    content: "";
+    position: absolute;
+    left: 5px; top: 6px; bottom: 18px;
+    width: 1px;
+    background: var(--border-strong);
+  }
+  .tl-item {
+    position: relative;
+    padding: 0 0 var(--sp-4) 22px;
+  }
+  .tl-item:last-child { padding-bottom: 6px; }
+  .tl-node {
+    position: absolute;
+    left: 0; top: 4px;
+    width: 11px; height: 11px;
+    border-radius: 50%;
+    background: var(--bg-panel);
+    border: 2px solid var(--zinc-300);
+    box-sizing: border-box;
+  }
+  .tl-item.k-planner    .tl-node { border-color: var(--accent); }
+  .tl-item.k-validation .tl-node { border-color: var(--ok); }
+  .tl-item.k-blocker    .tl-node { border-color: var(--warn); border-radius: 2px; }
+
+  .tl-meta {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 3px;
+  }
+  .tl-agent {
+    font-family: var(--font-mono);
+    font-size: var(--fs-12);
+    font-weight: 500;
+    color: var(--text-strong);
+  }
+  .tl-kind {
+    font-size: var(--fs-11);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 1px 6px;
+    border-radius: var(--r-sm);
+  }
+  .k-planner    .tl-kind { color: var(--accent-text); background: var(--accent-weak); }
+  .k-validation .tl-kind { color: var(--ok-text);     background: var(--ok-weak); }
+  .k-blocker    .tl-kind { color: var(--warn-text);   background: var(--warn-weak); }
+  .tl-time {
+    margin-left: auto;
+    font-size: var(--fs-11);
+    color: var(--text-ghost);
+    font-variant-numeric: tabular-nums;
+  }
+  .tl-text { font-size: var(--fs-13); color: var(--text-muted); line-height: 1.45; }
+
+  /* ---- Goal mini card ---- */
+  .goal-card { padding: 14px var(--sp-5); display: flex; flex-direction: column; gap: 11px; }
+  .goal-top { display: flex; align-items: center; gap: 9px; }
+  .goal-title { font-size: var(--fs-13); font-weight: 600; color: var(--text-strong); }
+  .req-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .req {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: var(--fs-12);
+    color: var(--text-muted);
+    background: var(--zinc-25);
+    border: 1px solid var(--border);
+    border-radius: var(--r-pill);
+    padding: 2px 9px 2px 7px;
+  }
+  .req svg { flex: none; }
+  .req.done svg { color: var(--ok); }
+  .req.todo svg { color: var(--text-ghost); }
+  .goal-line { font-size: var(--fs-12); color: var(--text-faint); }
+  .goal-line .mono { color: var(--text-muted); }
+  .goal-block {
+    display: flex; gap: 7px; align-items: flex-start;
+    font-size: var(--fs-12);
+    color: var(--warn-text);
+  }
+  .goal-block svg { flex: none; margin-top: 2px; color: var(--warn); }
+
+  /* footer note */
+  .footnote {
+    padding: 12px var(--sp-6);
+    font-size: var(--fs-11);
+    color: var(--text-ghost);
+    display: flex; align-items: center; gap: 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-panel);
+  }
+  .footnote .mono { color: var(--text-faint); }
+  .footnote .grow { flex: 1; }
+
+  /* ============================================================
+     RESPONSIVE — 390px
+     ============================================================ */
+  @media (max-width: 900px) {
+    .topbar {
+      flex-wrap: wrap;
+      height: auto;
+      padding: 10px var(--sp-4);
+      gap: 10px;
+    }
+    .topbar-spacer { display: none; }
+    .view-label { display: none; }
+    .tabs { order: 3; width: 100%; }
+    .tab { flex: 1; text-align: center; }
+    .controls { order: 2; margin-left: auto; }
+    .server-badge { font-size: 11px; }
+
+    .statusstrip { grid-template-columns: repeat(3, 1fr); }
+    .metric { padding: 12px var(--sp-4); border-bottom: 1px solid var(--border-faint); }
+    .metric:nth-child(3) { border-right: none; }
+
+    .main { grid-template-columns: 1fr; }
+    .col-left, .col-right { padding: var(--sp-4); }
+    .lanes { grid-template-columns: 1fr; }
+    .agent-result { max-width: 200px; }
+
+    .agents-table thead { display: none; }
+    .agents-table, .agents-table tbody, .agents-table tr, .agents-table td { display: block; width: 100%; }
+    .agents-table tbody tr { padding: 10px var(--sp-4); }
+    .agents-table td { padding: 3px 0; }
+    .agents-table td.col-num { text-align: left; }
+    .count-cell { justify-content: flex-start; }
+    .detail-stats { grid-template-columns: repeat(3, 1fr); }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ============================ TOP BAR ============================ -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+          <path d="M11.5 5.4A4 4 0 1 0 12 10.2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+        </svg>
+      </span>
+      <span class="brand-name">Capo</span>
+    </div>
+    <span class="divider-v" aria-hidden="true"></span>
+    <span class="view-label">Operator Dashboard</span>
+
+    <span class="topbar-spacer"></span>
+
+    <span class="server-badge" title="Server command API · fixture mode">
+      <span class="dot-live" aria-hidden="true"></span>
+      mock server-command API
+      <span class="sep">·</span>
+      <span class="mode-tag">fixture</span>
+    </span>
+
+    <nav class="tabs" aria-label="Primary views">
+      <button class="tab" aria-current="page">Overview</button>
+      <button class="tab">Goals</button>
+      <button class="tab">Settings</button>
+    </nav>
+
+    <div class="controls">
+      <button class="btn" aria-label="Refresh">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+          <path d="M13 8a5 5 0 1 1-1.46-3.54M13 2.5V5h-2.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Refresh
+      </button>
+      <button class="btn" aria-label="Details">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+          <rect x="2.5" y="3" width="11" height="2" rx="1" fill="currentColor"/>
+          <rect x="2.5" y="7" width="11" height="2" rx="1" fill="currentColor"/>
+          <rect x="2.5" y="11" width="7" height="2" rx="1" fill="currentColor"/>
+        </svg>
+        Details
+      </button>
+    </div>
+  </header>
+
+  <!-- ============================ STATUS STRIP ============================ -->
+  <section class="statusstrip" aria-label="Run summary">
+    <div class="metric">
+      <span class="metric-label"><span class="tick" aria-hidden="true"></span>Agents</span>
+      <span class="metric-value num">5</span>
+      <span class="metric-sub">supervised this run</span>
+    </div>
+    <div class="metric is-active">
+      <span class="metric-label"><span class="tick" aria-hidden="true"></span>Active</span>
+      <span class="metric-value num">3</span>
+      <span class="metric-sub">running now</span>
+    </div>
+    <div class="metric is-warn" role="status">
+      <span class="metric-label">
+        <span class="tick" aria-hidden="true"></span>
+        Blocked
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M8 1.5 15 14H1L8 1.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+          <path d="M8 6.2v3.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+          <circle cx="8" cy="11.6" r="0.9" fill="currentColor"/>
+        </svg>
+      </span>
+      <span class="metric-value num">1</span>
+      <span class="metric-sub">needs attention</span>
+    </div>
+    <div class="metric">
+      <span class="metric-label"><span class="tick" aria-hidden="true"></span>Evidence</span>
+      <span class="metric-value num">6</span>
+      <span class="metric-sub">artifacts captured</span>
+    </div>
+    <div class="metric">
+      <span class="metric-label"><span class="tick" aria-hidden="true"></span>Reviews</span>
+      <span class="metric-value num">2</span>
+      <span class="metric-sub">1 open · 1 accepted</span>
+    </div>
+    <div class="metric is-good">
+      <span class="metric-label"><span class="tick" aria-hidden="true"></span>Validations</span>
+      <span class="metric-value num">3</span>
+      <span class="metric-sub">2 passed · 1 pending</span>
+    </div>
+  </section>
+
+  <!-- ============================ MAIN ============================ -->
+  <div class="main">
+
+    <!-- ----------------------- LEFT COLUMN ----------------------- -->
+    <div class="col col-left">
+
+      <!-- AGENTS -->
+      <section>
+        <div class="section-head">
+          <span class="section-title">Agents</span>
+          <span class="section-meta num">5 total · 3 active · 1 blocked</span>
+          <span class="grow"></span>
+          <a class="section-link">Updated 12:00 UTC</a>
+        </div>
+        <div class="panel">
+          <table class="agents-table">
+            <thead>
+              <tr>
+                <th style="width: 30%;">Agent</th>
+                <th style="width: 13%;">Status</th>
+                <th style="width: 13%;">Adapter</th>
+                <th>Latest result</th>
+                <th class="col-num" style="width: 130px;">Ev · Rv · Vl</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- capo-operator (selected) -->
+              <tr class="is-selected" aria-current="true">
+                <td>
+                  <div class="agent-name">
+                    <span class="lead s-finished" aria-hidden="true"></span>
+                    <span class="nm">capo-operator</span>
+                  </div>
+                </td>
+                <td>
+                  <span class="pill finished">
+                    <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    finished
+                  </span>
+                </td>
+                <td><span class="adapter">codex_exec</span></td>
+                <td><div class="agent-result">Selected results_evidence for an all-agent evidence request.</div></td>
+                <td class="col-num">
+                  <span class="count-cell">
+                    <span class="countchip"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M9 1.5H4.5A1.5 1.5 0 0 0 3 3v10a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 13V5.5L9 1.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>1</span>
+                    <span class="countchip zero"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 3.5C4.5 3.5 2 8 2 8s2.5 4.5 6 4.5S14 8 14 8 11.5 3.5 8 3.5Z" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="8" r="1.7" stroke="currentColor" stroke-width="1.2"/></svg>0</span>
+                    <span class="countchip"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>1</span>
+                  </span>
+                </td>
+              </tr>
+
+              <!-- codex-local (timed out) -->
+              <tr>
+                <td>
+                  <div class="agent-name">
+                    <span class="lead s-timeout" aria-hidden="true"></span>
+                    <span class="nm">codex-local</span>
+                  </div>
+                </td>
+                <td>
+                  <span class="pill timeout">
+                    <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8.5" r="5.5" stroke="currentColor" stroke-width="1.4"/><path d="M8 5.5V8.5l2 1.4M8 1.2V2.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                    timed out
+                  </span>
+                </td>
+                <td><span class="adapter">codex_exec</span></td>
+                <td><div class="agent-result">Timed out after recording two tool calls and a memory packet.</div></td>
+                <td class="col-num">
+                  <span class="count-cell">
+                    <span class="countchip"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M9 1.5H4.5A1.5 1.5 0 0 0 3 3v10a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 13V5.5L9 1.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>2</span>
+                    <span class="countchip"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 3.5C4.5 3.5 2 8 2 8s2.5 4.5 6 4.5S14 8 14 8 11.5 3.5 8 3.5Z" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="8" r="1.7" stroke="currentColor" stroke-width="1.2"/></svg>1</span>
+                    <span class="countchip zero"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>0</span>
+                  </span>
+                </td>
+              </tr>
+
+              <!-- codex-one (running) -->
+              <tr>
+                <td>
+                  <div class="agent-name">
+                    <span class="lead s-running" aria-hidden="true"></span>
+                    <span class="nm">codex-one</span>
+                  </div>
+                </td>
+                <td>
+                  <span class="pill running"><span class="gl" aria-hidden="true"></span>running</span>
+                </td>
+                <td><span class="adapter">codex_exec</span></td>
+                <td><div class="agent-result">Working on webclient design and browser verification.</div></td>
+                <td class="col-num">
+                  <span class="count-cell">
+                    <span class="countchip"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M9 1.5H4.5A1.5 1.5 0 0 0 3 3v10a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 13V5.5L9 1.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>1</span>
+                    <span class="countchip zero"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 3.5C4.5 3.5 2 8 2 8s2.5 4.5 6 4.5S14 8 14 8 11.5 3.5 8 3.5Z" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="8" r="1.7" stroke="currentColor" stroke-width="1.2"/></svg>0</span>
+                    <span class="countchip"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>1</span>
+                  </span>
+                </td>
+              </tr>
+
+              <!-- codex-proof (finished) -->
+              <tr>
+                <td>
+                  <div class="agent-name">
+                    <span class="lead s-finished" aria-hidden="true"></span>
+                    <span class="nm">codex-proof</span>
+                  </div>
+                </td>
+                <td>
+                  <span class="pill finished">
+                    <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    finished
+                  </span>
+                </td>
+                <td><span class="adapter">codex_exec</span></td>
+                <td><div class="agent-result">Finished Codex-backed proof through the server boundary.</div></td>
+                <td class="col-num">
+                  <span class="count-cell">
+                    <span class="countchip"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M9 1.5H4.5A1.5 1.5 0 0 0 3 3v10a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 13V5.5L9 1.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>2</span>
+                    <span class="countchip"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 3.5C4.5 3.5 2 8 2 8s2.5 4.5 6 4.5S14 8 14 8 11.5 3.5 8 3.5Z" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="8" r="1.7" stroke="currentColor" stroke-width="1.2"/></svg>1</span>
+                    <span class="countchip"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>1</span>
+                  </span>
+                </td>
+              </tr>
+
+              <!-- demo (running, fake adapter) -->
+              <tr>
+                <td>
+                  <div class="agent-name">
+                    <span class="lead s-running" aria-hidden="true"></span>
+                    <span class="nm">demo</span>
+                  </div>
+                </td>
+                <td>
+                  <span class="pill running"><span class="gl" aria-hidden="true"></span>running</span>
+                </td>
+                <td><span class="adapter is-fake" title="Mock adapter">fake</span></td>
+                <td><div class="agent-result">Fake adapter processed the latest steering goal.</div></td>
+                <td class="col-num">
+                  <span class="count-cell">
+                    <span class="countchip"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M9 1.5H4.5A1.5 1.5 0 0 0 3 3v10a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 13V5.5L9 1.5Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>1</span>
+                    <span class="countchip zero"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 3.5C4.5 3.5 2 8 2 8s2.5 4.5 6 4.5S14 8 14 8 11.5 3.5 8 3.5Z" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="8" r="1.7" stroke="currentColor" stroke-width="1.2"/></svg>0</span>
+                    <span class="countchip zero"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>0</span>
+                  </span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- LANES: Evidence / Reviews / Validations -->
+      <section>
+        <div class="section-head">
+          <span class="section-title">Evidence, reviews &amp; validation</span>
+          <span class="section-meta num">6 evidence · 2 reviews · 3 validations</span>
+        </div>
+        <div class="lanes">
+
+          <!-- Evidence lane -->
+          <div class="lane">
+            <div class="lane-head">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M9 1.5H4.5A1.5 1.5 0 0 0 3 3v10a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 13V5.5L9 1.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9 1.5V5.5H13" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+              <span class="lane-title">Evidence</span>
+              <span class="lane-count num">6</span>
+            </div>
+            <div class="lane-body">
+              <div class="lane-row">
+                <span class="id">planner-action-results-evidence</span>
+                <span class="meta">test</span>
+                <span class="pill good"><span class="gl"></span>validated</span>
+              </div>
+              <div class="lane-row">
+                <span class="id">codex-live-smoke</span>
+                <span class="meta">manual</span>
+                <span class="pill good"><span class="gl"></span>validated</span>
+              </div>
+              <div class="lane-row">
+                <span class="id">timeout-log</span>
+                <span class="meta">artifact</span>
+                <span class="pill partial">
+                  <svg width="10" height="10" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.4"/><path d="M8 8 8 2.2A5.8 5.8 0 0 1 8 8Z" fill="currentColor"/></svg>
+                  partial
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Reviews lane -->
+          <div class="lane">
+            <div class="lane-head">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+              <span class="lane-title">Reviews</span>
+              <span class="lane-count num">2</span>
+            </div>
+            <div class="lane-body">
+              <div class="lane-row">
+                <span class="id">review-codex-local-timeout</span>
+                <span class="meta">→ codex-local</span>
+                <span class="pill caution"><span class="gl"></span>needs follow-up</span>
+              </div>
+              <div class="lane-row">
+                <span class="id">review-codex-proof</span>
+                <span class="meta">→ codex-proof</span>
+                <span class="pill good"><span class="gl"></span>accepted</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Validations lane -->
+          <div class="lane">
+            <div class="lane-head">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 1.6 13.5 4v3.6c0 3.4-2.3 5.6-5.5 6.8C4.8 13.2 2.5 11 2.5 7.6V4L8 1.6Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+              <span class="lane-title">Validations</span>
+              <span class="lane-count num">3</span>
+            </div>
+            <div class="lane-body">
+              <div class="lane-row">
+                <span class="id">browser-smoke</span>
+                <span class="meta">→ dashboard-webclient</span>
+                <span class="pill pending"><span class="gl"></span>pending</span>
+              </div>
+              <div class="lane-row">
+                <span class="id">codex-proof-smoke</span>
+                <span class="meta">→ codex-proof</span>
+                <span class="pill good"><span class="gl"></span>passed</span>
+              </div>
+              <div class="lane-row">
+                <span class="id">planner-results-evidence</span>
+                <span class="meta">→ capo-operator</span>
+                <span class="pill good"><span class="gl"></span>passed</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ACTIVITY + GOAL row -->
+      <section>
+        <div class="section-head">
+          <span class="section-title">Recent activity</span>
+          <span class="section-meta">last 3 events</span>
+          <span class="grow"></span>
+          <a class="section-link">View all</a>
+        </div>
+        <div class="panel timeline-card">
+          <ul class="tl">
+            <li class="tl-item k-planner">
+              <span class="tl-node" aria-hidden="true"></span>
+              <div class="tl-meta">
+                <span class="tl-agent">capo-operator</span>
+                <span class="tl-kind">planner</span>
+                <span class="tl-time num">12:00</span>
+              </div>
+              <p class="tl-text">Mapped an all-agent response/evidence request to results_evidence.</p>
+            </li>
+            <li class="tl-item k-validation">
+              <span class="tl-node" aria-hidden="true"></span>
+              <div class="tl-meta">
+                <span class="tl-agent">codex-proof</span>
+                <span class="tl-kind">validation</span>
+                <span class="tl-time num">11:42</span>
+              </div>
+              <p class="tl-text">Codex proof completed through server dispatch.</p>
+            </li>
+            <li class="tl-item k-blocker">
+              <span class="tl-node" aria-hidden="true"></span>
+              <div class="tl-meta">
+                <span class="tl-agent">codex-local</span>
+                <span class="tl-kind">blocker</span>
+                <span class="tl-time num">11:15</span>
+              </div>
+              <p class="tl-text">Timed out while collecting workspace internals.</p>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- GOAL -->
+      <section>
+        <div class="section-head">
+          <span class="section-title">Active goal</span>
+          <span class="grow"></span>
+          <a class="section-link">Goals →</a>
+        </div>
+        <div class="panel goal-card">
+          <div class="goal-top">
+            <span class="pill pending"><span class="gl"></span>active</span>
+            <span class="goal-title">Complete dashboard webclient workpad</span>
+          </div>
+          <div class="req-row">
+            <span class="req done">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.4" fill="var(--ok-weak)"/><path d="M5 8l2 2 4-4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              design accepted
+            </span>
+            <span class="req done">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.4" fill="var(--ok-weak)"/><path d="M5 8l2 2 4-4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              browser screenshots
+            </span>
+            <span class="req todo">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.6" stroke="currentColor" stroke-width="1.3" stroke-dasharray="2 2"/></svg>
+              interactive smoke
+            </span>
+          </div>
+          <div class="goal-block">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M8 1.5 15 14H1L8 1.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.2v3.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="11.6" r="0.9" fill="currentColor"/></svg>
+            <span>Blocker — live HTTP server integration is future work</span>
+          </div>
+          <div class="goal-line">Validation via <span class="mono">fixture browser smoke</span></div>
+        </div>
+      </section>
+
+    </div><!-- /col-left -->
+
+    <!-- ----------------------- RIGHT RAIL ----------------------- -->
+    <div class="col col-right">
+
+      <!-- SESSION DETAIL -->
+      <section>
+        <div class="section-head">
+          <span class="section-title">Session detail</span>
+          <span class="grow"></span>
+          <span class="section-meta">selected</span>
+        </div>
+        <div class="panel detail-card">
+          <div class="detail-head">
+            <span class="lead s-finished" aria-hidden="true" style="width:9px;height:9px;"></span>
+            <span class="nm">capo-operator</span>
+            <span class="grow"></span>
+            <span class="pill finished">
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              finished
+            </span>
+          </div>
+
+          <div class="kv-row">
+            <span class="kv-label">Latest result</span>
+            <p class="result-quote">Selected results_evidence for an all-agent evidence request.</p>
+          </div>
+
+          <div class="kv-row">
+            <span class="kv-label">Goal</span>
+            <span class="kv-value">Map operator input into validated server-backed actions</span>
+          </div>
+
+          <div style="display:flex; gap:var(--sp-5); align-items:flex-start;">
+            <div class="kv-row" style="flex:1;">
+              <span class="kv-label">Adapter</span>
+              <span class="kv-value strong mono">codex_exec</span>
+            </div>
+            <div class="kv-row" style="flex:1;">
+              <span class="kv-label">Confidence</span>
+              <span class="conf medium">
+                <span class="conf-bars" aria-hidden="true"><i></i><i></i><i></i></span>
+                medium
+              </span>
+            </div>
+          </div>
+
+          <div class="detail-stats" role="group" aria-label="Counts">
+            <div class="detail-stat"><span class="v num">1</span><span class="l">Evidence</span></div>
+            <div class="detail-stat"><span class="v num">0</span><span class="l">Reviews</span></div>
+            <div class="detail-stat"><span class="v num">1</span><span class="l">Validations</span></div>
+          </div>
+
+          <hr class="hr" />
+
+          <div class="kv-row">
+            <span class="kv-label">Evidence</span>
+            <div class="chiplist">
+              <span class="evchip"><span class="gl" aria-hidden="true"></span>planner-action-results-evidence</span>
+            </div>
+          </div>
+
+          <div class="kv-row">
+            <span class="kv-label">Validation</span>
+            <div class="chiplist">
+              <span class="pill good"><span class="gl"></span>planner-results-evidence · passed</span>
+            </div>
+          </div>
+
+          <div class="blocker-note" style="background:var(--ok-weak);border-color:var(--ok-weak-b);color:var(--ok-text);">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.4" stroke="currentColor" stroke-width="1.3"/><path d="M5 8l2 2 4-4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span><span class="bl-title">No blocker</span>Result reviewed and validated — safe to proceed.</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- COMMAND PANEL -->
+      <section>
+        <div class="section-head">
+          <span class="section-title">Command</span>
+          <span class="grow"></span>
+          <span class="section-meta">target <span class="mono" style="color:var(--accent-text)">capo-operator</span></span>
+        </div>
+        <div class="panel cmd-card">
+          <div class="cmd-target">Steer, interrupt, or stop the selected agent.</div>
+          <div class="steer-wrap">
+            <textarea class="steer" placeholder="Steer capo-operator — e.g. &quot;Re-run results_evidence across all agents and attach the diff.&quot;"></textarea>
+          </div>
+          <div class="cmd-actions">
+            <button class="btn btn-primary">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M2 8h10M8 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Send
+            </button>
+            <span class="grow"></span>
+            <button class="btn btn-danger" title="Pause the agent at the next safe point">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><rect x="4" y="3" width="3" height="10" rx="1" fill="currentColor"/><rect x="9" y="3" width="3" height="10" rx="1" fill="currentColor"/></svg>
+              Interrupt
+            </button>
+            <button class="btn btn-danger" title="Terminate the agent run">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor"/></svg>
+              Stop
+            </button>
+          </div>
+          <div class="cmd-log">
+            <span class="gl" aria-hidden="true"></span>
+            <span class="mono">planner → results_evidence</span>
+            <span>dispatched ok</span>
+            <span class="ts num">12:00:14</span>
+          </div>
+        </div>
+      </section>
+
+    </div><!-- /col-right -->
+
+  </div><!-- /main -->
+
+  <!-- FOOTER NOTE -->
+  <footer class="footnote">
+    <span class="mono">project-capo</span>
+    <span>·</span>
+    <span>fixture mode — no live HTTP integration</span>
+    <span class="grow"></span>
+    <span>Last sync <span class="num">2026-05-28 12:00 UTC</span></span>
+  </footer>
+
+</div>
+</body>
+</html>

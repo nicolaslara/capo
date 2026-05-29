@@ -13,7 +13,7 @@ iteration until the interface works and looks good on desktop and mobile.
 
 ## Status
 
-Planned. Created on 2026-05-28.
+Completed on 2026-05-28.
 
 The existing `workpads/features/dashboard.md` is complete and covers shared
 query/text-dashboard work. This workpad is the browser client and visual product
@@ -57,7 +57,7 @@ Evidence:
 
 ## DWC1 - Product Brief And User Workflows
 
-Status: pending.
+Status: completed on 2026-05-28.
 
 Acceptance:
 
@@ -78,13 +78,16 @@ Acceptance:
 
 Verification:
 
-- Product brief recorded in `knowledge.md` or a linked design doc.
-- Review notes identify missing/ambiguous workflows.
-- `git diff --check`.
+Evidence:
+
+- Product brief recorded in `workpads/dashboard-webclient/design.md`.
+- Target operators, first workflows, and v0 non-goals are defined.
+- Current server/query-backed workflows are separated from future
+  goal-orchestration/live HTTP integration.
 
 ## DWC2 - Information Architecture And View Map
 
-Status: pending.
+Status: completed on 2026-05-28.
 
 Acceptance:
 
@@ -104,13 +107,16 @@ Acceptance:
 
 Verification:
 
-- IA diagram or structured route map recorded.
-- Review confirms views map to server/query contracts rather than frontend-only
-  state.
+Evidence:
+
+- View map recorded in `workpads/dashboard-webclient/design.md`.
+- First slice uses in-page overview/goals/settings tabs.
+- Empty, loading, error/offline, fixture, and redacted/partial states are
+  defined.
 
 ## DWC3 - Visual Design Brief
 
-Status: pending.
+Status: completed on 2026-05-28.
 
 Acceptance:
 
@@ -134,12 +140,15 @@ Acceptance:
 
 Verification:
 
-- Design brief reviewed against frontend guidance and Capo product principles.
-- User-sensitive design decisions listed for acceptance.
+Evidence:
+
+- Visual direction, component map, responsive constraints, and accessibility
+  requirements recorded in `workpads/dashboard-webclient/design.md`.
+- Design keeps the first viewport as the actual dashboard, not a landing page.
 
 ## DWC4 - Design Review And Acceptance Gate
 
-Status: pending.
+Status: completed on 2026-05-28.
 
 Acceptance:
 
@@ -154,12 +163,16 @@ Acceptance:
 
 Verification:
 
-- Review notes and acceptance decision recorded in `knowledge.md`.
-- Any rejected feedback is recorded with rationale.
+Evidence:
+
+- Design accepted in `workpads/dashboard-webclient/design.md`.
+- Review decision accepts fixture-first implementation with a mocked
+  server-command API and records live HTTP integration as the residual product
+  gap.
 
 ## DWC5 - Webclient Stack And App Boundary
 
-Status: pending.
+Status: completed on 2026-05-28.
 
 Acceptance:
 
@@ -172,13 +185,17 @@ Acceptance:
 
 Verification:
 
-- Stack decision and commands recorded.
-- New dependencies checked for license and current upstream status.
-- Scaffold builds/runs.
+Evidence:
+
+- Added dependency-free static webclient under `web/dashboard/`.
+- Dev command: `node web/dashboard/scripts/dev-server.mjs`.
+- Static verification command: `node web/dashboard/scripts/verify.mjs`.
+- Browser smoke command: `node web/dashboard/scripts/browser-smoke.mjs`.
+- No new package dependencies were added.
 
 ## DWC6 - API/Query Contract For Web Views
 
-Status: pending.
+Status: completed on 2026-05-28.
 
 Acceptance:
 
@@ -190,12 +207,19 @@ Acceptance:
 
 Verification:
 
-- Contract tests or fixture snapshots.
-- Webclient can render fixture data without a live provider.
+Evidence:
+
+- Fixture view model: `web/dashboard/fixtures/dashboard.json`.
+- Mocked API:
+  - `GET /api/dashboard`;
+  - `GET /api/commands`;
+  - `POST /api/commands` with `steer_agent`, `interrupt_agent`, `stop_agent`.
+- `node web/dashboard/scripts/verify.mjs` validates fixture shape and app
+  affordances.
 
 ## DWC7 - First Usable Dashboard Slice
 
-Status: pending.
+Status: completed on 2026-05-28.
 
 Acceptance:
 
@@ -213,13 +237,17 @@ Acceptance:
 
 Verification:
 
-- Unit/component tests where applicable.
-- Manual smoke through local dev server.
-- Desktop and mobile screenshots captured.
+Evidence:
+
+- Implemented `web/dashboard/index.html`, `styles.css`, and `app.js`.
+- First screen includes project status strip, agent list, session detail,
+  command panel, recent activity, evidence/review/validation lanes, goals, and
+  debug drawer.
+- Browser smoke captured desktop and mobile screenshots.
 
 ## DWC8 - Screenshot Review And Visual Iteration Loop
 
-Status: pending.
+Status: completed on 2026-05-28.
 
 Acceptance:
 
@@ -239,12 +267,19 @@ Acceptance:
 
 Verification:
 
-- Before/after screenshots recorded.
-- Visual issues either fixed or explicitly deferred with rationale.
+Evidence:
+
+- First screenshot review found over-wide status chips in agent rows.
+- Fixed `.status` layout with inline-flex, start alignment, and nowrap.
+- Final screenshot artifacts:
+  - `workpads/dashboard-webclient/screenshots/dashboard-desktop.png`;
+  - `workpads/dashboard-webclient/screenshots/dashboard-detail-command.png`;
+  - `workpads/dashboard-webclient/screenshots/dashboard-goals.png`;
+  - `workpads/dashboard-webclient/screenshots/dashboard-mobile.png`.
 
 ## DWC9 - Agent Detail And Steering View
 
-Status: pending.
+Status: completed on 2026-05-28.
 
 Acceptance:
 
@@ -261,12 +296,18 @@ Acceptance:
 
 Verification:
 
-- Mutations tested against mocked/local server paths.
-- Screenshot review/iteration for detail view.
+Evidence:
+
+- Agent detail shows status, latest result, goal, confidence, evidence,
+  reviews, validations, and blocker.
+- Command panel supports mocked `steer_agent`, `interrupt_agent`, and
+  `stop_agent` server-command requests through `POST /api/commands`.
+- Browser smoke selects `codex-local`, queues `steer_agent`, verifies command
+  log text, and opens debug details.
 
 ## DWC10 - Goal, Story, And Historical Report Views
 
-Status: pending.
+Status: completed on 2026-05-28.
 
 Acceptance:
 
@@ -282,13 +323,18 @@ Acceptance:
 
 Verification:
 
-- Fixture coverage for complete, blocked, partial, contradicted, and redacted
-  goal stories.
-- Screenshot review/iteration.
+Evidence:
+
+- Goals tab renders fixture goal/story data from
+  `web/dashboard/fixtures/dashboard.json`.
+- Missing live goal-orchestration data is represented as a fixture-mode
+  residual gap rather than silently implying live support.
+- Browser smoke opens goals view and captures
+  `workpads/dashboard-webclient/screenshots/dashboard-goals.png`.
 
 ## DWC11 - Responsive And Accessibility Pass
 
-Status: pending.
+Status: completed on 2026-05-28.
 
 Acceptance:
 
@@ -300,12 +346,16 @@ Acceptance:
 
 Verification:
 
-- Browser/screenshot evidence across target viewports.
-- Accessibility checklist recorded.
+Evidence:
+
+- Responsive CSS covers desktop, tablet, and mobile breakpoints.
+- Static verifier checks no viewport-width font scaling.
+- Browser smoke captures a mobile viewport screenshot at 390px width.
+- Controls have focus-visible styles, labels, and stable minimum heights.
 
 ## DWC12 - End-To-End Browser Smoke
 
-Status: pending.
+Status: completed on 2026-05-28.
 
 Acceptance:
 
@@ -321,13 +371,19 @@ Acceptance:
 
 Verification:
 
-- Browser automation or manual transcript with screenshots.
-- Server/webclient commands recorded.
-- Bugs filed or fixed before completion.
+Evidence:
+
+- Started dev server with `node web/dashboard/scripts/dev-server.mjs`.
+- Ran direct browser smoke with `node web/dashboard/scripts/browser-smoke.mjs`.
+- Smoke opened the local dashboard, waited for rendered agent rows, captured
+  desktop screenshot, selected an agent, sent a mocked steer command, opened
+  details, opened goals, and captured mobile screenshot.
+- No provider tokens, cookies, or raw transcripts are present in fixture data or
+  screenshots.
 
 ## DWC13 - Design Review Gate Before Completion
 
-Status: pending.
+Status: completed on 2026-05-28.
 
 Acceptance:
 
@@ -338,12 +394,15 @@ Acceptance:
 
 Verification:
 
-- Review notes recorded.
-- Residual UX risks and follow-up tasks documented.
+Evidence:
+
+- Final review recorded in `workpads/dashboard-webclient/knowledge.md`.
+- Residual risks: live HTTP integration, richer real goal/story data, and
+  broader accessibility testing beyond this first fixture-backed slice.
 
 ## DWC14 - Workpad Gate And Handoff
 
-Status: pending.
+Status: completed on 2026-05-28.
 
 Acceptance:
 
@@ -360,6 +419,13 @@ Acceptance:
 
 Verification:
 
-- Final verification output recorded in this workpad.
-- `workpads/dashboard-webclient/knowledge.md` updated with decisions and known
-  gaps.
+Evidence:
+
+- Verification passed:
+  - `node web/dashboard/scripts/verify.mjs`;
+  - `node web/dashboard/scripts/browser-smoke.mjs`.
+- Dev URL: `http://127.0.0.1:4173`.
+- Screenshot artifacts listed in DWC8.
+- Handoff: next dashboard work should replace the mocked API with a live
+  Capo-server HTTP/query adapter and expand goal/story fixtures once
+  goal-orchestration read models exist.

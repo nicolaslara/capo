@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Capo Dashboard</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div id="app" class="app-shell" data-testid="dashboard-app">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Capo</p>
+          <h1>Operator Dashboard</h1>
+        </div>
+        <div class="topbar-actions">
+          <span class="badge" id="server-badge">Loading</span>
+          <button class="icon-button" id="refresh-button" type="button" title="Refresh dashboard" aria-label="Refresh dashboard">R</button>
+          <button class="icon-button" id="debug-toggle" type="button" title="Toggle details" aria-label="Toggle details">D</button>
+        </div>
+      </header>
+
+      <nav class="tabs" aria-label="Dashboard views">
+        <button class="tab is-active" type="button" data-view="overview">Overview</button>
+        <button class="tab" type="button" data-view="goals">Goals</button>
+        <button class="tab" type="button" data-view="settings">Settings</button>
+      </nav>
+
+      <main class="dashboard-grid">
+        <section class="status-strip" aria-label="Project status">
+          <div class="metric"><span id="metric-agents">0</span><label>Agents</label></div>
+          <div class="metric"><span id="metric-active">0</span><label>Active</label></div>
+          <div class="metric warn"><span id="metric-blocked">0</span><label>Blocked</label></div>
+          <div class="metric"><span id="metric-evidence">0</span><label>Evidence</label></div>
+          <div class="metric"><span id="metric-reviews">0</span><label>Reviews</label></div>
+          <div class="metric"><span id="metric-validations">0</span><label>Validations</label></div>
+        </section>
+
+        <section class="panel agent-list-panel" aria-labelledby="agents-heading">
+          <div class="panel-heading">
+            <h2 id="agents-heading">Agents</h2>
+            <label class="filter-label" for="agent-filter">Filter</label>
+            <input id="agent-filter" type="search" placeholder="Name or status">
+          </div>
+          <div id="agent-list" class="agent-list" role="list"></div>
+        </section>
+
+        <section class="panel detail-panel" aria-labelledby="detail-heading">
+          <div class="panel-heading">
+            <h2 id="detail-heading">Session Detail</h2>
+            <span class="badge" id="selected-status">No agent</span>
+          </div>
+          <div id="agent-detail" class="agent-detail"></div>
+        </section>
+
+        <section class="panel command-panel" aria-labelledby="command-heading">
+          <div class="panel-heading">
+            <h2 id="command-heading">Command</h2>
+            <span class="badge subtle">server command path</span>
+          </div>
+          <label for="steer-input">Steer selected agent</label>
+          <textarea id="steer-input" rows="4" placeholder="Ask the selected agent to continue, summarize, or validate."></textarea>
+          <div class="command-actions">
+            <button class="primary" id="steer-button" type="button">Send</button>
+            <button class="danger" id="interrupt-button" type="button">Interrupt</button>
+            <button class="danger ghost" id="stop-button" type="button">Stop</button>
+          </div>
+          <div id="command-log" class="command-log" aria-live="polite"></div>
+        </section>
+
+        <section class="panel timeline-panel" aria-labelledby="timeline-heading">
+          <div class="panel-heading">
+            <h2 id="timeline-heading">Recent Activity</h2>
+          </div>
+          <ol id="activity-list" class="timeline"></ol>
+        </section>
+
+        <section class="panel lanes-panel" aria-labelledby="lanes-heading">
+          <div class="panel-heading">
+            <h2 id="lanes-heading">Evidence, Reviews, Validation</h2>
+          </div>
+          <div class="lanes">
+            <div>
+              <h3>Evidence</h3>
+              <div id="evidence-list" class="compact-list"></div>
+            </div>
+            <div>
+              <h3>Reviews</h3>
+              <div id="review-list" class="compact-list"></div>
+            </div>
+            <div>
+              <h3>Validation</h3>
+              <div id="validation-list" class="compact-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel goals-panel hidden" id="goals-view" aria-labelledby="goals-heading">
+          <div class="panel-heading">
+            <h2 id="goals-heading">Goals And Story</h2>
+          </div>
+          <div id="goal-list" class="goal-list"></div>
+        </section>
+
+        <section class="panel settings-panel hidden" id="settings-view" aria-labelledby="settings-heading">
+          <div class="panel-heading">
+            <h2 id="settings-heading">Settings</h2>
+          </div>
+          <dl class="settings-list">
+            <div><dt>Data mode</dt><dd id="settings-mode">fixture</dd></div>
+            <div><dt>Polling</dt><dd>Manual refresh</dd></div>
+            <div><dt>Mutation policy</dt><dd>Mocked server-command endpoint</dd></div>
+            <div><dt>Raw output</dt><dd>Hidden behind details</dd></div>
+          </dl>
+        </section>
+      </main>
+
+      <aside class="debug-drawer" id="debug-drawer" aria-label="Debug details" hidden>
+        <div class="panel-heading">
+          <h2>Details</h2>
+          <button class="icon-button" id="debug-close" type="button" aria-label="Close details">X</button>
+        </div>
+        <pre id="debug-output"></pre>
+      </aside>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

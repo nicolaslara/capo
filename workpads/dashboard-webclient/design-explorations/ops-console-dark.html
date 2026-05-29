@@ -1,0 +1,1066 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Capo — Operator Dashboard</title>
+<style>
+  /* ============================================================
+     CAPO · OPERATOR DASHBOARD
+     Direction: "ops-console-dark" — mission-control console
+     Tokens → color (by role), type scale, spacing, radius, border, elevation
+     ============================================================ */
+  :root {
+    /* --- surfaces (deep slate/navy, panels one step lighter) --- */
+    --bg-app:      #0e1117;
+    --bg-canvas:   #11161f;
+    --bg-panel:    #151b26;
+    --bg-panel-2:  #19202c;
+    --bg-raised:   #1d2532;
+    --bg-row-alt:  #131925;
+    --bg-input:    #0d121b;
+    --bg-chip:     #1b2330;
+
+    /* --- seams / borders (crisp 1px) --- */
+    --line:        #232c3a;
+    --line-soft:   #1c2431;
+    --line-strong: #2d3a4d;
+    --focus-ring:  #3b6ef0;
+
+    /* --- text --- */
+    --fg:          #e6ebf2;
+    --fg-strong:   #f4f7fb;
+    --fg-muted:    #9aa6b8;
+    --fg-dim:      #6c788c;
+    --fg-faint:    #4d5869;
+
+    /* --- status roles (filled dot + desaturated chip bg) --- */
+    --ok:          #36c98d;  --ok-bg:   #11281f;  --ok-bd:   #1d4634;
+    --info:        #4f9bf2;  --info-bg: #0f2236;  --info-bd: #1d3c5c;
+    --warn:        #e8b341;  --warn-bg: #2c2310;  --warn-bd: #4d3f17;
+    --danger:      #f0664f;  --danger-bg:#2e1714; --danger-bd:#502721;
+    --neutral:     #8492a6;  --neutral-bg:#1a212d; --neutral-bd:#28323f;
+    --accent:      #7c8cf8;
+
+    /* --- type scale --- */
+    --t-10: 10px; --t-11: 11px; --t-12: 12px; --t-13: 13px;
+    --t-14: 14px; --t-16: 16px; --t-22: 22px; --t-28: 28px;
+    --lh-tight: 1.15; --lh: 1.45;
+
+    /* --- spacing (4px base) --- */
+    --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px;
+    --s-5: 20px; --s-6: 24px; --s-7: 32px; --s-8: 40px;
+
+    /* --- radius --- */
+    --r-1: 4px; --r-2: 6px; --r-3: 8px; --r-pill: 999px;
+
+    /* --- elevation --- */
+    --shadow-1: 0 1px 0 rgba(0,0,0,.4);
+    --shadow-2: 0 8px 24px -8px rgba(0,0,0,.6);
+
+    /* --- fonts --- */
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg-app);
+    color: var(--fg);
+    font-family: var(--sans);
+    font-size: var(--t-13);
+    line-height: var(--lh);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  ::selection { background: rgba(79,155,242,.32); }
+
+  /* tabular figures everywhere numbers matter */
+  .tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .upcase {
+    text-transform: uppercase;
+    letter-spacing: .09em;
+    font-size: var(--t-10);
+    font-weight: 600;
+    color: var(--fg-dim);
+  }
+
+  /* ============================================================
+     APP SHELL
+     ============================================================ */
+  .app {
+    max-width: 1440px;
+    margin: 0 auto;
+    min-height: 100vh;
+    background: var(--bg-canvas);
+    border-left: 1px solid var(--line-soft);
+    border-right: 1px solid var(--line-soft);
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* --- top bar --- */
+  header.topbar {
+    display: flex;
+    align-items: center;
+    gap: var(--s-4);
+    height: 52px;
+    padding: 0 var(--s-5);
+    background: var(--bg-app);
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+  .brand { display: flex; align-items: center; gap: var(--s-3); }
+  .brand-mark {
+    width: 26px; height: 26px; border-radius: var(--r-2);
+    background: linear-gradient(160deg, #2d3a52, #161d29);
+    border: 1px solid var(--line-strong);
+    display: grid; place-items: center;
+    box-shadow: var(--shadow-1);
+  }
+  .brand-mark svg { display: block; }
+  .brand-name {
+    font-size: var(--t-14); font-weight: 700; color: var(--fg-strong);
+    letter-spacing: -.01em;
+  }
+  .brand-sep { width: 1px; height: 20px; background: var(--line); }
+  .view-label { font-size: var(--t-13); color: var(--fg-muted); font-weight: 500; }
+
+  .server-badge {
+    display: inline-flex; align-items: center; gap: var(--s-2);
+    height: 24px; padding: 0 10px;
+    background: var(--bg-chip);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-pill);
+    font-size: var(--t-11); color: var(--fg-muted);
+  }
+  .server-badge .mono { color: var(--fg); }
+  .mode-tag {
+    font-size: var(--t-10); font-weight: 700;
+    letter-spacing: .06em; text-transform: uppercase;
+    color: var(--info);
+    background: var(--info-bg);
+    border: 1px solid var(--info-bd);
+    border-radius: var(--r-1);
+    padding: 1px 6px;
+  }
+
+  nav.tabs { display: flex; gap: 2px; margin-left: var(--s-3); }
+  nav.tabs a {
+    display: inline-flex; align-items: center; height: 30px; padding: 0 12px;
+    font-size: var(--t-13); color: var(--fg-muted); text-decoration: none;
+    border-radius: var(--r-2); font-weight: 500;
+    border: 1px solid transparent;
+  }
+  nav.tabs a:hover { color: var(--fg); background: var(--bg-panel); }
+  nav.tabs a.active {
+    color: var(--fg-strong); background: var(--bg-panel-2);
+    border-color: var(--line);
+  }
+
+  .topbar-right { margin-left: auto; display: flex; align-items: center; gap: var(--s-2); }
+  .clock { font-size: var(--t-11); color: var(--fg-dim); }
+  .clock .mono { color: var(--fg-muted); }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: var(--s-2);
+    height: 30px; padding: 0 12px;
+    background: var(--bg-panel-2); color: var(--fg);
+    border: 1px solid var(--line-strong); border-radius: var(--r-2);
+    font-size: var(--t-12); font-weight: 500; cursor: pointer;
+    font-family: var(--sans);
+  }
+  .btn:hover { background: var(--bg-raised); border-color: #36475d; }
+  .btn svg { display: block; }
+  .btn.icon-only { width: 30px; padding: 0; justify-content: center; }
+  .btn.primary {
+    background: #2a4a8c; border-color: #3a63b8; color: #eaf1ff;
+  }
+  .btn.primary:hover { background: #305aa8; }
+  .btn.danger {
+    background: var(--danger-bg); border-color: var(--danger-bd); color: #ffb6a8;
+  }
+  .btn.danger:hover { background: #3a1c17; border-color: #6b3329; }
+
+  /* ============================================================
+     STATUS STRIP (monitoring header)
+     ============================================================ */
+  .statstrip {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    background: var(--bg-app);
+    border-bottom: 1px solid var(--line);
+  }
+  .metric {
+    padding: 12px var(--s-5) 14px;
+    border-right: 1px solid var(--line-soft);
+    position: relative;
+  }
+  .metric:last-child { border-right: none; }
+  .metric .upcase { display: flex; align-items: center; gap: 6px; }
+  .metric .val {
+    font-family: var(--mono); font-variant-numeric: tabular-nums;
+    font-size: var(--t-28); font-weight: 600; line-height: 1;
+    color: var(--fg-strong); margin-top: 8px; letter-spacing: -.02em;
+  }
+  .metric .sub {
+    font-size: var(--t-11); color: var(--fg-dim); margin-top: 6px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  /* sparkline room */
+  .spark { height: 16px; margin-top: 8px; opacity: .85; }
+  .spark svg { display: block; }
+  /* warning metric */
+  .metric.warn { background: linear-gradient(180deg, rgba(232,179,65,.06), transparent 70%); }
+  .metric.warn .val { color: var(--warn); }
+  .metric.warn::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+    width: 2px; background: var(--warn);
+  }
+  .metric.attn .val { color: var(--info); }
+
+  .delta { font-size: var(--t-10); font-weight: 600; }
+  .delta.up { color: var(--ok); }
+  .delta.flat { color: var(--fg-faint); }
+  .delta.warn { color: var(--warn); }
+
+  /* ============================================================
+     MAIN LAYOUT: agent table (left) + detail rail (right)
+     ============================================================ */
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 420px;
+    flex: 1;
+    min-height: 0;
+  }
+  .col-main { border-right: 1px solid var(--line); min-width: 0; }
+  .col-rail { background: var(--bg-app); min-width: 0; }
+
+  /* --- panel primitives --- */
+  .panel { border-bottom: 1px solid var(--line); }
+  .panel-head {
+    display: flex; align-items: center; gap: var(--s-3);
+    height: 38px; padding: 0 var(--s-5);
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--line);
+  }
+  .panel-head h2 {
+    margin: 0; font-size: var(--t-12); font-weight: 600;
+    color: var(--fg-strong); letter-spacing: .01em;
+  }
+  .panel-head .count {
+    font-family: var(--mono); font-size: var(--t-11);
+    color: var(--fg-dim); background: var(--bg-chip);
+    border: 1px solid var(--line); border-radius: var(--r-pill);
+    padding: 1px 7px;
+  }
+  .panel-head .ph-right { margin-left: auto; display: flex; align-items: center; gap: var(--s-3); }
+  .panel-head .hint { font-size: var(--t-11); color: var(--fg-dim); }
+
+  /* ============================================================
+     STATUS CHIP / DOT system (color is never the only signal)
+     ============================================================ */
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 20px; padding: 0 8px 0 7px;
+    border-radius: var(--r-pill);
+    font-size: var(--t-11); font-weight: 600; line-height: 1;
+    border: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; box-shadow: 0 0 0 2px rgba(0,0,0,.25); }
+
+  /* role: ok / good */
+  .chip.ok    { color: #7be0b4; background: var(--ok-bg); border-color: var(--ok-bd); }
+  .dot.ok     { background: var(--ok); }
+  /* role: info / running */
+  .chip.info  { color: #9cc7fb; background: var(--info-bg); border-color: var(--info-bd); }
+  .dot.info   { background: var(--info); }
+  /* role: warn / attention */
+  .chip.warn  { color: #f3d07e; background: var(--warn-bg); border-color: var(--warn-bd); }
+  .dot.warn   { background: var(--warn); }
+  /* role: danger / blocked */
+  .chip.danger{ color: #ffa593; background: var(--danger-bg); border-color: var(--danger-bd); }
+  .dot.danger { background: var(--danger); }
+  /* role: neutral */
+  .chip.neutral { color: var(--fg-muted); background: var(--neutral-bg); border-color: var(--neutral-bd); }
+  .dot.neutral  { background: var(--neutral); }
+
+  /* pulsing dot for live/running, with shape ring fallback */
+  .dot.live { position: relative; }
+  .dot.live::after {
+    content: ""; position: absolute; inset: -3px; border-radius: 50%;
+    border: 1px solid var(--info); opacity: .6;
+    animation: pulse 1.8s ease-out infinite;
+  }
+  @keyframes pulse { 0% { transform: scale(.7); opacity: .8; } 100% { transform: scale(1.6); opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .dot.live::after { animation: none; } }
+
+  /* status glyphs (shape redundancy for the color-blind) */
+  .glyph { width: 12px; height: 12px; flex: none; }
+
+  /* ============================================================
+     AGENT TABLE (dense, tabular, hairline rows)
+     ============================================================ */
+  .tbl-wrap { overflow-x: auto; }
+  table.agents {
+    width: 100%; border-collapse: collapse; font-size: var(--t-12);
+  }
+  table.agents thead th {
+    text-align: left; font-weight: 600;
+    font-size: var(--t-10); text-transform: uppercase; letter-spacing: .08em;
+    color: var(--fg-dim);
+    padding: 8px var(--s-4); white-space: nowrap;
+    background: var(--bg-panel-2);
+    border-bottom: 1px solid var(--line);
+    position: sticky; top: 0;
+  }
+  table.agents tbody td {
+    padding: 10px var(--s-4);
+    border-bottom: 1px solid var(--line-soft);
+    vertical-align: middle;
+  }
+  table.agents tbody tr:nth-child(even) { background: var(--bg-row-alt); }
+  table.agents tbody tr:hover { background: var(--bg-panel-2); }
+  table.agents tbody tr.selected {
+    background: linear-gradient(90deg, rgba(79,155,242,.10), rgba(79,155,242,.02));
+    box-shadow: inset 2px 0 0 var(--info);
+  }
+  table.agents tbody tr.selected:hover { background: rgba(79,155,242,.13); }
+
+  .agent-name { display: flex; align-items: center; gap: 9px; }
+  .agent-name .nm {
+    font-family: var(--mono); font-size: var(--t-12);
+    color: var(--fg-strong); font-weight: 600;
+  }
+  .agent-name .sel-tag {
+    font-size: var(--t-9, 9px); color: var(--info);
+    border: 1px solid var(--info-bd); border-radius: var(--r-1);
+    padding: 0 4px; letter-spacing: .05em; text-transform: uppercase;
+    font-size: 9px; font-weight: 700;
+  }
+  td.col-adapter .mono { color: var(--fg-muted); font-size: var(--t-11); }
+  .adapter-pill {
+    display: inline-block; font-family: var(--mono); font-size: var(--t-11);
+    color: var(--fg-muted); background: var(--bg-chip);
+    border: 1px solid var(--line); border-radius: var(--r-1);
+    padding: 1px 6px;
+  }
+  .adapter-pill.fake { color: var(--fg-dim); border-style: dashed; }
+  td.col-result { color: var(--fg-muted); max-width: 360px; }
+  td.col-result .rtxt {
+    display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* count cells */
+  .counts { display: flex; gap: 12px; }
+  .cnt { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: var(--t-11); }
+  .cnt .n { color: var(--fg); font-weight: 600; }
+  .cnt .n.zero { color: var(--fg-faint); }
+  .cnt .lab { color: var(--fg-dim); font-family: var(--sans); font-size: var(--t-10); text-transform: uppercase; letter-spacing: .05em; }
+  .cnt .mini-dot { width: 5px; height: 5px; border-radius: 50%; }
+
+  .row-conf { font-size: var(--t-10); color: var(--fg-dim); text-transform: uppercase; letter-spacing: .05em; }
+
+  /* ============================================================
+     SESSION DETAIL (right rail)
+     ============================================================ */
+  .detail-head {
+    padding: var(--s-4) var(--s-5);
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-panel);
+  }
+  .detail-title { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
+  .detail-title .nm {
+    font-family: var(--mono); font-size: var(--t-16); font-weight: 700;
+    color: var(--fg-strong); letter-spacing: -.01em;
+  }
+  .detail-meta {
+    margin-top: 10px; display: flex; gap: var(--s-5); flex-wrap: wrap;
+  }
+  .meta-item { display: flex; flex-direction: column; gap: 3px; }
+  .meta-item .k { font-size: var(--t-10); text-transform: uppercase; letter-spacing: .07em; color: var(--fg-dim); font-weight: 600; }
+  .meta-item .v { font-size: var(--t-12); color: var(--fg); }
+  .meta-item .v.mono { color: var(--fg); }
+
+  .section { padding: var(--s-4) var(--s-5); border-bottom: 1px solid var(--line); }
+  .section > .upcase { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .section > .upcase .count {
+    font-family: var(--mono); color: var(--fg-dim);
+    background: var(--bg-chip); border: 1px solid var(--line);
+    border-radius: var(--r-pill); padding: 0 6px; font-size: var(--t-10);
+    letter-spacing: 0;
+  }
+
+  .result-box {
+    background: var(--bg-panel); border: 1px solid var(--line);
+    border-left: 2px solid var(--info);
+    border-radius: var(--r-2); padding: 11px 13px;
+    font-size: var(--t-13); color: var(--fg); line-height: var(--lh);
+  }
+  .goal-line { font-size: var(--t-12); color: var(--fg-muted); margin-top: 10px; }
+  .goal-line .k { color: var(--fg-dim); }
+
+  /* confidence meter */
+  .conf-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .conf-label { font-size: var(--t-11); color: var(--fg-muted); }
+  .conf-bars { display: flex; gap: 3px; }
+  .conf-bars i {
+    width: 18px; height: 6px; border-radius: 2px; background: var(--line-strong);
+  }
+  .conf-bars.medium i:nth-child(-n+2) { background: var(--warn); }
+  .conf-bars.high i { background: var(--ok); }
+  .conf-bars.low i:nth-child(-n+1) { background: var(--danger); }
+  .conf-val { font-size: var(--t-11); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .conf-val.medium { color: var(--warn); }
+  .conf-val.high { color: var(--ok); }
+  .conf-val.low { color: var(--danger); }
+
+  /* mini stat grid in detail */
+  .ministats { display: grid; grid-template-columns: repeat(4,1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--r-2); overflow: hidden; margin-top: 12px; }
+  .ministat { background: var(--bg-panel); padding: 9px 10px; }
+  .ministat .k { font-size: 9px; text-transform: uppercase; letter-spacing: .07em; color: var(--fg-dim); font-weight: 600; }
+  .ministat .v { font-family: var(--mono); font-size: var(--t-16); color: var(--fg-strong); margin-top: 3px; font-weight: 600; }
+  .ministat .v.zero { color: var(--fg-faint); }
+
+  /* evidence tag list */
+  .tag-list { display: flex; flex-wrap: wrap; gap: 6px; }
+  .ev-tag {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: var(--t-11); color: var(--fg);
+    background: var(--bg-chip); border: 1px solid var(--line-strong);
+    border-radius: var(--r-1); padding: 3px 8px;
+  }
+
+  .blocker-box {
+    display: flex; gap: 10px; align-items: flex-start;
+    background: var(--danger-bg); border: 1px solid var(--danger-bd);
+    border-radius: var(--r-2); padding: 10px 12px; margin-top: 12px;
+  }
+  .blocker-box .icon { color: var(--danger); flex: none; margin-top: 1px; }
+  .blocker-box .bk-k { font-size: var(--t-10); text-transform: uppercase; letter-spacing: .07em; color: #ffa593; font-weight: 700; }
+  .blocker-box .bk-v { font-size: var(--t-12); color: #ffcabb; margin-top: 2px; }
+
+  /* ============================================================
+     COMMAND PANEL
+     ============================================================ */
+  .cmd-panel { background: var(--bg-panel); }
+  textarea.steer {
+    width: 100%; resize: vertical; min-height: 64px;
+    background: var(--bg-input); color: var(--fg);
+    border: 1px solid var(--line-strong); border-radius: var(--r-2);
+    padding: 10px 12px; font-family: var(--sans); font-size: var(--t-13);
+    line-height: var(--lh);
+  }
+  textarea.steer::placeholder { color: var(--fg-faint); }
+  textarea.steer:focus { outline: none; border-color: var(--focus-ring); box-shadow: 0 0 0 3px rgba(59,110,240,.18); }
+  .cmd-actions { display: flex; gap: var(--s-2); margin-top: 10px; align-items: center; }
+  .cmd-actions .grow { flex: 1; }
+  .cmd-log {
+    margin-top: 12px; display: flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: var(--t-11); color: var(--fg-dim);
+    background: var(--bg-input); border: 1px solid var(--line-soft);
+    border-radius: var(--r-2); padding: 7px 10px;
+  }
+  .cmd-log .ts { color: var(--fg-faint); }
+  .cmd-log .ok-mark { color: var(--ok); }
+
+  /* ============================================================
+     LANES: activity / evidence / reviews / validations
+     ============================================================ */
+  .lane-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    border-bottom: 1px solid var(--line);
+  }
+  .lane { border-right: 1px solid var(--line); min-width: 0; }
+  .lane:last-child { border-right: none; }
+
+  .lrow {
+    display: grid; align-items: center; gap: 10px;
+    padding: 9px var(--s-4);
+    border-bottom: 1px solid var(--line-soft);
+    grid-template-columns: 16px 1fr auto;
+  }
+  .lrow:last-child { border-bottom: none; }
+  .lrow:hover { background: var(--bg-panel-2); }
+  .lrow .lid { font-family: var(--mono); font-size: var(--t-11); color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lrow .lsub { font-family: var(--mono); font-size: var(--t-10); color: var(--fg-dim); margin-top: 1px; }
+  .lrow .lkind { font-size: var(--t-10); color: var(--fg-dim); text-transform: uppercase; letter-spacing: .05em; }
+
+  /* timeline */
+  .timeline { padding: var(--s-2) 0; }
+  .tl-item { display: grid; grid-template-columns: 52px 16px 1fr; gap: 10px; padding: 9px var(--s-4); align-items: flex-start; border-bottom: 1px solid var(--line-soft); }
+  .tl-item:last-child { border-bottom: none; }
+  .tl-item:hover { background: var(--bg-panel-2); }
+  .tl-time { font-family: var(--mono); font-size: var(--t-11); color: var(--fg-dim); padding-top: 1px; }
+  .tl-rail { display: flex; flex-direction: column; align-items: center; padding-top: 4px; }
+  .tl-rail .dot { margin-bottom: 2px; }
+  .tl-rail .stem { width: 1px; flex: 1; background: var(--line); margin-top: 2px; }
+  .tl-body .who { font-family: var(--mono); font-size: var(--t-11); color: var(--fg); font-weight: 600; }
+  .tl-body .who .kindtag { font-family: var(--sans); font-size: 9px; text-transform: uppercase; letter-spacing: .06em; font-weight: 700; margin-left: 6px; padding: 1px 5px; border-radius: var(--r-1); }
+  .kindtag.planner { color: var(--accent); background: rgba(124,140,248,.12); border: 1px solid rgba(124,140,248,.28); }
+  .kindtag.validation { color: #7be0b4; background: var(--ok-bg); border: 1px solid var(--ok-bd); }
+  .kindtag.blocker { color: #ffa593; background: var(--danger-bg); border: 1px solid var(--danger-bd); }
+  .tl-body .txt { font-size: var(--t-12); color: var(--fg-muted); margin-top: 3px; }
+
+  /* goals strip (compact, in main column) */
+  .goal-row {
+    display: grid; grid-template-columns: 1fr auto; gap: var(--s-4);
+    padding: 12px var(--s-5); border-bottom: 1px solid var(--line-soft);
+  }
+  .goal-row:hover { background: var(--bg-panel-2); }
+  .goal-main .gtitle { font-size: var(--t-13); color: var(--fg-strong); font-weight: 600; display: flex; align-items: center; gap: 9px; }
+  .goal-main .gtitle .gid { font-family: var(--mono); font-size: var(--t-10); color: var(--fg-dim); }
+  .req-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .req {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: var(--t-11); color: var(--fg-muted);
+    background: var(--bg-chip); border: 1px solid var(--line);
+    border-radius: var(--r-1); padding: 2px 7px;
+  }
+  .req .check { color: var(--ok); }
+  .req.pending .check { color: var(--warn); }
+  .goal-side { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+  .blocker-inline { font-size: var(--t-11); color: var(--fg-dim); display: flex; align-items: center; gap: 6px; }
+  .blocker-inline .icon { color: var(--warn); }
+  .validation-inline { font-size: var(--t-11); color: var(--fg-muted); }
+  .validation-inline .mono { color: var(--fg); }
+
+  /* footer */
+  footer.statusbar {
+    display: flex; align-items: center; gap: var(--s-4);
+    height: 30px; padding: 0 var(--s-5);
+    background: var(--bg-app); border-top: 1px solid var(--line);
+    font-size: var(--t-11); color: var(--fg-dim);
+  }
+  footer.statusbar .sb-item { display: flex; align-items: center; gap: 6px; }
+  footer.statusbar .sb-sep { width: 1px; height: 14px; background: var(--line); }
+  footer.statusbar .right { margin-left: auto; }
+  footer .mono { color: var(--fg-muted); }
+
+  /* ============================================================
+     RESPONSIVE → 390px
+     ============================================================ */
+  @media (max-width: 980px) {
+    header.topbar { flex-wrap: wrap; height: auto; padding: 8px var(--s-4); gap: var(--s-2); }
+    nav.tabs { order: 5; width: 100%; margin-left: 0; }
+    .topbar-right { width: 100%; margin-left: 0; }
+    .clock { display: none; }
+    .statstrip { grid-template-columns: repeat(3, 1fr); }
+    .metric:nth-child(3n) { border-right: none; }
+    .metric:nth-child(-n+3) { border-bottom: 1px solid var(--line-soft); }
+    .layout { grid-template-columns: 1fr; }
+    .col-main { border-right: none; }
+    .col-rail { border-top: 1px solid var(--line); }
+    .lane-grid { grid-template-columns: 1fr; }
+    .lane { border-right: none; border-bottom: 1px solid var(--line); }
+    .lane:last-child { border-bottom: none; }
+    .server-badge .label-text { display: none; }
+    table.agents td.col-result { display: none; }
+    table.agents th.col-result { display: none; }
+    .ministats { grid-template-columns: repeat(2,1fr); }
+    .detail-meta { gap: var(--s-4); }
+    .goal-row { grid-template-columns: 1fr; }
+    .goal-side { align-items: flex-start; margin-top: 8px; }
+  }
+  @media (max-width: 480px) {
+    .metric .val { font-size: var(--t-22); }
+    table.agents td.col-counts, table.agents th.col-counts { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ===================== TOP BAR ===================== -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M7 1L12.2 4v6L7 13 1.8 10V4L7 1z" stroke="#8fa3d6" stroke-width="1.1" stroke-linejoin="round"/>
+          <circle cx="7" cy="7" r="2.1" fill="#8fa3d6"/>
+        </svg>
+      </span>
+      <span class="brand-name">Capo</span>
+    </div>
+    <span class="brand-sep" aria-hidden="true"></span>
+    <span class="view-label">Operator Dashboard</span>
+
+    <span class="server-badge" title="Connected to mock server-command API">
+      <span class="dot ok" aria-hidden="true"></span>
+      <span class="label-text">server</span>
+      <span class="mono">mock server-command API</span>
+      <span class="mode-tag">fixture</span>
+    </span>
+
+    <nav class="tabs" aria-label="Primary">
+      <a href="#" class="active" aria-current="page">Overview</a>
+      <a href="#">Goals</a>
+      <a href="#">Settings</a>
+    </nav>
+
+    <div class="topbar-right">
+      <span class="clock">updated <span class="mono">2026-05-28 12:00Z</span></span>
+      <button class="btn" type="button">
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M11.5 7a4.5 4.5 0 1 1-1.32-3.18M11.5 2v2.5H9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Refresh
+      </button>
+      <button class="btn" type="button">
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><rect x="1.5" y="2" width="11" height="3" rx="1" stroke="currentColor" stroke-width="1.1"/><rect x="1.5" y="6.5" width="11" height="5.5" rx="1" stroke="currentColor" stroke-width="1.1"/></svg>
+        Details
+      </button>
+    </div>
+  </header>
+
+  <!-- ===================== STATUS STRIP ===================== -->
+  <section class="statstrip" aria-label="Fleet summary metrics">
+    <div class="metric">
+      <div class="upcase">Agents</div>
+      <div class="val tnum">5</div>
+      <div class="spark" aria-hidden="true">
+        <svg width="100%" height="16" viewBox="0 0 90 16" preserveAspectRatio="none"><polyline points="0,11 12,10 24,12 36,8 48,9 60,6 72,7 84,5 90,5" fill="none" stroke="#586a85" stroke-width="1.3"/></svg>
+      </div>
+    </div>
+    <div class="metric attn">
+      <div class="upcase"><span class="dot info" aria-hidden="true"></span>Active</div>
+      <div class="val tnum">3</div>
+      <div class="sub"><span class="delta up">running now</span></div>
+    </div>
+    <div class="metric warn" role="status">
+      <div class="upcase"><span class="dot warn" aria-hidden="true"></span>Blocked</div>
+      <div class="val tnum">1</div>
+      <div class="sub"><span class="delta warn">needs attention</span></div>
+    </div>
+    <div class="metric">
+      <div class="upcase">Evidence</div>
+      <div class="val tnum">6</div>
+      <div class="sub"><span class="delta up">2 validated</span></div>
+    </div>
+    <div class="metric">
+      <div class="upcase">Reviews</div>
+      <div class="val tnum">2</div>
+      <div class="sub"><span class="delta warn">1 follow-up</span></div>
+    </div>
+    <div class="metric">
+      <div class="upcase">Validations</div>
+      <div class="val tnum">3</div>
+      <div class="sub"><span class="delta up">2 passed · 1 pending</span></div>
+    </div>
+  </section>
+
+  <!-- ===================== MAIN LAYOUT ===================== -->
+  <div class="layout">
+
+    <!-- ---------- LEFT: agent table + lanes + goals ---------- -->
+    <div class="col-main">
+
+      <!-- agent table -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Agents</h2>
+          <span class="count tnum">5</span>
+          <div class="ph-right">
+            <span class="hint">3 active · 1 blocked · 1 timed out</span>
+          </div>
+        </div>
+        <div class="tbl-wrap">
+          <table class="agents">
+            <thead>
+              <tr>
+                <th style="width:30%">Agent</th>
+                <th style="width:120px">Status</th>
+                <th class="col-adapter" style="width:110px">Adapter</th>
+                <th class="col-result">Latest result</th>
+                <th class="col-counts" style="width:150px">Evidence / Review</th>
+                <th style="width:80px">Conf.</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- capo-operator (selected) -->
+              <tr class="selected">
+                <td>
+                  <div class="agent-name">
+                    <span class="nm">capo-operator</span>
+                    <span class="sel-tag">selected</span>
+                  </div>
+                </td>
+                <td>
+                  <span class="chip ok"><span class="dot ok" aria-hidden="true"></span>finished</span>
+                </td>
+                <td class="col-adapter"><span class="adapter-pill">codex_exec</span></td>
+                <td class="col-result"><span class="rtxt">Selected results_evidence for an all-agent evidence request.</span></td>
+                <td class="col-counts">
+                  <div class="counts">
+                    <span class="cnt"><span class="mini-dot" style="background:var(--ok)"></span><span class="n">1</span><span class="lab">ev</span></span>
+                    <span class="cnt"><span class="n zero">0</span><span class="lab">rv</span></span>
+                    <span class="cnt"><span class="mini-dot" style="background:var(--ok)"></span><span class="n">1</span><span class="lab">vd</span></span>
+                  </div>
+                </td>
+                <td><span class="row-conf">medium</span></td>
+              </tr>
+
+              <!-- codex-local (timed out) -->
+              <tr>
+                <td>
+                  <div class="agent-name"><span class="nm">codex-local</span></div>
+                </td>
+                <td>
+                  <span class="chip warn" title="Provider run exceeded the configured timeout">
+                    <svg class="glyph" viewBox="0 0 12 12" fill="none" aria-hidden="true"><circle cx="6" cy="6.5" r="4.2" stroke="currentColor" stroke-width="1.1"/><path d="M6 4.3v2.2L7.4 7.6M6 1.4h0" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>
+                    timed out
+                  </span>
+                </td>
+                <td class="col-adapter"><span class="adapter-pill">codex_exec</span></td>
+                <td class="col-result"><span class="rtxt">Timed out after recording two tool calls and a memory packet.</span></td>
+                <td class="col-counts">
+                  <div class="counts">
+                    <span class="cnt"><span class="mini-dot" style="background:var(--warn)"></span><span class="n">2</span><span class="lab">ev</span></span>
+                    <span class="cnt"><span class="mini-dot" style="background:var(--warn)"></span><span class="n">1</span><span class="lab">rv</span></span>
+                    <span class="cnt"><span class="n zero">0</span><span class="lab">vd</span></span>
+                  </div>
+                </td>
+                <td><span class="row-conf" style="color:var(--danger)">low</span></td>
+              </tr>
+
+              <!-- codex-one (running) -->
+              <tr>
+                <td>
+                  <div class="agent-name"><span class="nm">codex-one</span></div>
+                </td>
+                <td>
+                  <span class="chip info"><span class="dot info live" aria-hidden="true"></span>running</span>
+                </td>
+                <td class="col-adapter"><span class="adapter-pill">codex_exec</span></td>
+                <td class="col-result"><span class="rtxt">Working on webclient design and browser verification.</span></td>
+                <td class="col-counts">
+                  <div class="counts">
+                    <span class="cnt"><span class="mini-dot" style="background:var(--neutral)"></span><span class="n">1</span><span class="lab">ev</span></span>
+                    <span class="cnt"><span class="n zero">0</span><span class="lab">rv</span></span>
+                    <span class="cnt"><span class="mini-dot" style="background:var(--ok)"></span><span class="n">1</span><span class="lab">vd</span></span>
+                  </div>
+                </td>
+                <td><span class="row-conf">medium</span></td>
+              </tr>
+
+              <!-- codex-proof (finished) -->
+              <tr>
+                <td>
+                  <div class="agent-name"><span class="nm">codex-proof</span></div>
+                </td>
+                <td>
+                  <span class="chip ok"><span class="dot ok" aria-hidden="true"></span>finished</span>
+                </td>
+                <td class="col-adapter"><span class="adapter-pill">codex_exec</span></td>
+                <td class="col-result"><span class="rtxt">Finished Codex-backed proof through the server boundary.</span></td>
+                <td class="col-counts">
+                  <div class="counts">
+                    <span class="cnt"><span class="mini-dot" style="background:var(--ok)"></span><span class="n">2</span><span class="lab">ev</span></span>
+                    <span class="cnt"><span class="mini-dot" style="background:var(--ok)"></span><span class="n">1</span><span class="lab">rv</span></span>
+                    <span class="cnt"><span class="mini-dot" style="background:var(--ok)"></span><span class="n">1</span><span class="lab">vd</span></span>
+                  </div>
+                </td>
+                <td><span class="row-conf" style="color:var(--ok)">high</span></td>
+              </tr>
+
+              <!-- demo (running, fake) -->
+              <tr>
+                <td>
+                  <div class="agent-name"><span class="nm">demo</span></div>
+                </td>
+                <td>
+                  <span class="chip info"><span class="dot info live" aria-hidden="true"></span>running</span>
+                </td>
+                <td class="col-adapter"><span class="adapter-pill fake">fake</span></td>
+                <td class="col-result"><span class="rtxt">Fake adapter processed the latest steering goal.</span></td>
+                <td class="col-counts">
+                  <div class="counts">
+                    <span class="cnt"><span class="mini-dot" style="background:var(--neutral)"></span><span class="n">1</span><span class="lab">ev</span></span>
+                    <span class="cnt"><span class="n zero">0</span><span class="lab">rv</span></span>
+                    <span class="cnt"><span class="n zero">0</span><span class="lab">vd</span></span>
+                  </div>
+                </td>
+                <td><span class="row-conf">medium</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- recent activity -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Recent activity</h2>
+          <span class="count tnum">3</span>
+          <div class="ph-right"><span class="hint">last 45 minutes</span></div>
+        </div>
+        <div class="timeline">
+          <div class="tl-item">
+            <div class="tl-time">12:00</div>
+            <div class="tl-rail"><span class="dot info" aria-hidden="true"></span><span class="stem"></span></div>
+            <div class="tl-body">
+              <div class="who">capo-operator <span class="kindtag planner">planner</span></div>
+              <div class="txt">Mapped an all-agent response/evidence request to results_evidence.</div>
+            </div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-time">11:42</div>
+            <div class="tl-rail"><span class="dot ok" aria-hidden="true"></span><span class="stem"></span></div>
+            <div class="tl-body">
+              <div class="who">codex-proof <span class="kindtag validation">validation</span></div>
+              <div class="txt">Codex proof completed through server dispatch.</div>
+            </div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-time">11:15</div>
+            <div class="tl-rail"><span class="dot danger" aria-hidden="true"></span></div>
+            <div class="tl-body">
+              <div class="who">codex-local <span class="kindtag blocker">blocker</span></div>
+              <div class="txt">Timed out while collecting workspace internals.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- evidence / reviews / validations lanes -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Evidence · Reviews · Validation</h2>
+          <span class="count tnum">11</span>
+          <div class="ph-right"><span class="hint">latest signals across the fleet</span></div>
+        </div>
+        <div class="lane-grid">
+
+          <!-- Evidence lane -->
+          <div class="lane">
+            <div class="panel-head" style="height:32px;background:var(--bg-panel-2)">
+              <span class="upcase">Evidence</span><span class="count tnum">6</span>
+            </div>
+            <div class="lrow">
+              <span class="dot ok" aria-hidden="true"></span>
+              <div>
+                <div class="lid">planner-action-results-evidence</div>
+                <div class="lsub">test · capo-operator</div>
+              </div>
+              <span class="chip ok"><span class="dot ok" aria-hidden="true"></span>validated</span>
+            </div>
+            <div class="lrow">
+              <span class="dot ok" aria-hidden="true"></span>
+              <div>
+                <div class="lid">codex-live-smoke</div>
+                <div class="lsub">manual · codex-proof</div>
+              </div>
+              <span class="chip ok"><span class="dot ok" aria-hidden="true"></span>validated</span>
+            </div>
+            <div class="lrow">
+              <span class="dot warn" aria-hidden="true"></span>
+              <div>
+                <div class="lid">timeout-log</div>
+                <div class="lsub">artifact · codex-local</div>
+              </div>
+              <span class="chip warn"><span class="dot warn" aria-hidden="true"></span>partial</span>
+            </div>
+          </div>
+
+          <!-- Reviews lane -->
+          <div class="lane">
+            <div class="panel-head" style="height:32px;background:var(--bg-panel-2)">
+              <span class="upcase">Reviews</span><span class="count tnum">2</span>
+            </div>
+            <div class="lrow">
+              <span class="dot warn" aria-hidden="true"></span>
+              <div>
+                <div class="lid">review-codex-local-timeout</div>
+                <div class="lsub">target · codex-local</div>
+              </div>
+              <span class="chip warn"><span class="dot warn" aria-hidden="true"></span>needs follow-up</span>
+            </div>
+            <div class="lrow">
+              <span class="dot ok" aria-hidden="true"></span>
+              <div>
+                <div class="lid">review-codex-proof</div>
+                <div class="lsub">target · codex-proof</div>
+              </div>
+              <span class="chip ok"><span class="dot ok" aria-hidden="true"></span>accepted</span>
+            </div>
+          </div>
+
+          <!-- Validations lane -->
+          <div class="lane">
+            <div class="panel-head" style="height:32px;background:var(--bg-panel-2)">
+              <span class="upcase">Validation</span><span class="count tnum">3</span>
+            </div>
+            <div class="lrow">
+              <span class="dot info" aria-hidden="true"></span>
+              <div>
+                <div class="lid">browser-smoke</div>
+                <div class="lsub">target · dashboard-webclient</div>
+              </div>
+              <span class="chip info"><span class="dot info" aria-hidden="true"></span>pending</span>
+            </div>
+            <div class="lrow">
+              <span class="dot ok" aria-hidden="true"></span>
+              <div>
+                <div class="lid">codex-proof-smoke</div>
+                <div class="lsub">target · codex-proof</div>
+              </div>
+              <span class="chip ok"><span class="dot ok" aria-hidden="true"></span>passed</span>
+            </div>
+            <div class="lrow">
+              <span class="dot ok" aria-hidden="true"></span>
+              <div>
+                <div class="lid">planner-results-evidence</div>
+                <div class="lsub">target · capo-operator</div>
+              </div>
+              <span class="chip ok"><span class="dot ok" aria-hidden="true"></span>passed</span>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- goals -->
+      <section class="panel" style="border-bottom:none">
+        <div class="panel-head">
+          <h2>Goals</h2>
+          <span class="count tnum">1</span>
+          <div class="ph-right"><span class="hint">1 active</span></div>
+        </div>
+        <div class="goal-row">
+          <div class="goal-main">
+            <div class="gtitle">
+              <span class="chip info"><span class="dot info live" aria-hidden="true"></span>active</span>
+              Complete dashboard webclient workpad
+              <span class="gid">goal-dashboard-webclient</span>
+            </div>
+            <div class="req-list">
+              <span class="req"><svg class="check" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M2.5 6.4l2.2 2.2L9.5 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>design accepted</span>
+              <span class="req"><svg class="check" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M2.5 6.4l2.2 2.2L9.5 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>browser screenshots</span>
+              <span class="req"><svg class="check" width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M2.5 6.4l2.2 2.2L9.5 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>interactive smoke</span>
+            </div>
+          </div>
+          <div class="goal-side">
+            <div class="validation-inline">validation <span class="mono">fixture browser smoke</span></div>
+            <div class="blocker-inline">
+              <svg class="icon" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M6 1.2l5 8.6H1L6 1.2z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><path d="M6 5v2.1M6 8.4h0" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>
+              live HTTP server integration is future work
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- ---------- RIGHT: session detail + command ---------- -->
+    <aside class="col-rail" aria-label="Selected session detail">
+
+      <div class="detail-head">
+        <div class="detail-title">
+          <span class="nm">capo-operator</span>
+          <span class="chip ok"><span class="dot ok" aria-hidden="true"></span>finished</span>
+        </div>
+        <div class="detail-meta">
+          <div class="meta-item">
+            <span class="k">Adapter</span>
+            <span class="v mono">codex_exec</span>
+          </div>
+          <div class="meta-item">
+            <span class="k">Tools</span>
+            <span class="v mono">0</span>
+          </div>
+          <div class="meta-item">
+            <span class="k">Memory</span>
+            <span class="v mono">0</span>
+          </div>
+          <div class="meta-item">
+            <span class="k">Session</span>
+            <span class="v mono">project-capo</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- latest result + goal + confidence -->
+      <div class="section">
+        <div class="upcase">Latest result</div>
+        <div class="result-box">Selected results_evidence for an all-agent evidence request.</div>
+        <div class="goal-line"><span class="k">Goal &nbsp;</span>Map operator input into validated server-backed actions</div>
+        <div class="conf-row">
+          <span class="conf-label">Confidence</span>
+          <span class="conf-bars medium" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="conf-val medium">medium</span>
+        </div>
+        <div class="ministats">
+          <div class="ministat"><div class="k">Evidence</div><div class="v">1</div></div>
+          <div class="ministat"><div class="k">Reviews</div><div class="v zero">0</div></div>
+          <div class="ministat"><div class="k">Validations</div><div class="v">1</div></div>
+          <div class="ministat"><div class="k">Tools</div><div class="v zero">0</div></div>
+        </div>
+      </div>
+
+      <!-- evidence -->
+      <div class="section">
+        <div class="upcase">Evidence <span class="count tnum">1</span></div>
+        <div class="tag-list">
+          <span class="ev-tag"><span class="dot ok" aria-hidden="true"></span>planner-action-results-evidence</span>
+        </div>
+      </div>
+
+      <!-- reviews + validations -->
+      <div class="section">
+        <div class="upcase">Reviews <span class="count tnum">0</span> · Validations <span class="count tnum">1</span></div>
+        <div class="tag-list">
+          <span class="ev-tag" style="color:var(--fg-dim)"><span class="dot neutral" aria-hidden="true"></span>no reviews on record</span>
+          <span class="ev-tag"><span class="dot ok" aria-hidden="true"></span>planner-results-evidence&nbsp;<span style="color:var(--ok)">passed</span></span>
+        </div>
+        <div style="margin-top:12px;font-size:var(--t-11);color:var(--fg-dim);display:flex;align-items:center;gap:8px">
+          <span class="chip neutral"><span class="dot ok" aria-hidden="true"></span>no blocker</span>
+          this session is clear to proceed
+        </div>
+      </div>
+
+      <!-- command panel -->
+      <div class="section cmd-panel">
+        <div class="upcase">Command — steer capo-operator</div>
+        <textarea class="steer" placeholder="Steer this agent… e.g. “re-run results_evidence and attach the diff for review.”"></textarea>
+        <div class="cmd-actions">
+          <button class="btn primary grow" type="button">
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M1.5 7h9M7 3l4 4-4 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Send
+          </button>
+          <button class="btn danger" type="button" title="Pause the agent at the next safe checkpoint">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><rect x="3" y="2.5" width="2" height="7" rx=".6" fill="currentColor"/><rect x="7" y="2.5" width="2" height="7" rx=".6" fill="currentColor"/></svg>
+            Interrupt
+          </button>
+          <button class="btn danger" type="button" title="Terminate the agent run — cannot be resumed">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><rect x="2.6" y="2.6" width="6.8" height="6.8" rx="1.2" fill="currentColor"/></svg>
+            Stop
+          </button>
+        </div>
+        <div class="cmd-log">
+          <span class="ts">12:00:14Z</span>
+          <span class="ok-mark">✓</span>
+          <span>dispatch results_evidence → accepted by mock server-command API</span>
+        </div>
+      </div>
+
+    </aside>
+
+  </div>
+
+  <!-- ===================== STATUS BAR ===================== -->
+  <footer class="statusbar">
+    <span class="sb-item"><span class="dot ok" aria-hidden="true"></span>connected</span>
+    <span class="sb-sep" aria-hidden="true"></span>
+    <span class="sb-item">project <span class="mono">project-capo</span></span>
+    <span class="sb-sep" aria-hidden="true"></span>
+    <span class="sb-item">mode <span class="mono">fixture</span></span>
+    <span class="sb-item right">5 agents · 3 active · <span style="color:var(--warn)">1 blocked</span> · 6 evidence · auto-refresh <span class="mono">30s</span></span>
+  </footer>
+
+</div>
+</body>
+</html>

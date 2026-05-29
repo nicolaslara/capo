@@ -1,0 +1,189 @@
+{
+  "project": {
+    "id": "project-capo",
+    "name": "Capo",
+    "mode": "fixture",
+    "server": "mock server-command API",
+    "updatedAt": "2026-05-28T12:00:00Z"
+  },
+  "summary": {
+    "agents": 5,
+    "active": 3,
+    "blocked": 1,
+    "evidence": 6,
+    "reviews": 2,
+    "validations": 3
+  },
+  "agents": [
+    {
+      "name": "capo-operator",
+      "status": "finished",
+      "adapter": "codex_exec",
+      "goal": "Map operator input into validated server-backed actions",
+      "result": "Selected results_evidence for an all-agent evidence request.",
+      "confidence": "medium",
+      "evidence": ["planner-action-results-evidence"],
+      "reviews": 0,
+      "validations": 1,
+      "tools": 0,
+      "memory": 0,
+      "debug": {
+        "session": "session-capo-operator",
+        "run": "run-capo-operator",
+        "policy": "raw output redacted"
+      }
+    },
+    {
+      "name": "codex-local",
+      "status": "timed out",
+      "adapter": "codex_exec",
+      "goal": "Inspect local workspace and report blockers",
+      "result": "Timed out after recording two tool calls and a memory packet.",
+      "confidence": "low",
+      "evidence": ["timeout-log", "tool-summary"],
+      "reviews": 1,
+      "validations": 0,
+      "tools": 2,
+      "memory": 1,
+      "blocker": "Provider run exceeded the configured timeout.",
+      "debug": {
+        "session": "session-codex-local",
+        "run": "run-codex-local",
+        "policy": "bounded artifacts"
+      }
+    },
+    {
+      "name": "codex-one",
+      "status": "running",
+      "adapter": "codex_exec",
+      "goal": "Continue dashboard implementation",
+      "result": "Working on webclient design and browser verification.",
+      "confidence": "medium",
+      "evidence": ["workpad-dwc-design"],
+      "reviews": 0,
+      "validations": 1,
+      "tools": 3,
+      "memory": 0,
+      "debug": {
+        "session": "session-codex-one",
+        "run": "run-codex-one",
+        "policy": "metadata visible"
+      }
+    },
+    {
+      "name": "codex-proof",
+      "status": "finished",
+      "adapter": "codex_exec",
+      "goal": "Prove Codex live provider path",
+      "result": "Finished Codex-backed proof through the server boundary.",
+      "confidence": "high",
+      "evidence": ["codex-live-smoke", "server-dispatch-proof"],
+      "reviews": 1,
+      "validations": 1,
+      "tools": 1,
+      "memory": 0,
+      "debug": {
+        "session": "session-codex-proof",
+        "run": "run-codex-proof",
+        "policy": "artifact metadata only"
+      }
+    },
+    {
+      "name": "demo",
+      "status": "running",
+      "adapter": "fake",
+      "goal": "Exercise mocked steering and dashboard fixtures",
+      "result": "Fake adapter processed the latest steering goal.",
+      "confidence": "medium",
+      "evidence": ["demo-evidence"],
+      "reviews": 0,
+      "validations": 0,
+      "tools": 1,
+      "memory": 1,
+      "debug": {
+        "session": "session-demo",
+        "run": "run-demo",
+        "policy": "fixture"
+      }
+    }
+  ],
+  "goals": [
+    {
+      "id": "goal-dashboard-webclient",
+      "title": "Complete dashboard webclient workpad",
+      "status": "active",
+      "requirements": ["design accepted", "browser screenshots", "interactive smoke"],
+      "blockers": ["live HTTP server integration is future work"],
+      "validation": "fixture browser smoke"
+    }
+  ],
+  "activity": [
+    {
+      "time": "12:00",
+      "agent": "capo-operator",
+      "kind": "planner",
+      "text": "Mapped an all-agent response/evidence request to results_evidence."
+    },
+    {
+      "time": "11:42",
+      "agent": "codex-proof",
+      "kind": "validation",
+      "text": "Codex proof completed through server dispatch."
+    },
+    {
+      "time": "11:15",
+      "agent": "codex-local",
+      "kind": "blocker",
+      "text": "Timed out while collecting workspace internals."
+    }
+  ],
+  "evidence": [
+    {
+      "id": "planner-action-results-evidence",
+      "kind": "test",
+      "status": "validated",
+      "agent": "capo-operator"
+    },
+    {
+      "id": "codex-live-smoke",
+      "kind": "manual",
+      "status": "validated",
+      "agent": "codex-proof"
+    },
+    {
+      "id": "timeout-log",
+      "kind": "artifact",
+      "status": "partial",
+      "agent": "codex-local"
+    }
+  ],
+  "reviews": [
+    {
+      "id": "review-codex-local-timeout",
+      "status": "needs follow-up",
+      "target": "codex-local"
+    },
+    {
+      "id": "review-codex-proof",
+      "status": "accepted",
+      "target": "codex-proof"
+    }
+  ],
+  "validations": [
+    {
+      "id": "browser-smoke",
+      "status": "pending",
+      "target": "dashboard-webclient"
+    },
+    {
+      "id": "codex-proof-smoke",
+      "status": "passed",
+      "target": "codex-proof"
+    },
+    {
+      "id": "planner-results-evidence",
+      "status": "passed",
+      "target": "capo-operator"
+    }
+  ]
+}

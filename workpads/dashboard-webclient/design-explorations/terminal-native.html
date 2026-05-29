@@ -1,0 +1,923 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Capo — Operator Dashboard</title>
+<style>
+  /* ============================================================
+     CAPO — Operator Dashboard
+     Direction: Developer / terminal-native (IDE), dark mode
+     Self-contained: no JS, no network, system fonts only.
+     ============================================================ */
+
+  :root {
+    /* --- Surfaces (near-black IDE editor stack) --- */
+    --bg-0:        #07090e;   /* app backdrop */
+    --bg-1:        #0b0e14;   /* editor / primary panel */
+    --bg-2:        #0f131b;   /* raised panel */
+    --bg-3:        #141a24;   /* rows, inputs */
+    --bg-hover:    #1a212d;   /* hover row */
+    --bg-active:   #18202c;   /* selected row */
+
+    /* --- Lines / hairlines --- */
+    --line:        #1d242f;
+    --line-strong: #2a333f;
+    --line-soft:   #161c25;
+
+    /* --- Text --- */
+    --fg:          #e6edf3;   /* primary */
+    --fg-1:        #aeb9c5;   /* secondary */
+    --fg-2:        #7b8794;   /* tertiary / labels */
+    --fg-3:        #55606d;   /* faint / placeholder */
+
+    /* --- Semantic terminal palette --- */
+    --green:       #3fb950;   /* ok / done / validated / passed */
+    --green-dim:   #2ea043;
+    --amber:       #d29922;   /* attention / caution / pending */
+    --red:         #f85149;   /* destructive / blocked / failed */
+    --cyan:        #39c5cf;   /* running / active / info */
+    --violet:      #a371f7;   /* accent / brand */
+
+    /* --- Tinted fills (12% over dark) --- */
+    --green-bg:    rgba(63,185,80,0.13);
+    --amber-bg:    rgba(210,153,34,0.14);
+    --red-bg:      rgba(248,81,73,0.13);
+    --cyan-bg:     rgba(57,197,207,0.13);
+    --violet-bg:   rgba(163,113,247,0.14);
+
+    --green-ln:    rgba(63,185,80,0.34);
+    --amber-ln:    rgba(210,153,34,0.36);
+    --red-ln:      rgba(248,81,73,0.36);
+    --cyan-ln:     rgba(57,197,207,0.34);
+    --violet-ln:   rgba(163,113,247,0.36);
+
+    /* --- Type --- */
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "SFMono-Regular", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+    --fs-11: 11px;
+    --fs-12: 12px;
+    --fs-13: 13px;
+    --fs-14: 14px;
+    --fs-16: 16px;
+    --fs-19: 19px;
+
+    /* --- Spacing / radius / elevation --- */
+    --r-sm: 4px;
+    --r-md: 6px;
+    --r-lg: 9px;
+    --sp-1: 4px;
+    --sp-2: 8px;
+    --sp-3: 12px;
+    --sp-4: 16px;
+    --sp-5: 20px;
+    --sp-6: 24px;
+
+    --shadow: 0 1px 0 rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.36);
+    --focus: 0 0 0 1px var(--bg-1), 0 0 0 3px rgba(57,197,207,0.45);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(57,197,207,0.04), transparent 60%),
+      var(--bg-0);
+    color: var(--fg);
+    font-family: var(--sans);
+    font-size: var(--fs-13);
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .mono { font-family: var(--mono); font-feature-settings: "tnum" 1, "zero" 1; }
+
+  ::selection { background: rgba(163,113,247,0.32); }
+
+  /* ===================== APP SHELL ===================== */
+  .app {
+    max-width: 1440px;
+    margin: 0 auto;
+    min-height: 100vh;
+    background: var(--bg-0);
+    display: grid;
+    grid-template-rows: auto auto 1fr;
+    border-left: 1px solid var(--line-soft);
+    border-right: 1px solid var(--line-soft);
+  }
+
+  /* ---- Top bar ---- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-4);
+    height: 52px;
+    padding: 0 var(--sp-5);
+    background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; padding-right: var(--sp-4); border-right: 1px solid var(--line); }
+  .brand .glyph {
+    width: 26px; height: 26px; border-radius: 7px;
+    display: grid; place-items: center;
+    background: linear-gradient(160deg, rgba(163,113,247,0.25), rgba(57,197,207,0.18));
+    border: 1px solid var(--violet-ln);
+    color: var(--violet);
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 14px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
+  }
+  .brand .name { font-weight: 650; font-size: var(--fs-14); letter-spacing: -0.01em; }
+  .brand .view { color: var(--fg-2); font-size: var(--fs-12); }
+  .brand .sep { color: var(--fg-3); }
+
+  .tabs { display: flex; gap: 2px; }
+  .tab {
+    font: inherit; font-size: var(--fs-13);
+    color: var(--fg-2);
+    background: transparent; border: 0;
+    padding: 7px 12px; border-radius: var(--r-md);
+    cursor: pointer; position: relative;
+    display: inline-flex; align-items: center; gap: 7px;
+  }
+  .tab:hover { color: var(--fg); background: var(--bg-3); }
+  .tab[aria-current="page"] { color: var(--fg); background: var(--bg-3); }
+  .tab[aria-current="page"]::after {
+    content: ""; position: absolute; left: 12px; right: 12px; bottom: -1px; height: 2px;
+    background: var(--cyan); border-radius: 2px 2px 0 0;
+  }
+  .tab .kc { font-family: var(--mono); font-size: 10px; color: var(--fg-3); border: 1px solid var(--line-strong); border-radius: 3px; padding: 0 4px; line-height: 14px; }
+
+  .topbar .spacer { flex: 1; }
+
+  .modebadge {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: var(--fs-12);
+    color: var(--fg-1);
+    background: var(--bg-3);
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    padding: 4px 10px 4px 8px;
+  }
+  .modebadge .pip { width: 6px; height: 6px; border-radius: 50%; background: var(--violet); box-shadow: 0 0 0 3px var(--violet-bg); }
+  .modebadge b { color: var(--fg); font-weight: 600; }
+  .modebadge .mode { color: var(--amber); }
+
+  .controls { display: flex; align-items: center; gap: var(--sp-2); }
+  .btn {
+    font: inherit; font-size: var(--fs-13);
+    display: inline-flex; align-items: center; gap: 7px;
+    color: var(--fg-1);
+    background: var(--bg-3);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-md);
+    padding: 6px 11px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .btn:hover { background: var(--bg-hover); color: var(--fg); border-color: #36404e; }
+  .btn:focus-visible { outline: none; box-shadow: var(--focus); }
+  .btn svg { width: 14px; height: 14px; }
+  .btn .kc { font-family: var(--mono); font-size: 10px; color: var(--fg-3); }
+  .btn.ghost { background: transparent; }
+  .btn.toggle[aria-pressed="true"] { color: var(--cyan); border-color: var(--cyan-ln); background: var(--cyan-bg); }
+
+  /* ---- Status strip ---- */
+  .strip {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    background: var(--bg-1);
+    border-bottom: 1px solid var(--line);
+  }
+  .metric {
+    padding: 12px 18px;
+    border-right: 1px solid var(--line-soft);
+    display: flex; flex-direction: column; gap: 5px;
+    position: relative;
+  }
+  .metric:last-child { border-right: 0; }
+  .metric .k {
+    display: flex; align-items: center; gap: 7px;
+    font-size: var(--fs-11); text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--fg-2);
+  }
+  .metric .v { font-family: var(--mono); font-size: 26px; font-weight: 600; line-height: 1; letter-spacing: -0.02em; color: var(--fg); }
+  .metric .v .delta { font-size: 11px; color: var(--fg-3); font-weight: 500; margin-left: 6px; vertical-align: middle; }
+  .metric .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-3); }
+  .metric.is-info  .dot { background: var(--cyan);  box-shadow: 0 0 0 3px var(--cyan-bg); }
+  .metric.is-good  .dot { background: var(--green); box-shadow: 0 0 0 3px var(--green-bg); }
+  .metric.is-warn  .dot { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-bg); }
+  .metric.is-warn  { background: linear-gradient(180deg, var(--amber-bg), transparent 70%); }
+  .metric.is-warn::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--amber); }
+  .metric.is-warn .v { color: var(--amber); }
+  .metric.is-warn .warnflag { margin-left: 7px; font-family: var(--mono); font-size: 10px; color: var(--amber); border: 1px solid var(--amber-ln); border-radius: 3px; padding: 1px 5px; vertical-align: middle; background: var(--amber-bg); }
+
+  /* ===================== MAIN GRID ===================== */
+  .main {
+    display: grid;
+    grid-template-columns: minmax(0, 1.55fr) minmax(360px, 0.95fr);
+    gap: 1px;
+    background: var(--line-soft);
+    min-height: 0;
+  }
+  .col { display: flex; flex-direction: column; gap: 1px; background: var(--line-soft); min-width: 0; }
+  .col.left { background: var(--bg-0); }
+
+  .panel {
+    background: var(--bg-1);
+    display: flex; flex-direction: column;
+    min-width: 0;
+  }
+  .panel + .panel { border-top: 1px solid var(--line); }
+  .col .panel { border: 0; }
+
+  .phead {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px var(--sp-5);
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+  }
+  .phead .title { font-size: var(--fs-13); font-weight: 600; color: var(--fg); letter-spacing: -0.005em; }
+  .phead .prompt { font-family: var(--mono); color: var(--cyan); font-weight: 600; }
+  .phead .sub { font-family: var(--mono); font-size: var(--fs-11); color: var(--fg-2); }
+  .phead .spacer { flex: 1; }
+  .phead .count { font-family: var(--mono); font-size: var(--fs-11); color: var(--fg-2); border: 1px solid var(--line-strong); border-radius: 999px; padding: 1px 8px; }
+
+  /* ---- Status chip (shared) ---- */
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: var(--fs-11);
+    padding: 2px 8px 2px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--line-strong);
+    color: var(--fg-1);
+    white-space: nowrap;
+    line-height: 1.5;
+  }
+  .chip .ico { font-weight: 700; font-size: 11px; line-height: 1; }
+  .chip.run  { color: var(--cyan);  border-color: var(--cyan-ln);  background: var(--cyan-bg); }
+  .chip.ok   { color: var(--green); border-color: var(--green-ln); background: var(--green-bg); }
+  .chip.warn { color: var(--amber); border-color: var(--amber-ln); background: var(--amber-bg); }
+  .chip.bad  { color: var(--red);   border-color: var(--red-ln);   background: var(--red-bg); }
+  .chip.neutral { color: var(--fg-2); }
+
+  /* pulsing running dot (subtle, css only) */
+  .pulse { position: relative; width: 7px; height: 7px; }
+  .pulse i { position: absolute; inset: 0; border-radius: 50%; background: var(--cyan); }
+  .pulse::after { content: ""; position: absolute; inset: -3px; border-radius: 50%; border: 1px solid var(--cyan-ln); animation: ring 2.2s ease-out infinite; }
+  @keyframes ring { 0% { transform: scale(0.6); opacity: 0.9; } 100% { transform: scale(1.5); opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .pulse::after { animation: none; } }
+
+  /* ===================== AGENT TABLE ===================== */
+  .agents { flex: 1; overflow: hidden; }
+  .row {
+    display: grid;
+    grid-template-columns: 22px minmax(190px, 1.3fr) 132px minmax(220px, 2fr) 118px;
+    align-items: center;
+    gap: var(--sp-3);
+    padding: 11px var(--sp-5);
+    border-bottom: 1px solid var(--line-soft);
+    cursor: pointer;
+    position: relative;
+  }
+  .row.head {
+    cursor: default;
+    padding-top: 8px; padding-bottom: 8px;
+    background: var(--bg-1);
+    border-bottom: 1px solid var(--line);
+  }
+  .row.head span { font-size: var(--fs-11); text-transform: uppercase; letter-spacing: 0.07em; color: var(--fg-2); }
+  .row:not(.head):hover { background: var(--bg-hover); }
+  .row.sel { background: var(--bg-active); }
+  .row.sel::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--violet); }
+
+  .agentname { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .agentname .n { font-family: var(--mono); font-size: var(--fs-13); color: var(--fg); font-weight: 600; }
+  .agentname .n .selmark { color: var(--violet); margin-right: 4px; }
+  .agentname .g { font-size: var(--fs-12); color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .adapter { font-family: var(--mono); font-size: var(--fs-12); color: var(--fg-1); }
+  .adapter .tag {
+    display: inline-flex; align-items: center; gap: 5px;
+    border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+    padding: 2px 7px; color: var(--fg-1); background: var(--bg-3);
+  }
+  .adapter .tag.fake { color: var(--violet); border-color: var(--violet-ln); background: var(--violet-bg); }
+
+  .result { font-size: var(--fs-13); color: var(--fg-1); min-width: 0; }
+  .result .text { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .result .blk { display: inline-flex; align-items: center; gap: 5px; margin-top: 4px; font-family: var(--mono); font-size: var(--fs-11); color: var(--red); }
+
+  .counts { display: flex; gap: 6px; justify-content: flex-end; }
+  .pillc {
+    font-family: var(--mono); font-size: var(--fs-11);
+    display: inline-flex; align-items: center; gap: 4px;
+    color: var(--fg-1); background: var(--bg-3);
+    border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+    padding: 1px 6px;
+  }
+  .pillc .lbl { color: var(--fg-3); }
+  .pillc.zero { color: var(--fg-3); }
+  .pillc.has-e { border-color: var(--cyan-ln); color: var(--cyan); }
+  .pillc.has-r { border-color: var(--amber-ln); color: var(--amber); }
+
+  /* glyph status cell */
+  .gly { font-family: var(--mono); font-size: 14px; font-weight: 700; text-align: center; }
+  .gly.run  { color: var(--cyan); }
+  .gly.ok   { color: var(--green); }
+  .gly.warn { color: var(--amber); }
+  .gly.bad  { color: var(--red); }
+
+  .statuscell { display: flex; align-items: center; }
+
+  /* ===================== TIMELINE ===================== */
+  .timeline { padding: var(--sp-3) var(--sp-5) var(--sp-4); display: flex; flex-direction: column; }
+  .tl-row { display: grid; grid-template-columns: 52px 18px 1fr; gap: var(--sp-3); padding: 8px 0; align-items: start; position: relative; }
+  .tl-row + .tl-row { border-top: 1px solid var(--line-soft); }
+  .tl-time { font-family: var(--mono); font-size: var(--fs-12); color: var(--fg-2); padding-top: 1px; }
+  .tl-rail { display: flex; flex-direction: column; align-items: center; padding-top: 3px; }
+  .tl-node { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--bg-1); }
+  .tl-node.planner    { background: var(--violet); box-shadow: 0 0 0 1px var(--violet-ln); }
+  .tl-node.validation { background: var(--green);  box-shadow: 0 0 0 1px var(--green-ln); }
+  .tl-node.blocker    { background: var(--red);    box-shadow: 0 0 0 1px var(--red-ln); }
+  .tl-line { width: 1px; flex: 1; background: var(--line); margin-top: 3px; min-height: 14px; }
+  .tl-row:last-child .tl-line { display: none; }
+  .tl-body { min-width: 0; }
+  .tl-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+  .tl-agent { font-family: var(--mono); font-size: var(--fs-12); color: var(--fg); font-weight: 600; }
+  .tl-kind { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 6px; border-radius: 3px; border: 1px solid var(--line-strong); color: var(--fg-2); }
+  .tl-kind.planner    { color: var(--violet); border-color: var(--violet-ln); }
+  .tl-kind.validation { color: var(--green);  border-color: var(--green-ln); }
+  .tl-kind.blocker    { color: var(--red);    border-color: var(--red-ln); }
+  .tl-text { font-size: var(--fs-13); color: var(--fg-1); }
+
+  /* ===================== RIGHT COLUMN: SESSION DETAIL ===================== */
+  .detail { background: var(--bg-1); }
+  .detail .dhead { padding: 14px var(--sp-5) 12px; border-bottom: 1px solid var(--line); background: linear-gradient(180deg, var(--bg-2), var(--bg-1)); }
+  .detail .dtop { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .detail .dname { font-family: var(--mono); font-size: var(--fs-16); font-weight: 700; color: var(--fg); letter-spacing: -0.01em; }
+  .detail .dtop .spacer { flex: 1; }
+  .detail .dsub { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: var(--fs-12); color: var(--fg-2); flex-wrap: wrap; }
+  .detail .dsub .k { color: var(--fg-3); }
+
+  .dbody { padding: var(--sp-4) var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-4); }
+
+  .field .flabel { font-size: var(--fs-11); text-transform: uppercase; letter-spacing: 0.07em; color: var(--fg-2); margin-bottom: 5px; display: flex; align-items: center; gap: 7px; }
+  .resultbox {
+    font-size: var(--fs-13); color: var(--fg); line-height: 1.5;
+    background: var(--bg-3); border: 1px solid var(--line); border-left: 2px solid var(--green);
+    border-radius: var(--r-md); padding: 10px 12px;
+  }
+  .resultbox .marker { font-family: var(--mono); color: var(--green); margin-right: 6px; }
+
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; }
+  .kv dt { font-family: var(--mono); font-size: var(--fs-12); color: var(--fg-2); }
+  .kv dd { margin: 0; font-size: var(--fs-13); color: var(--fg-1); }
+
+  /* confidence meter */
+  .conf { display: flex; align-items: center; gap: 9px; }
+  .conf .bars { display: inline-flex; gap: 3px; }
+  .conf .bars i { width: 14px; height: 8px; border-radius: 2px; background: var(--bg-3); border: 1px solid var(--line-strong); }
+  .conf.medium .bars i:nth-child(-n+2) { background: var(--amber); border-color: var(--amber); }
+  .conf.high .bars i { background: var(--green); border-color: var(--green); }
+  .conf.low .bars i:nth-child(-n+1) { background: var(--red); border-color: var(--red); }
+  .conf .lab { font-family: var(--mono); font-size: var(--fs-12); }
+  .conf.medium .lab { color: var(--amber); }
+  .conf.high .lab { color: var(--green); }
+  .conf.low .lab { color: var(--red); }
+
+  /* lane rows */
+  .lane { display: flex; flex-direction: column; gap: 1px; background: var(--line-soft); border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+  .lane .lrow {
+    display: grid; grid-template-columns: 16px 1fr auto; align-items: center; gap: 9px;
+    padding: 7px 10px; background: var(--bg-2);
+  }
+  .lane .lrow .lico { font-family: var(--mono); font-weight: 700; text-align: center; }
+  .lane .lrow .lid { font-family: var(--mono); font-size: var(--fs-12); color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .lane .lrow .lmeta { font-family: var(--mono); font-size: var(--fs-11); color: var(--fg-3); margin-left: 6px; }
+  .lico.ok { color: var(--green); } .lico.warn { color: var(--amber); } .lico.bad { color: var(--red); } .lico.info { color: var(--cyan); }
+
+  .lanes-grid { display: grid; grid-template-columns: 1fr; gap: var(--sp-4); }
+
+  .blockerbox {
+    display: flex; gap: 9px; align-items: flex-start;
+    font-size: var(--fs-13); color: var(--fg);
+    background: var(--red-bg); border: 1px solid var(--red-ln);
+    border-radius: var(--r-md); padding: 10px 12px;
+  }
+  .blockerbox .bi { color: var(--red); font-family: var(--mono); font-weight: 700; }
+  .blockerbox b { color: var(--red); font-weight: 600; }
+
+  /* ===================== COMMAND PANEL ===================== */
+  .cmd { background: var(--bg-1); }
+  .cmd .cbody { padding: var(--sp-4) var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-3); }
+  .steer {
+    position: relative;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-md);
+    background: var(--bg-3);
+    transition: box-shadow .12s ease, border-color .12s ease;
+  }
+  .steer:focus-within { border-color: var(--cyan-ln); box-shadow: var(--focus); }
+  .steer .ps1 { position: absolute; top: 11px; left: 12px; font-family: var(--mono); color: var(--cyan); font-weight: 700; pointer-events: none; }
+  textarea.steerin {
+    width: 100%; resize: none; border: 0; background: transparent; color: var(--fg);
+    font-family: var(--mono); font-size: var(--fs-13); line-height: 1.5;
+    padding: 10px 12px 10px 32px; min-height: 64px; outline: none;
+  }
+  textarea.steerin::placeholder { color: var(--fg-3); }
+  .steer .caret { color: var(--cyan); animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .steer .caret { animation: none; } }
+
+  .cmdbar { display: flex; align-items: center; gap: var(--sp-2); }
+  .cmdbar .spacer { flex: 1; }
+  .send {
+    font: inherit; font-size: var(--fs-13); font-weight: 600;
+    display: inline-flex; align-items: center; gap: 8px;
+    color: #06210c; background: var(--green); border: 1px solid var(--green);
+    border-radius: var(--r-md); padding: 7px 14px; cursor: pointer;
+  }
+  .send:hover { background: #46c759; }
+  .send:focus-visible { outline: none; box-shadow: var(--focus); }
+  .send .kc { font-family: var(--mono); font-size: 10px; color: rgba(6,33,12,0.7); }
+
+  .danger {
+    font: inherit; font-size: var(--fs-13);
+    display: inline-flex; align-items: center; gap: 7px;
+    color: var(--red); background: transparent;
+    border: 1px solid var(--red-ln); border-radius: var(--r-md);
+    padding: 7px 12px; cursor: pointer;
+  }
+  .danger svg { width: 13px; height: 13px; }
+  .danger:hover { background: var(--red-bg); border-color: var(--red); }
+  .danger:focus-visible { outline: none; box-shadow: 0 0 0 1px var(--bg-1), 0 0 0 3px rgba(248,81,73,0.5); }
+  .danger.stop { color: #fff; background: var(--red); border-color: var(--red); }
+  .danger.stop:hover { background: #ff6259; }
+
+  .cmdlog {
+    display: flex; align-items: center; gap: 9px;
+    font-family: var(--mono); font-size: var(--fs-12); color: var(--fg-2);
+    border-top: 1px dashed var(--line-strong); padding-top: 10px;
+  }
+  .cmdlog .ok { color: var(--green); }
+  .cmdlog .t { color: var(--fg-3); }
+  .cmdlog .scope { color: var(--violet); }
+
+  /* affordance hint row */
+  .hintrow { display: flex; align-items: center; gap: 8px; font-size: var(--fs-12); color: var(--fg-3); }
+  .hintrow svg { width: 13px; height: 13px; opacity: 0.7; }
+
+  /* footer status bar (IDE-like) */
+  .statusbar {
+    grid-column: 1 / -1;
+    display: flex; align-items: center; gap: var(--sp-4);
+    height: 30px; padding: 0 var(--sp-5);
+    background: var(--bg-2); border-top: 1px solid var(--line);
+    font-family: var(--mono); font-size: var(--fs-11); color: var(--fg-2);
+  }
+  .statusbar .seg { display: inline-flex; align-items: center; gap: 6px; }
+  .statusbar .spacer { flex: 1; }
+  .statusbar .ok { color: var(--green); }
+  .statusbar .warn { color: var(--amber); }
+  .statusbar b { color: var(--fg-1); font-weight: 600; }
+
+  /* ===================== RESPONSIVE ===================== */
+  @media (max-width: 900px) {
+    .topbar { height: auto; flex-wrap: wrap; gap: 10px; padding: 10px var(--sp-4); }
+    .topbar .spacer { display: none; }
+    .tabs { order: 3; width: 100%; }
+    .controls { order: 4; }
+    .strip { grid-template-columns: repeat(3, 1fr); }
+    .metric:nth-child(3n) { border-right: 0; }
+    .metric:nth-child(-n+3) { border-bottom: 1px solid var(--line-soft); }
+    .main { grid-template-columns: 1fr; }
+    .row {
+      grid-template-columns: 18px 1fr auto;
+      grid-template-areas: "g name status" "g result result" "g counts counts";
+      row-gap: 7px;
+    }
+    .row.head { display: none; }
+    .row .statuscell { grid-area: g; align-self: start; }
+    .row .agentname { grid-area: name; }
+    .row .chip.statuschip { grid-area: status; justify-self: end; }
+    .row .adapter { display: none; }
+    .row .result { grid-area: result; }
+    .row .result .text { white-space: normal; }
+    .row .counts { grid-area: counts; justify-content: flex-start; }
+    .modebadge { font-size: 11px; }
+    .metric .v { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+  <div class="app">
+
+    <!-- ============ TOP BAR ============ -->
+    <header class="topbar">
+      <div class="brand">
+        <div class="glyph mono">⌘</div>
+        <div>
+          <span class="name">Capo</span>
+          <span class="sep mono">·</span>
+          <span class="view">Operator Dashboard</span>
+        </div>
+      </div>
+
+      <nav class="tabs" aria-label="Primary">
+        <button class="tab" aria-current="page">Overview</button>
+        <button class="tab">Goals</button>
+        <button class="tab">Settings</button>
+      </nav>
+
+      <div class="spacer"></div>
+
+      <div class="modebadge" title="Server connection and mode">
+        <span class="pip" aria-hidden="true"></span>
+        <span>mock <b>server-command API</b></span>
+        <span class="sep">·</span>
+        <span>mode <span class="mode">fixture</span></span>
+      </div>
+
+      <div class="controls">
+        <button class="btn toggle" aria-pressed="true" title="Show row details">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 4h12M2 8h12M2 12h8"/></svg>
+          Details
+        </button>
+        <button class="btn" title="Refresh fixture">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.8 2.5V5h-2.5"/></svg>
+          Refresh
+          <span class="kc">R</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- ============ STATUS STRIP ============ -->
+    <section class="strip" aria-label="Project summary">
+      <div class="metric is-neutral">
+        <span class="k"><span class="dot"></span>Agents</span>
+        <span class="v mono">5</span>
+      </div>
+      <div class="metric is-info">
+        <span class="k"><span class="dot"></span>Active</span>
+        <span class="v mono">3<span class="delta">running</span></span>
+      </div>
+      <div class="metric is-warn" role="status">
+        <span class="k"><span class="dot"></span>Blocked</span>
+        <span class="v mono">1<span class="warnflag">needs attention</span></span>
+      </div>
+      <div class="metric is-info">
+        <span class="k"><span class="dot"></span>Evidence</span>
+        <span class="v mono">6</span>
+      </div>
+      <div class="metric is-neutral">
+        <span class="k"><span class="dot"></span>Reviews</span>
+        <span class="v mono">2</span>
+      </div>
+      <div class="metric is-good">
+        <span class="k"><span class="dot"></span>Validations</span>
+        <span class="v mono">3</span>
+      </div>
+    </section>
+
+    <!-- ============ MAIN ============ -->
+    <div class="main">
+
+      <!-- ----------- LEFT COLUMN ----------- -->
+      <div class="col left">
+
+        <!-- AGENT TABLE -->
+        <section class="panel agents" aria-label="Agents">
+          <div class="phead">
+            <span class="prompt mono">$</span>
+            <span class="title">agents</span>
+            <span class="sub mono">--watch</span>
+            <span class="spacer"></span>
+            <span class="count mono">5 total · 3 active</span>
+          </div>
+
+          <div class="row head" role="row">
+            <span></span>
+            <span>Agent / Goal</span>
+            <span>Adapter</span>
+            <span>Latest result</span>
+            <span style="text-align:right">Evid · Rev</span>
+          </div>
+
+          <!-- capo-operator (selected, finished) -->
+          <div class="row sel" role="row" aria-selected="true">
+            <div class="statuscell"><span class="gly ok" title="finished">✓</span></div>
+            <div class="agentname">
+              <span class="n mono"><span class="selmark">▸</span>capo-operator</span>
+              <span class="g">Map operator input into validated server-backed actions</span>
+            </div>
+            <div class="adapter"><span class="tag mono">codex_exec</span></div>
+            <div class="result">
+              <span class="text">Selected results_evidence for an all-agent evidence request.</span>
+            </div>
+            <div class="counts">
+              <span class="pillc has-e mono"><span class="lbl">e</span>1</span>
+              <span class="pillc zero mono"><span class="lbl">r</span>0</span>
+            </div>
+          </div>
+
+          <!-- codex-local (timed out) -->
+          <div class="row" role="row">
+            <div class="statuscell"><span class="gly bad" title="timed out">⨯</span></div>
+            <div class="agentname">
+              <span class="n mono">codex-local</span>
+              <span class="g">Inspect local workspace and report blockers</span>
+            </div>
+            <div class="adapter"><span class="tag mono">codex_exec</span></div>
+            <div class="result">
+              <span class="text">Timed out after recording two tool calls and a memory packet.</span>
+              <span class="blk mono">[!] Provider run exceeded the configured timeout.</span>
+            </div>
+            <div class="counts">
+              <span class="pillc has-e mono"><span class="lbl">e</span>2</span>
+              <span class="pillc has-r mono"><span class="lbl">r</span>1</span>
+            </div>
+          </div>
+
+          <!-- codex-one (running) -->
+          <div class="row" role="row">
+            <div class="statuscell"><span class="pulse" title="running"><i></i></span></div>
+            <div class="agentname">
+              <span class="n mono">codex-one</span>
+              <span class="g">Continue dashboard implementation</span>
+            </div>
+            <div class="adapter"><span class="tag mono">codex_exec</span></div>
+            <div class="result">
+              <span class="text">Working on webclient design and browser verification.</span>
+            </div>
+            <div class="counts">
+              <span class="pillc has-e mono"><span class="lbl">e</span>1</span>
+              <span class="pillc zero mono"><span class="lbl">r</span>0</span>
+            </div>
+          </div>
+
+          <!-- codex-proof (finished) -->
+          <div class="row" role="row">
+            <div class="statuscell"><span class="gly ok" title="finished">✓</span></div>
+            <div class="agentname">
+              <span class="n mono">codex-proof</span>
+              <span class="g">Prove Codex live provider path</span>
+            </div>
+            <div class="adapter"><span class="tag mono">codex_exec</span></div>
+            <div class="result">
+              <span class="text">Finished Codex-backed proof through the server boundary.</span>
+            </div>
+            <div class="counts">
+              <span class="pillc has-e mono"><span class="lbl">e</span>2</span>
+              <span class="pillc has-r mono"><span class="lbl">r</span>1</span>
+            </div>
+          </div>
+
+          <!-- demo (running, fake) -->
+          <div class="row" role="row" style="border-bottom:0">
+            <div class="statuscell"><span class="pulse" title="running"><i></i></span></div>
+            <div class="agentname">
+              <span class="n mono">demo</span>
+              <span class="g">Exercise mocked steering and dashboard fixtures</span>
+            </div>
+            <div class="adapter"><span class="tag fake mono">fake</span></div>
+            <div class="result">
+              <span class="text">Fake adapter processed the latest steering goal.</span>
+            </div>
+            <div class="counts">
+              <span class="pillc zero mono"><span class="lbl">e</span>1</span>
+              <span class="pillc zero mono"><span class="lbl">r</span>0</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- LEGEND + TIMELINE -->
+        <section class="panel" aria-label="Recent activity">
+          <div class="phead">
+            <span class="prompt mono">$</span>
+            <span class="title">activity</span>
+            <span class="sub mono">--tail 3</span>
+            <span class="spacer"></span>
+            <span class="count mono">last 45m</span>
+          </div>
+          <div class="timeline">
+
+            <div class="tl-row">
+              <div class="tl-time mono">12:00</div>
+              <div class="tl-rail"><span class="tl-node planner"></span><span class="tl-line"></span></div>
+              <div class="tl-body">
+                <div class="tl-meta">
+                  <span class="tl-agent mono">capo-operator</span>
+                  <span class="tl-kind planner mono">planner</span>
+                </div>
+                <div class="tl-text">Mapped an all-agent response/evidence request to results_evidence.</div>
+              </div>
+            </div>
+
+            <div class="tl-row">
+              <div class="tl-time mono">11:42</div>
+              <div class="tl-rail"><span class="tl-node validation"></span><span class="tl-line"></span></div>
+              <div class="tl-body">
+                <div class="tl-meta">
+                  <span class="tl-agent mono">codex-proof</span>
+                  <span class="tl-kind validation mono">validation</span>
+                </div>
+                <div class="tl-text">Codex proof completed through server dispatch.</div>
+              </div>
+            </div>
+
+            <div class="tl-row">
+              <div class="tl-time mono">11:15</div>
+              <div class="tl-rail"><span class="tl-node blocker"></span><span class="tl-line"></span></div>
+              <div class="tl-body">
+                <div class="tl-meta">
+                  <span class="tl-agent mono">codex-local</span>
+                  <span class="tl-kind blocker mono">blocker</span>
+                </div>
+                <div class="tl-text">Timed out while collecting workspace internals.</div>
+              </div>
+            </div>
+
+          </div>
+        </section>
+
+      </div><!-- /left -->
+
+      <!-- ----------- RIGHT COLUMN ----------- -->
+      <div class="col right">
+
+        <!-- SESSION DETAIL -->
+        <section class="panel detail" aria-label="Session detail">
+          <div class="dhead">
+            <div class="dtop">
+              <span class="gly ok" style="font-size:15px" aria-hidden="true">✓</span>
+              <span class="dname mono">capo-operator</span>
+              <span class="spacer"></span>
+              <span class="chip ok mono"><span class="ico">[✓]</span>finished</span>
+            </div>
+            <div class="dsub">
+              <span><span class="k">adapter</span> codex_exec</span>
+              <span class="k">·</span>
+              <span><span class="k">tools</span> 0</span>
+              <span class="k">·</span>
+              <span><span class="k">memory</span> 0</span>
+              <span class="k">·</span>
+              <span><span class="k">session</span> #project-capo</span>
+            </div>
+          </div>
+
+          <div class="dbody">
+
+            <div class="field">
+              <div class="flabel"><span class="prompt mono" style="color:var(--cyan)">›</span>Latest result</div>
+              <div class="resultbox"><span class="marker mono">→</span>Selected results_evidence for an all-agent evidence request.</div>
+            </div>
+
+            <div class="field">
+              <div class="flabel">Goal &amp; confidence</div>
+              <dl class="kv">
+                <dt>goal</dt>
+                <dd>Map operator input into validated server-backed actions</dd>
+                <dt>confidence</dt>
+                <dd>
+                  <span class="conf medium">
+                    <span class="bars" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <span class="lab mono">medium</span>
+                  </span>
+                </dd>
+              </dl>
+            </div>
+
+            <div class="lanes-grid">
+              <!-- Evidence lane -->
+              <div class="field">
+                <div class="flabel"><span class="dot" style="background:var(--cyan);width:6px;height:6px;border-radius:50%"></span>Evidence <span style="color:var(--fg-3);font-family:var(--mono)">· 6 across project</span></div>
+                <div class="lane">
+                  <div class="lrow">
+                    <span class="lico ok">✓</span>
+                    <span class="lid">planner-action-results-evidence<span class="lmeta">test · capo-operator</span></span>
+                    <span class="chip ok mono"><span class="ico">✓</span>validated</span>
+                  </div>
+                  <div class="lrow">
+                    <span class="lico ok">✓</span>
+                    <span class="lid">codex-live-smoke<span class="lmeta">manual · codex-proof</span></span>
+                    <span class="chip ok mono"><span class="ico">✓</span>validated</span>
+                  </div>
+                  <div class="lrow">
+                    <span class="lico warn">◐</span>
+                    <span class="lid">timeout-log<span class="lmeta">artifact · codex-local</span></span>
+                    <span class="chip warn mono"><span class="ico">◐</span>partial</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Reviews lane -->
+              <div class="field">
+                <div class="flabel"><span class="dot" style="background:var(--amber);width:6px;height:6px;border-radius:50%"></span>Reviews <span style="color:var(--fg-3);font-family:var(--mono)">· 2</span></div>
+                <div class="lane">
+                  <div class="lrow">
+                    <span class="lico warn">!</span>
+                    <span class="lid">review-codex-local-timeout<span class="lmeta">→ codex-local</span></span>
+                    <span class="chip warn mono"><span class="ico">[!]</span>needs follow-up</span>
+                  </div>
+                  <div class="lrow">
+                    <span class="lico ok">✓</span>
+                    <span class="lid">review-codex-proof<span class="lmeta">→ codex-proof</span></span>
+                    <span class="chip ok mono"><span class="ico">✓</span>accepted</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Validation lane -->
+              <div class="field">
+                <div class="flabel"><span class="dot" style="background:var(--green);width:6px;height:6px;border-radius:50%"></span>Validation <span style="color:var(--fg-3);font-family:var(--mono)">· 3</span></div>
+                <div class="lane">
+                  <div class="lrow">
+                    <span class="lico warn">◐</span>
+                    <span class="lid">browser-smoke<span class="lmeta">→ dashboard-webclient</span></span>
+                    <span class="chip warn mono"><span class="ico">◐</span>pending</span>
+                  </div>
+                  <div class="lrow">
+                    <span class="lico ok">✓</span>
+                    <span class="lid">codex-proof-smoke<span class="lmeta">→ codex-proof</span></span>
+                    <span class="chip ok mono"><span class="ico">✓</span>passed</span>
+                  </div>
+                  <div class="lrow">
+                    <span class="lico ok">✓</span>
+                    <span class="lid">planner-results-evidence<span class="lmeta">→ capo-operator</span></span>
+                    <span class="chip ok mono"><span class="ico">✓</span>passed</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- COMMAND PANEL -->
+        <section class="panel cmd" aria-label="Command panel">
+          <div class="phead">
+            <span class="prompt mono">&gt;</span>
+            <span class="title">steer</span>
+            <span class="sub mono">capo-operator</span>
+            <span class="spacer"></span>
+            <span class="count mono">1 selected</span>
+          </div>
+          <div class="cbody">
+            <div class="steer">
+              <span class="ps1" aria-hidden="true">&gt;</span>
+              <textarea class="steerin" rows="2" aria-label="Steer instruction for capo-operator" placeholder="steer capo-operator — e.g. re-run results_evidence with full transcript&#10;Shift+Enter for newline · Enter to send"></textarea>
+            </div>
+
+            <div class="cmdbar">
+              <button class="send">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 8h9"/><path d="M7 4l4 4-4 4"/></svg>
+                Send
+                <span class="kc">↵</span>
+              </button>
+              <span class="spacer"></span>
+              <button class="danger" title="Interrupt the current run (destructive)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3.5" y="3.5" width="3" height="9"/><rect x="9.5" y="3.5" width="3" height="9"/></svg>
+                Interrupt
+              </button>
+              <button class="danger stop" title="Stop and terminate the agent (destructive)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3.5" y="3.5" width="9" height="9" rx="1"/></svg>
+                Stop
+              </button>
+            </div>
+
+            <div class="hintrow">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v3.4M8 5.2v.2"/></svg>
+              Interrupt and Stop are destructive and require confirmation.
+            </div>
+
+            <div class="cmdlog">
+              <span class="ok">[✓]</span>
+              <span class="t">12:00:14</span>
+              <span>steer dispatched →</span>
+              <span class="scope">capo-operator</span>
+              <span>· results_evidence · ack</span>
+            </div>
+          </div>
+        </section>
+
+      </div><!-- /right -->
+
+      <!-- ============ STATUS BAR ============ -->
+      <footer class="statusbar">
+        <span class="seg"><span class="ok">●</span> connected <b>mock server-command API</b></span>
+        <span class="seg">mode <b style="color:var(--amber)">fixture</b></span>
+        <span class="seg"><span class="warn">[!]</span> 1 blocked</span>
+        <span class="seg">3 active · 2 finished</span>
+        <span class="spacer"></span>
+        <span class="seg">project <b>project-capo</b></span>
+        <span class="seg">updated <b>2026-05-28 12:00 UTC</b></span>
+      </footer>
+
+    </div><!-- /main -->
+  </div><!-- /app -->
+</body>
+</html>
