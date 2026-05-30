@@ -2613,6 +2613,246 @@ fn real_controller_turn_invokes_a_runtime_wrapper_through_authorize_and_invoke()
     }));
 }
 
+/// ACI1 deny path: a denied Capo dispatch (read-only policy + a write tool)
+/// returns `outcome.status == "denied"` AND drives the persisted projection to
+/// "denied" -- it must NOT stick at "requested" (the bug: the deny audit kind
+/// `tool.call_canceled` has no loop EventKind, so the projection was never
+/// advanced past the initial "requested" write).
+#[test]
+fn real_controller_denied_capo_dispatch_persists_denied_projection() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{
+        CapoToolContext, CapoToolRequest, PermissionPolicy, ToolExposureRequest, ToolExposureResult,
+    };
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci1-deny-session"));
+    let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        PermissionPolicy::static_read_only_local(),
+        scripted,
+    )
+    .expect("open real controller");
+    let registration = controller
+        .register_agent("aci1-deny-worker")
+        .expect("agent");
+    let refs = controller
+        .send_task(
+            &registration,
+            "Attempt a write tool under a read-only policy",
+        )
+        .expect("send task");
+
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-aci1-deny"),
+        tool_call_id: ToolCallId::new("tool-aci1-evidence-record"),
+    };
+    // capo.evidence_record is a write/mutating tool; the read-only policy denies it.
+    let outcome = controller
+        .dispatch_tool_call(
+            &scope,
+            ToolExposureRequest::Capo(CapoToolRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: scope.session_id.clone(),
+                tool_id: "capo.evidence_record".to_string(),
+                capability_profile_id: "static-read-only-local".to_string(),
+                context: CapoToolContext {
+                    task_status: "task active".to_string(),
+                    agent_status: "agent running".to_string(),
+                    session_summary: "summary".to_string(),
+                    workpad_excerpt: "section".to_string(),
+                    evidence_note: "note".to_string(),
+                    capability_scope: "tool:invoke:capo.evidence_record".to_string(),
+                },
+            }),
+        )
+        .expect("dispatch denied capo tool");
+
+    let ToolExposureResult::Capo(result) = &outcome.result else {
+        panic!("expected a real Capo result");
+    };
+    assert_ne!(result.permission_decision.effect, "allow");
+    assert_eq!(outcome.status, "denied");
+    // No tool.call_completed event is persisted on the deny path.
+    assert!(
+        !outcome
+            .observed_event_kinds
+            .contains(&"tool.call_completed".to_string())
+    );
+
+    // The persisted projection reaches the TERMINAL denied status, not "requested",
+    // and records no output artifact.
+    let tools = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    let projection = tools
+        .iter()
+        .find(|tool| tool.tool_call_id == scope.tool_call_id)
+        .expect("denied projection present");
+    assert_eq!(projection.status, "denied");
+    assert_eq!(projection.output_artifact_id, None);
+    assert_eq!(projection.turn_id.as_deref(), Some("turn-aci1-deny"));
+}
+
+/// ACI1 failure path: a runtime dispatch that fails at execution (a
+/// `capo.file_read` on a missing file under an allow policy) returns
+/// `outcome.status == "failed"` and drives the persisted projection to "failed"
+/// -- the failure audit kind `tool.call_failed` has no loop EventKind, so before
+/// the fix the projection stuck at "requested".
+#[test]
+fn real_controller_failed_runtime_dispatch_persists_failed_projection() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{
+        RuntimeToolConfig, ToolExposureRequest, ToolExposureResult, WrapperToolRequest,
+    };
+
+    let workspace = temp_root();
+    let artifacts = temp_root();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci1-fail-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open real controller")
+    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace, artifacts));
+    let registration = controller
+        .register_agent("aci1-fail-worker")
+        .expect("agent");
+    let refs = controller
+        .send_task(&registration, "Read a workspace file that does not exist")
+        .expect("send task");
+
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-aci1-fail"),
+        tool_call_id: ToolCallId::new("tool-aci1-missing-read"),
+    };
+    let outcome = controller
+        .dispatch_tool_call(
+            &scope,
+            ToolExposureRequest::Runtime(WrapperToolRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: scope.session_id.clone(),
+                run_id: scope.run_id.clone(),
+                tool_id: "capo.file_read".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                input: serde_json::json!({"path": "does-not-exist.md"}),
+            }),
+        )
+        .expect("dispatch failing runtime tool");
+
+    let ToolExposureResult::Runtime(result) = &outcome.result else {
+        panic!("expected a real runtime-wrapper result");
+    };
+    assert_eq!(result.status, "failed");
+    assert_eq!(outcome.status, "failed");
+    // The terminal failure audit event was observed, and no completed event was.
+    assert!(
+        outcome
+            .observed_event_kinds
+            .contains(&"tool.output_observed".to_string())
+    );
+    assert!(
+        !outcome
+            .observed_event_kinds
+            .contains(&"tool.call_completed".to_string())
+    );
+
+    let tools = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    let projection = tools
+        .iter()
+        .find(|tool| tool.tool_call_id == scope.tool_call_id)
+        .expect("failed projection present");
+    assert_eq!(projection.status, "failed");
+    assert_eq!(projection.output_artifact_id, None);
+    assert_eq!(projection.turn_id.as_deref(), Some("turn-aci1-fail"));
+}
+
+/// ACI1 replay identity: one dispatched tool call must reconstruct to exactly
+/// ONE observed tool ref, not three. The tool.* events of a single call share a
+/// stamped item_id (the tool_call_id) so `reconstruct_turn_finished`'s dedup
+/// collapses tool.call_requested/invocation_started/call_completed into a single
+/// ref -- matching the loop's documented replay-identity invariant.
+#[test]
+fn real_controller_dispatched_tool_call_reconstructs_as_single_observed_ref() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{CapoToolContext, CapoToolRequest, ToolExposureRequest};
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci1-replay-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open real controller");
+    let registration = controller
+        .register_agent("aci1-replay-worker")
+        .expect("agent");
+    let refs = controller
+        .send_task(&registration, "Inspect agent status once for replay")
+        .expect("send task");
+
+    let turn_id = TurnId::new("turn-aci1-replay");
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: turn_id.clone(),
+        tool_call_id: ToolCallId::new("tool-aci1-replay-status"),
+    };
+    controller
+        .dispatch_tool_call(
+            &scope,
+            ToolExposureRequest::Capo(CapoToolRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: scope.session_id.clone(),
+                tool_id: "capo.agent_status".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                context: CapoToolContext {
+                    task_status: "task active".to_string(),
+                    agent_status: "agent running".to_string(),
+                    session_summary: "summary".to_string(),
+                    workpad_excerpt: "section".to_string(),
+                    evidence_note: "note".to_string(),
+                    capability_scope: "state:read:agent".to_string(),
+                },
+            }),
+        )
+        .expect("dispatch capo tool");
+
+    let finished = controller
+        .core()
+        .reconstruct_turn_finished(&refs, &turn_id)
+        .expect("reconstruct turn");
+    // One real tool call -> exactly one observed tool ref (not three distinct
+    // payload strings from tool.call_requested/invocation_started/call_completed).
+    assert_eq!(
+        finished.observed_tool_refs.len(),
+        1,
+        "expected a single observed tool ref per dispatched tool call, got {:?}",
+        finished.observed_tool_refs
+    );
+    assert_eq!(
+        finished.observed_tool_refs[0],
+        scope.tool_call_id.to_string()
+    );
+}
+
 /// Tiny test-only adapter over the two coexisting controllers so the parity
 /// test can drive an identical scripted sequence on each without duplicating
 /// the body. Both arms call the SAME public method names; the point of the test

@@ -113,9 +113,31 @@ Evidence:
   persists the canonical observed sequence keyed to the turn; a real
   `capo.file_read` turn flows through the runtime wrappers; real exposures are
   not the fake default).
+- Scope boundary (loop wiring): ACI1 lands and proves the REAL dispatch SEAM --
+  `RealBoundaryController::dispatch_tool_call` runs the real registry/wrappers
+  end-to-end (authorize -> invoke -> persisted canonical events + projection),
+  exercised through the controller's public dispatch entrypoint. The autonomous
+  observe->decide->emit turn loop does NOT yet auto-select and auto-invoke tools
+  on a model's behalf (the loop's `send_task` memory-packet shim still uses the
+  fake summary `ToolExposure::fake()` for its turn-context summary); promoting
+  the dispatch seam into the autonomous loop's decision step is owned by the
+  later ACI tasks + `safety-gates`. ACI1's claim is the seam is real and
+  driveable, not that the loop autonomously calls tools yet.
+- Remediation (review findings on this task): the deny/fail dispatch paths now
+  drive the persisted `ToolCallProjection` to its TERMINAL status
+  (`denied`/`failed`) instead of sticking at `requested` -- the deny/fail audit
+  kinds (`tool.call_canceled`/`tool.call_failed`) have no loop `EventKind`, so
+  the terminal projection is attached to the dispatch's last persisted event
+  when no `tool.call_completed` is emitted (`tool_dispatch.rs`). The dispatched
+  `tool.*` events of one call now share a stamped `item_id` (the
+  `tool_call_id`), so `reconstruct_turn_finished` dedups them to a SINGLE
+  observed tool ref per call (replay-identity). New deterministic tests:
+  `real_controller_denied_capo_dispatch_persists_denied_projection`,
+  `real_controller_failed_runtime_dispatch_persists_failed_projection`,
+  `real_controller_dispatched_tool_call_reconstructs_as_single_observed_ref`.
 - Gate run from `/Users/nicolas/devel/capo-wt/tools-aci`:
   `cargo fmt --check` clean; `cargo clippy --all-targets --all-features -- -D
-  warnings` clean; `cargo test --workspace` => 329 passed, 0 failed.
+  warnings` clean; `cargo test --workspace` => all passed, 0 failed.
 
 Acceptance:
 

@@ -227,6 +227,13 @@ impl RealBoundaryController {
     /// sequence keyed to the turn via the core's
     /// [`FakeBoundaryController::dispatch_tool_call`]. The fake summary shim is
     /// unreachable from this path.
+    ///
+    /// Scope (ACI1): this is the REAL dispatch SEAM and is the only entrypoint
+    /// into real tool execution. The autonomous observe->decide->emit turn loop
+    /// does not yet auto-select/auto-invoke tools on a model's behalf -- the
+    /// loop's per-turn memory-packet summary still uses `ToolExposure::fake()`.
+    /// Promoting this seam into the loop's decision step is owned by the later
+    /// ACI tasks + `safety-gates`; ACI1 proves the seam is real and driveable.
     pub fn dispatch_tool_call(
         &self,
         scope: &ToolDispatchScope,

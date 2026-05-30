@@ -441,6 +441,7 @@ fn scoped_event(
 trait EventBuilder {
     fn with_payload(self, payload_json: String) -> Self;
     fn with_turn(self, turn_id: impl ToString) -> Self;
+    fn with_item(self, item_id: impl ToString) -> Self;
 }
 
 impl EventBuilder for NewEvent {
@@ -451,6 +452,11 @@ impl EventBuilder for NewEvent {
 
     fn with_turn(mut self, turn_id: impl ToString) -> Self {
         self.turn_id = Some(turn_id.to_string());
+        self
+    }
+
+    fn with_item(mut self, item_id: impl ToString) -> Self {
+        self.item_id = Some(item_id.to_string());
         self
     }
 }

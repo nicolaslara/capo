@@ -69,19 +69,46 @@ impl FakeBoundaryController {
     ) -> StateResult<ToolDispatchOutcome> {
         let result = exposure.authorize_and_invoke(request, &self.permission_policy);
         let normalized = NormalizedToolResult::from_result(&result);
-        let mut observed_event_kinds = Vec::with_capacity(normalized.events.len());
-        for (index, audit_event) in normalized.events.iter().enumerate() {
-            let Some(kind) = tool_audit_event_kind(audit_event) else {
-                continue;
-            };
-            let projections = self.dispatch_event_projections(kind, scope, &normalized);
+        // The persistable canonical kinds for this dispatch, in order. Audit
+        // events with no loop counterpart (`tool.call_canceled`/`tool.call_failed`)
+        // are dropped here, but their terminal STATUS is still applied to the
+        // projection below so a denied/failed call never sticks at "requested".
+        let persistable: Vec<(usize, EventKind, &ToolAuditEvent)> = normalized
+            .events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, audit_event)| {
+                tool_audit_event_kind(audit_event).map(|kind| (index, kind, audit_event))
+            })
+            .collect();
+        // Whether the registry/wrappers reached a `tool.call_completed`. If not
+        // (deny/fail), the loop never runs the `ToolCallCompleted` projection
+        // branch, so we must stamp the terminal projection onto the LAST
+        // persisted event instead -- otherwise the persisted projection (read by
+        // `tool_calls_for_session`, dashboards, recovery) stays at "requested"
+        // even though the dispatch outcome is "denied"/"failed".
+        let reaches_completed = persistable
+            .iter()
+            .any(|(_, kind, _)| matches!(kind, EventKind::ToolCallCompleted));
+        let last_index = persistable.len().saturating_sub(1);
+        let mut observed_event_kinds = Vec::with_capacity(persistable.len());
+        for (position, (index, kind, audit_event)) in persistable.iter().enumerate() {
+            let kind = *kind;
+            let mut projections = self.dispatch_event_projections(kind, scope, &normalized);
+            // Terminal projection for the non-completed paths: attach the final
+            // `ToolCall` projection (status == normalized.status, i.e.
+            // "denied"/"failed") to the dispatch's last persisted event so every
+            // path drives the projection to its true terminal status.
+            if !reaches_completed && position == last_index {
+                projections.push(terminal_tool_call_projection(scope, &normalized));
+            }
             self.state.append_event(
                 scoped_event(
                     &format!(
                         "event-tool-dispatch-{}-{}-{}",
                         scope.session_id,
                         scope.tool_call_id,
-                        dispatch_event_suffix(kind, index)
+                        dispatch_event_suffix(kind, *index)
                     ),
                     kind,
                     &self.project_id,
@@ -91,6 +118,11 @@ impl FakeBoundaryController {
                     &scope.run_id,
                 )
                 .with_turn(scope.turn_id.to_string())
+                // Stamp a shared item ref (the tool_call_id) across every event of
+                // this one tool call so `persisted_turn_ref`/`reconstruct_turn_finished`
+                // dedup collapse them to a SINGLE observed tool ref per call,
+                // matching the loop's documented replay-identity invariant.
+                .with_item(scope.tool_call_id.to_string())
                 .with_payload(dispatch_event_payload(
                     kind,
                     scope,
@@ -133,21 +165,33 @@ impl FakeBoundaryController {
                 })]
             }
             EventKind::ToolCallCompleted => {
-                vec![ProjectionRecord::ToolCall(capo_state::ToolCallProjection {
-                    tool_call_id: scope.tool_call_id.clone(),
-                    session_id: scope.session_id.clone(),
-                    turn_id: Some(scope.turn_id.to_string()),
-                    tool_name: normalized.tool_name.clone(),
-                    tool_origin: normalized.tool_origin.clone(),
-                    status: normalized.status.clone(),
-                    input_artifact_id: normalized.input_artifact_id.clone(),
-                    output_artifact_id: normalized.output_artifact_id.clone(),
-                    updated_sequence: 0,
-                })]
+                vec![terminal_tool_call_projection(scope, normalized)]
             }
             _ => Vec::new(),
         }
     }
+}
+
+/// The terminal `ToolCall` projection for a dispatch: status == the normalized
+/// dispatch status (`completed`/`denied`/`failed`). Used both for the
+/// `tool.call_completed` (allow+success) branch AND, for the deny/fail paths that
+/// carry no `tool.call_completed` event, attached to the last persisted event so
+/// the persisted projection always reaches its true terminal status.
+fn terminal_tool_call_projection(
+    scope: &ToolDispatchScope,
+    normalized: &NormalizedToolResult,
+) -> ProjectionRecord {
+    ProjectionRecord::ToolCall(capo_state::ToolCallProjection {
+        tool_call_id: scope.tool_call_id.clone(),
+        session_id: scope.session_id.clone(),
+        turn_id: Some(scope.turn_id.to_string()),
+        tool_name: normalized.tool_name.clone(),
+        tool_origin: normalized.tool_origin.clone(),
+        status: normalized.status.clone(),
+        input_artifact_id: normalized.input_artifact_id.clone(),
+        output_artifact_id: normalized.output_artifact_id.clone(),
+        updated_sequence: 0,
+    })
 }
 
 /// A variant-erased view of the typed tool result, so the canonical normalization
