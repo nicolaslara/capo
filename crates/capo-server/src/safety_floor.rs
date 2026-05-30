@@ -76,6 +76,21 @@ impl WriteMode {
 /// here.
 pub fn resolve_write_mode(live_execution_opt_in: bool, unattended: bool) -> WriteMode {
     let env_opt_in = std::env::var(LIVE_WRITE_OPT_IN_ENV).as_deref() == Ok("1");
+    resolve_write_mode_with_env(live_execution_opt_in, env_opt_in, unattended)
+}
+
+/// Pure write-mode decision with the env gate injected as a bool.
+///
+/// [`resolve_write_mode`] reads the process env gate and delegates here; tests
+/// (and the injectable [`CapoServer::run_workspace_write_turn_with_env_gate`]
+/// seam) call this directly so the live-write decision -- and the live arm of
+/// `run_workspace_write_turn` that takes the checkpoint -- can be exercised
+/// deterministically without mutating process-global env.
+pub fn resolve_write_mode_with_env(
+    live_execution_opt_in: bool,
+    env_opt_in: bool,
+    unattended: bool,
+) -> WriteMode {
     if live_execution_opt_in && env_opt_in && !unattended {
         WriteMode::LiveWrite
     } else {
@@ -174,13 +189,32 @@ impl CapoServer {
         origin: &ServerClientOrigin,
         request: WorkspaceWriteRequest<'_>,
     ) -> ServerResult<WorkspaceWriteOutcome> {
+        let env_opt_in = std::env::var(LIVE_WRITE_OPT_IN_ENV).as_deref() == Ok("1");
+        self.run_workspace_write_turn_with_env_gate(origin, request, env_opt_in)
+    }
+
+    /// Same as [`Self::run_workspace_write_turn`] but with the live-write env
+    /// gate injected as a bool, so the live-write arm (the only branch that takes
+    /// the pre-write checkpoint) can be exercised deterministically in tests
+    /// without mutating the process-global `CAPO_SERVER_RUN_CODEX_LIVE` env. The
+    /// public entry point reads the env gate and delegates here.
+    pub fn run_workspace_write_turn_with_env_gate(
+        &self,
+        origin: &ServerClientOrigin,
+        request: WorkspaceWriteRequest<'_>,
+        env_opt_in: bool,
+    ) -> ServerResult<WorkspaceWriteOutcome> {
         // 1. Confinement, before anything runs.
         let confined_write_target =
             self.confine_workspace_write(request.workspace_root, request.write_target)?;
 
         // 2. Dry-run/diff-preview is the default. A live write needs the opt-in,
         //    the env gate, AND an attended run.
-        let write_mode = resolve_write_mode(request.live_execution_opt_in, request.unattended);
+        let write_mode = resolve_write_mode_with_env(
+            request.live_execution_opt_in,
+            env_opt_in,
+            request.unattended,
+        );
 
         // 3. Only a live write touches the workspace, so only a live write needs
         //    the reversibility checkpoint -- taken BEFORE the write.

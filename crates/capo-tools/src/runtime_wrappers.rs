@@ -10,8 +10,8 @@ use capo_runtime::{
 use serde_json::Value;
 
 use crate::runtime_wrapper_paths::{
-    ensure_under_workspace, is_workpad_path, nearest_existing_ancestor, sanitize_path_component,
-    sanitized_run_id, workspace_path, workspace_relative_path,
+    ensure_under_workspace, is_workpad_path, lexically_normalize, nearest_existing_ancestor,
+    sanitize_path_component, sanitized_run_id, workspace_path, workspace_relative_path,
 };
 use crate::{
     CAPO_WRAPPER_TOOLS, PermissionPolicy, PermissionRequest, ToolAuditEvent, ToolAuthorization,
@@ -523,12 +523,25 @@ impl RuntimeToolWrappers {
     }
 
     fn resolve_workspace_path(&self, path: &str, allow_missing: bool) -> Result<PathBuf, String> {
-        let candidate = workspace_path(&self.config.workspace_root, path);
+        // Build the candidate against the CANONICAL workspace root, then lexically
+        // fold `.`/`..` so a not-yet-created target with interior `..` (e.g.
+        // `src/sub/../../../escape.txt`) cannot escape confinement by hiding
+        // behind a non-existent intermediate dir -- the same fix applied to the
+        // shared `confine_write_path` engine. Canonicalizing the root up front
+        // keeps the lexical containment check valid even when `workspace_root`
+        // itself is a symlink (e.g. macOS `/var` -> `/private/var`).
+        let canonical_root = self
+            .config
+            .workspace_root
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let candidate = lexically_normalize(&workspace_path(&canonical_root, path));
+        ensure_under_workspace(&candidate, &canonical_root)?;
         if candidate.exists() {
             let canonical = candidate
                 .canonicalize()
                 .map_err(|error| error.to_string())?;
-            ensure_under_workspace(&canonical, &self.config.workspace_root)?;
+            ensure_under_workspace(&canonical, &canonical_root)?;
             return Ok(canonical);
         }
         if !allow_missing {
@@ -544,7 +557,7 @@ impl RuntimeToolWrappers {
             )
         })?;
         let ancestor = ancestor.canonicalize().map_err(|error| error.to_string())?;
-        ensure_under_workspace(&ancestor, &self.config.workspace_root)?;
+        ensure_under_workspace(&ancestor, &canonical_root)?;
         Ok(candidate)
     }
 }

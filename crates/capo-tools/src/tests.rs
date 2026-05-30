@@ -252,7 +252,11 @@ fn file_wrappers_record_input_output_artifacts_and_reject_workspace_escape() {
         &policy,
     );
     assert_eq!(escaped.status, "failed");
-    assert!(escaped.summary.contains("workspace path does not exist"));
+    assert!(
+        escaped.summary.contains("escapes workspace"),
+        "a `..`-escape must be rejected as a containment violation, got {}",
+        escaped.summary
+    );
 
     let workpad_escape = wrappers.authorize_and_invoke(
         wrapper_request(
@@ -955,12 +959,94 @@ fn confine_write_path_accepts_targets_under_the_workspace_and_rejects_escapes() 
         "parent-traversal escape must be rejected"
     );
 
+    // A NOT-YET-CREATED target with interior `..` that escapes the workspace via
+    // a non-existent intermediate dir must be rejected. `src/sub` does not exist,
+    // so the nearest-existing-ancestor walk used to skip past the `..` segments
+    // and accept the escape; the lexical normalization closes that bypass.
+    assert!(
+        confine_write_path(Path::new("src/sub/../../../escape.txt"), &workspace).is_err(),
+        "a deep `..`-escape through a non-existent intermediate must be rejected"
+    );
+    // A confined interior `..` that stays under the workspace is still accepted
+    // and the returned path is normalized (no `..` segments).
+    let folded = confine_write_path(Path::new("src/sub/../kept.rs"), &workspace)
+        .expect("interior `..` that stays confined is accepted");
+    assert!(folded.starts_with(&canonical_workspace));
+    assert!(
+        !folded.components().any(|c| matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        )),
+        "returned confined path must be normalized, got {}",
+        folded.display()
+    );
+
+    // A credential-like component is rejected anywhere in the path, matching the
+    // live provider's `normalize_policy_path` rule (single containment engine).
+    assert!(
+        confine_write_path(Path::new(".ssh/id_rsa"), &workspace).is_err(),
+        "credential-like components must be rejected"
+    );
+
     // An unrelated absolute path outside the workspace is rejected.
     let outside = temp_root("confine-outside");
     fs::create_dir_all(&outside).expect("outside dir");
     assert!(
         confine_write_path(&outside.join("file.txt"), &workspace).is_err(),
         "an absolute path outside the workspace must be rejected"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn confine_write_path_accepts_a_target_reached_through_a_symlinked_workspace_prefix() {
+    // RTL6 regression: on macOS `/tmp` is a symlink to `/private/tmp`, so a
+    // workspace root handed in as `/tmp/ws` canonicalizes to `/private/tmp/ws`.
+    // A write target reached through that same symlinked prefix must still
+    // confine: the engine must compare the symlink-RESOLVED candidate against
+    // the resolved workspace root, not the raw `/tmp/...` form (which lexically
+    // is not "under" `/private/tmp/...`). We model this with a real symlinked
+    // directory standing in for `/tmp`.
+    use std::os::unix::fs::symlink;
+
+    let real_parent = temp_root("confine-symlinked-prefix-real");
+    fs::create_dir_all(&real_parent).expect("real parent");
+    let link_parent = temp_root("confine-symlinked-prefix-link");
+    symlink(&real_parent, &link_parent).expect("symlink standing in for /tmp");
+
+    // Workspace root addressed THROUGH the symlink (like `/tmp/ws`).
+    let workspace_via_link = link_parent.join("ws");
+    fs::create_dir_all(workspace_via_link.join("src")).expect("workspace via link");
+    fs::write(workspace_via_link.join("src/lib.rs"), b"contents").expect("seed");
+    let canonical_workspace = workspace_via_link
+        .canonicalize()
+        .expect("canonical workspace");
+
+    // Existing file: the engine canonicalizes through the symlink and confines.
+    let existing = confine_write_path(Path::new("src/lib.rs"), &workspace_via_link)
+        .expect("existing file under a symlinked-prefix workspace root must confine");
+    assert!(existing.starts_with(&canonical_workspace));
+
+    // Not-yet-created file: same — confines via the canonical ancestor and the
+    // returned path is symlink-resolved (under the canonical workspace root).
+    let new_file = confine_write_path(Path::new("src/new.rs"), &workspace_via_link)
+        .expect("new file under a symlinked-prefix workspace root must confine");
+    assert!(
+        new_file.starts_with(&canonical_workspace),
+        "returned path must be confined to the canonical workspace, got {}",
+        new_file.display()
+    );
+
+    // The workspace root itself (target == root, as the pre-write checkpoint
+    // passes it) confines to the canonical root.
+    let root_target = confine_write_path(&workspace_via_link, &workspace_via_link)
+        .expect("the workspace root itself must confine");
+    assert_eq!(root_target, canonical_workspace);
+
+    // A `..`-escape through the symlinked prefix is still rejected.
+    assert!(
+        confine_write_path(Path::new("../escape.txt"), &workspace_via_link).is_err(),
+        "a `..`-escape must be rejected even through a symlinked workspace prefix"
     );
 }
 

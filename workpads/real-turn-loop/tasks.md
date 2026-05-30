@@ -411,7 +411,8 @@ Verification:
 
 ## RTL6 - Safety Floor: Confinement, Hard-Kill, Pre-Write Checkpoint, Dry-Run Default
 
-Status: done (gate green). The RTL safety floor lives in
+Status: done (gate green; symlinked-temp-prefix confinement regression repaired -
+see Evidence). The RTL safety floor lives in
 `crates/capo-server/src/safety_floor.rs` and wires the four floor requirements
 onto the write path. Confinement reuses the existing path-containment engine:
 the new public `capo_tools::confine_write_path`
@@ -492,6 +493,42 @@ Evidence:
   capo-state 31, capo-runtime 19, capo cli 63 + server_transport 11, etc.).
   `git diff --check` -> clean (exit 0). No live Codex smoke is required for RTL6
   (the live workspace-write smoke is RTL13); all proofs are deterministic.
+
+- Gate repair (symlinked temp-prefix confinement): the objective gate failed in
+  three `safety_floor` tests
+  (`pre_write_checkpoint_is_created_and_one_command_restores_the_workspace`,
+  `create_pre_write_checkpoint_is_idempotent_on_unchanged_state`,
+  `checkpoint_event_survives_restart_and_replay`) whenever the system temp dir
+  resolves through a symlink (on macOS `/tmp` -> `/private/tmp`, e.g. under
+  `TMPDIR=/tmp`). Root cause was in `capo_tools::confine_write_path`
+  (`crates/capo-tools/src/runtime_wrapper_paths.rs`): it canonicalized the
+  workspace root (`/private/tmp/...`) but then ran the lexical
+  `ensure_under_workspace` check against the UN-resolved candidate (`/tmp/...`),
+  which is not lexically "under" the canonical root, so a legitimate confined
+  target (including `target == workspace_root`, as the pre-write checkpoint
+  passes it) was rejected before any process ran. Fix: when the normalized
+  candidate exists, canonicalize it FIRST and confine the symlink-resolved form
+  (the lexical pre-check is skipped for existing paths precisely because it
+  compares an unresolved candidate against a resolved root); for not-yet-created
+  targets, re-anchor the tail onto the canonical nearest-existing-ancestor and
+  confine that symlink-resolved candidate. `..`-escapes and symlinked-prefix
+  escapes still reject (the ancestor confinement and credential-component rules
+  are unchanged), and returned paths remain `..`-free and symlink-resolved. New
+  deterministic regression that does not depend on the ambient temp dir
+  (it builds its own symlink standing in for `/tmp`):
+  `crates/capo-tools/src/tests.rs` ::
+  `confine_write_path_accepts_a_target_reached_through_a_symlinked_workspace_prefix`.
+  Commands run from `/Users/nicolas/devel/capo-wt/real-turn-loop`:
+  `TMPDIR=/tmp cargo test -p capo-server safety_floor` -> ok, 6 passed (was 3
+  failed before the fix); `cargo test -p capo-tools confine` -> ok, 3 passed.
+  Full objective gate run twice -- with `TMPDIR=/tmp` (the failing scenario) and
+  with the default temp dir: `cargo fmt --check` clean; `cargo clippy
+  --all-targets --all-features -- -D warnings` clean (exit 0); `cargo test
+  --workspace` exit 0, 0 failed across all binaries (capo-tools 21, capo-server
+  39, capo-adapters 28, capo-state 31, capo-runtime 19, capo cli 63 +
+  server_transport 11, etc.). Files changed:
+  `crates/capo-tools/src/runtime_wrapper_paths.rs`,
+  `crates/capo-tools/src/tests.rs`.
 
 Acceptance:
 
