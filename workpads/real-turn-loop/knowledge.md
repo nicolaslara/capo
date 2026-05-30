@@ -238,11 +238,16 @@ to clients.
 
 ## Parity Cutover And The Verification Invariant
 
-The default routing flip is gated, not assumed. `RealBoundaryController` must
-pass the IDENTICAL deterministic suite (`send`/`steer`/`interrupt`/`stop`,
+The default routing flip is gated, not assumed. `RealBoundaryController` passes
+the IDENTICAL deterministic suite (`send`/`steer`/`interrupt`/`stop`,
 restart/replay) that `FakeBoundaryController` passes, plus a parity-equivalence
 test asserting the fake and real paths produce equivalent event sequences for a
-scripted turn (modulo adapter-identity fields). Routing selects the controller
+scripted turn. Note the honest reading of "passes the identical suite": the real
+handle is a zero-cost pass-through over the same orchestration core (see
+`real_controller.rs`), so this parity holds BY CONSTRUCTION -- the suites are a
+regression guard that the real handle keeps delegating to the one core (that the
+core is never forked into a divergent real path), not an independent validation
+of two separate implementations that happen to agree. Routing selects the controller
 behind a single typed config switch (not scattered booleans); the scripted-mock
 adapter stays an explicit fallback so the parity suite can run the real
 controller over scripted input. Before the flip, the fake remains default and
@@ -340,8 +345,10 @@ through `RealBoundaryController` (a zero-cost view over the one orchestration
 core), so a real adapter handle plugs into the production routing unchanged.
 Because the real handle persists through the same `append_event`/projection
 path, default-chat safety is preserved by construction -- the flip is the one
-visible `ControllerSelection` value, and the parity criterion below proves the
-real handle is observably equivalent to the fake handle for a scripted turn.
+visible `ControllerSelection` value, and the parity criterion below guards that
+the real handle stays observably equivalent to the fake handle for a scripted
+turn (equivalent because both drive the one shared core, not because two
+implementations were independently validated to agree).
 
 What the cutover was gated on (the RTL12 parity criterion, all green):
 
@@ -358,8 +365,13 @@ What the cutover was gated on (the RTL12 parity criterion, all green):
   IDENTICAL `send`/`steer`/`interrupt`/`stop` + restart/replay suite the fake
   handle passes (`real_controller_passes_the_identical_send_steer_interrupt_stop_suite`),
   and for a scripted turn the fake and real paths produce equivalent event
-  sequences modulo adapter-identity fields
-  (`fake_and_real_paths_produce_equivalent_event_sequences_for_a_scripted_turn`).
+  sequences (`fake_and_real_paths_produce_equivalent_event_sequences_for_a_scripted_turn`).
+  Both are regression guards over the shared core (the real handle delegates to
+  the same `FakeBoundaryController` core), so they prove the core has not forked,
+  not that two independent implementations agree -- the parity is by construction.
+  Both runs use the identical adapter/session label, so there are no
+  adapter-identity fields to factor out; the comparison is over the full
+  persisted sequence/projection/outcome.
 
 Rollback knob, post-cutover: `CAPO_SERVER_REAL_CONTROLLER=0` (or
 `false`/`no`/`off`) forces the fake routing back on -- a single falsey env value,

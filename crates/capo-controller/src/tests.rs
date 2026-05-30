@@ -1488,12 +1488,23 @@ fn lifecycle_fingerprint(
 /// deterministic suite (`send`/`steer`/`interrupt`/`stop`, restart/replay) that
 /// `FakeBoundaryController` passes.
 ///
-/// The same `register -> send -> steer -> interrupt` and `-> stop` sequences are
-/// driven over BOTH handles, over the same scripted-mock adapter and the same
-/// session label, and the resulting lifecycles are asserted equal (terminal
-/// statuses + causal session event-kind sequence + event count). Then both
-/// rebuild identically from their persisted event logs, satisfying the
-/// restart/replay half of the suite.
+/// What this proves, and what it does NOT: `RealBoundaryController` is, by
+/// construction, a zero-cost pass-through over the same `FakeBoundaryController`
+/// orchestration core (see `real_controller.rs`: every method forwards to
+/// `self.core.<same_method>`; the return types are aliases). So parity here
+/// holds by construction -- there is no second implementation that could
+/// disagree. This test is therefore a REGRESSION GUARD that the real handle
+/// keeps delegating to the one shared core (i.e. that the core is never forked
+/// into a divergent real path), NOT a proof that two independent
+/// implementations were independently validated and found to agree. The same
+/// `register -> send -> steer -> interrupt` and `-> stop` sequences are driven
+/// over BOTH handles, over the same scripted-mock adapter and the same session
+/// label, and the resulting lifecycles are asserted equal (terminal statuses +
+/// causal session event-kind sequence + event count); both then rebuild
+/// identically from their persisted event logs, satisfying the restart/replay
+/// half of the suite. Given the shared core, the only way these assertions can
+/// fail is if the real handle stops delegating or the one core becomes
+/// nondeterministic -- exactly the regressions the guard exists to catch.
 #[test]
 fn real_controller_passes_the_identical_send_steer_interrupt_stop_suite() {
     use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
@@ -1601,7 +1612,7 @@ enum Terminal {
 }
 
 /// RTL12 parity-equivalence: for a scripted turn, the fake and real paths
-/// produce equivalent event sequences (modulo adapter-identity fields).
+/// produce equivalent event sequences.
 ///
 /// Both handles drive the SAME scripted multi-event turn through the RTL3 loop
 /// (`run_turn`) over the same adapter and session label. The persisted causal
@@ -1609,6 +1620,13 @@ enum Terminal {
 /// outcome must match -- the equivalence the RTL12 cutover gates on. This is the
 /// turn-loop-level companion to the RTL11 command-surface equivalence test
 /// (`both_routings_handle_send_steer_and_interrupt_equivalently`).
+///
+/// As with the sibling suite above, the real path delegates to the same core as
+/// the fake path, so this equivalence holds by construction; the test is a
+/// regression guard against that core forking, not a cross-validation of two
+/// implementations. Both runs use the identical adapter and session label, so
+/// there are no adapter-identity fields to differ -- the comparison is over the
+/// full persisted sequence/projection/outcome, not "modulo" anything.
 #[test]
 fn fake_and_real_paths_produce_equivalent_event_sequences_for_a_scripted_turn() {
     use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
@@ -1663,9 +1681,11 @@ fn fake_and_real_paths_produce_equivalent_event_sequences_for_a_scripted_turn() 
         )
     });
 
-    // Equivalent event sequences (the causal session event-kind order), modulo
-    // adapter-identity fields (which are identical here because both drive the
-    // same scripted adapter and session label).
+    // Equal event sequences (the causal session event-kind order). There are no
+    // adapter-identity fields to factor out: both runs drive the identical
+    // scripted adapter and session label, so the comparison is over the full
+    // sequence. (The "modulo adapter-identity" framing only matters if the two
+    // sides ever ran distinct adapters; here, with the shared core, they cannot.)
     assert_eq!(
         real.0, fake.0,
         "fake and real scripted-turn event sequences diverged"

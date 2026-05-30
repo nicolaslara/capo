@@ -1,5 +1,6 @@
-//! RTL11: route default chat/steer through the single-switch controller
-//! cutover, keeping the scripted-mock fallback and a fake default.
+//! RTL11/RTL12: route default chat/steer through the single-switch controller
+//! cutover, keeping the scripted-mock fallback. The RTL12 cutover flipped the
+//! default routing to `Real`; the fake routing is the rollback target.
 //!
 //! These tests prove the two routings ([`ControllerSelection::Fake`] and
 //! [`ControllerSelection::Real`]) both handle `send`/`steer`/`interrupt`/`stop`

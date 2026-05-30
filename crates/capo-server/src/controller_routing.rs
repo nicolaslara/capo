@@ -1,36 +1,42 @@
-//! RTL11: the single-switch controller cutover.
+//! RTL11/RTL12: the single-switch controller cutover.
 //!
 //! Default chat (`SendTask`) and steer (`SteerAgent`), plus the rest of the
 //! command surface (`register`/`interrupt`/`stop`/`recover`), route through
 //! ONE typed switch -- [`ControllerSelection`] -- that selects between the
-//! default [`FakeBoundaryController`] and the production
+//! rollback-target [`FakeBoundaryController`] and the now-default production
 //! [`RealBoundaryController`]. There are no scattered booleans: the whole
-//! routing decision is this one enum, chosen once at server construction.
+//! routing decision is this one enum, chosen once at server construction. The
+//! RTL12 cutover flipped this switch's default to [`ControllerSelection::Real`]
+//! after the parity suite passed (see the per-variant docs below).
 //!
-//! ## Scope: what this switch routes (and what it does NOT, yet)
+//! ## Scope: what this switch routes (and what it deliberately does NOT)
 //!
-//! RTL11 routes the **command-envelope surface** -- the lightweight
+//! This switch routes the **command-envelope surface** -- the lightweight
 //! `register`/`send`/`steer`/`interrupt`/`stop`/`recover` methods listed on
 //! [`ControllerRoute`] below. That is exactly the set the RTL11 acceptance
 //! criteria name, and the set whose handle choice clients could otherwise
 //! observe through the typed `ServerCommand` boundary.
 //!
-//! It deliberately does NOT yet route the RTL3 turn-loop *ingestion* entry
-//! points -- `apply_normalized_adapter_events_with_turn` (fixture replay and
+//! It deliberately does NOT route the RTL3 turn-loop *ingestion* entry points
+//! -- `apply_normalized_adapter_events_with_turn` (fixture replay and
 //! live-provider ingest), `prepare_local_adapter_dispatch_run` (session start),
-//! and `abort_run_for_ceiling`. Those still drive the server's one shared
+//! and `abort_run_for_ceiling`. Those drive the server's one shared
 //! orchestration core directly (`self.controller.<method>` in `lib.rs`,
-//! `live_provider.rs`, and `turn_orchestration.rs`). Routing the loop is the
-//! RTL12 cutover's job: the loop is where a genuinely-real adapter's output
-//! would diverge from the fake adapter's, and RTL12 owns the parity criterion
-//! and the parity-equivalence suite that must pass *before* a real adapter is
-//! allowed to drive that loop in production. Until then, with the phase-1
-//! `Fake` default, the shared core is fake-backed, so loop ingestion staying on
-//! it is correct and not a divergence. The injection seam that lets RTL12/RTL13
-//! back the loop with a real/scripted adapter is
+//! `live_provider.rs`, and `turn_orchestration.rs`) and are never wired through
+//! [`ControllerSelection`]/[`ControllerRoute`]. This is intentional, not a gap
+//! the RTL12 cutover left open: [`RealBoundaryController`] is a zero-cost view
+//! over that same orchestration core, so routing loop ingestion through the
+//! `Real` handle would be a literal no-op -- it would call the same core methods
+//! over the same store. There is no separate "real loop" to flip to; the loop
+//! already runs on the one core that the real handle merely views. What the
+//! RTL12 cutover actually changed is the *default* of this command-surface
+//! switch (now [`ControllerSelection::Real`], see below), gated on the parity
+//! suite in `crates/capo-controller/src/tests.rs`. The injection seam that lets
+//! a real/scripted adapter back that one core (and therefore both the routed
+//! command surface and the loop) is
 //! [`crate::CapoServer::open_with_controller_and_adapter`].
 //!
-//! Why routing only the command surface is the right shape for phase 1:
+//! Why routing only the command surface is the right shape:
 //!
 //! - [`RealBoundaryController`] is a zero-cost view over the SAME orchestration
 //!   core ([`FakeBoundaryController`], whose control flow is the real one --
@@ -45,14 +51,18 @@
 //! - The `ServerCommand`/`ServerResponse` boundary is untouched. Only the
 //!   controller selection changes; clients cannot tell which handle served a
 //!   command.
-//! - The default is [`ControllerSelection::Fake`]: until RTL12 flips it after
-//!   the parity suite passes, default chat keeps routing through the fake
-//!   handle and the real path is strictly opt-in (via
-//!   [`ControllerSelection::from_env`] / [`CapoServer::open_with_controller`]).
+//! - The default is [`ControllerSelection::Real`]: the RTL12 cutover flipped it
+//!   here after the parity suite passed, so default chat routes through the real
+//!   handle. The fake routing is the rollback target, selectable explicitly or
+//!   via a falsey opt-in env value (via [`ControllerSelection::from_env`] /
+//!   [`CapoServer::open_with_controller`]).
 //!
 //! Rollback is a one-line revert of the selected value back to
-//! [`ControllerSelection::Fake`] (or unsetting the opt-in env). The default
-//! routing is recorded in `workpads/real-turn-loop/knowledge.md`.
+//! [`ControllerSelection::Fake`], or -- without a code change -- a single falsey
+//! [`REAL_CONTROLLER_OPT_IN_ENV`] value (`0`/`false`/`no`/`off`). Note that
+//! *unsetting* the env no longer rolls back: an absent env now defers to the
+//! [`ControllerSelection::Real`] default. The default routing is recorded in
+//! `workpads/real-turn-loop/knowledge.md`.
 
 use capo_controller::{
     FakeAgentRegistration, FakeBoundaryController, FakeReadModelObservation, FakeRunRefs,
