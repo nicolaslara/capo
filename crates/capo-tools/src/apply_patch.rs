@@ -378,4 +378,53 @@ mod tests {
         assert_eq!(applied.matches[0].strategy, MatchStrategy::Insert);
         assert_eq!(applied.new_content, "a\nb\n");
     }
+
+    #[test]
+    fn multiple_hunks_apply_at_distinct_sites_in_order() {
+        // Two hunks against different blocks of the same file land independently.
+        let original = "alpha\nbeta\ngamma\ndelta\n";
+        let applied = apply_hunks(
+            original,
+            &[hunk("alpha\n", "ALPHA\n"), hunk("delta\n", "DELTA\n")],
+        )
+        .expect("apply");
+        assert_eq!(applied.new_content, "ALPHA\nbeta\ngamma\nDELTA\n");
+        assert_eq!(applied.matches.len(), 2);
+        // Each hunk's changed range is the resulting-file line it edited (1-based).
+        assert_eq!(applied.changed_line_ranges, vec!["1:1", "4:4"]);
+    }
+
+    #[test]
+    fn two_hunks_target_identical_text_at_different_sites() {
+        // Both hunks search the SAME block ("dup\n"); the cursor must advance past
+        // the first match so the second hunk edits the SECOND occurrence, not the
+        // first again. This is the index-shifting/cursor invariant in apply_hunks.
+        let original = "dup\nmiddle\ndup\n";
+        let applied = apply_hunks(
+            original,
+            &[hunk("dup\n", "first\n"), hunk("dup\n", "second\n")],
+        )
+        .expect("apply");
+        assert_eq!(applied.new_content, "first\nmiddle\nsecond\n");
+        assert_eq!(applied.matches[0].start_line, 0);
+        assert_eq!(applied.matches[1].start_line, 2);
+        assert_eq!(applied.changed_line_ranges, vec!["1:1", "3:3"]);
+    }
+
+    #[test]
+    fn hunk_that_grows_line_count_shifts_later_hunk_correctly() {
+        // The first hunk replaces 1 line with 3, growing the file; the second hunk
+        // must still locate its block (now shifted down) and report ranges in the
+        // RESULTING file, proving the post-splice cursor/range arithmetic is right.
+        let original = "head\ntarget\ntail\n";
+        let applied = apply_hunks(
+            original,
+            &[hunk("head\n", "h1\nh2\nh3\n"), hunk("tail\n", "TAIL\n")],
+        )
+        .expect("apply");
+        assert_eq!(applied.new_content, "h1\nh2\nh3\ntarget\nTAIL\n");
+        // First hunk replaced line 1 with three lines -> resulting range 1:3.
+        // Second hunk's "tail" moved to resulting line 5 -> range 5:5.
+        assert_eq!(applied.changed_line_ranges, vec!["1:3", "5:5"]);
+    }
 }

@@ -268,14 +268,16 @@ impl NormalizedToolResult {
 ///
 /// Most wrapper statuses are already canonical (`completed`/`denied`, and the
 /// process-runner's `exited`/`failed` which the loop understands). The
-/// non-completing `precondition_failed` guard is a real terminal FAILURE for
-/// dispatch/projection purposes (no write, no artifact), so it is folded onto
-/// `failed` here; the precise `precondition_failed` semantics (and the
-/// expected/actual hashes) still travel on the wrapper result's own status and
-/// typed output for the loop to reflect.
+/// non-completing guards (`precondition_failed` for a stale file_write, and
+/// `no_match` for an apply_patch hunk no strategy could locate) are real
+/// terminal FAILURES for dispatch/projection purposes (no write, no artifact),
+/// so they are folded onto `failed` here; the precise `precondition_failed` /
+/// `no_match` semantics (expected/actual hashes, rejected hunk index, nearest
+/// candidate) still travel on the wrapper result's own status and typed output
+/// for the loop to reflect and retry.
 fn normalize_runtime_status(status: &str) -> String {
     match status {
-        "precondition_failed" => "failed".to_string(),
+        "precondition_failed" | "no_match" => "failed".to_string(),
         other => other.to_string(),
     }
 }

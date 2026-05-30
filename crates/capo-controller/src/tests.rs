@@ -2782,6 +2782,102 @@ fn real_controller_failed_runtime_dispatch_persists_failed_projection() {
     assert_eq!(projection.turn_id.as_deref(), Some("turn-aci1-fail"));
 }
 
+/// ACI4 no-match path: an `capo.apply_patch` whose hunk no strategy can locate
+/// returns the wrapper's finer-grained `no_match` status on the typed result,
+/// but the controller MUST fold that onto the shared dispatch vocabulary so the
+/// persisted projection is canonical (`failed`) -- a `no_match` must never
+/// escape to downstream consumers (dashboards, safety-gates score_run,
+/// goal-autonomy evidence) that only recognize `completed`/`failed`/`denied`.
+/// Mirrors the `precondition_failed` fold the file_write guard relies on.
+#[test]
+fn real_controller_apply_patch_no_match_folds_onto_shared_failed_status() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{
+        RuntimeToolConfig, ToolExposureRequest, ToolExposureResult, WrapperToolRequest,
+    };
+
+    let workspace = temp_root();
+    let artifacts = temp_root();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    // Seed a file whose content the hunk's `search` block will not match.
+    std::fs::write(workspace.join("lib.rs"), "fn one() {}\nfn two() {}\n").expect("seed file");
+
+    let scripted =
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci4-no-match-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open real controller")
+    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace, artifacts));
+    let registration = controller
+        .register_agent("aci4-no-match-worker")
+        .expect("agent");
+    let refs = controller
+        .send_task(&registration, "Apply a patch whose hunk does not match")
+        .expect("send task");
+
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-aci4-no-match"),
+        tool_call_id: ToolCallId::new("tool-aci4-apply-patch-miss"),
+    };
+    let outcome = controller
+        .dispatch_tool_call(
+            &scope,
+            ToolExposureRequest::Runtime(WrapperToolRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: scope.session_id.clone(),
+                run_id: scope.run_id.clone(),
+                tool_id: "capo.apply_patch".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                input: serde_json::json!({
+                    "path": "lib.rs",
+                    "hunks": [{
+                        "search": "completely\nunrelated\nblock\n",
+                        "replace": "x\n"
+                    }]
+                }),
+            }),
+        )
+        .expect("dispatch no-match apply_patch");
+
+    let ToolExposureResult::Runtime(result) = &outcome.result else {
+        panic!("expected a real runtime-wrapper result");
+    };
+    // The wrapper carries the FINER no_match detail for the loop to reflect on.
+    assert_eq!(result.status, "no_match");
+    assert_eq!(result.typed_output["status"], "no_match");
+    assert_eq!(result.typed_output["rejected_hunk_index"], 0);
+    // No write/artifact, so it is NOT audited as a completed call.
+    assert!(result.output_artifacts.is_empty());
+    assert!(
+        !outcome
+            .observed_event_kinds
+            .contains(&"tool.call_completed".to_string())
+    );
+
+    // But the persisted DISPATCH status is folded onto the shared vocabulary.
+    assert_eq!(outcome.status, "failed");
+
+    let tools = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    let projection = tools
+        .iter()
+        .find(|tool| tool.tool_call_id == scope.tool_call_id)
+        .expect("no-match projection present");
+    // The terminal projection status is canonical, never the raw `no_match`.
+    assert_eq!(projection.status, "failed");
+    assert_eq!(projection.output_artifact_id, None);
+    assert_eq!(projection.turn_id.as_deref(), Some("turn-aci4-no-match"));
+}
+
 /// ACI1 replay identity: one dispatched tool call must reconstruct to exactly
 /// ONE observed tool ref, not three. The tool.* events of a single call share a
 /// stamped item_id (the tool_call_id) so `reconstruct_turn_finished`'s dedup

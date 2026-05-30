@@ -657,7 +657,9 @@ impl RuntimeToolWrappers {
             // NOT a raw error string. It made no change and produced no artifact,
             // so it flows through the non-completed audit shape (no
             // `tool.call_completed`) like a precondition guard.
-            Err(no_match) => return Ok(no_match_execution(&path.display().to_string(), &no_match)),
+            Err(no_match) => {
+                return Ok(self.no_match_execution(&path.display().to_string(), &no_match));
+            }
         };
 
         if let Some(parent) = path.parent() {
@@ -779,6 +781,50 @@ impl RuntimeToolWrappers {
             "failed".to_string()
         };
         (status, findings)
+    }
+
+    /// Build the typed `no_match` execution for a structured, retryable
+    /// apply_patch miss (ACI4). It made no change and produced no artifact, so it
+    /// is NOT audited as a completed call (`reached_completion: false`).
+    ///
+    /// The nearest-candidate preview is a window of the TARGET FILE's own
+    /// content, so it is scrubbed with the same [`Self::redact_bytes`] every
+    /// other content surface uses before it reaches the operator/loop-facing
+    /// summary -- otherwise a configured secret sitting next to the agent's
+    /// near-miss search block would leak into the summary in the clear.
+    fn no_match_execution(&self, path: &str, no_match: &NoMatch) -> WrapperExecution {
+        let redacted_preview = no_match.nearest_preview.as_deref().map(|preview| {
+            String::from_utf8_lossy(&self.redact_bytes(preview.as_bytes())).into_owned()
+        });
+        let typed_output = serde_json::json!({
+            "status": "no_match",
+            "path": path,
+            "hunks_total": 0,
+            "hunks_applied": 0,
+            "hunks_rejected": 1,
+            "changed_line_ranges": Vec::<Value>::new(),
+            "output_artifact_id": "none",
+            "lint_status": "skipped",
+            "lint_findings": Vec::<Value>::new(),
+            "rejected_hunk_index": no_match.hunk_index as i64,
+            "reject_reason": no_match.reason.clone(),
+            "nearest_line": no_match.nearest_start_line.map(|line| line as i64),
+            "nearest_preview": redacted_preview.clone(),
+        });
+        let preview = redacted_preview
+            .as_deref()
+            .map(|preview| format!("; nearest candidate:\n{preview}"))
+            .unwrap_or_default();
+        WrapperExecution {
+            status: "no_match".to_string(),
+            summary: format!(
+                "apply_patch hunk {} did not match {} ({}; similarity {:.2}){preview}",
+                no_match.hunk_index, path, no_match.reason, no_match.nearest_similarity
+            ),
+            typed_output,
+            output_artifacts: Vec::new(),
+            reached_completion: false,
+        }
     }
 
     fn record_input_artifact(&self, request: &WrapperToolRequest) -> WrapperArtifact {
@@ -926,7 +972,7 @@ pub(crate) const FILE_WRITE_OUTPUT_SCHEMA: &str = "{\"output\":{\"status\":\"str
 /// `hunks_rejected`), the changed line ranges, the unified-diff
 /// `output_artifact_id`, the lint outcome (`lint_status`, `lint_findings`), and
 /// the structured no-match fields surfaced on a rejected hunk (ACI4).
-pub(crate) const APPLY_PATCH_OUTPUT_SCHEMA: &str = "{\"output\":{\"status\":\"string\",\"path\":\"string\",\"hunks_total\":\"integer\",\"hunks_applied\":\"integer\",\"hunks_rejected\":\"integer\",\"changed_line_ranges\":\"string[]\",\"output_artifact_id\":\"string\",\"lint_status\":\"string\",\"lint_findings\":\"array\",\"rejected_hunk_index\":\"integer?\",\"reject_reason\":\"string?\",\"nearest_line\":\"integer?\"}}";
+pub(crate) const APPLY_PATCH_OUTPUT_SCHEMA: &str = "{\"output\":{\"status\":\"string\",\"path\":\"string\",\"hunks_total\":\"integer\",\"hunks_applied\":\"integer\",\"hunks_rejected\":\"integer\",\"changed_line_ranges\":\"string[]\",\"output_artifact_id\":\"string\",\"lint_status\":\"string\",\"lint_findings\":\"array\",\"rejected_hunk_index\":\"integer?\",\"reject_reason\":\"string?\",\"nearest_line\":\"integer?\",\"nearest_preview\":\"string?\"}}";
 
 /// The declared `output_schema` descriptor for a runtime wrapper tool (ACI3).
 pub(crate) fn wrapper_output_schema(tool_id: &str) -> &'static str {
@@ -1066,41 +1112,6 @@ fn parse_patch_hunks(request: &WrapperToolRequest) -> Result<Vec<PatchHunk>, Str
             })
         })
         .collect()
-}
-
-/// Build the typed `no_match` execution for a structured, retryable apply_patch
-/// miss (ACI4). It made no change and produced no artifact, so it is NOT audited
-/// as a completed call (`reached_completion: false`).
-fn no_match_execution(path: &str, no_match: &NoMatch) -> WrapperExecution {
-    let typed_output = serde_json::json!({
-        "status": "no_match",
-        "path": path,
-        "hunks_total": 0,
-        "hunks_applied": 0,
-        "hunks_rejected": 1,
-        "changed_line_ranges": Vec::<Value>::new(),
-        "output_artifact_id": "none",
-        "lint_status": "skipped",
-        "lint_findings": Vec::<Value>::new(),
-        "rejected_hunk_index": no_match.hunk_index as i64,
-        "reject_reason": no_match.reason.clone(),
-        "nearest_line": no_match.nearest_start_line.map(|line| line as i64),
-    });
-    let preview = no_match
-        .nearest_preview
-        .as_deref()
-        .map(|preview| format!("; nearest candidate:\n{preview}"))
-        .unwrap_or_default();
-    WrapperExecution {
-        status: "no_match".to_string(),
-        summary: format!(
-            "apply_patch hunk {} did not match {} ({}; similarity {:.2}){preview}",
-            no_match.hunk_index, path, no_match.reason, no_match.nearest_similarity
-        ),
-        typed_output,
-        output_artifacts: Vec::new(),
-        reached_completion: false,
-    }
 }
 
 fn required_input(request: &WrapperToolRequest, key: &str) -> Result<String, String> {

@@ -106,26 +106,25 @@ fn resolve_program(program: &str) -> String {
 
 /// Parse `rustfmt --check` output into typed findings.
 ///
-/// `rustfmt --check` exits non-zero and prints a `Diff in <path> at line N:`
-/// header per region that is not formatted, plus an `error[: ...]` line on a
-/// genuine parse error. We surface one finding per `Diff in ... at line N`
-/// region (rule `rustfmt`) and one finding per `error` line (rule `syntax`).
+/// `rustfmt --check` exits non-zero and prints a `Diff in <path>:<N>:` header
+/// per region that is not formatted (current stable, 1.8.0), plus an
+/// `error[: ...]` line on a genuine parse error. We surface one finding per
+/// `Diff in ...` region (rule `rustfmt`) and one finding per `error` line (rule
+/// `syntax`). The diff body is colorized with ANSI escapes, so we strip those
+/// before scanning. An older rustfmt emitted `Diff in <path> at line <N>:`; we
+/// keep that as a fallback so a pinned toolchain still reports the right line.
 fn parse_rustfmt(file: &str, exit_code: Option<i32>, stderr: &str) -> Vec<LintFinding> {
     if exit_code == Some(0) {
         return Vec::new();
     }
     let mut findings = Vec::new();
     for line in stderr.lines() {
-        let trimmed = line.trim();
+        let trimmed = strip_ansi(line);
+        let trimmed = trimmed.trim();
         if let Some(rest) = trimmed.strip_prefix("Diff in ") {
-            // Format: `Diff in <path> at line <N>:`
-            let parsed_line = rest
-                .rsplit_once("at line ")
-                .and_then(|(_, tail)| tail.trim_end_matches(':').trim().parse::<i64>().ok())
-                .unwrap_or(0);
             findings.push(LintFinding {
                 file: file.to_string(),
-                line: parsed_line,
+                line: parse_diff_line(rest),
                 rule: "rustfmt".to_string(),
                 message: "code is not rustfmt-formatted in this region".to_string(),
             });
@@ -151,6 +150,57 @@ fn parse_rustfmt(file: &str, exit_code: Option<i32>, stderr: &str) -> Vec<LintFi
     findings
 }
 
+/// Extract the line number from the tail of a `Diff in ` header.
+///
+/// Current stable rustfmt (1.8.0) emits `Diff in <path>:<line>:` (path may itself
+/// contain colons on some platforms, so we take the number between the LAST two
+/// colons). The older `Diff in <path> at line <line>:` shape is kept as a
+/// fallback. Returns 0 only if neither shape yields a number.
+fn parse_diff_line(rest: &str) -> i64 {
+    // Legacy `... at line N:` form first (unambiguous when present).
+    if let Some((_, tail)) = rest.rsplit_once("at line ")
+        && let Ok(line) = tail.trim_end_matches(':').trim().parse::<i64>()
+    {
+        return line;
+    }
+    // Current `<path>:<line>:` form: strip an optional trailing colon, then take
+    // the segment after the final colon.
+    let stripped = rest.trim_end().trim_end_matches(':');
+    if let Some((_, tail)) = stripped.rsplit_once(':')
+        && let Ok(line) = tail.trim().parse::<i64>()
+    {
+        return line;
+    }
+    0
+}
+
+/// Strip ANSI SGR / CSI escape sequences (e.g. `\x1b[31m`, `\x1b(B`) so the diff
+/// body rustfmt colorizes does not pollute the scanned header lines.
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            match chars.next() {
+                // CSI: `ESC [ ... <final byte 0x40..=0x7e>`
+                Some('[') => {
+                    for next in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                // Two-char escapes like `ESC ( B` (charset select): drop one more.
+                Some(_) => {}
+                None => {}
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,11 +212,30 @@ mod tests {
 
     #[test]
     fn rustfmt_diff_region_becomes_a_typed_finding() {
-        let stderr = "Diff in /ws/src/lib.rs at line 3:\n some diff\n";
+        // Real rustfmt 1.8.0-stable output: `Diff in <path>:<line>:` header
+        // followed by an ANSI-colorized diff body. Captured from
+        // `rustfmt --edition 2021 --check` against a misformatted file.
+        let stderr = concat!(
+            "Diff in /ws/src/lib.rs:3:\n",
+            "\u{1b}[31m-fn  main( ){\n\u{1b}(B\u{1b}[m",
+            "\u{1b}[32m+fn main() {\n\u{1b}(B\u{1b}[m",
+            " }\n",
+        );
+        let findings = parse_rustfmt("src/lib.rs", Some(1), stderr);
+        assert_eq!(findings.len(), 1, "exactly one Diff-in region finding");
+        assert_eq!(findings[0].rule, "rustfmt");
+        // The line must be the real non-zero header line, not the 0 fallback.
+        assert_eq!(findings[0].line, 3);
+    }
+
+    #[test]
+    fn rustfmt_legacy_at_line_format_still_parses() {
+        // An older rustfmt emitted `Diff in <path> at line N:`; the fallback
+        // keeps that shape working for a pinned toolchain.
+        let stderr = "Diff in /ws/src/lib.rs at line 7:\n some diff\n";
         let findings = parse_rustfmt("src/lib.rs", Some(1), stderr);
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].rule, "rustfmt");
-        assert_eq!(findings[0].line, 3);
+        assert_eq!(findings[0].line, 7);
     }
 
     #[test]

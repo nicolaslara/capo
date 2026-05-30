@@ -1391,6 +1391,64 @@ fn apply_patch_rejected_hunk_returns_structured_retryable_error_without_writing(
 }
 
 #[test]
+fn apply_patch_no_match_preview_is_redacted_in_summary() {
+    // ACI4 security: on a fuzzy near-miss the nearest-candidate preview is a
+    // window of the TARGET FILE. If a configured secret sits in that window it
+    // must be scrubbed before reaching the operator/loop-facing summary, the
+    // same as every other content surface -- otherwise the no-match preview is a
+    // redaction bypass.
+    let workspace = temp_root("aci4-apply-redact-workspace");
+    let artifacts = temp_root("aci4-apply-redact-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    // A file whose best fuzzy candidate window holds a secret adjacent to the
+    // agent's near-miss search block.
+    let original = "alpha\nSECRET_TOKEN_abc123\ncharlie\n";
+    fs::write(workspace.join("creds.txt"), original).expect("seed");
+
+    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts);
+    config.redaction_rules.push(RedactionRule {
+        pattern: "SECRET_TOKEN_abc123".to_string(),
+        replacement: "[REDACTED]".to_string(),
+    });
+    let wrappers = RuntimeToolWrappers::new(config);
+
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci4-redact",
+            "run-aci4-redact",
+            "capo.apply_patch",
+            serde_json::json!({
+                "path": "creds.txt",
+                "auto_lint": false,
+                // A 3-line search that drifts from the file's 3 lines: it locates
+                // the secret-bearing window as the nearest candidate, below the
+                // fuzzy threshold (no match).
+                "hunks": [{"search": "alpha\nWRONG_LINE\ncharlie\n", "replace": "x\n"}],
+            }),
+        ),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+
+    assert_eq!(result.status, "no_match", "summary: {}", result.summary);
+    // The raw secret must NOT appear in the summary nor the typed preview.
+    assert!(
+        !result.summary.contains("SECRET_TOKEN_abc123"),
+        "secret leaked into no_match summary: {}",
+        result.summary
+    );
+    assert!(
+        result.summary.contains("[REDACTED]"),
+        "the redacted placeholder must be present in the preview: {}",
+        result.summary
+    );
+    let typed = result.narrow_output();
+    assert!(
+        !typed.to_string().contains("SECRET_TOKEN_abc123"),
+        "secret leaked into typed no_match output: {typed}"
+    );
+}
+
+#[test]
 fn apply_patch_lint_on_edit_returns_typed_findings() {
     // ACI4: after applying, a Rust file runs `rustfmt --check` and returns typed
     // lint findings (file, line, rule, message) the loop can repair.
@@ -1439,6 +1497,18 @@ fn apply_patch_lint_on_edit_returns_typed_findings() {
     assert!(finding["line"].as_i64().is_some(), "finding has line");
     assert!(finding["rule"].as_str().is_some(), "finding has rule");
     assert!(finding["message"].as_str().is_some(), "finding has message");
+    // The misformat is on the only (first) line, so the parsed rustfmt line must
+    // be the REAL non-zero header line, not the 0 fallback -- this exercises the
+    // parser against genuine `rustfmt --check` output and guards line locality.
+    let rustfmt_finding = findings
+        .iter()
+        .find(|finding| finding["rule"] == serde_json::json!("rustfmt"))
+        .expect("a rustfmt-region finding");
+    assert_eq!(
+        rustfmt_finding["line"].as_i64(),
+        Some(1),
+        "rustfmt finding must carry the real edited-region line, not 0; findings: {findings:?}"
+    );
 }
 
 #[test]
