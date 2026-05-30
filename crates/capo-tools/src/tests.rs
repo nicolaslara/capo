@@ -1192,3 +1192,224 @@ fn tool_exposure_authorize_and_invoke_rejects_a_cross_variant_request() {
         &PermissionPolicy::allow_trusted_local(),
     );
 }
+
+// --- ACI2: per-tool input AND output schemas plus risk/scope/redaction ------
+
+#[test]
+fn every_registered_tool_declares_output_schema_risk_scope_and_redaction() {
+    // ACI2: every tool in CAPO_OWNED_TOOLS and CAPO_WRAPPER_TOOLS must declare a
+    // non-empty output_schema, non-empty required_scopes_json, a valid risk
+    // level, and a non-empty redaction_policy_json -- present and checkable
+    // rather than convention.
+    let registry = CapoToolRegistry;
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        PathBuf::from("/tmp/capo-aci2-workspace"),
+        PathBuf::from("/tmp/capo-aci2-artifacts"),
+    ));
+
+    let definitions = registry
+        .list_tools()
+        .into_iter()
+        .chain(wrappers.list_tools())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        definitions.len(),
+        CAPO_OWNED_TOOLS.len() + CAPO_WRAPPER_TOOLS.len()
+    );
+
+    for definition in &definitions {
+        let tool_id = &definition.tool_id;
+
+        // output_schema present, non-empty, and a well-formed `{"output":{...}}`.
+        assert!(
+            !definition.output_schema.trim().is_empty(),
+            "{tool_id} must declare a non-empty output_schema"
+        );
+        let schema: Value = serde_json::from_str(&definition.output_schema)
+            .unwrap_or_else(|error| panic!("{tool_id} output_schema must be json: {error}"));
+        let output = schema
+            .get("output")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("{tool_id} output_schema must carry an `output` object"));
+        assert!(
+            !output.is_empty(),
+            "{tool_id} output_schema must describe at least one field"
+        );
+
+        // required_scopes non-empty and includes the tool-invoke scope.
+        let scopes: Value = serde_json::from_str(&definition.required_scopes_json)
+            .unwrap_or_else(|error| panic!("{tool_id} required_scopes_json must be json: {error}"));
+        let scopes = scopes
+            .as_array()
+            .unwrap_or_else(|| panic!("{tool_id} required_scopes_json must be an array"));
+        assert!(
+            !scopes.is_empty(),
+            "{tool_id} must declare non-empty required_scopes_json"
+        );
+
+        // risk present and one of the tool-exposure.md levels.
+        assert!(
+            definition.risk_is_valid(),
+            "{tool_id} risk `{}` must be one of {:?}",
+            definition.risk,
+            TOOL_RISK_LEVELS
+        );
+
+        // redaction_policy present, non-empty, and well-formed json.
+        assert!(
+            !definition.redaction_policy_json.trim().is_empty(),
+            "{tool_id} must declare a non-empty redaction_policy_json"
+        );
+        let policy: Value =
+            serde_json::from_str(&definition.redaction_policy_json).unwrap_or_else(|error| {
+                panic!("{tool_id} redaction_policy_json must be json: {error}")
+            });
+        assert!(
+            policy.get("strategy").and_then(Value::as_str).is_some(),
+            "{tool_id} redaction_policy_json must declare a strategy"
+        );
+    }
+}
+
+#[test]
+fn wrapper_risk_levels_reconcile_with_tool_exposure() {
+    // ACI2: risk stays aligned with the tool-exposure.md assignments.
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        PathBuf::from("/tmp/capo-aci2-risk-workspace"),
+        PathBuf::from("/tmp/capo-aci2-risk-artifacts"),
+    ));
+    let risk = |tool_id: &str| {
+        wrappers
+            .describe_tool(tool_id)
+            .unwrap_or_else(|| panic!("{tool_id} definition"))
+            .risk
+    };
+    assert_eq!(risk("capo.shell_run"), "high");
+    assert_eq!(risk("capo.git_commit"), "high");
+    assert_eq!(risk("capo.file_write"), "medium");
+    assert_eq!(risk("capo.git_status"), "low");
+    assert_eq!(risk("capo.file_read"), "low");
+}
+
+#[test]
+fn capo_registry_emitted_results_validate_against_their_output_schema() {
+    // ACI2: each Capo tool's emitted result must validate against its declared
+    // output_schema, so "narrow typed output" is checkable rather than
+    // convention.
+    let registry = CapoToolRegistry;
+    let policy = PermissionPolicy::allow_trusted_local();
+    let context = tool_context();
+
+    for tool_id in CAPO_OWNED_TOOLS {
+        let definition = registry.describe_tool(tool_id).expect("tool definition");
+        let result = registry.authorize_and_invoke(
+            CapoToolRequest {
+                tool_call_id: ToolCallId::new(format!("call-aci2-{tool_id}")),
+                session_id: SessionId::new("session-aci2"),
+                tool_id: tool_id.to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                context: context.clone(),
+            },
+            &policy,
+        );
+        let errors = definition.validate_output(&result.narrow_output());
+        assert!(
+            errors.is_empty(),
+            "{tool_id} emitted result must validate against output_schema, got {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn wrapper_emitted_results_validate_against_their_output_schema() {
+    // ACI2: each wrapper tool's emitted result validates against its declared
+    // output_schema over a real fixture workspace.
+    let workspace = temp_root("aci2-wrapper-output-workspace");
+    let artifacts = temp_root("aci2-wrapper-output-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    Command::new("git")
+        .args(["init"])
+        .current_dir(&workspace)
+        .output()
+        .expect("git init");
+    fs::write(workspace.join("note.md"), "hello aci2").expect("seed note");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    let cases = [
+        (
+            "capo.file_read",
+            "call-aci2-read",
+            "run-aci2-read",
+            serde_json::json!({"path":"note.md"}),
+        ),
+        (
+            "capo.git_status",
+            "call-aci2-status",
+            "run-aci2-status",
+            serde_json::json!({}),
+        ),
+        (
+            "capo.shell_run",
+            "call-aci2-shell",
+            "run-aci2-shell",
+            serde_json::json!({"program":"/bin/sh","argv":["-c","echo hi"],"cwd":"."}),
+        ),
+        (
+            "capo.file_write",
+            "call-aci2-write",
+            "run-aci2-write",
+            serde_json::json!({"path":"out.txt","content":"written"}),
+        ),
+    ];
+
+    for (tool_id, call_id, run_id, input) in cases {
+        let definition = wrappers.describe_tool(tool_id).expect("wrapper definition");
+        let result = wrappers
+            .authorize_and_invoke(wrapper_request(call_id, run_id, tool_id, input), &policy);
+        assert_ne!(
+            result.status, "denied",
+            "{tool_id} should be allowed under trusted-local"
+        );
+        let errors = definition.validate_output(&result.narrow_output());
+        assert!(
+            errors.is_empty(),
+            "{tool_id} emitted result must validate against output_schema, got {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn output_schema_validation_rejects_a_wrong_shaped_result() {
+    // ACI2: the validator is a real check, not a rubber stamp -- a result that
+    // is missing a required field or has the wrong type fails validation.
+    let registry = CapoToolRegistry;
+    let definition = registry
+        .describe_tool("capo.session_summary")
+        .expect("definition");
+
+    // Missing both required fields.
+    let missing = definition.validate_output(&serde_json::json!({}));
+    assert!(
+        missing
+            .iter()
+            .any(|error| error.contains("missing required field `output`")),
+        "missing output must be reported, got {missing:?}"
+    );
+
+    // Wrong type for a declared field.
+    let wrong_type = definition.validate_output(&serde_json::json!({
+        "output": 7,
+        "output_artifact_id": "artifact-1",
+    }));
+    assert!(
+        wrong_type
+            .iter()
+            .any(|error| error.contains("field `output` expected `string`")),
+        "wrong-typed output must be reported, got {wrong_type:?}"
+    );
+}

@@ -119,8 +119,10 @@ impl RuntimeToolWrappers {
             origin: "runtime".to_string(),
             handler_kind: "runtime_wrapper".to_string(),
             schema_json: schema_json.to_string(),
+            output_schema: WRAPPER_OUTPUT_SCHEMA.to_string(),
             required_scopes_json: json_array(required_scopes),
             risk: risk.to_string(),
+            redaction_policy_json: wrapper_redaction_policy(tool_id),
             exposure: "agent_visible".to_string(),
             instrumentation_level: "full".to_string(),
             status: "available".to_string(),
@@ -562,6 +564,33 @@ impl RuntimeToolWrappers {
         let ancestor = ancestor.canonicalize().map_err(|error| error.to_string())?;
         ensure_under_workspace(&ancestor, &canonical_root)?;
         Ok(candidate)
+    }
+}
+
+/// Narrow typed output shape every runtime wrapper emits: the observed
+/// `status`, a human `summary`, and the recorded `output_artifacts` IDs (the
+/// full stdout/stderr/file payloads live in the artifacts, never inline).
+pub(crate) const WRAPPER_OUTPUT_SCHEMA: &str =
+    "{\"output\":{\"status\":\"string\",\"summary\":\"string\",\"output_artifacts\":\"string[]\"}}";
+
+/// Per-tool redaction policy descriptor for a runtime wrapper.
+///
+/// Execution tools (`shell_run`, the git wrappers) capture process stdout/stderr
+/// where secrets leak, so their policy is the credential-shape scan applied to
+/// output; read/write tools scrub input/output content. Every wrapper declares
+/// a non-empty policy (ACI2).
+pub(crate) fn wrapper_redaction_policy(tool_id: &str) -> String {
+    match tool_id {
+        "capo.shell_run" => {
+            "{\"strategy\":\"credential_scan\",\"fields\":[\"stdout\",\"stderr\"]}".to_string()
+        }
+        "capo.git_status" | "capo.git_diff" | "capo.git_commit" => {
+            "{\"strategy\":\"credential_scan\",\"fields\":[\"stdout\",\"stderr\"]}".to_string()
+        }
+        "capo.file_write" => {
+            "{\"strategy\":\"credential_scan\",\"fields\":[\"content\"]}".to_string()
+        }
+        _ => "{\"strategy\":\"credential_scan\",\"fields\":[\"content\"]}".to_string(),
     }
 }
 

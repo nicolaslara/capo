@@ -256,8 +256,10 @@ impl CapoToolRegistry {
             origin: "capo".to_string(),
             handler_kind: "capo_registry".to_string(),
             schema_json: schema_json.to_string(),
+            output_schema: CAPO_REGISTRY_OUTPUT_SCHEMA.to_string(),
             required_scopes_json: json_array(required_scopes),
             risk: if mutates_state { "medium" } else { "low" }.to_string(),
+            redaction_policy_json: capo_redaction_policy(tool_id),
             exposure: "agent_visible".to_string(),
             instrumentation_level: "full".to_string(),
             status: "available".to_string(),
@@ -375,13 +377,130 @@ pub struct ToolDefinition {
     pub display_name: String,
     pub origin: String,
     pub handler_kind: String,
+    /// Input schema descriptor (`{"input":{...}}`).
     pub schema_json: String,
+    /// Output schema descriptor (`{"output":{...}}`).
+    ///
+    /// ACI2: every registered tool declares a non-empty output schema so
+    /// "narrow typed output" is a checkable contract rather than convention.
+    /// [`ToolDefinition::validate_output`] checks an emitted result against it.
+    pub output_schema: String,
     pub required_scopes_json: String,
     pub risk: String,
+    /// Per-tool redaction policy descriptor (`{"strategy":...,"fields":[...]}`).
+    ///
+    /// ACI2: matches `tool-exposure.md`'s `redaction_policy_json` field. Every
+    /// registered tool declares a non-empty policy so input/output redaction is
+    /// a declared per-tool contract.
+    pub redaction_policy_json: String,
     pub exposure: String,
     pub instrumentation_level: String,
     pub status: String,
     pub mutates_state: bool,
+}
+
+/// One of the `tool-exposure.md` risk levels.
+pub const TOOL_RISK_LEVELS: &[&str] = &["low", "medium", "high", "critical"];
+
+impl ToolDefinition {
+    /// Whether `risk` is one of the `tool-exposure.md` levels.
+    pub fn risk_is_valid(&self) -> bool {
+        TOOL_RISK_LEVELS.contains(&self.risk.as_str())
+    }
+
+    /// Validate an emitted result object against the declared `output_schema`.
+    ///
+    /// ACI2: the output schema follows the same lightweight descriptor shape as
+    /// `schema_json` (`{"output":{"field":"type"}}`). Every declared field must
+    /// be present in `result` and match its declared scalar/array type, so a
+    /// tool's narrow typed output is checkable rather than convention. A `?`
+    /// suffix marks an optional field. Returns the list of validation errors;
+    /// an empty list means the result conforms.
+    pub fn validate_output(&self, result: &serde_json::Value) -> Vec<String> {
+        validate_against_schema(&self.output_schema, "output", result)
+    }
+}
+
+/// Validate a value object against a `{"<root>":{"field":"type"}}` descriptor.
+///
+/// Shared by the input and output schema descriptors. `type` is one of
+/// `string`, `integer`, `number`, `boolean`, `string[]`, `object`, `array`,
+/// optionally suffixed with `?` to mark the field optional.
+fn validate_against_schema(
+    schema_json: &str,
+    root_key: &str,
+    value: &serde_json::Value,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    let schema: serde_json::Value = match serde_json::from_str(schema_json) {
+        Ok(schema) => schema,
+        Err(error) => {
+            errors.push(format!("schema is not valid json: {error}"));
+            return errors;
+        }
+    };
+    let Some(fields) = schema.get(root_key).and_then(|root| root.as_object()) else {
+        errors.push(format!("schema has no `{root_key}` object"));
+        return errors;
+    };
+    let Some(object) = value.as_object() else {
+        errors.push("result is not a json object".to_string());
+        return errors;
+    };
+    for (field, declared_type) in fields {
+        let Some(declared_type) = declared_type.as_str() else {
+            errors.push(format!("schema field `{field}` type must be a string"));
+            continue;
+        };
+        let (base_type, optional) = match declared_type.strip_suffix('?') {
+            Some(base) => (base, true),
+            None => (declared_type, false),
+        };
+        match object.get(field) {
+            None => {
+                if !optional {
+                    errors.push(format!("missing required field `{field}`"));
+                }
+            }
+            Some(actual) => {
+                if !scalar_type_matches(base_type, actual) {
+                    errors.push(format!(
+                        "field `{field}` expected `{base_type}` but found `{}`",
+                        json_type_name(actual)
+                    ));
+                }
+            }
+        }
+    }
+    errors
+}
+
+fn scalar_type_matches(declared: &str, value: &serde_json::Value) -> bool {
+    match declared {
+        "string" => value.is_string(),
+        "integer" => value.is_i64() || value.is_u64(),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "string[]" => value
+            .as_array()
+            .is_some_and(|items| items.iter().all(serde_json::Value::is_string)),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        // An unknown declared type accepts any present value rather than
+        // silently failing closed; the schema-shape test guards declared types.
+        _ => true,
+    }
+}
+
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -495,6 +614,17 @@ pub struct CapoToolResult {
     pub events: Vec<ToolAuditEvent>,
 }
 
+impl CapoToolResult {
+    /// The narrow typed output object validatable against a Capo tool's
+    /// declared [`ToolDefinition::output_schema`] (ACI2).
+    pub fn narrow_output(&self) -> serde_json::Value {
+        serde_json::json!({
+            "output": self.output,
+            "output_artifact_id": self.output_artifact_id,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolAuditEvent {
     pub kind: String,
@@ -599,6 +729,27 @@ fn render_tool_output(tool_id: &str, context: &CapoToolContext) -> String {
     }
 }
 
+/// Narrow typed output shape every Capo-registry tool emits: a rendered
+/// `output` string plus the `output_artifact_id` that carries the full payload.
+pub(crate) const CAPO_REGISTRY_OUTPUT_SCHEMA: &str =
+    "{\"output\":{\"output\":\"string\",\"output_artifact_id\":\"string\"}}";
+
+/// Per-tool redaction policy descriptor for a Capo-registry tool.
+///
+/// Read-only status tools default to the credential-shape scan; tools that
+/// carry free-text evidence/scope add those fields to the scrub set.
+pub(crate) fn capo_redaction_policy(tool_id: &str) -> String {
+    match tool_id {
+        "capo.evidence_record" => {
+            "{\"strategy\":\"credential_scan\",\"fields\":[\"evidence\"]}".to_string()
+        }
+        "capo.capability_request" => {
+            "{\"strategy\":\"credential_scan\",\"fields\":[\"scope\",\"reason\"]}".to_string()
+        }
+        _ => "{\"strategy\":\"credential_scan\",\"fields\":[\"output\"]}".to_string(),
+    }
+}
+
 pub(crate) fn unknown_tool_definition(tool_id: &str) -> ToolDefinition {
     ToolDefinition {
         tool_id: tool_id.to_string(),
@@ -606,8 +757,11 @@ pub(crate) fn unknown_tool_definition(tool_id: &str) -> ToolDefinition {
         origin: "capo".to_string(),
         handler_kind: "capo_registry".to_string(),
         schema_json: "{}".to_string(),
+        output_schema: CAPO_REGISTRY_OUTPUT_SCHEMA.to_string(),
         required_scopes_json: json_array(vec!["tool:invoke:capo"]),
         risk: "medium".to_string(),
+        redaction_policy_json: "{\"strategy\":\"credential_scan\",\"fields\":[\"output\"]}"
+            .to_string(),
         exposure: "internal".to_string(),
         instrumentation_level: "none".to_string(),
         status: "unhealthy".to_string(),

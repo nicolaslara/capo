@@ -50,6 +50,30 @@ pub struct WrapperToolResult {
 }
 
 impl WrapperToolResult {
+    /// The narrow typed output object validatable against a wrapper tool's
+    /// declared [`ToolDefinition::output_schema`] (ACI2): the observed status,
+    /// a human summary, and the recorded output artifacts (full payloads live
+    /// in the artifacts, never inline).
+    pub fn narrow_output(&self) -> Value {
+        Value::Object(
+            [
+                ("status".to_string(), Value::String(self.status.clone())),
+                ("summary".to_string(), Value::String(self.summary.clone())),
+                (
+                    "output_artifacts".to_string(),
+                    Value::Array(
+                        self.output_artifacts
+                            .iter()
+                            .map(|artifact| Value::String(artifact.artifact_id.clone()))
+                            .collect(),
+                    ),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    }
+
     pub(crate) fn denied(
         request: WrapperToolRequest,
         definition: ToolDefinition,

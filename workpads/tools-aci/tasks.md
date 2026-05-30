@@ -176,7 +176,45 @@ Must not do:
 
 ## ACI2 - Per-Tool Input And Output Schemas Plus Metadata
 
-Status: pending.
+Status: done.
+
+Evidence:
+
+- `ToolDefinition` (`crates/capo-tools/src/lib.rs`) gains two fields matching
+  `tool-exposure.md`: `output_schema` (`{"output":{...}}` descriptor in the same
+  lightweight shape as the existing `schema_json` input descriptor) and
+  `redaction_policy_json` (`{"strategy":...,"fields":[...]}`). A `TOOL_RISK_LEVELS`
+  constant (`low`/`medium`/`high`/`critical`) plus `ToolDefinition::risk_is_valid`
+  pin risk to the doc's levels, and `ToolDefinition::validate_output` checks an
+  emitted result object against the declared `output_schema` (field
+  presence/scalar+array type, `?`-suffix optional) so "narrow typed output" is a
+  checkable contract rather than convention. No new crate dependency: the
+  validator mirrors the existing hand-rolled `schema_json` descriptor convention
+  via `serde_json` rather than pulling a full JSON-Schema engine.
+- Every registered tool now declares the metadata. Capo-owned tools
+  (`describe_tool`) emit `CAPO_REGISTRY_OUTPUT_SCHEMA`
+  (`{output:string, output_artifact_id:string}`) and a per-tool
+  `capo_redaction_policy`; runtime wrappers (`runtime_wrappers.rs`) emit
+  `WRAPPER_OUTPUT_SCHEMA` (`{status:string, summary:string,
+  output_artifacts:string[]}`) and a per-tool `wrapper_redaction_policy`.
+  `CapoToolResult::narrow_output` / `WrapperToolResult::narrow_output` produce the
+  validatable result objects. Existing wrapper risk assignments are preserved
+  (`capo.shell_run` high, `capo.git_commit` high, `capo.file_write` medium,
+  reads low).
+- Tests added (`crates/capo-tools/src/tests.rs`):
+  `every_registered_tool_declares_output_schema_risk_scope_and_redaction`
+  (non-empty `output_schema`/`required_scopes_json`/`redaction_policy_json` and a
+  valid `risk` for all `CAPO_OWNED_TOOLS` + `CAPO_WRAPPER_TOOLS`),
+  `wrapper_risk_levels_reconcile_with_tool_exposure`,
+  `capo_registry_emitted_results_validate_against_their_output_schema`,
+  `wrapper_emitted_results_validate_against_their_output_schema` (real
+  fixture-workspace runs through `authorize_and_invoke`), and
+  `output_schema_validation_rejects_a_wrong_shaped_result` (negative: the
+  validator is a real check, not a rubber stamp).
+- Gate run from `/Users/nicolas/devel/capo-wt/tools-aci`: `cargo fmt --check`
+  clean; `cargo clippy --all-targets --all-features -- -D warnings` exit 0;
+  `cargo test --workspace` => all passed, 0 failed (capo-tools: 32 passed);
+  `git diff --check` clean.
 
 Acceptance:
 
