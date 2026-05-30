@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use capo_runtime::{LocalProcessConfig, LocalProcessRequest, LocalProcessRunner};
 
 use crate::safety_floor::LIVE_WRITE_OPT_IN_ENV;
-use crate::{RunTurnRef, WorkspaceWriteRequest, WriteMode, resolve_write_mode};
+use crate::{
+    RunTurnRef, WorkspaceWriteRequest, WriteMode, resolve_write_mode, resolve_write_mode_with_env,
+};
 
 fn system_origin() -> ServerClientOrigin {
     ServerClientOrigin {
@@ -198,6 +200,112 @@ fn write_adapter_defaults_to_dry_run_and_takes_no_checkpoint() {
         resolve_write_mode(true, true),
         WriteMode::DryRun,
         "unattended turns never reach a live write"
+    );
+}
+
+#[test]
+fn resolve_write_mode_with_env_is_an_and_gate_over_all_three_requirements() {
+    // RTL6: `resolve_write_mode_with_env` is the gate protecting the first real
+    // workspace write. A live write is permitted ONLY when ALL THREE required
+    // conditions hold simultaneously:
+    //   1. the caller explicitly opted in (`live_execution_opt_in`),
+    //   2. the process env gate is set (`env_opt_in`), and
+    //   3. the run is attended (`!unattended`).
+    // Every other combination must fall back to the safe `DryRun` default. We
+    // assert this EXHAUSTIVELY over all 2^3 = 8 combinations of the three bools,
+    // so dropping any single requirement from the gate fails this test.
+    //
+    // The pure, env-injected `resolve_write_mode_with_env` is used (rather than
+    // `resolve_write_mode`, which reads process-global env) so the truth table is
+    // deterministic and independent of the surrounding environment.
+
+    // Build the full truth table programmatically as the canonical AND-gate, and
+    // assert against it. `expected_live` is *defined* as the three-way AND so the
+    // test encodes the intended semantics, then we additionally pin down each row
+    // explicitly below to catch a wrong definition.
+    for caller_opt_in in [false, true] {
+        for env_opt_in in [false, true] {
+            for unattended in [false, true] {
+                let attended = !unattended;
+                let expected_live = caller_opt_in && env_opt_in && attended;
+                let expected = if expected_live {
+                    WriteMode::LiveWrite
+                } else {
+                    WriteMode::DryRun
+                };
+                let actual = resolve_write_mode_with_env(caller_opt_in, env_opt_in, unattended);
+                assert_eq!(
+                    actual, expected,
+                    "resolve_write_mode_with_env(caller_opt_in={caller_opt_in}, \
+                     env_opt_in={env_opt_in}, unattended={unattended}) must be {expected:?}: \
+                     a live write requires caller opt-in AND env gate AND attended"
+                );
+            }
+        }
+    }
+
+    // Explicit, row-by-row truth table (caller_opt_in, env_opt_in, unattended) ->
+    // expected mode. Pinning every row guards against a regression that drops a
+    // requirement yet still happens to agree with a mis-stated `expected_live`.
+    let truth_table: [(bool, bool, bool, WriteMode); 8] = [
+        // No requirement satisfied.
+        (false, false, false, WriteMode::DryRun),
+        (false, false, true, WriteMode::DryRun),
+        // Only the env gate.
+        (false, true, false, WriteMode::DryRun),
+        (false, true, true, WriteMode::DryRun),
+        // Only the caller opt-in.
+        (true, false, false, WriteMode::DryRun),
+        (true, false, true, WriteMode::DryRun),
+        // Caller opt-in AND env gate, but UNATTENDED -> still dry run.
+        (true, true, true, WriteMode::DryRun),
+        // ALL THREE: caller opt-in AND env gate AND attended -> the ONLY live row.
+        (true, true, false, WriteMode::LiveWrite),
+    ];
+    for (caller_opt_in, env_opt_in, unattended, expected) in truth_table {
+        assert_eq!(
+            resolve_write_mode_with_env(caller_opt_in, env_opt_in, unattended),
+            expected,
+            "truth-table row (caller_opt_in={caller_opt_in}, env_opt_in={env_opt_in}, \
+             unattended={unattended}) must resolve to {expected:?}"
+        );
+    }
+
+    // Exactly ONE combination yields a live write: the all-requirements-met row.
+    let live_rows = truth_table
+        .iter()
+        .filter(|(_, _, _, mode)| *mode == WriteMode::LiveWrite)
+        .count();
+    assert_eq!(
+        live_rows, 1,
+        "exactly one of the eight combinations may reach LiveWrite"
+    );
+
+    // The single live combination, established as the baseline.
+    assert_eq!(
+        resolve_write_mode_with_env(true, true, false),
+        WriteMode::LiveWrite,
+        "the all-requirements-met combination must reach a live write"
+    );
+
+    // Regression guard: from that live baseline, dropping ANY single requirement
+    // -- and ONLY that requirement -- must collapse the decision back to DryRun.
+    // This is what makes the test fail if a future change removes a conjunct from
+    // the gate.
+    assert_eq!(
+        resolve_write_mode_with_env(false, true, false),
+        WriteMode::DryRun,
+        "dropping the caller opt-in alone must fall back to dry run"
+    );
+    assert_eq!(
+        resolve_write_mode_with_env(true, false, false),
+        WriteMode::DryRun,
+        "dropping the env gate alone must fall back to dry run"
+    );
+    assert_eq!(
+        resolve_write_mode_with_env(true, true, true),
+        WriteMode::DryRun,
+        "making the run unattended alone must fall back to dry run"
     );
 }
 
