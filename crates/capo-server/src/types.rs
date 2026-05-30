@@ -191,6 +191,11 @@ pub enum ServerCommand {
         mock_provider_output_name: Option<String>,
         mock_provider_output_jsonl: Option<String>,
         timeout_seconds: u64,
+        /// Absolute path to a codex binary to run on the spawn path instead of
+        /// resolving `codex` from PATH. Ops set it from `CAPO_CODEX_BIN`; tests
+        /// pass a stub so the spawn path is deterministic. `None`/relative keeps
+        /// `codex`.
+        codex_program_override: Option<String>,
     },
     Recover,
 }

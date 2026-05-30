@@ -49,6 +49,10 @@ pub(crate) struct LiveProviderLocalRunRequest<'a> {
     pub(crate) mock_provider_output_name: Option<&'a str>,
     pub(crate) mock_provider_output_jsonl: Option<&'a str>,
     pub(crate) timeout_seconds: u64,
+    /// Absolute path to a codex binary to run on the spawn path instead of
+    /// resolving `codex` from PATH. Ops set it from `CAPO_CODEX_BIN`; tests pass
+    /// a stub so the spawn path is deterministic. `None` keeps `codex`.
+    pub(crate) codex_program_override: Option<&'a str>,
 }
 
 struct LiveExecutionContext<'a> {
@@ -434,8 +438,22 @@ impl CapoServer {
             );
         }
 
-        let launch_plan =
+        let mut launch_plan =
             CodexExecAdapter::local_launch_plan(workspace, artifacts, request.goal.to_string());
+        // Test/operations seam: when an absolute codex-binary override is supplied
+        // (ops set it via `CAPO_CODEX_BIN`, threaded in at the command handler;
+        // tests pass it directly), run THAT binary instead of resolving `codex`
+        // from PATH. The runtime spawns with `env_clear()`, so only an absolute
+        // path is honored. This is not a gate bypass: preflight, the execution
+        // gate, credential scanning, and the per-turn artifact keying are
+        // unchanged regardless of which binary runs -- it only swaps the program
+        // so the spawn path can be driven deterministically against a stub.
+        if let Some(codex_bin) = request
+            .codex_program_override
+            .filter(|path| Path::new(path).is_absolute())
+        {
+            launch_plan.program = codex_bin.to_string();
+        }
         let context = LiveExecutionContext {
             plan: &plan,
             gate: &gate,

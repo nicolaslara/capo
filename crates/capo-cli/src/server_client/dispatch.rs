@@ -270,6 +270,9 @@ pub(crate) fn server_dispatch_live_run_local(
                 mock_provider_output_name,
                 mock_provider_output_jsonl,
                 timeout_seconds,
+                // The spawn-path codex binary is resolved server-side from
+                // `CAPO_CODEX_BIN`; the CLI passes no explicit override.
+                codex_program_override: None,
             },
         )?,
     )?;

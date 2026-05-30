@@ -707,7 +707,8 @@ Verification:
 
 ## RTL8 - Per-Turn Artifact Keying By turn_id Reconciled With Dispatch Run-Exit
 
-Status: done (gate green). `turn_id` is now threaded through
+Status: done (gate green; codex-program-override drift repaired - see Evidence).
+`turn_id` is now threaded through
 `LocalProcessRequest` (a new `Option<String>` field, plus `new()`/`with_turn_id`
 helpers) and the runtime `run_dir`/artifact path in
 `crates/capo-runtime/src/lib.rs`: when a turn key is present the runtime keys the
@@ -773,6 +774,26 @@ Evidence:
   capo-query 21, capo-voice 19, etc.). `git diff --check` -> clean. No live Codex
   smoke is required for RTL8 (the live workspace-write smoke is RTL13); all
   proofs are deterministic.
+
+- Gate repair (codex-program-override drift): the objective gate failed on two
+  fronts after the `LiveProviderTurn.codex_program_override` field landed. (1)
+  fmt: `crates/capo-server/src/lib.rs:753` materialized the field with a
+  multi-line `codex_program_override: codex_program_override.as_deref().map(...)`
+  expression that rustfmt collapses to a single line. (2) clippy/test: the RTL8
+  `live_mock_turn` helper in `crates/capo-server/src/tests/per_turn_artifacts.rs`
+  built `LiveProviderTurn` without the new `codex_program_override` field, a
+  missing-field compile error that blocked both clippy and the test run. Fix:
+  collapsed the lib.rs expression to one line and added
+  `codex_program_override: None` to the mock-turn initializer (the mock path
+  never spawns codex, so no override is needed). Files changed:
+  `crates/capo-server/src/lib.rs`,
+  `crates/capo-server/src/tests/per_turn_artifacts.rs`. Commands run from
+  `/Users/nicolas/devel/capo-wt/real-turn-loop`: `cargo fmt --check` -> clean;
+  `cargo clippy --all-targets --all-features -- -D warnings` -> clean (exit 0);
+  `cargo test --workspace` -> exit 0, 0 failed across all binaries (capo-server
+  44 incl. both RTL8 per-turn-artifact tests, capo-runtime 14, capo-cli 63 +
+  server_transport 11, capo-adapters 28 / 2 ignored, capo-controller 23,
+  capo-state 32, capo-tools 21, capo-query 21, capo-voice 19, etc.).
 
 Acceptance:
 

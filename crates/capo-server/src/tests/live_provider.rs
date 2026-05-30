@@ -337,6 +337,7 @@ fn server_live_provider_local_run_requires_ready_codex_preflight_and_mock_opt_in
             mock_provider_output_name: None,
             mock_provider_output_jsonl: None,
             timeout_seconds: 1,
+            codex_program_override: None,
         },
     );
     let ServerResponsePayload::DispatchRun(blocked) = blocked.payload else {
@@ -361,6 +362,7 @@ fn server_live_provider_local_run_requires_ready_codex_preflight_and_mock_opt_in
             mock_provider_output_name: Some("codex-exec.jsonl".to_string()),
             mock_provider_output_jsonl: Some(fixture.to_string()),
             timeout_seconds: 1,
+            codex_program_override: None,
         },
     );
     let ServerResponsePayload::DispatchRun(stale_prompt) = stale_prompt.payload else {
@@ -383,6 +385,7 @@ fn server_live_provider_local_run_requires_ready_codex_preflight_and_mock_opt_in
             mock_provider_output_name: Some("codex-exec.jsonl".to_string()),
             mock_provider_output_jsonl: Some(fixture.to_string()),
             timeout_seconds: 1,
+            codex_program_override: None,
         },
     );
     let ServerResponsePayload::DispatchRun(run) = run.payload else {
@@ -427,6 +430,7 @@ fn server_live_provider_local_run_requires_ready_codex_preflight_and_mock_opt_in
             mock_provider_output_name: Some("codex-exec.jsonl".to_string()),
             mock_provider_output_jsonl: Some(fixture.to_string()),
             timeout_seconds: 1,
+            codex_program_override: None,
         },
     );
     let ServerResponsePayload::DispatchRun(repeat) = repeat.payload else {
@@ -537,6 +541,7 @@ fn server_live_provider_local_run_rechecks_prompt_after_existing_real_execution(
             mock_provider_output_name: None,
             mock_provider_output_jsonl: None,
             timeout_seconds: 1,
+            codex_program_override: None,
         },
     );
     let ServerResponsePayload::DispatchRun(stale) = stale.payload else {
@@ -702,6 +707,7 @@ fn server_live_provider_local_run_blocks_claude_in_first_live_slice() {
                 include_str!("../../../capo-adapters/fixtures/codex-exec.jsonl").to_string(),
             ),
             timeout_seconds: 1,
+            codex_program_override: None,
         },
     );
     let ServerResponsePayload::DispatchRun(run) = run.payload else {
@@ -773,6 +779,7 @@ fn server_live_provider_local_run_rejects_credential_like_paths() {
                 include_str!("../../../capo-adapters/fixtures/codex-exec.jsonl").to_string(),
             ),
             timeout_seconds: 1,
+            codex_program_override: None,
         },
     );
     let ServerResponsePayload::DispatchRun(run) = run.payload else {
@@ -849,6 +856,7 @@ fn server_live_provider_local_run_rejects_symlinked_credential_paths() {
                 include_str!("../../../capo-adapters/fixtures/codex-exec.jsonl").to_string(),
             ),
             timeout_seconds: 1,
+            codex_program_override: None,
         },
     );
     let ServerResponsePayload::DispatchRun(run) = run.payload else {

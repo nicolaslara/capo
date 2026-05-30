@@ -140,6 +140,8 @@ fn live_mock_turn(turn_token_cost: u64) -> DispatchTurnMode {
         ),
         usage_before: RunResourceUsage::default(),
         turn_token_cost,
+        // Mock path never spawns codex, so no program override is needed.
+        codex_program_override: None,
     }))
 }
 

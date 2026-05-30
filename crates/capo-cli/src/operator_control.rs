@@ -692,6 +692,9 @@ Operator input: {line}
                 .map(|_| "capo-control-planner-mock-codex.jsonl".to_string()),
             mock_provider_output_jsonl: mock_provider_output_jsonl.map(ToString::to_string),
             timeout_seconds,
+            // Ops set the spawn-path codex binary via `CAPO_CODEX_BIN`, resolved
+            // server-side; the operator-control flow passes no explicit override.
+            codex_program_override: None,
         })?;
         let ServerResponsePayload::DispatchRun(run) = run else {
             return Err("server returned unexpected response for Codex live run".to_string());

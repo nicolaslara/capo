@@ -106,6 +106,12 @@ pub struct LiveProviderTurn {
     /// the observed post-turn cost (when the provider reports it) is folded into
     /// [`DispatchTurnOutcome::usage_after`].
     pub turn_token_cost: u64,
+    /// Optional absolute path to a codex binary to run on the spawn path instead
+    /// of resolving `codex` from PATH. Ops normally leave this `None` and set
+    /// `CAPO_CODEX_BIN` instead; tests pass a stub so the spawn path is
+    /// deterministic without process-global env mutation. Ignored on the mock
+    /// path (which never spawns) and when not absolute.
+    pub codex_program_override: Option<String>,
 }
 
 /// One turn's worth of inputs for the loop's dispatch-driven execution.
@@ -239,6 +245,7 @@ impl CapoServer {
                     ceiling,
                     usage_before,
                     turn_token_cost,
+                    codex_program_override,
                 } = *live;
                 // RTL7: a live-provider turn must run inside an active ceiling.
                 // The wall-clock bound is wired to the runtime timeout below; a
@@ -310,6 +317,7 @@ impl CapoServer {
                         mock_provider_output_name,
                         mock_provider_output_jsonl,
                         timeout_seconds,
+                        codex_program_override,
                     }))?;
                 let ServerResponsePayload::DispatchRun(run) = run_response.payload else {
                     return Err(ServerError::AdapterFixture(

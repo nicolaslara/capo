@@ -731,7 +731,18 @@ impl CapoServer {
                 mock_provider_output_name,
                 mock_provider_output_jsonl,
                 timeout_seconds,
+                codex_program_override,
             } => {
+                // Spawn-path codex-binary override: prefer the explicit command
+                // field (threaded in-process by the loop / tests); otherwise fall
+                // back to an absolute `CAPO_CODEX_BIN` so ops can pin an exact
+                // codex build for a live smoke. A bare/relative value is ignored
+                // downstream (the runtime spawns with `env_clear()`).
+                let codex_program_override = codex_program_override.or_else(|| {
+                    std::env::var("CAPO_CODEX_BIN")
+                        .ok()
+                        .filter(|path| std::path::Path::new(path.trim()).is_absolute())
+                });
                 let summary = self.run_live_provider_local(
                     &origin,
                     LiveProviderLocalRunRequest {
@@ -742,6 +753,7 @@ impl CapoServer {
                         mock_provider_output_name: mock_provider_output_name.as_deref(),
                         mock_provider_output_jsonl: mock_provider_output_jsonl.as_deref(),
                         timeout_seconds,
+                        codex_program_override: codex_program_override.as_deref().map(str::trim),
                     },
                 )?;
                 let command_hash = command_identity_hash(format!(
