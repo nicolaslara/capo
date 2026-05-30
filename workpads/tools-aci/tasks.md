@@ -242,7 +242,52 @@ Verification:
 
 ## ACI3 - Narrow Typed Output For Wrappers And Tightened file_write
 
-Status: pending.
+Status: done.
+
+Evidence:
+
+- Narrow typed output for every wrapper (`crates/capo-tools/src/runtime_wrappers.rs`):
+  `WrapperToolResult` gains a `typed_output: Value` field and
+  `narrow_output()` now returns that per-tool object (not the generic
+  status/summary/artifact blob). Execution wrappers (`capo.shell_run`,
+  `capo.git_status`, `capo.git_diff`, `capo.git_commit`) emit
+  `{status, exit_status, passed, duration_ms, output_artifact_id, truncated}`
+  (`EXEC_OUTPUT_SCHEMA`); `capo.file_read` emits
+  `{status, path, bytes_read, content_hash, output_artifact_id}`
+  (`FILE_READ_OUTPUT_SCHEMA`); `capo.file_write` emits
+  `{status, path, mode, before_hash, after_hash, bytes_written,
+  output_artifact_id, expected_hash?, actual_hash?}`
+  (`FILE_WRITE_OUTPUT_SCHEMA`). `describe_tool` now declares the per-tool
+  `output_schema` via `wrapper_output_schema(tool_id)`. Deny/fail paths emit a
+  schema-valid typed output via `denied_typed_output`/`failed_typed_output`
+  (`runtime_wrapper_types.rs`).
+- Tightened `capo.file_write`: accepts an `expected_hash` precondition OR a
+  structured `replace`/`with` substitution (in addition to whole-file
+  `content`); a precondition mismatch returns a typed `precondition_failed`
+  result carrying `expected_hash`/`actual_hash` WITHOUT writing (blind clobbers
+  impossible). It now emits a real unified-diff artifact (`similar` crate,
+  `default-features = false`, `text` only) instead of a before/after hash
+  summary.
+- `capo.shell_run` over-cap success is NOT failed: execution wrappers run via a
+  new `uncapped_runtime_runner()` (runtime limit `usize::MAX`) so the full
+  output is preserved in the artifact rather than triggering
+  `OutputLimitExceeded`; the wrapper compares the artifact size against the
+  configured inline `output_limit_bytes` cap and records `truncated` in the
+  typed result while keeping `status=exited`/`passed=true`.
+- Tests added (`crates/capo-tools/src/tests.rs`):
+  `shell_run_typed_output_carries_exit_status_passed_duration_and_artifact`,
+  `shell_run_over_cap_success_is_truncated_not_failed`,
+  `file_read_typed_output_carries_path_bytes_and_hash`,
+  `file_write_emits_a_unified_diff_artifact`,
+  `file_write_precondition_mismatch_does_not_clobber`,
+  `file_write_structured_replace_edits_in_place`, plus a deny-path
+  schema-validation assertion in
+  `file_wrappers_record_input_output_artifacts_and_reject_workspace_escape`.
+  Existing ACI2 output-schema validation tests still cover the wrappers.
+- Gate run from `/Users/nicolas/devel/capo-wt/tools-aci`: `cargo fmt --check`
+  clean; `cargo clippy --all-targets --all-features -- -D warnings` clean;
+  `cargo test --workspace` => 343 passed, 0 failed (capo-tools: 38 passed);
+  `git diff --check` clean.
 
 Acceptance:
 

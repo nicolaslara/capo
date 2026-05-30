@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use capo_core::{BoundaryBinding, BoundaryKind};
 use capo_runtime::{
@@ -8,11 +9,13 @@ use capo_runtime::{
     RuntimeOutputArtifact,
 };
 use serde_json::Value;
+use similar::TextDiff;
 
 use crate::runtime_wrapper_paths::{
     ensure_under_workspace, is_workpad_path, lexically_normalize, nearest_existing_ancestor,
     sanitize_path_component, sanitized_run_id, workspace_path, workspace_relative_path,
 };
+use crate::runtime_wrapper_types::{denied_typed_output, failed_typed_output};
 use crate::{
     CAPO_WRAPPER_TOOLS, PermissionPolicy, PermissionRequest, ToolAuditEvent, ToolAuthorization,
     ToolDefinition, content_hash, json_array, unknown_tool_definition,
@@ -86,7 +89,7 @@ impl RuntimeToolWrappers {
                 true,
                 "medium",
                 vec!["tool:invoke:capo.file_write", "filesystem:write:workspace"],
-                "{\"input\":{\"path\":\"string\",\"content\":\"string\"}}",
+                "{\"input\":{\"path\":\"string\",\"content\":\"string?\",\"expected_hash\":\"string?\",\"replace\":\"string?\",\"with\":\"string?\"}}",
             ),
             "capo.workpad_read" => (
                 "Workpad Read",
@@ -119,7 +122,7 @@ impl RuntimeToolWrappers {
             origin: "runtime".to_string(),
             handler_kind: "runtime_wrapper".to_string(),
             schema_json: schema_json.to_string(),
-            output_schema: WRAPPER_OUTPUT_SCHEMA.to_string(),
+            output_schema: wrapper_output_schema(tool_id).to_string(),
             required_scopes_json: json_array(required_scopes),
             risk: risk.to_string(),
             redaction_policy_json: wrapper_redaction_policy(tool_id),
@@ -171,11 +174,16 @@ impl RuntimeToolWrappers {
                 "tool.call_canceled",
                 "authorization_mismatch",
             ));
+            let typed_output = denied_typed_output(
+                &authorization.definition.output_schema,
+                &authorization.permission,
+            );
             return WrapperToolResult {
                 tool_call_id: request.tool_call_id,
                 tool_id: request.tool_id,
                 status: "denied".to_string(),
                 summary: error,
+                typed_output,
                 input_artifact: None,
                 output_artifacts: Vec::new(),
                 permission_decision: authorization.permission,
@@ -216,6 +224,7 @@ impl RuntimeToolWrappers {
                     tool_id: request.tool_id,
                     status: execution.status,
                     summary: execution.summary,
+                    typed_output: execution.typed_output,
                     input_artifact: Some(input_artifact),
                     output_artifacts: execution.output_artifacts,
                     permission_decision: authorization.permission,
@@ -227,11 +236,14 @@ impl RuntimeToolWrappers {
                     ToolAuditEvent::new("tool.output_observed", "failed"),
                     ToolAuditEvent::new("tool.call_failed", "failed"),
                 ]);
+                let typed_output =
+                    failed_typed_output(&authorization.definition.output_schema, &error);
                 WrapperToolResult {
                     tool_call_id: request.tool_call_id,
                     tool_id: request.tool_id,
                     status: "failed".to_string(),
                     summary: error,
+                    typed_output,
                     input_artifact: Some(input_artifact),
                     output_artifacts: Vec::new(),
                     permission_decision: authorization.permission,
@@ -279,8 +291,15 @@ impl RuntimeToolWrappers {
             .map(|path| self.resolve_workspace_path(path, true))
             .transpose()?
             .unwrap_or_else(|| self.config.workspace_root.clone());
+        // ACI3: run with an UNBOUNDED runner output limit so a successful run
+        // that exceeds the inline cap is not turned into a hard
+        // `OutputLimitExceeded` failure (which would discard the artifacts). The
+        // full output is preserved in the artifact; we record `truncated` in the
+        // typed result by comparing the artifact size against the configured
+        // inline `output_limit_bytes` cap.
+        let started = Instant::now();
         let outcome = self
-            .runtime_runner()
+            .uncapped_runtime_runner()
             .start_process(LocalProcessRequest {
                 run_id: sanitized_run_id(&request.run_id),
                 turn_id: None,
@@ -290,19 +309,29 @@ impl RuntimeToolWrappers {
                 env: HashMap::new(),
             })
             .map_err(runtime_error)?;
+        let duration_ms = started.elapsed().as_millis() as i64;
+        let stdout = wrapper_artifact("shell_stdout", outcome.stdout);
+        let stderr = wrapper_artifact("shell_stderr", outcome.stderr);
+        let cap = self.config.output_limit_bytes as i64;
+        let truncated = stdout.size_bytes > cap || stderr.size_bytes > cap;
+        let passed = outcome.exit_code == Some(0);
+        let exit_label = outcome
+            .exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "signal".to_string());
+        let typed_output = exec_typed_output(
+            &outcome.process.status,
+            outcome.exit_code,
+            passed,
+            duration_ms,
+            &stdout.artifact_id,
+            truncated,
+        );
         Ok(WrapperExecution {
             status: outcome.process.status,
-            summary: format!(
-                "shell exited with {}",
-                outcome
-                    .exit_code
-                    .map(|code| code.to_string())
-                    .unwrap_or_else(|| "signal".to_string())
-            ),
-            output_artifacts: vec![
-                wrapper_artifact("shell_stdout", outcome.stdout),
-                wrapper_artifact("shell_stderr", outcome.stderr),
-            ],
+            summary: format!("shell exited with {exit_label}"),
+            typed_output,
+            output_artifacts: vec![stdout, stderr],
         })
     }
 
@@ -320,8 +349,9 @@ impl RuntimeToolWrappers {
             let relative = workspace_relative_path(path)?;
             argv.push(relative);
         }
+        let started = Instant::now();
         let outcome = self
-            .runtime_runner()
+            .uncapped_runtime_runner()
             .start_process(LocalProcessRequest {
                 run_id: sanitized_run_id(&request.run_id),
                 turn_id: None,
@@ -331,13 +361,25 @@ impl RuntimeToolWrappers {
                 env: HashMap::new(),
             })
             .map_err(runtime_error)?;
+        let duration_ms = started.elapsed().as_millis() as i64;
+        let stdout = wrapper_artifact("git_stdout", outcome.stdout);
+        let stderr = wrapper_artifact("git_stderr", outcome.stderr);
+        let cap = self.config.output_limit_bytes as i64;
+        let truncated = stdout.size_bytes > cap || stderr.size_bytes > cap;
+        let passed = outcome.exit_code == Some(0);
+        let typed_output = exec_typed_output(
+            &outcome.process.status,
+            outcome.exit_code,
+            passed,
+            duration_ms,
+            &stdout.artifact_id,
+            truncated,
+        );
         Ok(WrapperExecution {
             status: outcome.process.status,
             summary: format!("git {label} completed"),
-            output_artifacts: vec![
-                wrapper_artifact("git_stdout", outcome.stdout),
-                wrapper_artifact("git_stderr", outcome.stderr),
-            ],
+            typed_output,
+            output_artifacts: vec![stdout, stderr],
         })
     }
 
@@ -349,8 +391,9 @@ impl RuntimeToolWrappers {
         if message.chars().any(char::is_control) {
             return Err("git_commit message must not contain control characters".to_string());
         }
+        let started = Instant::now();
         let outcome = self
-            .runtime_runner()
+            .uncapped_runtime_runner()
             .start_process(LocalProcessRequest {
                 run_id: sanitized_run_id(&request.run_id),
                 turn_id: None,
@@ -368,19 +411,29 @@ impl RuntimeToolWrappers {
                 env: HashMap::new(),
             })
             .map_err(runtime_error)?;
+        let duration_ms = started.elapsed().as_millis() as i64;
+        let stdout = wrapper_artifact("git_commit_stdout", outcome.stdout);
+        let stderr = wrapper_artifact("git_commit_stderr", outcome.stderr);
+        let cap = self.config.output_limit_bytes as i64;
+        let truncated = stdout.size_bytes > cap || stderr.size_bytes > cap;
+        let passed = outcome.exit_code == Some(0);
+        let exit_label = outcome
+            .exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "signal".to_string());
+        let typed_output = exec_typed_output(
+            &outcome.process.status,
+            outcome.exit_code,
+            passed,
+            duration_ms,
+            &stdout.artifact_id,
+            truncated,
+        );
         Ok(WrapperExecution {
             status: outcome.process.status,
-            summary: format!(
-                "git commit completed with {}",
-                outcome
-                    .exit_code
-                    .map(|code| code.to_string())
-                    .unwrap_or_else(|| "signal".to_string())
-            ),
-            output_artifacts: vec![
-                wrapper_artifact("git_commit_stdout", outcome.stdout),
-                wrapper_artifact("git_commit_stderr", outcome.stderr),
-            ],
+            summary: format!("git commit completed with {exit_label}"),
+            typed_output,
+            output_artifacts: vec![stdout, stderr],
         })
     }
 
@@ -398,9 +451,17 @@ impl RuntimeToolWrappers {
             &bytes,
             "safe",
         )?;
+        let typed_output = serde_json::json!({
+            "status": "completed",
+            "path": path.display().to_string(),
+            "bytes_read": bytes.len() as i64,
+            "content_hash": artifact.content_hash.clone(),
+            "output_artifact_id": artifact.artifact_id.clone(),
+        });
         Ok(WrapperExecution {
             status: "completed".to_string(),
             summary: format!("{kind} read {}", path.display()),
+            typed_output,
             output_artifacts: vec![artifact],
         })
     }
@@ -430,31 +491,106 @@ impl RuntimeToolWrappers {
 
     fn file_write(&self, request: &WrapperToolRequest) -> Result<WrapperExecution, String> {
         let path = self.resolve_workspace_path(&required_input(request, "path")?, true)?;
-        let content = required_input(request, "content")?;
         let before = fs::read(&path).unwrap_or_default();
+        let before_hash = content_hash(&before);
+
+        // ACI3: an expected-precondition hash makes blind clobbers impossible.
+        // If the caller declares the content hash they believe is on disk and it
+        // does not match, return a typed precondition-failed result WITHOUT
+        // writing, carrying the expected/actual hashes for the loop to reflect.
+        if let Some(expected_hash) = request.input.get("expected_hash").and_then(Value::as_str)
+            && expected_hash != before_hash
+        {
+            let typed_output = serde_json::json!({
+                "status": "precondition_failed",
+                "path": path.display().to_string(),
+                "mode": "precondition",
+                "before_hash": before_hash,
+                "after_hash": before_hash,
+                "bytes_written": 0,
+                "output_artifact_id": "none",
+                "expected_hash": expected_hash,
+                "actual_hash": before_hash,
+            });
+            return Ok(WrapperExecution {
+                status: "precondition_failed".to_string(),
+                summary: format!(
+                    "file_write precondition failed for {}: expected {expected_hash} but on-disk is {before_hash}",
+                    path.display()
+                ),
+                typed_output,
+                output_artifacts: Vec::new(),
+            });
+        }
+
+        // ACI3: accept either a whole-file `content` overwrite OR a structured
+        // `replace`/`with` substitution against the current on-disk content.
+        let (new_content, mode) = match (
+            request.input.get("content").and_then(Value::as_str),
+            request.input.get("replace").and_then(Value::as_str),
+        ) {
+            (Some(content), None) => (content.as_bytes().to_vec(), "overwrite"),
+            (None, Some(needle)) => {
+                let with = request
+                    .input
+                    .get("with")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        "file_write structured replace requires a string `with` field".to_string()
+                    })?;
+                let current = String::from_utf8_lossy(&before);
+                if !current.contains(needle) {
+                    return Err(format!(
+                        "file_write replace target not found in {}",
+                        path.display()
+                    ));
+                }
+                (current.replacen(needle, with, 1).into_bytes(), "replace")
+            }
+            (Some(_), Some(_)) => {
+                return Err(
+                    "file_write accepts either `content` or a `replace`/`with` pair, not both"
+                        .to_string(),
+                );
+            }
+            (None, None) => {
+                return Err(
+                    "file_write requires either a `content` string or a `replace`/`with` pair"
+                        .to_string(),
+                );
+            }
+        };
+
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        fs::write(&path, content.as_bytes()).map_err(|error| error.to_string())?;
+        fs::write(&path, &new_content).map_err(|error| error.to_string())?;
         let after = fs::read(&path).map_err(|error| error.to_string())?;
-        let before_hash = content_hash(&before);
         let after_hash = content_hash(&after);
-        let diff_summary = format!(
-            "file={} before={} after={}\n",
-            path.display(),
-            before_hash,
-            after_hash
-        );
+
+        // ACI3: emit a real unified diff artifact (before -> after), not just a
+        // before/after hash summary, so the change is reviewable.
+        let diff = unified_diff(&before, &after, &path.display().to_string());
         let artifact = self.write_tool_artifact(
             request,
             "file_write_diff",
-            "before/after hash summary",
-            diff_summary.as_bytes(),
+            &format!("unified diff for {}", path.display()),
+            diff.as_bytes(),
             "safe",
         )?;
+        let typed_output = serde_json::json!({
+            "status": "completed",
+            "path": path.display().to_string(),
+            "mode": mode,
+            "before_hash": before_hash,
+            "after_hash": after_hash,
+            "bytes_written": after.len() as i64,
+            "output_artifact_id": artifact.artifact_id.clone(),
+        });
         Ok(WrapperExecution {
             status: "completed".to_string(),
-            summary: format!("file_write wrote {}", path.display()),
+            summary: format!("file_write {mode} wrote {}", path.display()),
+            typed_output,
             output_artifacts: vec![artifact],
         })
     }
@@ -506,14 +642,21 @@ impl RuntimeToolWrappers {
         })
     }
 
-    fn runtime_runner(&self) -> LocalProcessRunner {
+    /// A runner whose runtime output limit is effectively unbounded (ACI3).
+    ///
+    /// Execution wrappers want the FULL output preserved in the artifact and a
+    /// `truncated` marker in the typed result, rather than a hard
+    /// `OutputLimitExceeded` failure that discards the artifacts. The wrapper
+    /// then compares the artifact size against the configured inline
+    /// `output_limit_bytes` cap to decide `truncated`.
+    fn uncapped_runtime_runner(&self) -> LocalProcessRunner {
         let mut config = LocalProcessConfig::for_test(
             self.config.workspace_root.clone(),
             self.config.artifact_root.clone(),
         );
         config.env_allowlist = self.config.env_allowlist.clone();
         config.redaction_rules = self.config.redaction_rules.clone();
-        config.output_limit_bytes = self.config.output_limit_bytes;
+        config.output_limit_bytes = usize::MAX;
         LocalProcessRunner::new(config)
     }
 
@@ -567,11 +710,36 @@ impl RuntimeToolWrappers {
     }
 }
 
-/// Narrow typed output shape every runtime wrapper emits: the observed
-/// `status`, a human `summary`, and the recorded `output_artifacts` IDs (the
-/// full stdout/stderr/file payloads live in the artifacts, never inline).
-pub(crate) const WRAPPER_OUTPUT_SCHEMA: &str =
-    "{\"output\":{\"status\":\"string\",\"summary\":\"string\",\"output_artifacts\":\"string[]\"}}";
+/// Narrow typed output shape for an execution wrapper (`shell_run`, the git
+/// wrappers): the observed `status`, an `exit_status`, a `passed`
+/// interpretation, the wall-clock `duration_ms`, the primary
+/// `output_artifact_id`, and a `truncated` marker. Full stdout/stderr live in
+/// the artifacts, never inline (ACI3).
+pub(crate) const EXEC_OUTPUT_SCHEMA: &str = "{\"output\":{\"status\":\"string\",\"exit_status\":\"integer?\",\"passed\":\"boolean\",\"duration_ms\":\"integer\",\"output_artifact_id\":\"string\",\"truncated\":\"boolean\"}}";
+
+/// Narrow typed output shape for `file_read`: the read `path`, the
+/// `bytes_read` count, the `content_hash`, and the `output_artifact_id` that
+/// carries the file payload (ACI3).
+pub(crate) const FILE_READ_OUTPUT_SCHEMA: &str = "{\"output\":{\"status\":\"string\",\"path\":\"string\",\"bytes_read\":\"integer\",\"content_hash\":\"string\",\"output_artifact_id\":\"string\"}}";
+
+/// Narrow typed output shape for `file_write`: the written `path`, the write
+/// `mode` (`overwrite`/`replace`), the `before_hash`/`after_hash`, the
+/// `bytes_written`, the unified-diff `output_artifact_id`, plus the
+/// precondition fields surfaced on a precondition failure (`expected_hash`,
+/// `actual_hash`) (ACI3).
+pub(crate) const FILE_WRITE_OUTPUT_SCHEMA: &str = "{\"output\":{\"status\":\"string\",\"path\":\"string\",\"mode\":\"string\",\"before_hash\":\"string\",\"after_hash\":\"string\",\"bytes_written\":\"integer\",\"output_artifact_id\":\"string\",\"expected_hash\":\"string?\",\"actual_hash\":\"string?\"}}";
+
+/// The declared `output_schema` descriptor for a runtime wrapper tool (ACI3).
+pub(crate) fn wrapper_output_schema(tool_id: &str) -> &'static str {
+    match tool_id {
+        "capo.shell_run" | "capo.git_status" | "capo.git_diff" | "capo.git_commit" => {
+            EXEC_OUTPUT_SCHEMA
+        }
+        "capo.file_write" => FILE_WRITE_OUTPUT_SCHEMA,
+        // file_read and the read-only workpad/project-memory aliases.
+        _ => FILE_READ_OUTPUT_SCHEMA,
+    }
+}
 
 /// Per-tool redaction policy descriptor for a runtime wrapper.
 ///
@@ -597,6 +765,9 @@ pub(crate) fn wrapper_redaction_policy(tool_id: &str) -> String {
 struct WrapperExecution {
     status: String,
     summary: String,
+    /// The narrow typed, per-tool output object the handler built (ACI3),
+    /// validatable against the tool's declared `output_schema`.
+    typed_output: Value,
     output_artifacts: Vec<WrapperArtifact>,
 }
 
@@ -675,4 +846,42 @@ fn wrapper_artifact(kind: &str, artifact: RuntimeOutputArtifact) -> WrapperArtif
 
 fn runtime_error(error: RuntimeError) -> String {
     format!("{error:?}")
+}
+
+/// Build the narrow typed output object for an execution wrapper (ACI3).
+///
+/// Carries the observed `status`, the `exit_status` (null on a signal), the
+/// `passed` interpretation, the wall-clock `duration_ms`, the primary
+/// `output_artifact_id` (full output lives in the artifact), and the
+/// `truncated` marker. Validatable against [`EXEC_OUTPUT_SCHEMA`].
+fn exec_typed_output(
+    status: &str,
+    exit_status: Option<i32>,
+    passed: bool,
+    duration_ms: i64,
+    output_artifact_id: &str,
+    truncated: bool,
+) -> Value {
+    serde_json::json!({
+        "status": status,
+        "exit_status": exit_status,
+        "passed": passed,
+        "duration_ms": duration_ms,
+        "output_artifact_id": output_artifact_id,
+        "truncated": truncated,
+    })
+}
+
+/// Render a unified diff between `before` and `after` for `path` (ACI3).
+///
+/// Uses the `similar` line differ so `file_write` emits a real reviewable diff
+/// artifact rather than only a before/after hash summary. Non-UTF-8 content is
+/// rendered lossily for the diff text; the on-disk write itself is byte-exact.
+fn unified_diff(before: &[u8], after: &[u8], path: &str) -> String {
+    let before_text = String::from_utf8_lossy(before);
+    let after_text = String::from_utf8_lossy(after);
+    let diff = TextDiff::from_lines(before_text.as_ref(), after_text.as_ref());
+    diff.unified_diff()
+        .header(&format!("a/{path}"), &format!("b/{path}"))
+        .to_string()
 }

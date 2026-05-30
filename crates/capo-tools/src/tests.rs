@@ -236,10 +236,15 @@ fn file_wrappers_record_input_output_artifacts_and_reject_workspace_escape() {
         "new text"
     );
     assert_eq!(write.output_artifacts[0].kind, "file_write_diff");
+    // ACI3: the diff artifact is now a real unified diff (new file write).
     assert!(
         fs::read_to_string(&write.output_artifacts[0].uri)
-            .expect("diff summary")
-            .contains("before=fnv1a64:")
+            .expect("diff artifact")
+            .contains("+new text")
+    );
+    assert_eq!(
+        write.narrow_output()["mode"],
+        serde_json::json!("overwrite")
     );
 
     let escaped = wrappers.authorize_and_invoke(
@@ -331,6 +336,20 @@ fn file_wrappers_record_input_output_artifacts_and_reject_workspace_escape() {
     assert!(denied.events.iter().any(|event| {
         event.kind == "tool.call_canceled" && event.status == "permission_denied"
     }));
+    // ACI3: a denied result still emits a schema-valid typed output carrying the
+    // terminal status, so "every emitted result validates" holds on deny paths.
+    let denied_definition = wrappers
+        .describe_tool("capo.file_write")
+        .expect("definition");
+    assert!(
+        denied_definition
+            .validate_output(&denied.narrow_output())
+            .is_empty()
+    );
+    assert_eq!(
+        denied.narrow_output()["status"],
+        serde_json::json!("denied")
+    );
 }
 
 #[test]
@@ -895,6 +914,323 @@ fn grant_ids_include_scope_identity() {
         summary
             .capability_grant_id
             .starts_with("grant-session-static-allow-")
+    );
+}
+
+// --- ACI3: narrow typed wrapper output + tightened file_write ---------------
+
+#[test]
+fn shell_run_typed_output_carries_exit_status_passed_duration_and_artifact() {
+    // ACI3: capo.shell_run typed output carries exit status, a `passed`
+    // interpretation, duration, and output_artifact_id, validating against the
+    // declared output_schema, with full output in the artifact (not inline).
+    let workspace = temp_root("aci3-shell-typed-workspace");
+    let artifacts = temp_root("aci3-shell-typed-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    let ok = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-shell-ok",
+            "run-shell-ok",
+            "capo.shell_run",
+            serde_json::json!({"program":"/bin/sh","argv":["-c","echo hello"],"cwd":"."}),
+        ),
+        &policy,
+    );
+    assert_eq!(ok.status, "exited");
+    let definition = wrappers
+        .describe_tool("capo.shell_run")
+        .expect("definition");
+    let errors = definition.validate_output(&ok.narrow_output());
+    assert!(
+        errors.is_empty(),
+        "shell_run typed output must validate, got {errors:?}"
+    );
+    let typed = ok.narrow_output();
+    assert_eq!(typed["exit_status"], serde_json::json!(0));
+    assert_eq!(typed["passed"], serde_json::json!(true));
+    assert_eq!(typed["truncated"], serde_json::json!(false));
+    assert!(typed["duration_ms"].is_i64());
+    let artifact_id = typed["output_artifact_id"].as_str().expect("artifact id");
+    let stdout = ok
+        .output_artifacts
+        .iter()
+        .find(|artifact| artifact.artifact_id == artifact_id)
+        .expect("output artifact referenced by typed output");
+    assert!(
+        fs::read_to_string(&stdout.uri)
+            .expect("stdout artifact")
+            .contains("hello")
+    );
+
+    // A non-zero exit is observed (status `failed`) but `passed` is false; the
+    // tool still produces a typed result rather than only a status blob.
+    let fail = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-shell-fail",
+            "run-shell-fail",
+            "capo.shell_run",
+            serde_json::json!({"program":"/bin/sh","argv":["-c","exit 3"],"cwd":"."}),
+        ),
+        &policy,
+    );
+    let fail_typed = fail.narrow_output();
+    assert_eq!(fail_typed["exit_status"], serde_json::json!(3));
+    assert_eq!(fail_typed["passed"], serde_json::json!(false));
+}
+
+#[test]
+fn shell_run_over_cap_success_is_truncated_not_failed() {
+    // ACI3: a successful run that exceeds the inline output cap is NOT
+    // classified as failed -- the run still `passed`, output is preserved in the
+    // artifact, and `truncated` is recorded in the typed result.
+    let workspace = temp_root("aci3-shell-overcap-workspace");
+    let artifacts = temp_root("aci3-shell-overcap-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts);
+    config.output_limit_bytes = 4; // tiny inline cap
+    let wrappers = RuntimeToolWrappers::new(config);
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    let over_cap = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-shell-overcap",
+            "run-shell-overcap",
+            "capo.shell_run",
+            // 26 bytes of stdout, far over the 4-byte inline cap, exit 0.
+            serde_json::json!({"program":"/bin/sh","argv":["-c","echo abcdefghijklmnopqrstuvwxy"],"cwd":"."}),
+        ),
+        &policy,
+    );
+
+    assert_eq!(
+        over_cap.status, "exited",
+        "an over-cap SUCCESS must stay `exited`, not be downgraded to failed"
+    );
+    let typed = over_cap.narrow_output();
+    assert_eq!(typed["passed"], serde_json::json!(true));
+    assert_eq!(
+        typed["truncated"],
+        serde_json::json!(true),
+        "over-cap output must be flagged truncated in the typed result"
+    );
+    // Full output is preserved in the artifact despite the small inline cap.
+    let artifact_id = typed["output_artifact_id"].as_str().expect("artifact id");
+    let stdout = over_cap
+        .output_artifacts
+        .iter()
+        .find(|artifact| artifact.artifact_id == artifact_id)
+        .expect("stdout artifact");
+    assert!(
+        stdout.size_bytes > 4,
+        "the full output must live in the artifact, got {} bytes",
+        stdout.size_bytes
+    );
+    assert!(
+        fs::read_to_string(&stdout.uri)
+            .expect("stdout artifact")
+            .contains("abcdefghijklmnopqrstuvwxy")
+    );
+}
+
+#[test]
+fn file_read_typed_output_carries_path_bytes_and_hash() {
+    // ACI3: capo.file_read returns a typed result (path, bytes_read,
+    // content_hash, output_artifact_id) validating against its output_schema.
+    let workspace = temp_root("aci3-file-read-workspace");
+    let artifacts = temp_root("aci3-file-read-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::write(workspace.join("note.md"), "hello aci3").expect("seed");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let read = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci3-read",
+            "run-aci3-read",
+            "capo.file_read",
+            serde_json::json!({"path":"note.md"}),
+        ),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+    assert_eq!(read.status, "completed");
+    let definition = wrappers
+        .describe_tool("capo.file_read")
+        .expect("definition");
+    let errors = definition.validate_output(&read.narrow_output());
+    assert!(errors.is_empty(), "file_read typed output: {errors:?}");
+    let typed = read.narrow_output();
+    assert_eq!(typed["bytes_read"], serde_json::json!(10));
+    assert!(
+        typed["content_hash"]
+            .as_str()
+            .expect("hash")
+            .starts_with("fnv1a64:")
+    );
+}
+
+#[test]
+fn file_write_emits_a_unified_diff_artifact() {
+    // ACI3: file_write emits a unified-diff artifact (before -> after), not a
+    // before/after hash summary, and the typed result records mode + hashes.
+    let workspace = temp_root("aci3-file-write-diff-workspace");
+    let artifacts = temp_root("aci3-file-write-diff-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::write(workspace.join("doc.txt"), "line one\nline two\n").expect("seed");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let write = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci3-write",
+            "run-aci3-write",
+            "capo.file_write",
+            serde_json::json!({"path":"doc.txt","content":"line one\nline two changed\n"}),
+        ),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+    assert_eq!(write.status, "completed");
+    let definition = wrappers
+        .describe_tool("capo.file_write")
+        .expect("definition");
+    let errors = definition.validate_output(&write.narrow_output());
+    assert!(errors.is_empty(), "file_write typed output: {errors:?}");
+    let typed = write.narrow_output();
+    assert_eq!(typed["mode"], serde_json::json!("overwrite"));
+    assert_ne!(typed["before_hash"], typed["after_hash"]);
+
+    let diff_artifact = write
+        .output_artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "file_write_diff")
+        .expect("diff artifact");
+    let diff = fs::read_to_string(&diff_artifact.uri).expect("diff");
+    assert!(
+        diff.contains("@@") && diff.contains("-line two") && diff.contains("+line two changed"),
+        "diff artifact must be a real unified diff, got:\n{diff}"
+    );
+}
+
+#[test]
+fn file_write_precondition_mismatch_does_not_clobber() {
+    // ACI3: a file_write whose expected-precondition hash does not match the
+    // on-disk file returns a typed precondition-failed result WITHOUT writing,
+    // so blind clobbers are impossible.
+    let workspace = temp_root("aci3-file-write-precond-workspace");
+    let artifacts = temp_root("aci3-file-write-precond-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let original = "original content\n";
+    fs::write(workspace.join("guard.txt"), original).expect("seed");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    let mismatch = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci3-precond-bad",
+            "run-aci3-precond-bad",
+            "capo.file_write",
+            serde_json::json!({
+                "path":"guard.txt",
+                "content":"clobbered\n",
+                "expected_hash":"fnv1a64:0000000000000000",
+            }),
+        ),
+        &policy,
+    );
+    assert_eq!(mismatch.status, "precondition_failed");
+    let typed = mismatch.narrow_output();
+    assert_eq!(typed["status"], serde_json::json!("precondition_failed"));
+    assert!(typed["expected_hash"].is_string());
+    assert!(typed["actual_hash"].is_string());
+    assert_ne!(typed["expected_hash"], typed["actual_hash"]);
+    // The on-disk file is untouched.
+    assert_eq!(
+        fs::read_to_string(workspace.join("guard.txt")).expect("file"),
+        original,
+        "a precondition mismatch must NOT write"
+    );
+
+    // The matching expected hash allows the write through.
+    let actual_hash = typed["actual_hash"].as_str().expect("actual hash");
+    let ok = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci3-precond-ok",
+            "run-aci3-precond-ok",
+            "capo.file_write",
+            serde_json::json!({
+                "path":"guard.txt",
+                "content":"updated\n",
+                "expected_hash":actual_hash,
+            }),
+        ),
+        &policy,
+    );
+    assert_eq!(ok.status, "completed");
+    assert_eq!(
+        fs::read_to_string(workspace.join("guard.txt")).expect("file"),
+        "updated\n"
+    );
+}
+
+#[test]
+fn file_write_structured_replace_edits_in_place() {
+    // ACI3: file_write accepts a structured replace (replace/with) against the
+    // current on-disk content instead of a whole-file overwrite.
+    let workspace = temp_root("aci3-file-write-replace-workspace");
+    let artifacts = temp_root("aci3-file-write-replace-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::write(workspace.join("cfg.toml"), "name = \"old\"\nkeep = 1\n").expect("seed");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    let replace = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci3-replace",
+            "run-aci3-replace",
+            "capo.file_write",
+            serde_json::json!({"path":"cfg.toml","replace":"\"old\"","with":"\"new\""}),
+        ),
+        &policy,
+    );
+    assert_eq!(replace.status, "completed");
+    assert_eq!(
+        replace.narrow_output()["mode"],
+        serde_json::json!("replace")
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("cfg.toml")).expect("file"),
+        "name = \"new\"\nkeep = 1\n"
+    );
+
+    // A replace whose target is absent is a structured failure, not a clobber.
+    let missing = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci3-replace-miss",
+            "run-aci3-replace-miss",
+            "capo.file_write",
+            serde_json::json!({"path":"cfg.toml","replace":"NOT THERE","with":"x"}),
+        ),
+        &policy,
+    );
+    assert_eq!(missing.status, "failed");
+    assert!(missing.summary.contains("replace target not found"));
+    assert_eq!(
+        fs::read_to_string(workspace.join("cfg.toml")).expect("file"),
+        "name = \"new\"\nkeep = 1\n",
+        "a missing replace target must not write"
     );
 }
 
