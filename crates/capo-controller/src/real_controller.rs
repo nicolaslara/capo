@@ -85,16 +85,21 @@ pub struct RealBoundaryController {
 struct RealToolExposures {
     capo: ToolExposure,
     runtime: Option<ToolExposure>,
+    /// ACI8: the `GO2` agent-reporting / evidence tool surface, always live (like
+    /// the Capo registry) and never the fake default.
+    agent_reports: ToolExposure,
 }
 
 impl RealToolExposures {
-    /// The default real exposures: the Capo registry is always live; the runtime
-    /// wrappers are wired only once a workspace config is provided
+    /// The default real exposures: the Capo registry and the agent-report
+    /// surface are always live; the runtime wrappers are wired only once a
+    /// workspace config is provided
     /// ([`RealBoundaryController::with_runtime_tools`]).
     fn default_real() -> Self {
         Self {
             capo: ToolExposure::capo(),
             runtime: None,
+            agent_reports: ToolExposure::agent_reports(),
         }
     }
 }
@@ -244,9 +249,10 @@ impl RealBoundaryController {
             ToolExposureRequest::Runtime(_) => self.tools.runtime.as_ref().expect(
                 "runtime tool exposure not wired; call RealBoundaryController::with_runtime_tools",
             ),
+            ToolExposureRequest::AgentReport(_) => &self.tools.agent_reports,
             ToolExposureRequest::Fake(_) => panic!(
                 "RealBoundaryController::dispatch_tool_call refuses fake tool requests; \
-                 the real loop dispatches Capo/Runtime tools only"
+                 the real loop dispatches Capo/Runtime/AgentReport tools only"
             ),
         };
         self.core.dispatch_tool_call(exposure, scope, request)

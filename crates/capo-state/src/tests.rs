@@ -235,6 +235,136 @@ fn tool_observations_are_persisted_and_rebuilt() {
     assert_eq!(rebuilt, observations);
 }
 
+/// ACI8: an agent-reported observation (`source=agent_reported`, carrying
+/// confidence) is persisted as a DISTINCT class from observed evidence
+/// (`source=runtime_output` / `adapter_event`); the classification survives
+/// replay and a duplicate report submission (same idempotency key) dedupes.
+#[test]
+fn agent_reported_observations_are_distinct_from_observed_and_dedupe_on_replay() {
+    let store = temp_store("agent-reported-observations");
+    let project_id = ProjectId::new("project-capo");
+    let session_id = SessionId::new("session-aci8-state");
+    let report_call = ToolCallId::new("tool-agent-report");
+    let observed_call = ToolCallId::new("tool-runtime-observed");
+
+    let append_report = |event_suffix: &str| {
+        store
+            .append_event(
+                NewEvent {
+                    event_id: format!("event-agent-report-{event_suffix}"),
+                    kind: EventKind::ToolObservationRecorded,
+                    actor: "agent-report".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: Some(session_id.clone()),
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some(report_call.to_string()),
+                    payload_json: "{\"source\":\"agent_reported\"}".to_string(),
+                    // The idempotency key duplicate submissions dedupe on.
+                    idempotency_key: Some("agent-report:sub-1".to_string()),
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::ToolObservation(
+                    ToolObservationProjection {
+                        tool_observation_id: "agent-report-obs-1".to_string(),
+                        session_id: session_id.clone(),
+                        tool_call_id: Some(report_call.clone()),
+                        source: "agent_reported".to_string(),
+                        external_tool_ref: None,
+                        tool_name: "capo.complete_requirement".to_string(),
+                        observed_status: "reported".to_string(),
+                        instrumentation_level: "structured_observed".to_string(),
+                        confidence: "80".to_string(),
+                        raw_event_hash: "agent-report:tool-agent-report".to_string(),
+                        artifact_id: None,
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append agent report")
+    };
+
+    // The agent report (a CLAIM) ...
+    append_report("first");
+    // ... and an OBSERVED runtime-evidence observation, distinct class.
+    store
+        .append_event(
+            NewEvent {
+                event_id: "event-runtime-observed".to_string(),
+                kind: EventKind::ToolObservationRecorded,
+                actor: "runtime".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(session_id.clone()),
+                run_id: None,
+                turn_id: None,
+                item_id: Some(observed_call.to_string()),
+                payload_json: "{\"source\":\"runtime_output\"}".to_string(),
+                idempotency_key: Some("runtime-observed:tool-runtime-observed".to_string()),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::ToolObservation(
+                ToolObservationProjection {
+                    tool_observation_id: "runtime-observed-obs-1".to_string(),
+                    session_id: session_id.clone(),
+                    tool_call_id: Some(observed_call.clone()),
+                    source: "runtime_output".to_string(),
+                    external_tool_ref: None,
+                    tool_name: "capo.test_run".to_string(),
+                    observed_status: "completed".to_string(),
+                    instrumentation_level: "full".to_string(),
+                    confidence: "high".to_string(),
+                    raw_event_hash: "fnv1a64:runtimehash".to_string(),
+                    artifact_id: Some("artifact-test-output".to_string()),
+                    updated_sequence: 0,
+                },
+            )],
+        )
+        .expect("append runtime observation");
+
+    // A DUPLICATE report submission (same idempotency key) dedupes: no second row.
+    append_report("duplicate");
+
+    let observations = store
+        .tool_observations_for_session(&session_id)
+        .expect("read observations");
+    assert_eq!(
+        observations.len(),
+        2,
+        "the duplicate agent report must dedupe; only the report + the observed row remain"
+    );
+
+    let report = observations
+        .iter()
+        .find(|observation| observation.tool_call_id.as_ref() == Some(&report_call))
+        .expect("agent report observation");
+    let observed = observations
+        .iter()
+        .find(|observation| observation.tool_call_id.as_ref() == Some(&observed_call))
+        .expect("runtime observed observation");
+
+    // The two are a DISTINCT class: the agent report is `agent_reported`, the
+    // runtime evidence is `runtime_output`. Completion is never reachable by the
+    // agent claim alone because the two never share a source classification.
+    assert_eq!(report.source, "agent_reported");
+    assert_eq!(report.confidence, "80");
+    assert_eq!(observed.source, "runtime_output");
+    assert_ne!(report.source, observed.source);
+
+    // The classification survives a restart/replay.
+    store.rebuild_projections().expect("rebuild projections");
+    let rebuilt = store
+        .tool_observations_for_session(&session_id)
+        .expect("read rebuilt observations");
+    assert_eq!(
+        rebuilt, observations,
+        "classification must replay identically"
+    );
+}
+
 #[test]
 fn append_event_is_idempotent_for_project_scoped_keys() {
     let store = temp_store("idempotency");

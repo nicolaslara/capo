@@ -5,6 +5,7 @@
 //! trusted local prototype allows broadly.
 
 use capo_core::{BoundaryBinding, BoundaryKind, RunId, SessionId, ToolCallId};
+mod agent_reports;
 mod apply_patch;
 mod lint;
 mod permission;
@@ -13,6 +14,7 @@ mod runtime_wrapper_types;
 mod runtime_wrappers;
 mod search;
 mod test_run;
+pub use agent_reports::*;
 pub use permission::*;
 pub use runtime_wrapper_paths::confine_write_path;
 pub use runtime_wrapper_types::*;
@@ -48,6 +50,10 @@ pub const CAPO_WRAPPER_TOOLS: &[&str] = &[
 pub enum ToolExposure {
     Capo(CapoToolRegistry),
     Runtime(RuntimeToolWrappers),
+    /// ACI8: the `GO2` agent-reporting / evidence tool surface. A distinct
+    /// exposure because every tool here emits an agent CLAIM tagged
+    /// `agent_reported`, never observed evidence.
+    AgentReports(AgentReportRegistry),
     Fake(FakeToolExposure),
 }
 
@@ -64,10 +70,16 @@ impl ToolExposure {
         Self::Runtime(RuntimeToolWrappers::new(config))
     }
 
+    /// ACI8: the `GO2` agent-reporting / evidence tool surface.
+    pub fn agent_reports() -> Self {
+        Self::AgentReports(AgentReportRegistry)
+    }
+
     pub fn binding(&self) -> BoundaryBinding {
         match self {
             Self::Capo(exposure) => exposure.binding(),
             Self::Runtime(exposure) => exposure.binding(),
+            Self::AgentReports(exposure) => exposure.binding(),
             Self::Fake(exposure) => exposure.binding(),
         }
     }
@@ -85,7 +97,7 @@ impl ToolExposure {
     pub fn invoke(&self, request: FakeToolRequest) -> FakeToolResult {
         match self {
             Self::Fake(exposure) => exposure.invoke(request),
-            Self::Capo(_) | Self::Runtime(_) => panic!(
+            Self::Capo(_) | Self::Runtime(_) | Self::AgentReports(_) => panic!(
                 "ToolExposure::invoke is the fake-only summary shim; the real \
                  `{}` exposure must dispatch through ToolExposure::authorize_and_invoke",
                 self.binding().variant
@@ -116,6 +128,9 @@ impl ToolExposure {
             (Self::Runtime(wrappers), ToolExposureRequest::Runtime(request)) => {
                 ToolExposureResult::Runtime(wrappers.authorize_and_invoke(request, policy))
             }
+            (Self::AgentReports(registry), ToolExposureRequest::AgentReport(request)) => {
+                ToolExposureResult::AgentReport(registry.authorize_and_invoke(request, policy))
+            }
             (Self::Fake(exposure), ToolExposureRequest::Fake(request)) => {
                 ToolExposureResult::Fake(exposure.invoke(request))
             }
@@ -138,6 +153,7 @@ impl ToolExposure {
 pub enum ToolExposureRequest {
     Capo(CapoToolRequest),
     Runtime(WrapperToolRequest),
+    AgentReport(AgentReportRequest),
     Fake(FakeToolRequest),
 }
 
@@ -146,6 +162,7 @@ impl ToolExposureRequest {
         match self {
             Self::Capo(_) => "capo",
             Self::Runtime(_) => "runtime",
+            Self::AgentReport(_) => "agent-report",
             Self::Fake(_) => "fake",
         }
     }
@@ -156,6 +173,7 @@ impl ToolExposureRequest {
 pub enum ToolExposureResult {
     Capo(CapoToolResult),
     Runtime(WrapperToolResult),
+    AgentReport(AgentReportRecord),
     Fake(FakeToolResult),
 }
 

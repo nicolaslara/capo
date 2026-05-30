@@ -19,8 +19,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use capo_tools::{
-    CapoToolResult, ToolAuditEvent, ToolExposure, ToolExposureRequest, ToolExposureResult,
-    WrapperToolResult,
+    AgentReportRecord, CapoToolResult, ToolAuditEvent, ToolExposure, ToolExposureRequest,
+    ToolExposureResult, WrapperToolResult,
 };
 
 use super::*;
@@ -203,6 +203,33 @@ impl FakeBoundaryController {
                     updated_sequence: 0,
                 })]
             }
+            EventKind::ToolObservationRecorded => {
+                // ACI8: persist the agent report as a DISTINCT observation class
+                // tagged `source=agent_reported` (carrying confidence), separate
+                // from observed runtime/adapter evidence, so completion is never
+                // reachable by agent assertion alone. Observed tools (Capo
+                // registry / runtime wrappers) carry no `agent_report`, so this
+                // projection is emitted ONLY for the reporting surface.
+                match &normalized.agent_report {
+                    Some(report) => vec![ProjectionRecord::ToolObservation(
+                        capo_state::ToolObservationProjection {
+                            tool_observation_id: format!("agent-report-obs-{}", scope.tool_call_id),
+                            session_id: scope.session_id.clone(),
+                            tool_call_id: Some(scope.tool_call_id.clone()),
+                            source: report.source.clone(),
+                            external_tool_ref: None,
+                            tool_name: normalized.tool_name.clone(),
+                            observed_status: "reported".to_string(),
+                            instrumentation_level: "structured_observed".to_string(),
+                            confidence: report.confidence.to_string(),
+                            raw_event_hash: format!("agent-report:{}", scope.tool_call_id),
+                            artifact_id: None,
+                            updated_sequence: 0,
+                        },
+                    )],
+                    None => Vec::new(),
+                }
+            }
             EventKind::ToolCallCompleted => {
                 vec![terminal_tool_call_projection(scope, normalized, provenance)]
             }
@@ -269,7 +296,20 @@ struct NormalizedToolResult {
     /// The permission-decision id pinned to this call (ACI7), derived from the
     /// issued grant so the projection can join back to the authorization.
     permission_decision_id: Option<String>,
+    /// ACI8: the agent-report classification for a `GO2` reporting tool, carrying
+    /// the `agent_reported` source tag and the agent's self-declared confidence.
+    /// `None` for observed tools (Capo registry / runtime wrappers), so a report
+    /// is never persisted indistinguishably from observed evidence.
+    agent_report: Option<AgentReportObservation>,
     events: Vec<ToolAuditEvent>,
+}
+
+/// ACI8: the distinct classification an agent report carries onto the persisted
+/// `tool.observation_recorded` projection: `source=agent_reported` (never an
+/// observed-evidence source) plus the agent's self-declared confidence.
+struct AgentReportObservation {
+    source: String,
+    confidence: i64,
 }
 
 impl NormalizedToolResult {
@@ -277,14 +317,41 @@ impl NormalizedToolResult {
         match result {
             ToolExposureResult::Capo(result) => Self::from_capo(result),
             ToolExposureResult::Runtime(result) => Self::from_runtime(result),
+            ToolExposureResult::AgentReport(result) => Self::from_agent_report(result),
             ToolExposureResult::Fake(_) => {
                 // The fake summary shim is not a real dispatch result; ACI1's
                 // real path never routes it here.
                 panic!(
                     "dispatch_tool_call received a fake tool result; the real loop \
-                     dispatches Capo/Runtime tools only"
+                     dispatches Capo/Runtime/AgentReport tools only"
                 )
             }
+        }
+    }
+
+    fn from_agent_report(result: &AgentReportRecord) -> Self {
+        let status = if result.accepted {
+            "completed".to_string()
+        } else {
+            "denied".to_string()
+        };
+        let grant_id = result.permission_decision.capability_grant_id.clone();
+        Self {
+            tool_name: result.tool_id.clone(),
+            // ACI8: a Capo-owned reporting tool, but tagged distinctly through
+            // the agent-report observation below so a report's persisted
+            // observation reads `source=agent_reported`, not observed evidence.
+            tool_origin: "capo".to_string(),
+            status,
+            input_artifact_id: None,
+            output_artifact_id: None,
+            permission_decision_id: Some(permission_decision_id(&grant_id)),
+            capability_grant_id: Some(grant_id),
+            agent_report: Some(AgentReportObservation {
+                source: result.source.clone(),
+                confidence: result.confidence,
+            }),
+            events: result.events.clone(),
         }
     }
 
@@ -303,6 +370,7 @@ impl NormalizedToolResult {
             output_artifact_id: artifact_or_none(&result.output_artifact_id),
             permission_decision_id: Some(permission_decision_id(&grant_id)),
             capability_grant_id: Some(grant_id),
+            agent_report: None,
             events: result.events.clone(),
         }
     }
@@ -330,6 +398,7 @@ impl NormalizedToolResult {
                 .map(|artifact| artifact.artifact_id.clone()),
             permission_decision_id: Some(permission_decision_id(&grant_id)),
             capability_grant_id: Some(grant_id),
+            agent_report: None,
             events: result.events.clone(),
         }
     }
@@ -382,6 +451,9 @@ fn tool_audit_event_kind(event: &ToolAuditEvent) -> Option<EventKind> {
         "tool.invocation_started" => Some(EventKind::ToolInvocationStarted),
         "tool.output_artifact_recorded" => Some(EventKind::ToolOutputArtifactRecorded),
         "tool.output_observed" => Some(EventKind::ToolOutputObserved),
+        // ACI8: an agent report records a distinct `agent_reported` observation,
+        // not observed runtime/adapter evidence.
+        "tool.observation_recorded" => Some(EventKind::ToolObservationRecorded),
         "tool.call_completed" => Some(EventKind::ToolCallCompleted),
         "tool.result_delivered" => Some(EventKind::ToolResultDelivered),
         _ => None,
@@ -409,6 +481,15 @@ fn dispatch_event_payload(
         ),
         EventKind::ToolOutputObserved => format!(
             "{{\"tool_call_id\":\"{}\",\"tool\":\"{}\",\"status\":\"{}\"}}",
+            scope.tool_call_id,
+            escape_json(&normalized.tool_name),
+            escape_json(&audit_event.status)
+        ),
+        // ACI8: the agent-report observation payload records its distinct
+        // `source` (the audit event's status carries `agent_reported`) so the
+        // persisted event is classifiable without re-deriving from the tool name.
+        EventKind::ToolObservationRecorded => format!(
+            "{{\"tool_call_id\":\"{}\",\"tool\":\"{}\",\"source\":\"{}\"}}",
             scope.tool_call_id,
             escape_json(&normalized.tool_name),
             escape_json(&audit_event.status)

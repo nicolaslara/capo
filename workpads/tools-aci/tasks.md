@@ -674,7 +674,67 @@ Verification:
 
 ## ACI8 - Agent-Reporting And Evidence Tools (GO2)
 
-Status: pending.
+Status: done.
+
+Evidence:
+
+- New `agent_reports.rs` module (`crates/capo-tools/src/agent_reports.rs`)
+  registers the 11 `GO2` reporting tools as a distinct Capo-owned surface
+  (`CAPO_REPORTING_TOOLS`, `AgentReportRegistry`): `capo.report_intent`,
+  `capo.report_progress`, `capo.record_evidence`, `capo.report_confidence`,
+  `capo.record_assumption`, `capo.raise_blocker`, `capo.request_review`,
+  `capo.record_review`, `capo.record_validation`, `capo.complete_requirement`,
+  `capo.complete_subtask`. Each `describe_tool` declares a `schema` (`{"input"}`),
+  non-empty `required_scopes_json` (the `tool:invoke:<tool>` scope plus a
+  per-tool `state:write:agent_report`/evidence/blocker/review/validation/
+  requirement_status scope), a `risk` (`low`/`medium`/`high`), a
+  `redaction_policy_json` (credential_scan over the free-text fields + `body` +
+  `output`), and `mutates_state` (pure intent/progress/confidence/assumption are
+  observations; evidence/blocker/review/validation/completion mutate the
+  autonomy ledger). It CITES `GO2` (`workpads/goal-orchestration/tasks.md:86-104`)
+  and does not redesign the schema.
+- Agent reports persist as a DISTINCT class tagged `source=agent_reported`
+  carrying confidence: `AgentReportRecord` always has
+  `source == EVIDENCE_SOURCE_AGENT_REPORTED`, `is_observed_evidence()` is always
+  false, and emission yields a `tool.observation_recorded` audit event tagged
+  `agent_reported` (NOT a `tool.output_observed` runtime-evidence event).
+  `source_is_observed_evidence` keeps `runtime_output`/`adapter_event(:..)`
+  distinct from the agent claim. A denied submission emits `accepted=false` and
+  no observation, so a report the policy rejected is not a claim of record --
+  completion is never reachable by agent assertion alone.
+- Each report carries an idempotency key so duplicates dedupe on replay: an
+  agent-supplied `submission_id` is authoritative (`agent-report:<id>`), else a
+  stable FNV hash over session/tool/body so a re-emitted identical report
+  collapses while two distinct reports stay distinct. `AgentReportLedger`
+  (the deterministic fake/replayable ledger) dedupes on that key.
+- Wired as a real `ToolExposure::AgentReports(AgentReportRegistry)` variant
+  (always live in `RealToolExposures`, never the fake default) dispatched through
+  the existing typed `authorize_and_invoke` /
+  `RealBoundaryController::dispatch_tool_call`; the dispatch normalizes the report
+  onto a `tool.observation_recorded` event + a `ToolObservationProjection` tagged
+  `source=agent_reported` (carrying confidence), reusing the ACI1/ACI7 substrate
+  rather than a second pipeline.
+- Tests added: `cargo test -p capo-tools` (registration of all 11 tools; every
+  tool declares schema/scope/risk/redaction/mutates_state; report stored as
+  `agent_reported` and NOT observed evidence; typed dispatch through the exposure;
+  denied report is not a claim; explicit-key dedupe with a distinct report kept;
+  keyless identical-body dedupe with different bodies distinct).
+  `cargo test -p capo-controller`
+  (`real_controller_dispatches_an_agent_report_persisted_as_agent_reported`: the
+  dispatched report persists a `tool.observation_recorded` event +
+  `tool_observations` row tagged `source=agent_reported` with confidence,
+  distinct from observed evidence, and replays identically).
+  `cargo test -p capo-state`
+  (`agent_reported_observations_are_distinct_from_observed_and_dedupe_on_replay`:
+  an `agent_reported` observation is a distinct class from a `runtime_output`
+  observed row, the duplicate report submission dedupes on its idempotency key,
+  and the classification replays identically).
+- Scope: emission + fakes here; projection/audit semantics are validated in
+  `goal-autonomy` (`GA-2`/`GA-6`) per the workpad seam.
+- Gate run from `/Users/nicolas/devel/capo-wt/tools-aci`: `cargo fmt --check`
+  clean; `cargo clippy --all-targets --all-features -- -D warnings` exit 0;
+  `cargo test --workspace` => all suites passed, 0 failed (capo-tools 93,
+  capo-controller 37, capo-state 38); `git diff --check` clean.
 
 Acceptance:
 

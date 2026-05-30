@@ -2813,3 +2813,352 @@ fn test_run_clean_output_is_labeled_safe() {
         artifact.redaction_state
     );
 }
+
+// --- ACI8: GO2 agent-reporting / evidence tools ----------------------------
+
+fn report_request(tool_call_id: &str, tool_id: &str, body: Value) -> AgentReportRequest {
+    AgentReportRequest {
+        tool_call_id: ToolCallId::new(tool_call_id),
+        session_id: SessionId::new("session-aci8"),
+        tool_id: tool_id.to_string(),
+        capability_profile_id: "trusted-local-dev".to_string(),
+        confidence: 70,
+        body,
+        submission_id: None,
+    }
+}
+
+#[test]
+fn agent_report_registry_registers_every_go2_reporting_tool() {
+    // ACI8: each GO2 reporting tool is registered in the typed registry, per
+    // workpads/goal-orchestration/tasks.md:86-104.
+    assert_eq!(CAPO_REPORTING_TOOLS.len(), 11);
+    for expected in [
+        "capo.report_intent",
+        "capo.report_progress",
+        "capo.record_evidence",
+        "capo.report_confidence",
+        "capo.record_assumption",
+        "capo.raise_blocker",
+        "capo.request_review",
+        "capo.record_review",
+        "capo.record_validation",
+        "capo.complete_requirement",
+        "capo.complete_subtask",
+    ] {
+        assert!(
+            CAPO_REPORTING_TOOLS.contains(&expected),
+            "{expected} must be a GO2 reporting tool"
+        );
+    }
+
+    let registry = AgentReportRegistry;
+    let tools = registry.list_tools();
+    assert_eq!(tools.len(), CAPO_REPORTING_TOOLS.len());
+    for tool_id in CAPO_REPORTING_TOOLS {
+        let definition = registry
+            .describe_tool(tool_id)
+            .expect("reporting definition");
+        assert_eq!(definition.origin, "capo");
+        assert_eq!(definition.handler_kind, "agent_report");
+        assert!(
+            definition
+                .required_scopes_json
+                .contains(&format!("tool:invoke:{tool_id}"))
+        );
+    }
+}
+
+#[test]
+fn every_reporting_tool_declares_schema_scopes_risk_redaction_and_mutates_state() {
+    // ACI8: each GO2 reporting tool declares schema / required_scopes / risk /
+    // redaction_policy / mutates_state.
+    let registry = AgentReportRegistry;
+    // mutates_state per the GO2 acceptance: pure intent/progress/confidence/
+    // assumption reports are observations; evidence/blocker/review/validation/
+    // completion records mutate the autonomy ledger.
+    let mutating = [
+        "capo.record_evidence",
+        "capo.raise_blocker",
+        "capo.request_review",
+        "capo.record_review",
+        "capo.record_validation",
+        "capo.complete_requirement",
+        "capo.complete_subtask",
+    ];
+    for tool_id in CAPO_REPORTING_TOOLS {
+        let definition = registry
+            .describe_tool(tool_id)
+            .expect("reporting definition");
+
+        // schema present and a well-formed `{"input":{...}}`.
+        let schema: Value = serde_json::from_str(&definition.schema_json)
+            .unwrap_or_else(|error| panic!("{tool_id} schema_json must be json: {error}"));
+        let input = schema
+            .get("input")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("{tool_id} schema_json must carry an `input` object"));
+        assert!(
+            !input.is_empty(),
+            "{tool_id} schema must describe at least one field"
+        );
+
+        // output_schema present and well-formed.
+        assert!(
+            !definition.output_schema.trim().is_empty(),
+            "{tool_id} must declare a non-empty output_schema"
+        );
+
+        // required_scopes non-empty.
+        let scopes: Value = serde_json::from_str(&definition.required_scopes_json)
+            .unwrap_or_else(|error| panic!("{tool_id} required_scopes_json must be json: {error}"));
+        assert!(
+            scopes.as_array().is_some_and(|scopes| !scopes.is_empty()),
+            "{tool_id} must declare non-empty required_scopes_json"
+        );
+
+        // risk one of the tool-exposure.md levels.
+        assert!(
+            definition.risk_is_valid(),
+            "{tool_id} risk `{}` must be one of {TOOL_RISK_LEVELS:?}",
+            definition.risk
+        );
+
+        // redaction_policy present, well-formed, with a strategy.
+        let policy: Value =
+            serde_json::from_str(&definition.redaction_policy_json).unwrap_or_else(|error| {
+                panic!("{tool_id} redaction_policy_json must be json: {error}")
+            });
+        assert!(
+            policy.get("strategy").and_then(Value::as_str).is_some(),
+            "{tool_id} redaction_policy_json must declare a strategy"
+        );
+
+        // mutates_state matches the GO2 acceptance.
+        assert_eq!(
+            definition.mutates_state,
+            mutating.contains(tool_id),
+            "{tool_id} mutates_state classification mismatch"
+        );
+    }
+}
+
+#[test]
+fn agent_report_is_stored_as_agent_reported_not_observed_evidence() {
+    // ACI8 (the load-bearing test): an agent report is persisted as a DISTINCT
+    // class tagged `agent_reported`, carrying confidence, and is NOT
+    // indistinguishable from observed tool evidence -- completion is never
+    // reachable by agent assertion alone.
+    let registry = AgentReportRegistry;
+    let policy = PermissionPolicy::allow_trusted_local();
+    let record = registry.authorize_and_invoke(
+        report_request(
+            "call-report-complete",
+            "capo.complete_requirement",
+            serde_json::json!({"requirement_id": "REQ-1", "summary": "done"}),
+        ),
+        &policy,
+    );
+
+    // The distinct classification: an agent claim, never observed evidence.
+    assert_eq!(record.source, EVIDENCE_SOURCE_AGENT_REPORTED);
+    assert!(
+        !record.is_observed_evidence(),
+        "an agent report must never classify as observed evidence"
+    );
+    assert!(
+        record.is_completion_claim(),
+        "complete_requirement is a completion CLAIM"
+    );
+    assert!(record.accepted);
+    assert_eq!(record.confidence, 70);
+
+    // The classification helper agrees: the observed-evidence sources are
+    // distinct from the agent-reported source.
+    assert!(source_is_observed_evidence(EVIDENCE_SOURCE_RUNTIME_OUTPUT));
+    assert!(source_is_observed_evidence(EVIDENCE_SOURCE_ADAPTER_EVENT));
+    assert!(source_is_observed_evidence("adapter_event:codex"));
+    assert!(
+        !source_is_observed_evidence(EVIDENCE_SOURCE_AGENT_REPORTED),
+        "agent_reported must not be classified as observed evidence"
+    );
+
+    // The emitted observation event carries the agent_reported source, distinct
+    // from a `tool.output_observed` runtime-evidence event.
+    assert!(
+        record
+            .events
+            .iter()
+            .any(|event| event.kind == "tool.observation_recorded"
+                && event.status == EVIDENCE_SOURCE_AGENT_REPORTED),
+        "report must emit a `tool.observation_recorded` event tagged agent_reported"
+    );
+    assert!(
+        !record
+            .events
+            .iter()
+            .any(|event| event.kind == "tool.output_observed"),
+        "an agent report must NOT emit a runtime `tool.output_observed` evidence event"
+    );
+
+    // Narrow typed output validates against the declared schema.
+    let definition = registry
+        .describe_tool("capo.complete_requirement")
+        .expect("definition");
+    let errors = definition.validate_output(&record.narrow_output());
+    assert!(
+        errors.is_empty(),
+        "agent report output must validate against its schema, got {errors:?}"
+    );
+}
+
+#[test]
+fn agent_report_dispatches_through_the_typed_tool_exposure() {
+    // ACI8: the reporting surface is a real ToolExposure variant routed through
+    // the same typed authorize_and_invoke dispatch as the other tools, never the
+    // fake summary shim.
+    let exposure = ToolExposure::agent_reports();
+    assert_eq!(exposure.binding().variant, "capo-agent-reports");
+    assert!(!exposure.binding().fake);
+
+    let policy = PermissionPolicy::allow_trusted_local();
+    let result = exposure.authorize_and_invoke(
+        ToolExposureRequest::AgentReport(report_request(
+            "call-report-intent",
+            "capo.report_intent",
+            serde_json::json!({"intent": "wire the GO2 tools"}),
+        )),
+        &policy,
+    );
+    let ToolExposureResult::AgentReport(record) = result else {
+        panic!("agent-report request must dispatch to an agent-report result");
+    };
+    assert_eq!(record.source, EVIDENCE_SOURCE_AGENT_REPORTED);
+    assert!(record.accepted);
+}
+
+#[test]
+fn denied_agent_report_is_not_a_claim_of_record() {
+    // ACI8 failure path: a report the permission policy rejects is recorded for
+    // audit (accepted=false) but is not an accepted agent claim, and never emits
+    // the observation event.
+    let registry = AgentReportRegistry;
+    // The read-only-local static profile does not allow `state:write:agent_report`.
+    let policy = PermissionPolicy::static_read_only_local();
+    let record = registry.authorize_and_invoke(
+        report_request(
+            "call-report-denied",
+            "capo.report_progress",
+            serde_json::json!({"summary": "halfway"}),
+        ),
+        &policy,
+    );
+    assert_eq!(record.permission_decision.effect, "deny");
+    assert!(!record.accepted, "a denied report is not an accepted claim");
+    assert!(
+        !record
+            .events
+            .iter()
+            .any(|event| event.kind == "tool.observation_recorded"),
+        "a denied report must not record an agent_reported observation"
+    );
+    // Even denied, it is still classified as a report (a claim), never observed
+    // evidence.
+    assert!(!record.is_observed_evidence());
+}
+
+#[test]
+fn duplicate_agent_report_submissions_dedupe_on_replay() {
+    // ACI8: each report carries an idempotency key so duplicate submissions
+    // dedupe on replay. A re-emitted identical report collapses to one ledger
+    // entry; a distinct report stays distinct.
+    let registry = AgentReportRegistry;
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    // An explicit agent-supplied submission id is the authoritative key.
+    let mut request = report_request(
+        "call-report-evidence-a",
+        "capo.record_evidence",
+        serde_json::json!({"evidence": "cargo test green", "evidence_kind": "test"}),
+    );
+    request.submission_id = Some("sub-42".to_string());
+    let first = registry.authorize_and_invoke(request.clone(), &policy);
+
+    // A retried submission with the SAME submission id (even with a different
+    // tool_call_id, as a replay would carry) keeps the same idempotency key.
+    let mut retry = request.clone();
+    retry.tool_call_id = ToolCallId::new("call-report-evidence-a-retry");
+    let second = registry.authorize_and_invoke(retry, &policy);
+    assert_eq!(
+        first.idempotency_key, second.idempotency_key,
+        "a retried identical submission must dedupe on the same key"
+    );
+
+    let mut ledger = AgentReportLedger::new();
+    assert!(ledger.record(first.clone()), "first record is new");
+    assert!(
+        !ledger.record(second),
+        "the duplicate submission must dedupe"
+    );
+    assert_eq!(
+        ledger.len(),
+        1,
+        "duplicate report must collapse to one entry"
+    );
+
+    // A DISTINCT report (no submission id, different body) gets a distinct key
+    // derived from session/tool/body, so it is not swallowed by the dedupe.
+    let distinct = registry.authorize_and_invoke(
+        report_request(
+            "call-report-intent-b",
+            "capo.report_intent",
+            serde_json::json!({"intent": "a different intent"}),
+        ),
+        &policy,
+    );
+    assert_ne!(distinct.idempotency_key, first.idempotency_key);
+    assert!(
+        ledger.record(distinct),
+        "a distinct report is newly recorded"
+    );
+    assert_eq!(ledger.len(), 2);
+
+    // Every ledger entry is an agent-reported claim, never observed evidence.
+    assert_eq!(ledger.agent_reported().len(), ledger.len());
+}
+
+#[test]
+fn identical_keyless_reports_dedupe_but_different_bodies_stay_distinct() {
+    // ACI8: with no submission id, the idempotency key is a stable hash over
+    // session/tool/body, so a re-emitted identical report dedupes while a
+    // different body stays distinct.
+    let registry = AgentReportRegistry;
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    let body = serde_json::json!({"assumption": "the workspace is a git repo"});
+    let a = registry.authorize_and_invoke(
+        report_request("call-assume-a", "capo.record_assumption", body.clone()),
+        &policy,
+    );
+    let b = registry.authorize_and_invoke(
+        report_request("call-assume-b", "capo.record_assumption", body),
+        &policy,
+    );
+    assert_eq!(
+        a.idempotency_key, b.idempotency_key,
+        "identical keyless reports must share an idempotency key"
+    );
+
+    let c = registry.authorize_and_invoke(
+        report_request(
+            "call-assume-c",
+            "capo.record_assumption",
+            serde_json::json!({"assumption": "a different assumption"}),
+        ),
+        &policy,
+    );
+    assert_ne!(
+        a.idempotency_key, c.idempotency_key,
+        "a different body must produce a distinct idempotency key"
+    );
+}

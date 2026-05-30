@@ -2631,6 +2631,111 @@ fn real_controller_dispatch_persists_provenance_and_timing_that_replays_identica
     );
 }
 
+/// ACI8: a dispatched GO2 agent report is persisted as a DISTINCT
+/// `tool.observation_recorded` projection tagged `source=agent_reported`
+/// (carrying confidence), separate from observed runtime/adapter evidence, and
+/// the same classification rebuilds identically on replay -- so completion is
+/// never reachable by agent assertion alone.
+#[test]
+fn real_controller_dispatches_an_agent_report_persisted_as_agent_reported() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{AgentReportRequest, ToolExposureRequest, ToolExposureResult};
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci8-report-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open real controller");
+    let registration = controller.register_agent("aci8-worker").expect("agent");
+    let refs = controller
+        .send_task(&registration, "Report intent through a GO2 reporting tool")
+        .expect("send task");
+
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-aci8-report"),
+        tool_call_id: ToolCallId::new("tool-aci8-report-intent"),
+    };
+    let outcome = controller
+        .dispatch_tool_call(
+            &scope,
+            ToolExposureRequest::AgentReport(AgentReportRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: scope.session_id.clone(),
+                tool_id: "capo.complete_requirement".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                confidence: 80,
+                body: serde_json::json!({"requirement_id": "REQ-1", "summary": "done"}),
+                submission_id: Some("sub-aci8".to_string()),
+            }),
+        )
+        .expect("dispatch agent report");
+
+    let ToolExposureResult::AgentReport(record) = &outcome.result else {
+        panic!("expected an agent-report result");
+    };
+    assert_eq!(record.source, "agent_reported");
+    assert!(record.accepted);
+    assert_eq!(outcome.status, "completed");
+
+    // The distinct observation class is persisted: a `tool.observation_recorded`
+    // row tagged `source=agent_reported`, carrying confidence, NOT a
+    // `tool.output_observed` runtime-evidence event.
+    let events = controller
+        .state()
+        .events_for_session_turn(&refs.session_id, "turn-aci8-report")
+        .expect("turn events");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == "tool.observation_recorded"
+                && event.payload_json.contains("agent_reported")),
+        "report must persist a `tool.observation_recorded` event tagged agent_reported"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.kind == "tool.output_observed"),
+        "an agent report must NOT persist a runtime `tool.output_observed` event"
+    );
+
+    let read_observation = || {
+        controller
+            .state()
+            .tool_observations_for_session(&refs.session_id)
+            .expect("tool observations")
+            .into_iter()
+            .find(|observation| observation.tool_call_id.as_ref() == Some(&scope.tool_call_id))
+            .expect("agent report observation")
+    };
+    let before = read_observation();
+    assert_eq!(
+        before.source, "agent_reported",
+        "the persisted observation must be classified agent_reported, not observed evidence"
+    );
+    assert_eq!(
+        before.confidence, "80",
+        "the report's confidence is carried"
+    );
+    assert_eq!(before.tool_name, "capo.complete_requirement");
+
+    // A restart/replay rebuilds the IDENTICAL agent_reported classification.
+    controller
+        .state()
+        .rebuild_projections()
+        .expect("rebuild projections");
+    assert_eq!(
+        read_observation(),
+        before,
+        "the agent_reported observation must replay identically"
+    );
+}
+
 /// ACI1: the runtime-wrapper path is equally real -- a `capo.file_read` turn
 /// flows through `RuntimeToolWrappers::authorize_and_invoke`, reads the
 /// workspace file, and records the output artifact.
