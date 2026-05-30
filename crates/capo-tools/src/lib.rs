@@ -12,6 +12,7 @@ mod runtime_wrapper_paths;
 mod runtime_wrapper_types;
 mod runtime_wrappers;
 mod search;
+mod test_run;
 pub use permission::*;
 pub use runtime_wrapper_paths::confine_write_path;
 pub use runtime_wrapper_types::*;
@@ -38,6 +39,7 @@ pub const CAPO_WRAPPER_TOOLS: &[&str] = &[
     "capo.file_write",
     "capo.apply_patch",
     "capo.search",
+    "capo.test_run",
     "capo.project_memory_read",
     "capo.workpad_read",
 ];

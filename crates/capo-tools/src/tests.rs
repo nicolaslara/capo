@@ -73,7 +73,7 @@ fn runtime_wrappers_define_shell_git_file_and_project_memory_tools() {
     ));
     let tools = wrappers.list_tools();
 
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 11);
     for tool_id in CAPO_WRAPPER_TOOLS {
         let definition = wrappers.describe_tool(tool_id).expect("wrapper definition");
         assert_eq!(definition.origin, "runtime");
@@ -2376,4 +2376,253 @@ fn search_cannot_read_outside_the_workspace() {
         "a workspace-escaping search root must be rejected, got: {}",
         escaped.summary
     );
+}
+
+// --- ACI6: typed test/check tool --------------------------------------------
+
+#[test]
+fn test_run_passing_command_returns_typed_passed_record_with_timing() {
+    // ACI6: capo.test_run runs a check command and returns the typed
+    // {command, exit_status, passed, failing_items, duration_ms,
+    // output_artifact_id} record, validating against the declared output_schema.
+    // A passing command has no failing items and records wall-clock timing.
+    let workspace = temp_root("aci6-test-pass-workspace");
+    let artifacts = temp_root("aci6-test-pass-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-test-pass",
+            "run-test-pass",
+            "capo.test_run",
+            serde_json::json!({
+                "program": "/bin/sh",
+                "argv": ["-c", "echo 'test mod::ok ... ok'; exit 0"],
+                "cwd": "."
+            }),
+        ),
+        &policy,
+    );
+    assert_eq!(result.status, "exited", "summary: {}", result.summary);
+
+    let definition = wrappers.describe_tool("capo.test_run").expect("definition");
+    let errors = definition.validate_output(&result.narrow_output());
+    assert!(
+        errors.is_empty(),
+        "test_run typed output must validate, got {errors:?}"
+    );
+
+    let typed = result.narrow_output();
+    assert_eq!(typed["exit_status"], serde_json::json!(0));
+    assert_eq!(typed["passed"], serde_json::json!(true));
+    assert_eq!(
+        typed["command"].as_str().expect("command"),
+        "/bin/sh -c echo 'test mod::ok ... ok'; exit 0"
+    );
+    assert_eq!(
+        typed["failing_items"]
+            .as_array()
+            .expect("failing_items")
+            .len(),
+        0,
+        "a passing command has no failing items"
+    );
+    assert_eq!(typed["failing_items_total"], serde_json::json!(0));
+    assert!(typed["duration_ms"].is_i64(), "duration_ms is recorded");
+    let started = typed["started_at"].as_i64().expect("started_at");
+    let completed = typed["completed_at"].as_i64().expect("completed_at");
+    assert!(started > 0, "started_at is a wall-clock timestamp");
+    assert!(
+        completed >= started,
+        "completed_at ({completed}) must not precede started_at ({started})"
+    );
+}
+
+#[test]
+fn test_run_failing_command_captures_bounded_failing_items_and_full_artifact() {
+    // ACI6: a failing command surfaces the failing test names in `failing_items`
+    // (bounded), is classified `passed:false`, and the FULL output lives in a
+    // redacted artifact rather than inline.
+    let workspace = temp_root("aci6-test-fail-workspace");
+    let artifacts = temp_root("aci6-test-fail-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-test-fail",
+            "run-test-fail",
+            "capo.test_run",
+            serde_json::json!({
+                "program": "/bin/sh",
+                "argv": [
+                    "-c",
+                    "echo 'test mod::a ... ok'; echo 'test mod::b ... FAILED'; echo 'test mod::c ... FAILED'; exit 101"
+                ],
+                "cwd": "."
+            }),
+        ),
+        &policy,
+    );
+    // The tool DID run the command and produce a complete typed evidence record;
+    // the observed process `status` is "failed" because the run under test exited
+    // non-zero (consistent with capo.shell_run). The decision-grade signal is
+    // `passed:false` + the failing_items, NOT a tool error -- this is still a
+    // completed call that delivered evidence.
+    assert_eq!(result.status, "failed", "summary: {}", result.summary);
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|event| event.kind == "tool.call_completed"),
+        "a test_run that produced evidence is a COMPLETED call even when the run failed"
+    );
+
+    let definition = wrappers.describe_tool("capo.test_run").expect("definition");
+    let errors = definition.validate_output(&result.narrow_output());
+    assert!(
+        errors.is_empty(),
+        "test_run failing typed output must validate, got {errors:?}"
+    );
+
+    let typed = result.narrow_output();
+    assert_eq!(typed["exit_status"], serde_json::json!(101));
+    assert_eq!(typed["passed"], serde_json::json!(false));
+    let failing = typed["failing_items"].as_array().expect("failing_items");
+    assert_eq!(failing.len(), 2, "two failing test names: {failing:?}");
+    assert_eq!(failing[0], serde_json::json!("mod::b"));
+    assert_eq!(failing[1], serde_json::json!("mod::c"));
+    assert_eq!(typed["failing_items_total"], serde_json::json!(2));
+
+    // The FULL output is in the artifact, including the passing line that is NOT
+    // surfaced inline -- inline stays decision-grade, the artifact is complete.
+    let artifact_id = typed["output_artifact_id"].as_str().expect("artifact id");
+    let artifact = result
+        .output_artifacts
+        .iter()
+        .find(|artifact| artifact.artifact_id == artifact_id)
+        .expect("output artifact referenced by typed output");
+    let full = fs::read_to_string(&artifact.uri).expect("output artifact");
+    assert!(full.contains("test mod::a ... ok"));
+    assert!(full.contains("test mod::b ... FAILED"));
+    assert_eq!(artifact.redaction_state, "redacted");
+}
+
+#[test]
+fn test_run_caps_inline_failing_items_with_explicit_truncation_marker() {
+    // ACI6: the inline failing_items list is bounded -- a run with many failures
+    // returns at most the cap plus an explicit elision marker, with the full set
+    // counted in failing_items_total and the full log in the artifact, so the
+    // tool never dumps the whole log inline.
+    let workspace = temp_root("aci6-test-cap-workspace");
+    let artifacts = temp_root("aci6-test-cap-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    // 12 failing tests but a max_failing_items cap of 3.
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-test-cap",
+            "run-test-cap",
+            "capo.test_run",
+            serde_json::json!({
+                "program": "/bin/sh",
+                "argv": [
+                    "-c",
+                    "for n in $(seq 1 12); do echo \"test mod::case$n ... FAILED\"; done; exit 1"
+                ],
+                "cwd": ".",
+                "max_failing_items": 3
+            }),
+        ),
+        &policy,
+    );
+    // Non-zero exit under test -> observed `status` "failed", but a completed
+    // evidence call (see the failing-command test).
+    assert_eq!(result.status, "failed", "summary: {}", result.summary);
+    let typed = result.narrow_output();
+    assert_eq!(typed["passed"], serde_json::json!(false));
+    assert_eq!(typed["failing_items_total"], serde_json::json!(12));
+    assert_eq!(
+        typed["failing_items_truncated"],
+        serde_json::json!(true),
+        "an over-cap failing set must be flagged truncated"
+    );
+    let failing = typed["failing_items"].as_array().expect("failing_items");
+    // 3 capped names + 1 explicit elision marker line.
+    assert_eq!(failing.len(), 4, "capped to 3 plus an elision marker");
+    assert!(
+        failing[3]
+            .as_str()
+            .expect("marker")
+            .contains("more failing item(s) elided"),
+        "the last item is an explicit elision marker: {failing:?}"
+    );
+
+    // The full set is still in the artifact.
+    let artifact_id = typed["output_artifact_id"].as_str().expect("artifact id");
+    let artifact = result
+        .output_artifacts
+        .iter()
+        .find(|artifact| artifact.artifact_id == artifact_id)
+        .expect("output artifact");
+    let full = fs::read_to_string(&artifact.uri).expect("output artifact");
+    assert!(full.contains("test mod::case12 ... FAILED"));
+}
+
+#[test]
+fn test_run_redacts_secrets_in_the_output_artifact() {
+    // ACI6: secrets in the command output are scrubbed in the redacted artifact
+    // before they reach the agent/gate.
+    let workspace = temp_root("aci6-test-redact-workspace");
+    let artifacts = temp_root("aci6-test-redact-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts);
+    config.redaction_rules.push(RedactionRule {
+        pattern: "SECRET_TOKEN_xyz789".to_string(),
+        replacement: "[REDACTED]".to_string(),
+    });
+    let wrappers = RuntimeToolWrappers::new(config);
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-test-redact",
+            "run-test-redact",
+            "capo.test_run",
+            serde_json::json!({
+                "program": "/bin/sh",
+                "argv": ["-c", "echo 'leaked SECRET_TOKEN_xyz789 in output'; exit 0"],
+                "cwd": "."
+            }),
+        ),
+        &policy,
+    );
+    assert_eq!(result.status, "exited", "summary: {}", result.summary);
+    let typed = result.narrow_output();
+    let artifact_id = typed["output_artifact_id"].as_str().expect("artifact id");
+    let artifact = result
+        .output_artifacts
+        .iter()
+        .find(|artifact| artifact.artifact_id == artifact_id)
+        .expect("output artifact");
+    let full = fs::read_to_string(&artifact.uri).expect("output artifact");
+    assert!(
+        !full.contains("SECRET_TOKEN_xyz789"),
+        "secret leaked into the test_run output artifact: {full}"
+    );
+    assert!(full.contains("[REDACTED]"));
 }

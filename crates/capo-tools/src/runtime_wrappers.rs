@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use capo_core::{BoundaryBinding, BoundaryKind};
 use capo_runtime::{
@@ -19,6 +19,7 @@ use crate::runtime_wrapper_paths::{
 };
 use crate::runtime_wrapper_types::{denied_typed_output, failed_typed_output};
 use crate::search::{SearchCaps, SearchMatch, apply_caps, parse_ripgrep_json};
+use crate::test_run::{FailingItemsCaps, extract_failing_items};
 use crate::{
     CAPO_WRAPPER_TOOLS, PermissionPolicy, PermissionRequest, ToolAuditEvent, ToolAuthorization,
     ToolDefinition, content_hash, json_array, unknown_tool_definition,
@@ -107,6 +108,15 @@ impl RuntimeToolWrappers {
                 "low",
                 vec!["tool:invoke:capo.search", "filesystem:read:workspace"],
                 "{\"input\":{\"query\":\"string\",\"path\":\"string?\",\"max_matches\":\"integer?\",\"max_preview_bytes\":\"integer?\"}}",
+            ),
+            "capo.test_run" => (
+                "Test Run",
+                // A test/check run is observation, not a state mutation in its own
+                // right (the gate, not this tool, interprets the result).
+                false,
+                "high",
+                vec!["tool:invoke:capo.test_run", "shell:execute:workspace"],
+                "{\"input\":{\"program\":\"string\",\"argv\":\"string[]\",\"cwd\":\"string?\",\"max_failing_items\":\"integer?\"}}",
             ),
             "capo.workpad_read" => (
                 "Workpad Read",
@@ -313,6 +323,7 @@ impl RuntimeToolWrappers {
             "capo.file_write" => self.file_write(request),
             "capo.apply_patch" => self.apply_patch(request),
             "capo.search" => self.search(request),
+            "capo.test_run" => self.test_run(request),
             "capo.project_memory_read" => self.project_memory_read(request),
             "capo.workpad_read" => self.workpad_read(request),
             other => Err(format!("unsupported wrapper tool: {other}")),
@@ -877,6 +888,124 @@ impl RuntimeToolWrappers {
         ))
     }
 
+    /// `capo.test_run` / `capo.check`: a specialized shell wrapper that runs a
+    /// test/check command and returns a typed
+    /// `{command, exit_status, passed, failing_items, duration_ms,
+    /// output_artifact_id}` record (ACI6).
+    ///
+    /// This tool emits decision-grade EVIDENCE only. It does NOT compute a score
+    /// or own the verification gate -- `safety-gates`' `VerificationRunner`
+    /// consumes this typed record and owns `score_run`. ACI never scores a run.
+    ///
+    /// The full command output is always written to a redacted artifact; the
+    /// inline `failing_items` list is bounded (failing test names, or the
+    /// first-N failure lines when no names are recognized) so the result stays
+    /// decision-grade and never dumps the whole log. `passed` is the exit-status
+    /// interpretation (exit 0 == passed). `started_at`/`completed_at` are
+    /// captured as wall-clock millis-since-epoch and `duration_ms` is the
+    /// measured elapsed time, for later evaluation by the gate.
+    fn test_run(&self, request: &WrapperToolRequest) -> Result<WrapperExecution, String> {
+        let program = required_input(request, "program")?;
+        let argv = request
+            .input
+            .get("argv")
+            .map(json_string_array)
+            .transpose()?
+            .unwrap_or_default();
+        let cwd = request
+            .input
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(|path| self.resolve_workspace_path(path, true))
+            .transpose()?
+            .unwrap_or_else(|| self.config.workspace_root.clone());
+        let caps = self.failing_items_caps(request)?;
+        let command_display = render_command(&program, &argv);
+
+        // Run with the bounded runner (full output preserved up to the artifact
+        // ceiling) like the other execution wrappers, so a large-but-bounded test
+        // log lands in the artifact rather than failing the call.
+        let started_at_ms = epoch_millis();
+        let started = Instant::now();
+        let outcome = self
+            .bounded_runtime_runner()
+            .start_process(LocalProcessRequest {
+                run_id: sanitized_run_id(&request.run_id),
+                turn_id: None,
+                program,
+                argv,
+                cwd,
+                env: HashMap::new(),
+            })
+            .map_err(runtime_error)?;
+        let duration_ms = started.elapsed().as_millis() as i64;
+        let completed_at_ms = epoch_millis();
+
+        // The full, un-truncated stdout+stderr live in a redacted artifact; the
+        // inline `failing_items` list is derived from (and bounded against) it.
+        let stdout = fs::read_to_string(&outcome.stdout.path).unwrap_or_default();
+        let stderr = fs::read_to_string(&outcome.stderr.path).unwrap_or_default();
+        let combined = format!("{stdout}\n{stderr}");
+        let passed = outcome.exit_code == Some(0);
+        let failing = extract_failing_items(&combined, passed, caps);
+
+        let artifact = self.write_tool_artifact(
+            request,
+            "test_run_output",
+            &format!("test_run output for `{command_display}`"),
+            self.redact_bytes(combined.as_bytes()).as_slice(),
+            "redacted",
+        )?;
+
+        let failing_items_json: Vec<Value> = failing
+            .items
+            .iter()
+            .map(|item| Value::String(item.clone()))
+            .collect();
+        let typed_output = serde_json::json!({
+            "status": outcome.process.status,
+            "command": command_display,
+            "exit_status": outcome.exit_code,
+            "passed": passed,
+            "failing_items": failing_items_json,
+            "failing_items_total": failing.total as i64,
+            "failing_items_truncated": failing.truncated,
+            "duration_ms": duration_ms,
+            "started_at": started_at_ms,
+            "completed_at": completed_at_ms,
+            "output_artifact_id": artifact.artifact_id.clone(),
+        });
+        Ok(WrapperExecution::completed(
+            outcome.process.status,
+            format!(
+                "test_run `{command_display}` {} ({} failing item(s){})",
+                if passed { "passed" } else { "failed" },
+                failing.total,
+                if failing.truncated { ", truncated" } else { "" }
+            ),
+            typed_output,
+            vec![artifact],
+        ))
+    }
+
+    /// Resolve the per-call `failing_items` caps from the request, falling back
+    /// to the bounded defaults (ACI6). A caller may TIGHTEN the count cap via
+    /// `max_failing_items`; a non-positive value is rejected so the cap can never
+    /// be disabled into a whole-log dump.
+    fn failing_items_caps(&self, request: &WrapperToolRequest) -> Result<FailingItemsCaps, String> {
+        let mut caps = FailingItemsCaps::default();
+        if let Some(max_items) = request.input.get("max_failing_items") {
+            let value = max_items
+                .as_i64()
+                .ok_or_else(|| "test_run `max_failing_items` must be an integer".to_string())?;
+            if value <= 0 {
+                return Err("test_run `max_failing_items` must be a positive integer".to_string());
+            }
+            caps.max_items = value as usize;
+        }
+        Ok(caps)
+    }
+
     /// Resolve the per-call search caps from the request, falling back to the
     /// bounded defaults (ACI5). A caller may TIGHTEN or widen the match/byte caps;
     /// non-positive values are rejected so a cap can never be disabled into a
@@ -1155,6 +1284,16 @@ pub(crate) const APPLY_PATCH_OUTPUT_SCHEMA: &str = "{\"output\":{\"status\":\"st
 /// never inlined -- only the capped `path:line:preview` matches are returned.
 pub(crate) const SEARCH_OUTPUT_SCHEMA: &str = "{\"output\":{\"status\":\"string\",\"query\":\"string\",\"matches\":\"array\",\"returned_matches\":\"integer\",\"total_matches\":\"integer\",\"truncated\":\"boolean\",\"truncation_reason\":\"string\",\"duration_ms\":\"integer\"}}";
 
+/// Narrow typed output shape for `capo.test_run` / `capo.check` (ACI6): the run
+/// `command`, the `exit_status` (null on a signal), the `passed` interpretation,
+/// the BOUNDED `failing_items` list (with its pre-cap `failing_items_total` and a
+/// `failing_items_truncated` marker), the wall-clock timing
+/// (`started_at`/`completed_at` as millis-since-epoch and the measured
+/// `duration_ms`), and the `output_artifact_id` that carries the full redacted
+/// output. The full log is never inlined -- only the capped `failing_items`. This
+/// is typed EVIDENCE only; `safety-gates`' `VerificationRunner` owns `score_run`.
+pub(crate) const TEST_RUN_OUTPUT_SCHEMA: &str = "{\"output\":{\"status\":\"string\",\"command\":\"string\",\"exit_status\":\"integer?\",\"passed\":\"boolean\",\"failing_items\":\"string[]\",\"failing_items_total\":\"integer\",\"failing_items_truncated\":\"boolean\",\"duration_ms\":\"integer\",\"started_at\":\"integer\",\"completed_at\":\"integer\",\"output_artifact_id\":\"string\"}}";
+
 /// The declared `output_schema` descriptor for a runtime wrapper tool (ACI3).
 pub(crate) fn wrapper_output_schema(tool_id: &str) -> &'static str {
     match tool_id {
@@ -1164,6 +1303,7 @@ pub(crate) fn wrapper_output_schema(tool_id: &str) -> &'static str {
         "capo.file_write" => FILE_WRITE_OUTPUT_SCHEMA,
         "capo.apply_patch" => APPLY_PATCH_OUTPUT_SCHEMA,
         "capo.search" => SEARCH_OUTPUT_SCHEMA,
+        "capo.test_run" => TEST_RUN_OUTPUT_SCHEMA,
         // file_read and the read-only workpad/project-memory aliases.
         _ => FILE_READ_OUTPUT_SCHEMA,
     }
@@ -1190,6 +1330,10 @@ pub(crate) fn wrapper_redaction_policy(tool_id: &str) -> String {
             "{\"strategy\":\"credential_scan\",\"fields\":[\"output_artifact_id\"]}".to_string()
         }
         "capo.search" => "{\"strategy\":\"credential_scan\",\"fields\":[\"preview\"]}".to_string(),
+        "capo.test_run" => {
+            "{\"strategy\":\"credential_scan\",\"fields\":[\"failing_items\",\"output_artifact_id\"]}"
+                .to_string()
+        }
         _ => "{\"strategy\":\"credential_scan\",\"fields\":[\"content\"]}".to_string(),
     }
 }
@@ -1334,6 +1478,31 @@ fn wrapper_artifact(kind: &str, artifact: RuntimeOutputArtifact) -> WrapperArtif
 
 fn runtime_error(error: RuntimeError) -> String {
     format!("{error:?}")
+}
+
+/// Wall-clock millis-since-epoch for `started_at`/`completed_at` (ACI6).
+///
+/// The workspace carries no date/time crate, so the typed test/check record uses
+/// a millis-since-epoch integer for its wall-clock timestamps (consistent with
+/// the integer `duration_ms`); the `safety-gates` `VerificationRunner` consumes
+/// these for later evaluation. A clock before the epoch (impossible in practice)
+/// is clamped to 0 rather than panicking.
+fn epoch_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Render a `program`/`argv` pair into a single display `command` string for the
+/// typed test/check record (ACI6). Arguments are space-joined; this is a
+/// human-readable echo, not a shell-quoted re-executable string.
+fn render_command(program: &str, argv: &[String]) -> String {
+    if argv.is_empty() {
+        program.to_string()
+    } else {
+        format!("{program} {}", argv.join(" "))
+    }
 }
 
 /// Resolve the ripgrep program for `capo.search` to an ABSOLUTE path (ACI5).

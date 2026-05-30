@@ -507,7 +507,55 @@ Verification:
 
 ## ACI6 - Typed Test/Check Tool
 
-Status: pending.
+Status: done.
+
+Evidence:
+
+- New `capo.test_run` runtime-wrapper tool (added to `CAPO_WRAPPER_TOOLS`,
+  `crates/capo-tools/src/lib.rs`) is a specialized shell wrapper
+  (`runtime_wrappers.rs::test_run`) returning the typed
+  `{command, exit_status, passed, failing_items, duration_ms,
+  output_artifact_id}` record (`TEST_RUN_OUTPUT_SCHEMA`), plus
+  `failing_items_total`/`failing_items_truncated` and wall-clock
+  `started_at`/`completed_at`. It runs through the existing bounded runtime
+  runner (full output preserved up to the artifact ceiling) like the ACI3
+  execution wrappers. `passed` is the exit-status interpretation (exit 0 ==
+  passed); the observed `status` is `"failed"` for a non-zero exit-under-test
+  (consistent with `capo.shell_run`) but the call still COMPLETES
+  (`tool.call_completed`) because it delivered a full evidence record -- the
+  decision-grade signal is `passed:false` + `failing_items`, not a tool error.
+- `failing_items` is BOUNDED, decision-grade evidence
+  (`crates/capo-tools/src/test_run.rs`): `extract_failing_items` prefers failing
+  test NAMES from recognized harness shapes (cargo test `... FAILED`, cargo
+  nextest `FAIL [..]`, pytest `FAILED ...`, TAP `not ok`) and falls back to the
+  first-N non-empty lines when no names are recognized. It is capped by a count
+  cap (`max_failing_items`, default 20, caller-tightenable; non-positive
+  rejected) AND a per-item byte cap (256), with an explicit elision marker line
+  when the count cap fires and `failing_items_truncated` set, so the inline
+  payload never dumps the whole log. The FULL output always lives in a redacted
+  artifact (`test_run_output`, scrubbed through `redact_bytes`,
+  `redaction_state=redacted`).
+- Evidence-only, no scoring: the handler computes no score and owns no gate. The
+  `test_run.rs` module + `TEST_RUN_OUTPUT_SCHEMA` doc comments state explicitly
+  that `safety-gates`' `VerificationRunner` consumes this typed record and owns
+  `score_run`; ACI never scores a run. `started_at`/`completed_at` are recorded
+  as millis-since-epoch (no date/time crate in the workspace, consistent with the
+  integer `duration_ms`) for later wall-clock evaluation by the gate.
+- Tests added: unit tests in `test_run.rs` (passing has no items; cargo/pytest/
+  TAP name parsing; first-lines fallback; count-cap truncation marker; per-item
+  byte clip) plus integration tests in `tests.rs` exercising the real wrapper
+  `authorize_and_invoke` with a deterministic `/bin/sh` fake command:
+  `test_run_passing_command_returns_typed_passed_record_with_timing`,
+  `test_run_failing_command_captures_bounded_failing_items_and_full_artifact`,
+  `test_run_caps_inline_failing_items_with_explicit_truncation_marker`,
+  `test_run_redacts_secrets_in_the_output_artifact`. The wrapper-count assertion
+  was updated 10 -> 11; ACI2's "every tool declares output_schema/risk/scope/
+  redaction" and the output-schema-validation tests cover `capo.test_run`
+  automatically.
+- Gate run from `/Users/nicolas/devel/capo-wt/tools-aci`: `cargo fmt --check`
+  clean; `cargo clippy --all-targets --all-features -- -D warnings` exit 0;
+  `cargo test --workspace` => 388 passed, 0 failed (capo-tools: 82 passed);
+  `git diff --check` clean.
 
 Acceptance:
 
