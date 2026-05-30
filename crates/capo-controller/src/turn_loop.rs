@@ -204,11 +204,16 @@ impl FakeBoundaryController {
         refs: &FakeRunRefs,
         turn_id: &TurnId,
     ) -> StateResult<TurnFinished> {
-        let mut events = self
+        // Turn-scoped and UNBOUNDED: re-derive the outcome from the turn's
+        // COMPLETE projected event set, never a recency window. A recency cap
+        // would silently drop an early turn's events once the session has more
+        // than the cap's worth of later events, reconstructing it with empty
+        // refs and a default stop reason -- breaking the replay-identity
+        // invariant on long multi-turn sessions. `events_for_session_turn`
+        // returns ascending sequence order, already scoped to this turn.
+        let events = self
             .state
-            .recent_events_for_session(&refs.session_id, 256)?;
-        // recent_events_for_session returns ascending sequence order already.
-        events.retain(|event| event.turn_id.as_deref() == Some(turn_id.as_str()));
+            .events_for_session_turn(&refs.session_id, turn_id.as_str())?;
         let mut summary_refs = Vec::new();
         let mut observed_tool_refs = Vec::new();
         let mut terminal_outcome = None;

@@ -1432,6 +1432,50 @@ impl SqliteStateStore {
         events.reverse();
         Ok(events)
     }
+
+    /// All events for a single turn within a session, in ascending sequence
+    /// order, with NO recency cap.
+    ///
+    /// Unlike [`Self::recent_events_for_session`] (which keeps only the most
+    /// recent `limit` events for diagnostics), this query is turn-scoped and
+    /// unbounded: a turn's full projected event set is the source the
+    /// replay-stable `TurnFinished` is re-derived from, so it must never be
+    /// truncated. A session with thousands of events across many turns still
+    /// reconstructs an early turn from its complete event set.
+    pub fn events_for_session_turn(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+    ) -> StateResult<Vec<EventRecord>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT sequence, event_id, kind, actor, project_id, task_id, agent_id, session_id,
+                    run_id, turn_id, item_id, payload_json, idempotency_key, redaction_state
+             FROM events
+             WHERE session_id = ?1 AND turn_id = ?2
+             ORDER BY sequence ASC",
+        )?;
+        let rows = statement.query_map(params![session_id.as_str(), turn_id], |row| {
+            Ok(EventRecord {
+                sequence: row.get(0)?,
+                event_id: row.get(1)?,
+                kind: row.get(2)?,
+                actor: row.get(3)?,
+                project_id: optional_id(row.get::<_, Option<String>>(4)?),
+                task_id: optional_id(row.get::<_, Option<String>>(5)?),
+                agent_id: optional_id(row.get::<_, Option<String>>(6)?),
+                session_id: optional_id(row.get::<_, Option<String>>(7)?),
+                run_id: optional_id(row.get::<_, Option<String>>(8)?),
+                turn_id: row.get(9)?,
+                item_id: row.get(10)?,
+                payload_json: row.get(11)?,
+                idempotency_key: row.get(12)?,
+                redaction_state: row.get(13)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
 }
 
 /// Extract `(external_pid, runtime_process_ref)` from a `run.started` payload

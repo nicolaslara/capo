@@ -1162,6 +1162,152 @@ fn turn_loop_projected_turn_rebuilds_identically_after_restart_replay() {
     );
 }
 
+/// Replay-identity on a LONG multi-turn session: flood a session with far more
+/// than 256 persisted events across many turns, then reconstruct an EARLY turn
+/// purely from the persisted, turn-keyed event log and assert the reconstructed
+/// `TurnFinished` is structurally identical to the live one the loop emitted.
+///
+/// This is the regression for the truncation bug: `reconstruct_turn_finished`
+/// previously read a 256-event recency WINDOW (`recent_events_for_session`),
+/// so once the session accrued >256 later events, an early turn's events fell
+/// out of the window and the early turn reconstructed with empty
+/// summary_refs/observed_tool_refs, `observed_terminal_event = false`, and a
+/// fallback `stop_reason = Completed`. With the turn-scoped UNBOUNDED query
+/// (`events_for_session_turn`) the early turn re-derives from its COMPLETE
+/// event set, so the live and reconstructed outcomes match.
+///
+/// FAILS against the old 256-cap (early turn reconstructs empty/wrong);
+/// PASSES with the unbounded turn-scoped query.
+#[test]
+fn turn_loop_reconstructs_early_turn_on_long_session_past_256_event_cap() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    let state_root = temp_root();
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("flood-session"));
+    let controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        &state_root,
+        scripted,
+    )
+    .expect("open controller");
+    let registration = controller.register_agent("flood-worker").expect("agent");
+    let refs = controller
+        .send_task(&registration, "Flood a session across many turns")
+        .expect("send task");
+
+    // Drive the FIRST (early) turn with a distinctive, non-empty batch: a tool
+    // round-trip + summaries + a terminal `turn_completed`. This is the turn we
+    // later reconstruct from the persisted log.
+    let early_turn = TurnId::new("turn-early-1");
+    let early_batch = ScriptedMockTurn::new("turn-early-1")
+        .message_delta("early-msg-1", "inspecting state")
+        .tool_requested("early-tool-1", "capo.agent_status")
+        .tool_completed("early-tool-1", "capo.agent_status", "agent is running")
+        .message_completed("early-msg-2", "state inspected")
+        .turn_completed("early-done-1")
+        .normalized_events(&refs.external_session_ref);
+    let early_finished = controller
+        .run_turn(&refs, &early_turn, &early_batch)
+        .expect("run early turn");
+
+    // Sanity: the live early turn really did observe summaries, a tool, a
+    // terminal completed event -- the exact content the truncation bug erased.
+    assert!(
+        !early_finished.summary_refs.is_empty(),
+        "live early turn must have summary refs"
+    );
+    assert!(
+        !early_finished.observed_tool_refs.is_empty(),
+        "live early turn must have tool refs"
+    );
+    assert!(early_finished.observed_terminal_event());
+    assert_eq!(early_finished.stop_reason, TurnStopReason::Completed);
+
+    // Flood the SAME session with many LATER turns so the persisted event count
+    // far exceeds the old 256-event recency window, pushing the early turn's
+    // events out of that window entirely.
+    let event_count_before_flood = controller.state().event_count().expect("event count");
+    for index in 0..60usize {
+        let turn_id = TurnId::new(format!("turn-flood-{index}"));
+        let batch = ScriptedMockTurn::new(format!("turn-flood-{index}"))
+            .message_delta(format!("flood-msg-{index}-1"), "working")
+            .tool_requested(format!("flood-tool-{index}"), "capo.agent_status")
+            .tool_completed(
+                format!("flood-tool-{index}"),
+                "capo.agent_status",
+                "still running",
+            )
+            .message_completed(format!("flood-msg-{index}-2"), "progress")
+            .turn_completed(format!("flood-done-{index}"))
+            .normalized_events(&refs.external_session_ref);
+        controller
+            .run_turn(&refs, &turn_id, &batch)
+            .expect("run flood turn");
+    }
+
+    // The session now holds well over 256 events, so the early turn's events sit
+    // outside any 256-event recency window.
+    let total_events = controller.state().event_count().expect("event count");
+    let session_events = controller
+        .state()
+        .recent_events_for_session(&refs.session_id, 1)
+        .expect("latest event");
+    let latest_sequence = session_events.last().map_or(0, |event| event.sequence);
+    assert!(
+        total_events > event_count_before_flood + 256,
+        "flood must push the session past the 256-event cap (saw {total_events} total events)"
+    );
+    let early_max_sequence = controller
+        .state()
+        .events_for_session_turn(&refs.session_id, early_turn.as_str())
+        .expect("early turn events")
+        .iter()
+        .map(|event| event.sequence)
+        .max()
+        .expect("early turn has events");
+    assert!(
+        latest_sequence - early_max_sequence > 256,
+        "early turn must be more than 256 events behind the latest event \
+         (gap = {})",
+        latest_sequence - early_max_sequence
+    );
+
+    // Reconstruct the EARLY turn from PERSISTED STATE on a fresh controller that
+    // never saw the in-memory batch: reopen over the rebuilt store and re-derive
+    // purely from the turn-keyed event log. With the old 256-cap this returns an
+    // empty/Completed-by-fallback outcome; with the unbounded turn-scoped query
+    // it matches the live early outcome exactly.
+    let reopened = SqliteStateStore::open(&state_root).expect("reopen state");
+    reopened.rebuild_projections().expect("rebuild projections");
+    let reconstructed_controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        &state_root,
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("flood-session")),
+    )
+    .expect("reopen controller");
+    let reconstructed = reconstructed_controller
+        .reconstruct_turn_finished(&refs, &early_turn)
+        .expect("reconstruct early outcome");
+
+    // Equality-significant fields match the live early outcome (the volatile
+    // `replay` append-count diagnostic is excluded: the reconstruction reports a
+    // default report).
+    assert_eq!(reconstructed.turn_id, early_finished.turn_id);
+    assert_eq!(reconstructed.stop_reason, early_finished.stop_reason);
+    assert_eq!(
+        reconstructed.observed_terminal_event(),
+        early_finished.observed_terminal_event()
+    );
+    assert_eq!(reconstructed.summary_refs, early_finished.summary_refs);
+    assert_eq!(
+        reconstructed.observed_tool_refs,
+        early_finished.observed_tool_refs
+    );
+    let mut expected_stable = early_finished.clone();
+    expected_stable.replay = AdapterReplayReport::default();
+    assert_eq!(reconstructed, expected_stable);
+}
+
 #[test]
 fn turn_loop_dispatch_derivation_matches_run_turn_for_the_same_batch() {
     use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
