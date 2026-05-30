@@ -333,7 +333,55 @@ Verification:
 
 ## ACI4 - Structured Edit/Patch Tool With Lint-On-Edit
 
-Status: pending.
+Status: done.
+
+Evidence:
+
+- New `capo.apply_patch` runtime-wrapper tool (added to `CAPO_WRAPPER_TOOLS`,
+  `crates/capo-tools/src/lib.rs`) with a typed search/replace patch model behind
+  one typed interface (`crates/capo-tools/src/apply_patch.rs`): each hunk is
+  located by a cascade of aider-style strategies -- `perfect` -> `whitespace`
+  (per-line trim) -> `dotdotdot` (`...` elided interior, anchored head+tail) ->
+  edit-distance `fuzzy` (sliding-window line similarity, threshold 0.80), plus an
+  empty-search `insert` for create/append. The handler lives in
+  `runtime_wrappers.rs::apply_patch`.
+- Structured retryable no-match: a hunk no strategy can locate returns a typed
+  `no_match` result (status `no_match`, `rejected_hunk_index`, `reject_reason`,
+  `nearest_line`, plus a nearest-candidate preview in the summary), shaped after
+  aider's `SearchReplaceNoExactMatch` -- not a raw error string -- and writes
+  nothing. It flows through the non-completed audit shape (no
+  `tool.call_completed`) like the ACI3 `precondition_failed` guard.
+- Successful apply returns a typed diff result
+  (`APPLY_PATCH_OUTPUT_SCHEMA`): `path`, `hunks_total`, `hunks_applied`,
+  `hunks_rejected`, `changed_line_ranges` (1-based inclusive), and the full
+  unified diff (via the existing `similar` differ) as a redacted artifact
+  (`apply_patch_diff`), never inline.
+- Lint-on-edit (`crates/capo-tools/src/lint.rs`): after applying, a
+  language-pluggable lint check runs (`Linter::for_path`); Rust files run
+  `rustfmt --check` through the bounded runtime runner and parse into typed
+  findings (`file`, `line`, `rule`, `message`) with `lint_status`
+  `passed`/`failed`/`skipped`/`unavailable`. The runner clears the environment,
+  so the linter program is resolved to an absolute path against the current
+  `PATH` for deterministic spawn. `auto_lint:false` opts out.
+- Path confinement: patch writes go through the existing
+  `resolve_workspace_path` (which calls `ensure_under_workspace`), so an absolute
+  escape or `..` traversal is rejected with a typed `failed` result and the
+  out-of-workspace file is untouched.
+- Tests added: unit tests in `apply_patch.rs` (perfect/whitespace/dotdotdot/
+  fuzzy/no-match/insert) and `lint.rs` (rustfmt parse + pluggable selection),
+  plus integration tests in `tests.rs` exercising the real wrapper
+  `authorize_and_invoke`: `apply_patch_clean_apply_returns_typed_diff_and_changed_ranges`,
+  `apply_patch_whitespace_and_fuzzy_tolerant_location`,
+  `apply_patch_rejected_hunk_returns_structured_retryable_error_without_writing`,
+  `apply_patch_lint_on_edit_returns_typed_findings`,
+  `apply_patch_lint_passes_on_well_formatted_rust`,
+  `apply_patch_cannot_edit_outside_the_workspace`. The wrapper-count assertion was
+  updated 8 -> 9; ACI2's "every tool declares output_schema/risk/scope/redaction"
+  and the schema-validation tests cover `capo.apply_patch` automatically.
+- Gate run from `/Users/nicolas/devel/capo-wt/tools-aci`: `cargo fmt --check`
+  clean; `cargo clippy --all-targets --all-features -- -D warnings` exit 0;
+  `cargo test --workspace` => 359 passed, 0 failed (capo-tools: 54 passed);
+  `git diff --check` clean.
 
 Acceptance:
 

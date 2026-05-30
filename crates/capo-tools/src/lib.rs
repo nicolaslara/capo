@@ -5,6 +5,8 @@
 //! trusted local prototype allows broadly.
 
 use capo_core::{BoundaryBinding, BoundaryKind, RunId, SessionId, ToolCallId};
+mod apply_patch;
+mod lint;
 mod permission;
 mod runtime_wrapper_paths;
 mod runtime_wrapper_types;
@@ -33,6 +35,7 @@ pub const CAPO_WRAPPER_TOOLS: &[&str] = &[
     "capo.git_commit",
     "capo.file_read",
     "capo.file_write",
+    "capo.apply_patch",
     "capo.project_memory_read",
     "capo.workpad_read",
 ];

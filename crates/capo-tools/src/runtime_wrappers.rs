@@ -11,6 +11,8 @@ use capo_runtime::{
 use serde_json::Value;
 use similar::TextDiff;
 
+use crate::apply_patch::{NoMatch, PatchHunk, apply_hunks};
+use crate::lint::{LintFinding, Linter};
 use crate::runtime_wrapper_paths::{
     ensure_under_workspace, is_workpad_path, lexically_normalize, nearest_existing_ancestor,
     sanitize_path_component, sanitized_run_id, workspace_path, workspace_relative_path,
@@ -90,6 +92,13 @@ impl RuntimeToolWrappers {
                 "medium",
                 vec!["tool:invoke:capo.file_write", "filesystem:write:workspace"],
                 "{\"input\":{\"path\":\"string\",\"content\":\"string?\",\"expected_hash\":\"string?\",\"replace\":\"string?\",\"with\":\"string?\"}}",
+            ),
+            "capo.apply_patch" => (
+                "Apply Patch",
+                true,
+                "medium",
+                vec!["tool:invoke:capo.apply_patch", "filesystem:write:workspace"],
+                "{\"input\":{\"path\":\"string\",\"hunks\":\"array\",\"auto_lint\":\"boolean?\"}}",
             ),
             "capo.workpad_read" => (
                 "Workpad Read",
@@ -294,6 +303,7 @@ impl RuntimeToolWrappers {
             "capo.git_commit" => self.git_commit(request),
             "capo.file_read" => self.file_read(request, "file_read"),
             "capo.file_write" => self.file_write(request),
+            "capo.apply_patch" => self.apply_patch(request),
             "capo.project_memory_read" => self.project_memory_read(request),
             "capo.workpad_read" => self.workpad_read(request),
             other => Err(format!("unsupported wrapper tool: {other}")),
@@ -620,6 +630,157 @@ impl RuntimeToolWrappers {
         ))
     }
 
+    /// `capo.apply_patch`: apply a typed sequence of search/replace hunks to one
+    /// file with whitespace/fuzzy-tolerant location, then run a syntax/lint check
+    /// (ACI4).
+    ///
+    /// Path confinement reuses [`Self::resolve_workspace_path`] so a patch cannot
+    /// edit outside the workspace. A hunk that no strategy can locate returns a
+    /// STRUCTURED retryable no-match result (status `no_match`, carrying the
+    /// rejected hunk index, the reason, and the nearest candidate) WITHOUT
+    /// writing -- the loop reflects and retries. A successful apply returns a
+    /// typed diff result (files touched, hunks applied/rejected, changed line
+    /// ranges, the full diff as an artifact) and, for a Rust file, typed
+    /// `rustfmt --check` findings the loop can repair.
+    fn apply_patch(&self, request: &WrapperToolRequest) -> Result<WrapperExecution, String> {
+        let path = self.resolve_workspace_path(&required_input(request, "path")?, true)?;
+        let hunks = parse_patch_hunks(request)?;
+        let before = fs::read(&path).unwrap_or_default();
+        // The patch operates on UTF-8 text; non-UTF-8 files are rejected up front
+        // rather than corrupted by a lossy round-trip.
+        let before_text = String::from_utf8(before.clone())
+            .map_err(|_| format!("apply_patch target is not utf-8 text: {}", path.display()))?;
+
+        let applied = match apply_hunks(&before_text, &hunks) {
+            Ok(applied) => applied,
+            // A hunk that no strategy located: a structured retryable no-match,
+            // NOT a raw error string. It made no change and produced no artifact,
+            // so it flows through the non-completed audit shape (no
+            // `tool.call_completed`) like a precondition guard.
+            Err(no_match) => return Ok(no_match_execution(&path.display().to_string(), &no_match)),
+        };
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        fs::write(&path, applied.new_content.as_bytes()).map_err(|error| error.to_string())?;
+
+        let diff = unified_diff(
+            &before,
+            applied.new_content.as_bytes(),
+            &path.display().to_string(),
+        );
+        let artifact = self.write_tool_artifact(
+            request,
+            "apply_patch_diff",
+            &format!("unified diff for {}", path.display()),
+            diff.as_bytes(),
+            "safe",
+        )?;
+
+        // Lint-on-edit: Rust-first via `rustfmt --check`, language-pluggable. Off
+        // when the caller passes `auto_lint:false`.
+        let auto_lint = request
+            .input
+            .get("auto_lint")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let (lint_status, lint_findings) = if auto_lint {
+            self.lint_edited(&path, request)
+        } else {
+            ("skipped".to_string(), Vec::new())
+        };
+
+        let changed_ranges: Vec<Value> = applied
+            .changed_line_ranges
+            .iter()
+            .map(|range| Value::String(range.clone()))
+            .collect();
+        let lint_findings_json: Vec<Value> =
+            lint_findings.iter().map(LintFinding::to_json).collect();
+        let strategies: Vec<String> = applied
+            .matches
+            .iter()
+            .map(|located| located.strategy.label().to_string())
+            .collect();
+        let typed_output = serde_json::json!({
+            "status": "completed",
+            "path": path.display().to_string(),
+            "hunks_total": hunks.len() as i64,
+            "hunks_applied": applied.matches.len() as i64,
+            "hunks_rejected": 0,
+            "changed_line_ranges": changed_ranges,
+            "output_artifact_id": artifact.artifact_id.clone(),
+            "lint_status": lint_status,
+            "lint_findings": lint_findings_json,
+        });
+        Ok(WrapperExecution::completed(
+            "completed".to_string(),
+            format!(
+                "apply_patch applied {} hunk(s) to {} via [{}]; lint {}",
+                applied.matches.len(),
+                path.display(),
+                strategies.join(", "),
+                lint_status
+            ),
+            typed_output,
+            vec![artifact],
+        ))
+    }
+
+    /// Run the language-pluggable lint check for an edited file and return
+    /// `(lint_status, findings)` (ACI4).
+    ///
+    /// Rust files run `rustfmt --check` through the bounded runtime runner;
+    /// non-Rust files report `skipped`. A clean check reports `passed`; findings
+    /// report `failed` so the loop knows to reflect and repair.
+    fn lint_edited(
+        &self,
+        path: &std::path::Path,
+        request: &WrapperToolRequest,
+    ) -> (String, Vec<LintFinding>) {
+        let Some(linter) = Linter::for_path(path) else {
+            return ("skipped".to_string(), Vec::new());
+        };
+        let (program, argv) = linter.command(&path.display().to_string());
+        let outcome = match self
+            .bounded_runtime_runner()
+            .start_process(LocalProcessRequest {
+                run_id: sanitized_run_id(&request.run_id),
+                turn_id: None,
+                program,
+                argv,
+                cwd: self.config.workspace_root.clone(),
+                env: HashMap::new(),
+            }) {
+            Ok(outcome) => outcome,
+            // A linter that cannot be spawned (not installed) is not a patch
+            // failure: the edit already landed. Report it as unavailable so the
+            // loop is not misled into thinking the code passed lint.
+            Err(error) => {
+                return (
+                    "unavailable".to_string(),
+                    vec![LintFinding {
+                        file: path.display().to_string(),
+                        line: 0,
+                        rule: "lint".to_string(),
+                        message: format!("lint runner unavailable: {error:?}"),
+                    }],
+                );
+            }
+        };
+        let stderr = fs::read_to_string(&outcome.stderr.path).unwrap_or_default();
+        let stdout = fs::read_to_string(&outcome.stdout.path).unwrap_or_default();
+        let combined = format!("{stdout}\n{stderr}");
+        let findings = linter.parse(&path.display().to_string(), outcome.exit_code, &combined);
+        let status = if findings.is_empty() {
+            "passed".to_string()
+        } else {
+            "failed".to_string()
+        };
+        (status, findings)
+    }
+
     fn record_input_artifact(&self, request: &WrapperToolRequest) -> WrapperArtifact {
         let payload = format!(
             "{{\"tool_id\":\"{}\",\"input\":{}}}",
@@ -760,6 +921,13 @@ pub(crate) const FILE_READ_OUTPUT_SCHEMA: &str = "{\"output\":{\"status\":\"stri
 /// `actual_hash`) (ACI3).
 pub(crate) const FILE_WRITE_OUTPUT_SCHEMA: &str = "{\"output\":{\"status\":\"string\",\"path\":\"string\",\"mode\":\"string\",\"before_hash\":\"string\",\"after_hash\":\"string\",\"bytes_written\":\"integer\",\"output_artifact_id\":\"string\",\"expected_hash\":\"string?\",\"actual_hash\":\"string?\"}}";
 
+/// Narrow typed output shape for `apply_patch`: the patched `path`, the patch
+/// `status`, the per-hunk accounting (`hunks_total`/`hunks_applied`/
+/// `hunks_rejected`), the changed line ranges, the unified-diff
+/// `output_artifact_id`, the lint outcome (`lint_status`, `lint_findings`), and
+/// the structured no-match fields surfaced on a rejected hunk (ACI4).
+pub(crate) const APPLY_PATCH_OUTPUT_SCHEMA: &str = "{\"output\":{\"status\":\"string\",\"path\":\"string\",\"hunks_total\":\"integer\",\"hunks_applied\":\"integer\",\"hunks_rejected\":\"integer\",\"changed_line_ranges\":\"string[]\",\"output_artifact_id\":\"string\",\"lint_status\":\"string\",\"lint_findings\":\"array\",\"rejected_hunk_index\":\"integer?\",\"reject_reason\":\"string?\",\"nearest_line\":\"integer?\"}}";
+
 /// The declared `output_schema` descriptor for a runtime wrapper tool (ACI3).
 pub(crate) fn wrapper_output_schema(tool_id: &str) -> &'static str {
     match tool_id {
@@ -767,6 +935,7 @@ pub(crate) fn wrapper_output_schema(tool_id: &str) -> &'static str {
             EXEC_OUTPUT_SCHEMA
         }
         "capo.file_write" => FILE_WRITE_OUTPUT_SCHEMA,
+        "capo.apply_patch" => APPLY_PATCH_OUTPUT_SCHEMA,
         // file_read and the read-only workpad/project-memory aliases.
         _ => FILE_READ_OUTPUT_SCHEMA,
     }
@@ -788,6 +957,9 @@ pub(crate) fn wrapper_redaction_policy(tool_id: &str) -> String {
         }
         "capo.file_write" => {
             "{\"strategy\":\"credential_scan\",\"fields\":[\"content\"]}".to_string()
+        }
+        "capo.apply_patch" => {
+            "{\"strategy\":\"credential_scan\",\"fields\":[\"output_artifact_id\"]}".to_string()
         }
         _ => "{\"strategy\":\"credential_scan\",\"fields\":[\"content\"]}".to_string(),
     }
@@ -864,6 +1036,71 @@ fn verify_authorization_matches_request(
 
 fn wrapper_input_hash(input: &Value) -> String {
     content_hash(input.to_string().as_bytes())
+}
+
+/// Parse the `hunks` input of a `capo.apply_patch` request into typed
+/// search/replace hunks (ACI4). Each hunk is an object with a `search` and a
+/// `replace` string. At least one hunk is required.
+fn parse_patch_hunks(request: &WrapperToolRequest) -> Result<Vec<PatchHunk>, String> {
+    let Some(Value::Array(items)) = request.input.get("hunks") else {
+        return Err("apply_patch requires a `hunks` array".to_string());
+    };
+    if items.is_empty() {
+        return Err("apply_patch requires at least one hunk".to_string());
+    }
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let search = item
+                .get("search")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("apply_patch hunk {index} requires a string `search`"))?;
+            let replace = item
+                .get("replace")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("apply_patch hunk {index} requires a string `replace`"))?;
+            Ok(PatchHunk {
+                search: search.to_string(),
+                replace: replace.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Build the typed `no_match` execution for a structured, retryable apply_patch
+/// miss (ACI4). It made no change and produced no artifact, so it is NOT audited
+/// as a completed call (`reached_completion: false`).
+fn no_match_execution(path: &str, no_match: &NoMatch) -> WrapperExecution {
+    let typed_output = serde_json::json!({
+        "status": "no_match",
+        "path": path,
+        "hunks_total": 0,
+        "hunks_applied": 0,
+        "hunks_rejected": 1,
+        "changed_line_ranges": Vec::<Value>::new(),
+        "output_artifact_id": "none",
+        "lint_status": "skipped",
+        "lint_findings": Vec::<Value>::new(),
+        "rejected_hunk_index": no_match.hunk_index as i64,
+        "reject_reason": no_match.reason.clone(),
+        "nearest_line": no_match.nearest_start_line.map(|line| line as i64),
+    });
+    let preview = no_match
+        .nearest_preview
+        .as_deref()
+        .map(|preview| format!("; nearest candidate:\n{preview}"))
+        .unwrap_or_default();
+    WrapperExecution {
+        status: "no_match".to_string(),
+        summary: format!(
+            "apply_patch hunk {} did not match {} ({}; similarity {:.2}){preview}",
+            no_match.hunk_index, path, no_match.reason, no_match.nearest_similarity
+        ),
+        typed_output,
+        output_artifacts: Vec::new(),
+        reached_completion: false,
+    }
 }
 
 fn required_input(request: &WrapperToolRequest, key: &str) -> Result<String, String> {

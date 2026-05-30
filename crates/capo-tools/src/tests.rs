@@ -73,7 +73,7 @@ fn runtime_wrappers_define_shell_git_file_and_project_memory_tools() {
     ));
     let tools = wrappers.list_tools();
 
-    assert_eq!(tools.len(), 8);
+    assert_eq!(tools.len(), 9);
     for tool_id in CAPO_WRAPPER_TOOLS {
         let definition = wrappers.describe_tool(tool_id).expect("wrapper definition");
         assert_eq!(definition.origin, "runtime");
@@ -1231,6 +1231,315 @@ fn file_write_structured_replace_edits_in_place() {
         fs::read_to_string(workspace.join("cfg.toml")).expect("file"),
         "name = \"new\"\nkeep = 1\n",
         "a missing replace target must not write"
+    );
+}
+
+#[test]
+fn apply_patch_clean_apply_returns_typed_diff_and_changed_ranges() {
+    // ACI4: a clean search/replace apply returns a typed diff result (files
+    // touched, hunks applied/rejected, changed line ranges) with the full diff
+    // as an artifact, and validates against its declared output_schema.
+    let workspace = temp_root("aci4-apply-clean-workspace");
+    let artifacts = temp_root("aci4-apply-clean-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::write(
+        workspace.join("notes.txt"),
+        "first line\nsecond line\nthird line\n",
+    )
+    .expect("seed");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci4-clean",
+            "run-aci4-clean",
+            "capo.apply_patch",
+            serde_json::json!({
+                "path": "notes.txt",
+                "auto_lint": false,
+                "hunks": [{"search": "second line\n", "replace": "second line edited\n"}],
+            }),
+        ),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+    assert_eq!(result.status, "completed", "summary: {}", result.summary);
+    let definition = wrappers
+        .describe_tool("capo.apply_patch")
+        .expect("definition");
+    let errors = definition.validate_output(&result.narrow_output());
+    assert!(errors.is_empty(), "apply_patch typed output: {errors:?}");
+    let typed = result.narrow_output();
+    assert_eq!(typed["hunks_total"], serde_json::json!(1));
+    assert_eq!(typed["hunks_applied"], serde_json::json!(1));
+    assert_eq!(typed["hunks_rejected"], serde_json::json!(0));
+    let ranges = typed["changed_line_ranges"].as_array().expect("ranges");
+    assert_eq!(ranges, &vec![serde_json::json!("2:2")]);
+    assert_eq!(
+        fs::read_to_string(workspace.join("notes.txt")).expect("file"),
+        "first line\nsecond line edited\nthird line\n"
+    );
+    // The full diff is a redacted artifact, not inline in the typed output.
+    let diff_artifact = result
+        .output_artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "apply_patch_diff")
+        .expect("diff artifact");
+    let diff = fs::read_to_string(&diff_artifact.uri).expect("diff");
+    assert!(
+        diff.contains("-second line") && diff.contains("+second line edited"),
+        "diff artifact must be a real unified diff, got:\n{diff}"
+    );
+}
+
+#[test]
+fn apply_patch_whitespace_and_fuzzy_tolerant_location() {
+    // ACI4: a hunk whose search drifts from the on-disk text (extra indent /
+    // a small edit) still locates via the whitespace/fuzzy fallbacks.
+    let workspace = temp_root("aci4-apply-fuzzy-workspace");
+    let artifacts = temp_root("aci4-apply-fuzzy-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::write(
+        workspace.join("indented.txt"),
+        "        let value = compute();\n",
+    )
+    .expect("seed");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let policy = PermissionPolicy::allow_trusted_local();
+    // The search has NO leading indent; the file does. The whitespace-tolerant
+    // strategy still locates and replaces it.
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci4-ws",
+            "run-aci4-ws",
+            "capo.apply_patch",
+            serde_json::json!({
+                "path": "indented.txt",
+                "auto_lint": false,
+                "hunks": [{"search": "let value = compute();\n", "replace": "        let value = compute2();\n"}],
+            }),
+        ),
+        &policy,
+    );
+    assert_eq!(result.status, "completed", "summary: {}", result.summary);
+    assert_eq!(
+        fs::read_to_string(workspace.join("indented.txt")).expect("file"),
+        "        let value = compute2();\n"
+    );
+    assert!(
+        result.summary.contains("whitespace"),
+        "whitespace strategy must be reported, got: {}",
+        result.summary
+    );
+}
+
+#[test]
+fn apply_patch_rejected_hunk_returns_structured_retryable_error_without_writing() {
+    // ACI4: a hunk no strategy can locate returns a STRUCTURED retryable error
+    // (which path, which hunk, nearest candidate), NOT a raw error string, and
+    // does not write.
+    let workspace = temp_root("aci4-apply-reject-workspace");
+    let artifacts = temp_root("aci4-apply-reject-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let original = "alpha\nbravo\ncharlie\n";
+    fs::write(workspace.join("src.txt"), original).expect("seed");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci4-reject",
+            "run-aci4-reject",
+            "capo.apply_patch",
+            serde_json::json!({
+                "path": "src.txt",
+                "auto_lint": false,
+                "hunks": [{"search": "totally\nunrelated\nblock\n", "replace": "x\n"}],
+            }),
+        ),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+    assert_eq!(result.status, "no_match");
+    let definition = wrappers
+        .describe_tool("capo.apply_patch")
+        .expect("definition");
+    // Even the structured no-match validates against the declared schema.
+    let errors = definition.validate_output(&result.narrow_output());
+    assert!(errors.is_empty(), "no_match typed output: {errors:?}");
+    let typed = result.narrow_output();
+    assert_eq!(typed["status"], serde_json::json!("no_match"));
+    assert_eq!(typed["rejected_hunk_index"], serde_json::json!(0));
+    assert!(
+        typed["reject_reason"].as_str().is_some(),
+        "structured reject must carry a reason"
+    );
+    assert!(
+        typed["nearest_line"].as_i64().is_some(),
+        "structured reject must carry the nearest candidate line"
+    );
+    // The file was NOT written.
+    assert_eq!(
+        fs::read_to_string(workspace.join("src.txt")).expect("file"),
+        original,
+        "a rejected hunk must not clobber the file"
+    );
+}
+
+#[test]
+fn apply_patch_lint_on_edit_returns_typed_findings() {
+    // ACI4: after applying, a Rust file runs `rustfmt --check` and returns typed
+    // lint findings (file, line, rule, message) the loop can repair.
+    let workspace = temp_root("aci4-apply-lint-workspace");
+    let artifacts = temp_root("aci4-apply-lint-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    // A syntactically-valid but BADLY formatted Rust file; the patch leaves it
+    // unformatted so `rustfmt --check` reports a diff.
+    fs::write(workspace.join("lib.rs"), "fn main() {}\n").expect("seed");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci4-lint",
+            "run-aci4-lint",
+            "capo.apply_patch",
+            serde_json::json!({
+                "path": "lib.rs",
+                "hunks": [{
+                    "search": "fn main() {}\n",
+                    "replace": "fn   main( )    {let x=1;}\n",
+                }],
+            }),
+        ),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+    assert_eq!(result.status, "completed", "summary: {}", result.summary);
+    let definition = wrappers
+        .describe_tool("capo.apply_patch")
+        .expect("definition");
+    let errors = definition.validate_output(&result.narrow_output());
+    assert!(errors.is_empty(), "apply_patch typed output: {errors:?}");
+    let typed = result.narrow_output();
+    assert_eq!(
+        typed["lint_status"],
+        serde_json::json!("failed"),
+        "badly-formatted Rust must fail rustfmt --check, summary: {}",
+        result.summary
+    );
+    let findings = typed["lint_findings"].as_array().expect("findings");
+    assert!(!findings.is_empty(), "lint must produce typed findings");
+    let finding = &findings[0];
+    assert!(finding["file"].as_str().is_some(), "finding has file");
+    assert!(finding["line"].as_i64().is_some(), "finding has line");
+    assert!(finding["rule"].as_str().is_some(), "finding has rule");
+    assert!(finding["message"].as_str().is_some(), "finding has message");
+}
+
+#[test]
+fn apply_patch_lint_passes_on_well_formatted_rust() {
+    // ACI4: a well-formatted Rust edit passes rustfmt --check with no findings.
+    let workspace = temp_root("aci4-apply-lint-ok-workspace");
+    let artifacts = temp_root("aci4-apply-lint-ok-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::write(workspace.join("ok.rs"), "fn main() {}\n").expect("seed");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci4-lint-ok",
+            "run-aci4-lint-ok",
+            "capo.apply_patch",
+            serde_json::json!({
+                "path": "ok.rs",
+                "hunks": [{
+                    "search": "fn main() {}\n",
+                    "replace": "fn main() {\n    let _x = 1;\n}\n",
+                }],
+            }),
+        ),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+    assert_eq!(result.status, "completed", "summary: {}", result.summary);
+    let typed = result.narrow_output();
+    assert_eq!(
+        typed["lint_status"],
+        serde_json::json!("passed"),
+        "well-formatted Rust must pass rustfmt --check, summary: {}",
+        result.summary
+    );
+    assert!(
+        typed["lint_findings"]
+            .as_array()
+            .expect("findings")
+            .is_empty(),
+        "passing lint must have no findings"
+    );
+}
+
+#[test]
+fn apply_patch_cannot_edit_outside_the_workspace() {
+    // ACI4: patch writes reuse the wrapper path confinement, so a patch cannot
+    // edit outside the workspace (absolute escape and `..` traversal rejected).
+    let workspace = temp_root("aci4-apply-escape-workspace");
+    let artifacts = temp_root("aci4-apply-escape-artifacts");
+    let outside = temp_root("aci4-apply-escape-outside");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::create_dir_all(&outside).expect("outside");
+    let secret = outside.join("secret.txt");
+    fs::write(&secret, "do not touch\n").expect("seed secret");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    // Absolute path outside the workspace.
+    let abs = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci4-escape-abs",
+            "run-aci4-escape-abs",
+            "capo.apply_patch",
+            serde_json::json!({
+                "path": secret.display().to_string(),
+                "auto_lint": false,
+                "hunks": [{"search": "do not touch\n", "replace": "hacked\n"}],
+            }),
+        ),
+        &policy,
+    );
+    assert_eq!(abs.status, "failed", "absolute escape must be rejected");
+
+    // `..` traversal escape.
+    let traversal = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci4-escape-rel",
+            "run-aci4-escape-rel",
+            "capo.apply_patch",
+            serde_json::json!({
+                "path": "../aci4-apply-escape-outside-x/secret.txt",
+                "auto_lint": false,
+                "hunks": [{"search": "do not touch\n", "replace": "hacked\n"}],
+            }),
+        ),
+        &policy,
+    );
+    assert_eq!(
+        traversal.status, "failed",
+        "`..` traversal escape must be rejected"
+    );
+    // The outside file is untouched.
+    assert_eq!(
+        fs::read_to_string(&secret).expect("secret"),
+        "do not touch\n",
+        "a confined patch must never write outside the workspace"
     );
 }
 
