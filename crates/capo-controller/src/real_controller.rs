@@ -42,11 +42,13 @@ use std::path::Path;
 use capo_adapters::{AgentAdapterHandle, NormalizedAdapterEvent};
 use capo_core::{CommandEnvelope, TaskId, TurnId};
 use capo_state::{SqliteStateStore, StateResult};
-use capo_tools::PermissionPolicy;
+use capo_tools::{
+    CapoToolRegistry, PermissionPolicy, RuntimeToolConfig, ToolExposure, ToolExposureRequest,
+};
 
 use crate::{
     ControllerInit, FakeAgentRegistration, FakeBoundaryController, FakeReadModelObservation,
-    FakeRunRefs, ProjectId, RecoveryReport, TurnFinished,
+    FakeRunRefs, ProjectId, RecoveryReport, ToolDispatchOutcome, ToolDispatchScope, TurnFinished,
 };
 
 /// Run references returned by the real controller. Alias of [`FakeRunRefs`] so
@@ -67,6 +69,34 @@ pub type RealAgentRegistration = FakeAgentRegistration;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RealBoundaryController {
     core: FakeBoundaryController,
+    /// The REAL tool exposures the loop dispatches through (ACI1). `capo` is the
+    /// Capo-owned registry; `runtime` is the workspace-confined runtime wrappers
+    /// once a workspace config is wired. Both are non-fake by construction --
+    /// the test-only [`ToolExposure::fake`] is never installed here, so a real
+    /// loop turn cannot silently default to the fake summary shim.
+    tools: RealToolExposures,
+}
+
+/// The real, non-fake tool exposures the production controller dispatches
+/// through. Kept as a pair because the `ToolExposure` enum is single-variant per
+/// handle and the loop dispatches Capo-owned and runtime-wrapper tools through
+/// distinct registries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RealToolExposures {
+    capo: ToolExposure,
+    runtime: Option<ToolExposure>,
+}
+
+impl RealToolExposures {
+    /// The default real exposures: the Capo registry is always live; the runtime
+    /// wrappers are wired only once a workspace config is provided
+    /// ([`RealBoundaryController::with_runtime_tools`]).
+    fn default_real() -> Self {
+        Self {
+            capo: ToolExposure::capo(),
+            runtime: None,
+        }
+    }
 }
 
 impl RealBoundaryController {
@@ -74,6 +104,7 @@ impl RealBoundaryController {
     pub fn open(project_id: ProjectId, state_root: impl AsRef<Path>) -> StateResult<Self> {
         Ok(Self {
             core: FakeBoundaryController::open(project_id, state_root)?,
+            tools: RealToolExposures::default_real(),
         })
     }
 
@@ -87,7 +118,10 @@ impl RealBoundaryController {
     /// through this view persists byte-identically to driving the core
     /// directly.
     pub fn from_core(core: FakeBoundaryController) -> Self {
-        Self { core }
+        Self {
+            core,
+            tools: RealToolExposures::default_real(),
+        }
     }
 
     /// Open the real controller with an explicit permission policy, mirroring
@@ -103,6 +137,7 @@ impl RealBoundaryController {
                 state_root,
                 permission_policy,
             )?,
+            tools: RealToolExposures::default_real(),
         })
     }
 
@@ -119,6 +154,7 @@ impl RealBoundaryController {
     ) -> StateResult<Self> {
         Ok(Self {
             core: FakeBoundaryController::open_with_adapter(project_id, state_root, adapter)?,
+            tools: RealToolExposures::default_real(),
         })
     }
 
@@ -136,6 +172,7 @@ impl RealBoundaryController {
                 permission_policy,
                 adapter,
             )?,
+            tools: RealToolExposures::default_real(),
         })
     }
 
@@ -150,6 +187,71 @@ impl RealBoundaryController {
     /// existing typed helpers without re-exposing every method.
     pub fn core(&self) -> &FakeBoundaryController {
         &self.core
+    }
+
+    /// Wire the workspace-confined runtime wrappers (ACI1).
+    ///
+    /// The Capo registry is always live; the runtime wrappers
+    /// (`capo.shell_run`/`capo.file_read`/...) need a workspace + artifact root,
+    /// so they are wired here. The installed exposure is the REAL
+    /// [`RuntimeToolWrappers`](capo_tools::RuntimeToolWrappers), never the fake.
+    #[must_use]
+    pub fn with_runtime_tools(mut self, config: RuntimeToolConfig) -> Self {
+        self.tools.runtime = Some(ToolExposure::runtime_wrappers(config));
+        self
+    }
+
+    /// Whether the Capo-owned tool exposure routes through the real registry
+    /// rather than the test-only fake shim. ACI1 invariant: this is always
+    /// `true` for the production controller.
+    pub fn capo_tools_are_real(&self) -> bool {
+        !self.tools.capo.binding().fake
+    }
+
+    /// Whether a real runtime-wrapper exposure has been wired (and, if so, that
+    /// it is non-fake).
+    pub fn runtime_tools_are_real(&self) -> bool {
+        self.tools
+            .runtime
+            .as_ref()
+            .map(|exposure| !exposure.binding().fake)
+            .unwrap_or(false)
+    }
+
+    /// Dispatch a real tool call through the loop (ACI1).
+    ///
+    /// Routes the typed request to the matching REAL exposure
+    /// (`ToolExposureRequest::Capo` -> the Capo registry,
+    /// `ToolExposureRequest::Runtime` -> the runtime wrappers), runs
+    /// `authorize_and_invoke`, and persists the canonical tool-call event
+    /// sequence keyed to the turn via the core's
+    /// [`FakeBoundaryController::dispatch_tool_call`]. The fake summary shim is
+    /// unreachable from this path.
+    pub fn dispatch_tool_call(
+        &self,
+        scope: &ToolDispatchScope,
+        request: ToolExposureRequest,
+    ) -> StateResult<ToolDispatchOutcome> {
+        let exposure = match &request {
+            ToolExposureRequest::Capo(_) => &self.tools.capo,
+            ToolExposureRequest::Runtime(_) => self.tools.runtime.as_ref().expect(
+                "runtime tool exposure not wired; call RealBoundaryController::with_runtime_tools",
+            ),
+            ToolExposureRequest::Fake(_) => panic!(
+                "RealBoundaryController::dispatch_tool_call refuses fake tool requests; \
+                 the real loop dispatches Capo/Runtime tools only"
+            ),
+        };
+        self.core.dispatch_tool_call(exposure, scope, request)
+    }
+
+    /// Borrow the Capo registry behind the real exposure, for callers that need
+    /// the tool definitions (schemas/scopes) directly.
+    pub fn capo_registry(&self) -> Option<&CapoToolRegistry> {
+        match &self.tools.capo {
+            ToolExposure::Capo(registry) => Some(registry),
+            _ => None,
+        }
     }
 
     // --- The methods the server boundary calls -----------------------------

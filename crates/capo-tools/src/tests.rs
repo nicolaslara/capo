@@ -1068,3 +1068,127 @@ fn confine_write_path_rejects_symlinked_prefix_escaping_the_workspace() {
         "a write through a symlink that escapes the workspace must be rejected"
     );
 }
+
+// --- ACI1: real tool dispatch, fake routing killed ------------------------
+
+#[test]
+#[should_panic(expected = "fake-only summary shim")]
+fn tool_exposure_invoke_no_longer_routes_capo_to_the_fake() {
+    // ACI1: the load-bearing dead-routing was `ToolExposure::invoke` sending the
+    // `Capo` variant to `FakeToolExposure`. The real `Capo` exposure must NOT be
+    // reachable through the fake summary shim anymore -- it must dispatch through
+    // `authorize_and_invoke` instead. Routing it through `invoke` is now a wiring
+    // bug and panics.
+    let exposure = ToolExposure::capo();
+    let _ = exposure.invoke(FakeToolRequest {
+        tool_call_id: ToolCallId::new("call-capo"),
+        session_id: SessionId::new("session-tools"),
+        tool_name: "capo.session_summary".to_string(),
+        input_summary: "should not route to fake".to_string(),
+    });
+}
+
+#[test]
+#[should_panic(expected = "fake-only summary shim")]
+fn tool_exposure_invoke_no_longer_routes_runtime_to_the_fake() {
+    let exposure = ToolExposure::runtime_wrappers(RuntimeToolConfig::local_workspace(
+        temp_root("aci1-invoke-runtime-ws"),
+        temp_root("aci1-invoke-runtime-artifacts"),
+    ));
+    let _ = exposure.invoke(FakeToolRequest {
+        tool_call_id: ToolCallId::new("call-runtime"),
+        session_id: SessionId::new("session-tools"),
+        tool_name: "capo.file_read".to_string(),
+        input_summary: "should not route to fake".to_string(),
+    });
+}
+
+#[test]
+fn tool_exposure_fake_invoke_remains_available_for_the_test_only_variant() {
+    // The fake summary shim stays reachable through the explicit, test-only
+    // `Fake` variant -- it is just no longer the default for the real variants.
+    let exposure = ToolExposure::fake();
+    let result = exposure.invoke(FakeToolRequest {
+        tool_call_id: ToolCallId::new("call-fake"),
+        session_id: SessionId::new("session-tools"),
+        tool_name: "capo.session_summary".to_string(),
+        input_summary: "summarize".to_string(),
+    });
+    assert_eq!(result.tool_name, "capo.session_summary");
+}
+
+#[test]
+fn tool_exposure_authorize_and_invoke_dispatches_the_real_capo_registry() {
+    // ACI1: the typed dispatch routes `Capo` requests into the REAL
+    // `CapoToolRegistry::authorize_and_invoke`, emitting the real audit lifecycle
+    // (not a fabricated fake observation).
+    let exposure = ToolExposure::capo();
+    let result = exposure.authorize_and_invoke(
+        ToolExposureRequest::Capo(CapoToolRequest {
+            tool_call_id: ToolCallId::new("call-capo-real"),
+            session_id: SessionId::new("session-tools"),
+            tool_id: "capo.session_summary".to_string(),
+            capability_profile_id: "trusted-local-dev".to_string(),
+            context: tool_context(),
+        }),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+    let ToolExposureResult::Capo(result) = result else {
+        panic!("Capo request must produce a Capo result");
+    };
+    assert_eq!(result.permission_decision.effect, "allow");
+    assert_eq!(result.output, "summary text");
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|event| event.kind == "tool.invocation_started")
+    );
+}
+
+#[test]
+fn tool_exposure_authorize_and_invoke_dispatches_the_real_runtime_wrappers() {
+    let workspace = temp_root("aci1-dispatch-runtime-ws");
+    let artifacts = temp_root("aci1-dispatch-runtime-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::write(workspace.join("note.md"), "hello aci1").expect("seed file");
+    let exposure = ToolExposure::runtime_wrappers(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let result = exposure.authorize_and_invoke(
+        ToolExposureRequest::Runtime(wrapper_request(
+            "call-runtime-real",
+            "run-runtime-real",
+            "capo.file_read",
+            serde_json::json!({"path":"note.md"}),
+        )),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+    let ToolExposureResult::Runtime(result) = result else {
+        panic!("Runtime request must produce a Runtime result");
+    };
+    assert_eq!(result.status, "completed");
+    assert_eq!(result.output_artifacts.len(), 1);
+    assert_eq!(
+        fs::read_to_string(&result.output_artifacts[0].uri).expect("artifact"),
+        "hello aci1"
+    );
+}
+
+#[test]
+#[should_panic(expected = "variant mismatch")]
+fn tool_exposure_authorize_and_invoke_rejects_a_cross_variant_request() {
+    // A `Runtime` request against the `Capo` exposure is a wiring bug; it must be
+    // rejected, never silently downgraded to the fake path.
+    let exposure = ToolExposure::capo();
+    let _ = exposure.authorize_and_invoke(
+        ToolExposureRequest::Runtime(wrapper_request(
+            "call-mismatch",
+            "run-mismatch",
+            "capo.file_read",
+            serde_json::json!({"path":"note.md"}),
+        )),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+}

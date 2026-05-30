@@ -1592,26 +1592,26 @@ fn real_controller_read_models_match_fake_path_for_identical_scripted_output() {
 
     let fake_root = temp_root();
     let fake = run_sequence_on(|adapter| {
-        SqliteStateStoreBundle::Fake(
+        SqliteStateStoreBundle::Fake(Box::new(
             FakeBoundaryController::open_with_adapter(
                 ProjectId::new("project-capo"),
                 &fake_root,
                 adapter,
             )
             .expect("open fake controller"),
-        )
+        ))
     });
 
     let real_root = temp_root();
     let real = run_sequence_on(|adapter| {
-        SqliteStateStoreBundle::Real(
+        SqliteStateStoreBundle::Real(Box::new(
             RealBoundaryController::open_with_adapter(
                 ProjectId::new("project-capo"),
                 &real_root,
                 adapter,
             )
             .expect("open real controller"),
-        )
+        ))
     });
 
     assert_eq!(real.0, fake.0, "session projection diverged");
@@ -1858,14 +1858,14 @@ fn real_controller_passes_the_identical_send_steer_interrupt_stop_suite() {
         let fake_root = temp_root();
         let (fake_fp, fake_refs, _fake) = run_suite(
             |adapter| {
-                SqliteStateStoreBundle::Fake(
+                SqliteStateStoreBundle::Fake(Box::new(
                     FakeBoundaryController::open_with_adapter(
                         ProjectId::new("project-capo"),
                         &fake_root,
                         adapter,
                     )
                     .expect("open fake controller"),
-                )
+                ))
             },
             terminal,
         );
@@ -1873,14 +1873,14 @@ fn real_controller_passes_the_identical_send_steer_interrupt_stop_suite() {
         let real_root = temp_root();
         let (real_fp, real_refs, real) = run_suite(
             |adapter| {
-                SqliteStateStoreBundle::Real(
+                SqliteStateStoreBundle::Real(Box::new(
                     RealBoundaryController::open_with_adapter(
                         ProjectId::new("project-capo"),
                         &real_root,
                         adapter,
                     )
                     .expect("open real controller"),
-                )
+                ))
             },
             terminal,
         );
@@ -1980,26 +1980,26 @@ fn fake_and_real_paths_produce_equivalent_event_sequences_for_a_scripted_turn() 
 
     let fake_root = temp_root();
     let fake = run_scripted_turn(|adapter| {
-        SqliteStateStoreBundle::Fake(
+        SqliteStateStoreBundle::Fake(Box::new(
             FakeBoundaryController::open_with_adapter(
                 ProjectId::new("project-capo"),
                 &fake_root,
                 adapter,
             )
             .expect("open fake controller"),
-        )
+        ))
     });
 
     let real_root = temp_root();
     let real = run_scripted_turn(|adapter| {
-        SqliteStateStoreBundle::Real(
+        SqliteStateStoreBundle::Real(Box::new(
             RealBoundaryController::open_with_adapter(
                 ProjectId::new("project-capo"),
                 &real_root,
                 adapter,
             )
             .expect("open real controller"),
-        )
+        ))
     });
 
     // Equal event sequences (the causal session event-kind order). There are no
@@ -2412,13 +2412,218 @@ fn wall_clock_and_token_cost_breaches_abort_with_their_reason_code_and_terminal_
     }
 }
 
+// --- ACI1: real tool dispatch wired into the loop -------------------------
+
+/// ACI1: the real controller is constructed with the REAL Capo registry and
+/// real runtime wrappers, never the test-only fake exposure.
+#[test]
+fn real_controller_tool_exposures_are_real_not_the_fake_default() {
+    use capo_tools::RuntimeToolConfig;
+
+    let controller =
+        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+    // The Capo registry is live by construction.
+    assert!(controller.capo_tools_are_real());
+    assert!(controller.capo_registry().is_some());
+    // Runtime wrappers are not the fake either, once wired with a workspace.
+    assert!(!controller.runtime_tools_are_real());
+    let controller =
+        controller.with_runtime_tools(RuntimeToolConfig::local_workspace(temp_root(), temp_root()));
+    assert!(controller.runtime_tools_are_real());
+}
+
+/// ACI1: a real loop turn invoking a Capo-governed tool flows through
+/// `authorize_and_invoke` (the real registry, not the fake summary shim) and
+/// persists the canonical observed tool-result event sequence keyed to the turn.
+#[test]
+fn real_controller_turn_invokes_a_capo_tool_through_authorize_and_invoke() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{CapoToolContext, CapoToolRequest, ToolExposureRequest, ToolExposureResult};
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci1-capo-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open real controller");
+    let registration = controller.register_agent("aci1-worker").expect("agent");
+    let refs = controller
+        .send_task(
+            &registration,
+            "Inspect agent status through a real tool call",
+        )
+        .expect("send task");
+
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-aci1-tool"),
+        tool_call_id: ToolCallId::new("tool-aci1-agent-status"),
+    };
+    let outcome = controller
+        .dispatch_tool_call(
+            &scope,
+            ToolExposureRequest::Capo(CapoToolRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: scope.session_id.clone(),
+                tool_id: "capo.agent_status".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                context: CapoToolContext {
+                    task_status: "task active".to_string(),
+                    agent_status: "agent running".to_string(),
+                    session_summary: "summary".to_string(),
+                    workpad_excerpt: "section".to_string(),
+                    evidence_note: "note".to_string(),
+                    capability_scope: "state:read:agent".to_string(),
+                },
+            }),
+        )
+        .expect("dispatch capo tool");
+
+    // The dispatch produced a real Capo result (allowed), not a fake observation.
+    let ToolExposureResult::Capo(result) = &outcome.result else {
+        panic!("expected a real Capo result");
+    };
+    assert_eq!(result.permission_decision.effect, "allow");
+    assert_eq!(result.output, "agent running");
+    assert_eq!(outcome.status, "completed");
+
+    // The canonical real audit event sequence was persisted (in order).
+    assert_eq!(
+        outcome.observed_event_kinds,
+        vec![
+            "tool.call_requested",
+            "permission.requested",
+            "permission.decided",
+            "capability.grant_used",
+            "tool.invocation_started",
+            "tool.output_artifact_recorded",
+            "tool.output_observed",
+            "tool.call_completed",
+            "tool.result_delivered",
+        ]
+    );
+
+    // The observed tool-result event and the completed projection are persisted,
+    // keyed to this turn.
+    let events = controller
+        .state()
+        .events_for_session_turn(&refs.session_id, "turn-aci1-tool")
+        .expect("turn events");
+    assert!(events.iter().any(|event| {
+        event.kind == "tool.output_observed" && event.payload_json.contains("capo.agent_status")
+    }));
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == "tool.call_completed")
+    );
+    let tools = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    assert!(tools.iter().any(|tool| {
+        tool.tool_call_id == scope.tool_call_id
+            && tool.tool_name == "capo.agent_status"
+            && tool.tool_origin == "capo"
+            && tool.status == "completed"
+            && tool.turn_id.as_deref() == Some("turn-aci1-tool")
+    }));
+}
+
+/// ACI1: the runtime-wrapper path is equally real -- a `capo.file_read` turn
+/// flows through `RuntimeToolWrappers::authorize_and_invoke`, reads the
+/// workspace file, and records the output artifact.
+#[test]
+fn real_controller_turn_invokes_a_runtime_wrapper_through_authorize_and_invoke() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{
+        RuntimeToolConfig, ToolExposureRequest, ToolExposureResult, WrapperToolRequest,
+    };
+
+    let workspace = temp_root();
+    let artifacts = temp_root();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("status.md"), "real read through the loop").expect("seed file");
+
+    let scripted =
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci1-runtime-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open real controller")
+    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace, artifacts));
+    let registration = controller
+        .register_agent("aci1-runtime-worker")
+        .expect("agent");
+    let refs = controller
+        .send_task(
+            &registration,
+            "Read a workspace file through a real tool call",
+        )
+        .expect("send task");
+
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-aci1-runtime"),
+        tool_call_id: ToolCallId::new("tool-aci1-file-read"),
+    };
+    let outcome = controller
+        .dispatch_tool_call(
+            &scope,
+            ToolExposureRequest::Runtime(WrapperToolRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: scope.session_id.clone(),
+                run_id: scope.run_id.clone(),
+                tool_id: "capo.file_read".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                input: serde_json::json!({"path": "status.md"}),
+            }),
+        )
+        .expect("dispatch runtime tool");
+
+    let ToolExposureResult::Runtime(result) = &outcome.result else {
+        panic!("expected a real runtime-wrapper result");
+    };
+    assert_eq!(result.status, "completed");
+    assert_eq!(result.output_artifacts.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&result.output_artifacts[0].uri).expect("artifact"),
+        "real read through the loop"
+    );
+    assert_eq!(outcome.tool_origin, "runtime");
+
+    let tools = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    assert!(tools.iter().any(|tool| {
+        tool.tool_call_id == scope.tool_call_id
+            && tool.tool_name == "capo.file_read"
+            && tool.status == "completed"
+            && tool.turn_id.as_deref() == Some("turn-aci1-runtime")
+    }));
+}
+
 /// Tiny test-only adapter over the two coexisting controllers so the parity
 /// test can drive an identical scripted sequence on each without duplicating
 /// the body. Both arms call the SAME public method names; the point of the test
 /// is that the resulting persisted state is identical.
+// Both controllers are large handles; box both arms so the enum stays small and
+// balanced. ACI1 gave `RealBoundaryController` its own real tool exposures, so
+// it grew past the fake handle and tripped `large_enum_variant`; boxing both
+// keeps the lint happy (and mirrors the server's `ControllerRoute::Real`).
 enum SqliteStateStoreBundle {
-    Fake(FakeBoundaryController),
-    Real(RealBoundaryController),
+    Fake(Box<FakeBoundaryController>),
+    Real(Box<RealBoundaryController>),
 }
 
 impl SqliteStateStoreBundle {

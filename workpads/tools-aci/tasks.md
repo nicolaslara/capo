@@ -81,7 +81,41 @@ Must not do:
 
 ## ACI1 - Wire Real Tool Dispatch Into The Loop
 
-Status: pending.
+Status: done.
+
+Evidence:
+
+- `ToolExposure::invoke` (`crates/capo-tools/src/lib.rs`) no longer routes
+  `Capo`/`Runtime` to `FakeToolExposure`: it is now the fake-only summary shim
+  (panics for real variants) and a new typed
+  `ToolExposure::authorize_and_invoke(ToolExposureRequest, &PermissionPolicy)
+  -> ToolExposureResult` dispatches `Capo` ->
+  `CapoToolRegistry::authorize_and_invoke` and `Runtime` ->
+  `RuntimeToolWrappers::authorize_and_invoke`; a cross-variant request is
+  rejected, never downgraded to fake.
+- `RealBoundaryController` (`crates/capo-controller/src/real_controller.rs`) is
+  constructed with REAL exposures (`ToolExposure::capo()` always live; real
+  runtime wrappers via `with_runtime_tools(RuntimeToolConfig)`); the test-only
+  `Fake` exposure is never installed. New `dispatch_tool_call` drives the new
+  core `FakeBoundaryController::dispatch_tool_call`
+  (`crates/capo-controller/src/tool_dispatch.rs`), which reuses the existing
+  `scoped_event`/`append_event`/`ToolCallProjection` primitives and normalizes
+  the typed audit events onto the canonical
+  `tool.call_requested -> permission.requested -> permission.decided ->
+  capability.grant_used -> tool.invocation_started ->
+  tool.output_artifact_recorded -> tool.output_observed -> tool.call_completed
+  -> tool.result_delivered` sequence; it does NOT call
+  `append_dispatch_run_exit` (no second pipeline).
+- Tests added: `cargo test -p capo-tools` (invoke no longer routes
+  Capo/Runtime to fake; authorize_and_invoke dispatches the real registry and
+  real wrappers; cross-variant rejection) and `cargo test -p capo-controller`
+  (a real turn invokes `capo.agent_status` through `authorize_and_invoke` and
+  persists the canonical observed sequence keyed to the turn; a real
+  `capo.file_read` turn flows through the runtime wrappers; real exposures are
+  not the fake default).
+- Gate run from `/Users/nicolas/devel/capo-wt/tools-aci`:
+  `cargo fmt --check` clean; `cargo clippy --all-targets --all-features -- -D
+  warnings` clean; `cargo test --workspace` => 329 passed, 0 failed.
 
 Acceptance:
 

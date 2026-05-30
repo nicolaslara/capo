@@ -35,6 +35,7 @@ mod local_dispatch;
 mod real_controller;
 mod resource_ceiling;
 mod session_control;
+mod tool_dispatch;
 mod turn_loop;
 
 pub use local_dispatch::LocalAdapterDispatchRunStart;
@@ -44,6 +45,7 @@ pub use real_controller::{
 pub use resource_ceiling::{
     CeilingBreach, CeilingTurnOutcome, RunResourceCeiling, RunResourceUsage,
 };
+pub use tool_dispatch::{ToolDispatchOutcome, ToolDispatchScope};
 pub use turn_loop::{TurnFinished, TurnStopReason};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

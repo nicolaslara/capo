@@ -65,13 +65,91 @@ impl ToolExposure {
         }
     }
 
+    /// The legacy fake summary shim, kept for the scripted `send_task` e2e path.
+    ///
+    /// ACI1: this is now reachable ONLY through the explicit test-only
+    /// [`Self::Fake`] variant. The `Capo`/`Runtime` variants no longer silently
+    /// masquerade as the fake here -- they must go through the typed
+    /// [`Self::authorize_and_invoke`] dispatch, which calls the real
+    /// [`CapoToolRegistry::authorize_and_invoke`] /
+    /// [`RuntimeToolWrappers::authorize_and_invoke`]. Routing a real variant
+    /// through the fake summary shim is a wiring bug, so it panics rather than
+    /// returning a fabricated fake observation.
     pub fn invoke(&self, request: FakeToolRequest) -> FakeToolResult {
         match self {
-            Self::Capo(_) => FakeToolExposure.invoke(request),
-            Self::Runtime(_) => FakeToolExposure.invoke(request),
             Self::Fake(exposure) => exposure.invoke(request),
+            Self::Capo(_) | Self::Runtime(_) => panic!(
+                "ToolExposure::invoke is the fake-only summary shim; the real \
+                 `{}` exposure must dispatch through ToolExposure::authorize_and_invoke",
+                self.binding().variant
+            ),
         }
     }
+
+    /// Typed tool dispatch: route a real tool call through the registry/wrappers
+    /// `authorize_and_invoke`, or the fake exposure for the test-only variant.
+    ///
+    /// ACI1: this replaces the dead fake-only routing. The `Capo` variant
+    /// dispatches into [`CapoToolRegistry::authorize_and_invoke`] and the
+    /// `Runtime` variant into [`RuntimeToolWrappers::authorize_and_invoke`], so a
+    /// real loop turn that invokes `capo.file_read`/`capo.shell_run` flows
+    /// through the real authorize+invoke path and the real audit event sequence.
+    /// A request whose variant does not match the exposure variant is a wiring
+    /// bug and is rejected as a mismatch rather than silently downgraded to the
+    /// fake path.
+    pub fn authorize_and_invoke(
+        &self,
+        request: ToolExposureRequest,
+        policy: &PermissionPolicy,
+    ) -> ToolExposureResult {
+        match (self, request) {
+            (Self::Capo(registry), ToolExposureRequest::Capo(request)) => {
+                ToolExposureResult::Capo(registry.authorize_and_invoke(request, policy))
+            }
+            (Self::Runtime(wrappers), ToolExposureRequest::Runtime(request)) => {
+                ToolExposureResult::Runtime(wrappers.authorize_and_invoke(request, policy))
+            }
+            (Self::Fake(exposure), ToolExposureRequest::Fake(request)) => {
+                ToolExposureResult::Fake(exposure.invoke(request))
+            }
+            (exposure, request) => panic!(
+                "ToolExposure::authorize_and_invoke variant mismatch: `{}` exposure \
+                 cannot dispatch a `{}` request",
+                exposure.binding().variant,
+                request.variant_name()
+            ),
+        }
+    }
+}
+
+/// A typed tool-dispatch request: a real Capo-registry call, a real
+/// runtime-wrapper call, or the test-only fake summary observation.
+///
+/// ACI1: the typed envelope that lets [`ToolExposure::authorize_and_invoke`]
+/// route to the real `authorize_and_invoke` instead of the fake shim.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolExposureRequest {
+    Capo(CapoToolRequest),
+    Runtime(WrapperToolRequest),
+    Fake(FakeToolRequest),
+}
+
+impl ToolExposureRequest {
+    fn variant_name(&self) -> &'static str {
+        match self {
+            Self::Capo(_) => "capo",
+            Self::Runtime(_) => "runtime",
+            Self::Fake(_) => "fake",
+        }
+    }
+}
+
+/// The typed result of [`ToolExposure::authorize_and_invoke`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolExposureResult {
+    Capo(CapoToolResult),
+    Runtime(WrapperToolResult),
+    Fake(FakeToolResult),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
