@@ -242,7 +242,7 @@ Verification:
 
 ## ACI3 - Narrow Typed Output For Wrappers And Tightened file_write
 
-Status: done.
+Status: done (gate green after `reached_completion` initializer fix).
 
 Evidence:
 
@@ -286,6 +286,20 @@ Evidence:
   Existing ACI2 output-schema validation tests still cover the wrappers.
 - Gate run from `/Users/nicolas/devel/capo-wt/tools-aci`: `cargo fmt --check`
   clean; `cargo clippy --all-targets --all-features -- -D warnings` clean;
+  `cargo test --workspace` => 343 passed, 0 failed (capo-tools: 38 passed);
+  `git diff --check` clean.
+- Gate remediation: the `WrapperExecution` struct carried a documented
+  `reached_completion` field (and a `completed()` constructor) that the six
+  handler initializer sites in `runtime_wrappers.rs` (`shell_run`, `git_command`,
+  `git_commit`, `file_read`, `file_write` success, `file_write`
+  precondition-failed) did not set, which broke compilation
+  (`missing field reached_completion`). Fixed by routing the five
+  unit-of-work-completing returns through `WrapperExecution::completed(...)`
+  (`reached_completion: true`) and setting `reached_completion: false` on the
+  `precondition_failed` no-op return, matching the `invoke_authorized` match
+  arms that branch on `execution.reached_completion`. Re-ran the gate from
+  `/Users/nicolas/devel/capo-wt/tools-aci`: `cargo fmt --check` clean;
+  `cargo clippy --all-targets --all-features -- -D warnings` clean;
   `cargo test --workspace` => 343 passed, 0 failed (capo-tools: 38 passed);
   `git diff --check` clean.
 

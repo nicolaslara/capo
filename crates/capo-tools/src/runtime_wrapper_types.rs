@@ -12,8 +12,24 @@ pub struct RuntimeToolConfig {
     pub artifact_root: PathBuf,
     pub env_allowlist: Vec<String>,
     pub redaction_rules: Vec<RedactionRule>,
+    /// Inline output cap (ACI3). Output beyond this is NOT inlined: the full
+    /// payload lives in the artifact and the typed result records `truncated`.
     pub output_limit_bytes: usize,
+    /// The hard ceiling the runtime runner enforces for a single wrapper
+    /// execution's stdout/stderr (ACI3). This is a real, bounded resource cap:
+    /// output beyond it fails the call with `OutputLimitExceeded` rather than
+    /// being buffered/persisted, so a runaway command (`yes`) cannot fill memory
+    /// or disk. It is deliberately much larger than `output_limit_bytes` so the
+    /// normal "over inline cap, under ceiling = truncated inline, full artifact"
+    /// path keeps working, but it is never unbounded.
+    pub artifact_limit_bytes: usize,
 }
+
+/// Default hard ceiling for a single wrapper execution's captured output (ACI3).
+/// `start_process` buffers the child's entire stdout/stderr in memory via
+/// `command.output()`, so this bound is what keeps that buffer (and the
+/// subsequent on-disk artifact) finite for a runaway command.
+pub(crate) const DEFAULT_ARTIFACT_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
 impl RuntimeToolConfig {
     pub fn local_workspace(workspace_root: PathBuf, artifact_root: PathBuf) -> Self {
@@ -23,6 +39,7 @@ impl RuntimeToolConfig {
             env_allowlist: Vec::new(),
             redaction_rules: Vec::new(),
             output_limit_bytes: 64 * 1024,
+            artifact_limit_bytes: DEFAULT_ARTIFACT_LIMIT_BYTES,
         }
     }
 }

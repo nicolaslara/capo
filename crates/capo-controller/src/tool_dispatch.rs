@@ -242,7 +242,14 @@ impl NormalizedToolResult {
         Self {
             tool_name: result.tool_id.clone(),
             tool_origin: "runtime".to_string(),
-            status: result.status.clone(),
+            // Normalize onto the dispatch terminal-status vocabulary
+            // (`completed`/`failed`/`denied`) that downstream consumers
+            // (dashboards, safety-gates score_run, goal-autonomy evidence) match
+            // on. A wrapper may carry finer-grained terminal statuses for the
+            // loop (e.g. `precondition_failed`, or the runtime's `exited`), but
+            // the persisted dispatch status must stay in the shared vocabulary so
+            // a non-completed outcome is never mis-bucketed as a completion.
+            status: normalize_runtime_status(&result.status),
             input_artifact_id: result
                 .input_artifact
                 .as_ref()
@@ -253,6 +260,23 @@ impl NormalizedToolResult {
                 .map(|artifact| artifact.artifact_id.clone()),
             events: result.events.clone(),
         }
+    }
+}
+
+/// Fold a runtime wrapper's terminal status onto the dispatch terminal-status
+/// vocabulary downstream consumers match on.
+///
+/// Most wrapper statuses are already canonical (`completed`/`denied`, and the
+/// process-runner's `exited`/`failed` which the loop understands). The
+/// non-completing `precondition_failed` guard is a real terminal FAILURE for
+/// dispatch/projection purposes (no write, no artifact), so it is folded onto
+/// `failed` here; the precise `precondition_failed` semantics (and the
+/// expected/actual hashes) still travel on the wrapper result's own status and
+/// typed output for the loop to reflect.
+fn normalize_runtime_status(status: &str) -> String {
+    match status {
+        "precondition_failed" => "failed".to_string(),
+        other => other.to_string(),
     }
 }
 

@@ -212,12 +212,36 @@ impl RuntimeToolWrappers {
         let input_artifact = self.record_input_artifact(&request);
         let execution = self.execute(&request);
         match execution {
-            Ok(execution) => {
+            Ok(execution) if execution.reached_completion => {
                 events.extend([
                     ToolAuditEvent::new("tool.output_artifact_recorded", "safe"),
                     ToolAuditEvent::new("tool.output_observed", execution.status.clone()),
                     ToolAuditEvent::new("tool.call_completed", "completed"),
                     ToolAuditEvent::new("tool.result_delivered", "delivered"),
+                ]);
+                WrapperToolResult {
+                    tool_call_id: request.tool_call_id,
+                    tool_id: request.tool_id,
+                    status: execution.status,
+                    summary: execution.summary,
+                    typed_output: execution.typed_output,
+                    input_artifact: Some(input_artifact),
+                    output_artifacts: execution.output_artifacts,
+                    permission_decision: authorization.permission,
+                    events,
+                }
+            }
+            // A terminal outcome that did NOT complete a unit of work (no write,
+            // no artifact) -- e.g. a `precondition_failed` guard. It must NOT
+            // emit the success audit sequence (`tool.output_artifact_recorded` /
+            // `tool.call_completed`); instead it flows through the same
+            // non-completed audit shape as a handler failure so the dispatch
+            // layer stamps its real terminal status without ever marking it a
+            // completed call (ACI3).
+            Ok(execution) => {
+                events.extend([
+                    ToolAuditEvent::new("tool.output_observed", execution.status.clone()),
+                    ToolAuditEvent::new("tool.call_failed", execution.status.clone()),
                 ]);
                 WrapperToolResult {
                     tool_call_id: request.tool_call_id,
@@ -299,7 +323,7 @@ impl RuntimeToolWrappers {
         // inline `output_limit_bytes` cap.
         let started = Instant::now();
         let outcome = self
-            .uncapped_runtime_runner()
+            .bounded_runtime_runner()
             .start_process(LocalProcessRequest {
                 run_id: sanitized_run_id(&request.run_id),
                 turn_id: None,
@@ -327,12 +351,12 @@ impl RuntimeToolWrappers {
             &stdout.artifact_id,
             truncated,
         );
-        Ok(WrapperExecution {
-            status: outcome.process.status,
-            summary: format!("shell exited with {exit_label}"),
+        Ok(WrapperExecution::completed(
+            outcome.process.status,
+            format!("shell exited with {exit_label}"),
             typed_output,
-            output_artifacts: vec![stdout, stderr],
-        })
+            vec![stdout, stderr],
+        ))
     }
 
     fn git_command(
@@ -351,7 +375,7 @@ impl RuntimeToolWrappers {
         }
         let started = Instant::now();
         let outcome = self
-            .uncapped_runtime_runner()
+            .bounded_runtime_runner()
             .start_process(LocalProcessRequest {
                 run_id: sanitized_run_id(&request.run_id),
                 turn_id: None,
@@ -375,12 +399,12 @@ impl RuntimeToolWrappers {
             &stdout.artifact_id,
             truncated,
         );
-        Ok(WrapperExecution {
-            status: outcome.process.status,
-            summary: format!("git {label} completed"),
+        Ok(WrapperExecution::completed(
+            outcome.process.status,
+            format!("git {label} completed"),
             typed_output,
-            output_artifacts: vec![stdout, stderr],
-        })
+            vec![stdout, stderr],
+        ))
     }
 
     fn git_commit(&self, request: &WrapperToolRequest) -> Result<WrapperExecution, String> {
@@ -393,7 +417,7 @@ impl RuntimeToolWrappers {
         }
         let started = Instant::now();
         let outcome = self
-            .uncapped_runtime_runner()
+            .bounded_runtime_runner()
             .start_process(LocalProcessRequest {
                 run_id: sanitized_run_id(&request.run_id),
                 turn_id: None,
@@ -429,12 +453,12 @@ impl RuntimeToolWrappers {
             &stdout.artifact_id,
             truncated,
         );
-        Ok(WrapperExecution {
-            status: outcome.process.status,
-            summary: format!("git commit completed with {exit_label}"),
+        Ok(WrapperExecution::completed(
+            outcome.process.status,
+            format!("git commit completed with {exit_label}"),
             typed_output,
-            output_artifacts: vec![stdout, stderr],
-        })
+            vec![stdout, stderr],
+        ))
     }
 
     fn file_read(
@@ -458,12 +482,12 @@ impl RuntimeToolWrappers {
             "content_hash": artifact.content_hash.clone(),
             "output_artifact_id": artifact.artifact_id.clone(),
         });
-        Ok(WrapperExecution {
-            status: "completed".to_string(),
-            summary: format!("{kind} read {}", path.display()),
+        Ok(WrapperExecution::completed(
+            "completed".to_string(),
+            format!("{kind} read {}", path.display()),
             typed_output,
-            output_artifacts: vec![artifact],
-        })
+            vec![artifact],
+        ))
     }
 
     fn workpad_read(&self, request: &WrapperToolRequest) -> Result<WrapperExecution, String> {
@@ -520,6 +544,7 @@ impl RuntimeToolWrappers {
                 ),
                 typed_output,
                 output_artifacts: Vec::new(),
+                reached_completion: false,
             });
         }
 
@@ -587,12 +612,12 @@ impl RuntimeToolWrappers {
             "bytes_written": after.len() as i64,
             "output_artifact_id": artifact.artifact_id.clone(),
         });
-        Ok(WrapperExecution {
-            status: "completed".to_string(),
-            summary: format!("file_write {mode} wrote {}", path.display()),
+        Ok(WrapperExecution::completed(
+            "completed".to_string(),
+            format!("file_write {mode} wrote {}", path.display()),
             typed_output,
-            output_artifacts: vec![artifact],
-        })
+            vec![artifact],
+        ))
     }
 
     fn record_input_artifact(&self, request: &WrapperToolRequest) -> WrapperArtifact {
@@ -642,21 +667,27 @@ impl RuntimeToolWrappers {
         })
     }
 
-    /// A runner whose runtime output limit is effectively unbounded (ACI3).
+    /// A runner bounded by the configured `artifact_limit_bytes` ceiling (ACI3).
     ///
     /// Execution wrappers want the FULL output preserved in the artifact and a
-    /// `truncated` marker in the typed result, rather than a hard
-    /// `OutputLimitExceeded` failure that discards the artifacts. The wrapper
-    /// then compares the artifact size against the configured inline
-    /// `output_limit_bytes` cap to decide `truncated`.
-    fn uncapped_runtime_runner(&self) -> LocalProcessRunner {
+    /// `truncated` marker in the typed result (rather than a hard
+    /// `OutputLimitExceeded` failure that discards the artifacts) whenever output
+    /// merely exceeds the small inline `output_limit_bytes` cap. So the runner's
+    /// cap is raised to the much larger `artifact_limit_bytes` ceiling -- but it
+    /// stays a REAL bound: `start_process` buffers the whole child stdout/stderr
+    /// in memory and then persists it, so a runaway command (`yes`) that blows
+    /// past the ceiling is rejected with `OutputLimitExceeded` rather than
+    /// filling memory/disk. The wrapper then compares the (bounded) artifact size
+    /// against the inline `output_limit_bytes` cap to decide `truncated`. The cap
+    /// is never `usize::MAX`.
+    fn bounded_runtime_runner(&self) -> LocalProcessRunner {
         let mut config = LocalProcessConfig::for_test(
             self.config.workspace_root.clone(),
             self.config.artifact_root.clone(),
         );
         config.env_allowlist = self.config.env_allowlist.clone();
         config.redaction_rules = self.config.redaction_rules.clone();
-        config.output_limit_bytes = usize::MAX;
+        config.output_limit_bytes = self.config.artifact_limit_bytes;
         LocalProcessRunner::new(config)
     }
 
@@ -769,6 +800,32 @@ struct WrapperExecution {
     /// validatable against the tool's declared `output_schema`.
     typed_output: Value,
     output_artifacts: Vec<WrapperArtifact>,
+    /// Whether this execution actually completed a unit of work (wrote output /
+    /// produced an artifact). When `false` (e.g. a `precondition_failed` write
+    /// that made no change and produced no artifact), the call is NOT audited as
+    /// a completed call: it must not emit `tool.output_artifact_recorded` /
+    /// `tool.call_completed`, so downstream consumers never mis-bucket a no-op
+    /// terminal outcome as a successful completion (ACI3).
+    reached_completion: bool,
+}
+
+impl WrapperExecution {
+    /// A successful execution that produced output/artifacts and is audited as a
+    /// completed call.
+    fn completed(
+        status: String,
+        summary: String,
+        typed_output: Value,
+        output_artifacts: Vec<WrapperArtifact>,
+    ) -> Self {
+        Self {
+            status,
+            summary,
+            typed_output,
+            output_artifacts,
+            reached_completion: true,
+        }
+    }
 }
 
 fn verify_authorization_matches_request(
