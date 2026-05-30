@@ -413,6 +413,7 @@ fn controller_hard_kill_terminates_the_process_group_mid_run_and_records_the_abo
     let mut running = runner
         .spawn_process(LocalProcessRequest {
             run_id: capo_core::RunId::new("run-kill"),
+            turn_id: None,
             program: "/bin/sh".to_string(),
             argv: vec![
                 "-c".to_string(),

@@ -281,6 +281,7 @@ impl RuntimeToolWrappers {
             .runtime_runner()
             .start_process(LocalProcessRequest {
                 run_id: sanitized_run_id(&request.run_id),
+                turn_id: None,
                 program,
                 argv,
                 cwd,
@@ -321,6 +322,7 @@ impl RuntimeToolWrappers {
             .runtime_runner()
             .start_process(LocalProcessRequest {
                 run_id: sanitized_run_id(&request.run_id),
+                turn_id: None,
                 program: "git".to_string(),
                 argv,
                 cwd: self.config.workspace_root.clone(),
@@ -349,6 +351,7 @@ impl RuntimeToolWrappers {
             .runtime_runner()
             .start_process(LocalProcessRequest {
                 run_id: sanitized_run_id(&request.run_id),
+                turn_id: None,
                 program: "git".to_string(),
                 argv: vec![
                     "-c".to_string(),

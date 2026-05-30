@@ -251,12 +251,14 @@ impl LocalProcessRunner {
         };
         let stdout_artifact = self.write_artifact(
             &request.run_id,
+            request.turn_id.as_deref(),
             "stdout",
             &stdout.bytes,
             &stdout.redaction_state,
         )?;
         let stderr_artifact = self.write_artifact(
             &request.run_id,
+            request.turn_id.as_deref(),
             "stderr",
             &stderr.bytes,
             &stderr.redaction_state,
@@ -319,7 +321,7 @@ impl LocalProcessRunner {
         self.ensure_cwd_allowed(&request.cwd)?;
         fs::create_dir_all(&self.config.artifact_root)?;
 
-        let run_dir = self.config.artifact_root.join(request.run_id.as_str());
+        let run_dir = self.run_dir_for(&request.run_id, request.turn_id.as_deref());
         fs::create_dir_all(&run_dir)?;
         let stdout_path = run_dir.join("stdout.txt");
         let stderr_path = run_dir.join("stderr.txt");
@@ -352,6 +354,7 @@ impl LocalProcessRunner {
                 redaction_state: "redacted".to_string(),
             },
             child,
+            turn_id: request.turn_id.clone(),
             stdout_path,
             stderr_path,
             events: vec![
@@ -472,6 +475,7 @@ impl LocalProcessRunner {
         fs::write(&process.stderr_path, &stderr.bytes)?;
         let stdout_artifact = self.output_artifact_from_path(
             &process.process.run_id,
+            process.turn_id.as_deref(),
             "stdout",
             &process.stdout_path,
             &stdout.bytes,
@@ -479,6 +483,7 @@ impl LocalProcessRunner {
         );
         let stderr_artifact = self.output_artifact_from_path(
             &process.process.run_id,
+            process.turn_id.as_deref(),
             "stderr",
             &process.stderr_path,
             &stderr.bytes,
@@ -691,19 +696,33 @@ impl LocalProcessRunner {
         }
     }
 
+    /// Resolve the artifact directory for a run/turn.
+    ///
+    /// With no turn key this is the legacy `artifact_root/run_id`. With a turn
+    /// key the artifacts are nested under `artifact_root/run_id/turns/<turn_id>`
+    /// so multiple turns in the same run keep distinct `stdout.txt`/`stderr.txt`.
+    fn run_dir_for(&self, run_id: &RunId, turn_id: Option<&str>) -> PathBuf {
+        let run_dir = self.config.artifact_root.join(run_id.as_str());
+        match turn_id {
+            Some(turn_id) => run_dir.join("turns").join(sanitize_artifact_key(turn_id)),
+            None => run_dir,
+        }
+    }
+
     fn write_artifact(
         &self,
         run_id: &RunId,
+        turn_id: Option<&str>,
         stream: &str,
         bytes: &[u8],
         redaction_state: &str,
     ) -> RuntimeResult<RuntimeOutputArtifact> {
-        let run_dir = self.config.artifact_root.join(run_id.as_str());
+        let run_dir = self.run_dir_for(run_id, turn_id);
         fs::create_dir_all(&run_dir)?;
         let path = run_dir.join(format!("{stream}.txt"));
         fs::write(&path, bytes)?;
         Ok(RuntimeOutputArtifact {
-            artifact_id: format!("artifact-runtime-{run_id}-{stream}"),
+            artifact_id: artifact_id_for(run_id, turn_id, stream),
             path,
             size_bytes: bytes.len() as i64,
             content_hash: content_hash(bytes),
@@ -714,13 +733,14 @@ impl LocalProcessRunner {
     fn output_artifact_from_path(
         &self,
         run_id: &RunId,
+        turn_id: Option<&str>,
         stream: &str,
         path: &Path,
         bytes: &[u8],
         redaction_state: &str,
     ) -> RuntimeOutputArtifact {
         RuntimeOutputArtifact {
-            artifact_id: format!("artifact-runtime-{run_id}-{stream}"),
+            artifact_id: artifact_id_for(run_id, turn_id, stream),
             path: path.to_path_buf(),
             size_bytes: bytes.len() as i64,
             content_hash: content_hash(bytes),
@@ -732,10 +752,45 @@ impl LocalProcessRunner {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalProcessRequest {
     pub run_id: RunId,
+    /// Optional per-turn key.
+    ///
+    /// When set, the runtime keys the artifact directory and artifact ids per
+    /// `(run_id, turn_id)` so multiple turns in the same run no longer overwrite
+    /// each other's `stdout`/`stderr`. When `None`, the legacy single-turn
+    /// `run_dir = artifact_root/run_id` layout (one `stdout.txt`/`stderr.txt`) is
+    /// preserved byte-for-byte for callers that have no turn (tool wrappers,
+    /// single-turn dispatch runs).
+    pub turn_id: Option<String>,
     pub program: String,
     pub argv: Vec<String>,
     pub cwd: PathBuf,
     pub env: HashMap<String, String>,
+}
+
+impl LocalProcessRequest {
+    /// Construct a request with no per-turn key (legacy single-turn layout).
+    pub fn new(
+        run_id: RunId,
+        program: impl Into<String>,
+        argv: Vec<String>,
+        cwd: PathBuf,
+        env: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            run_id,
+            turn_id: None,
+            program: program.into(),
+            argv,
+            cwd,
+            env,
+        }
+    }
+
+    /// Attach a per-turn key so this request's artifacts are keyed by `turn_id`.
+    pub fn with_turn_id(mut self, turn_id: impl Into<String>) -> Self {
+        self.turn_id = Some(turn_id.into());
+        self
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -772,6 +827,8 @@ pub struct RuntimeControlResult {
 pub struct LocalRunningProcess {
     pub process: LocalRuntimeProcessRef,
     child: Child,
+    /// The per-turn artifact key, if this run was spawned for a specific turn.
+    turn_id: Option<String>,
     stdout_path: PathBuf,
     stderr_path: PathBuf,
     pub events: Vec<RuntimeEvent>,
@@ -1394,6 +1451,43 @@ fn normalize_path(path: &Path) -> RuntimeResult<PathBuf> {
     }
 }
 
+/// Build the artifact id for a run/turn stream.
+///
+/// With no turn key this is the legacy `artifact-runtime-{run_id}-{stream}`.
+/// With a turn key the turn is folded in so per-turn artifacts in the same run
+/// have distinct ids: `artifact-runtime-{run_id}-turn-{turn_id}-{stream}`.
+fn artifact_id_for(run_id: &RunId, turn_id: Option<&str>, stream: &str) -> String {
+    match turn_id {
+        Some(turn_id) => format!(
+            "artifact-runtime-{run_id}-turn-{}-{stream}",
+            sanitize_artifact_key(turn_id)
+        ),
+        None => format!("artifact-runtime-{run_id}-{stream}"),
+    }
+}
+
+/// Sanitize a turn key for use as a path segment and artifact-id component.
+///
+/// Keeps the key filesystem-safe and free of separators so it cannot escape the
+/// run directory or collide across turns.
+fn sanitize_artifact_key(key: &str) -> String {
+    let sanitized: String = key
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "turn".to_string()
+    } else {
+        sanitized
+    }
+}
+
 fn content_hash(bytes: &[u8]) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
@@ -1523,6 +1617,7 @@ mod tests {
         let outcome = runner
             .start_process(LocalProcessRequest {
                 run_id: RunId::new("run-local"),
+                turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec![
                     "-c".to_string(),
@@ -1580,6 +1675,7 @@ mod tests {
         let mut running = runner
             .spawn_process(LocalProcessRequest {
                 run_id: RunId::new("run-live"),
+                turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec![
                     "-c".to_string(),
@@ -1604,6 +1700,130 @@ mod tests {
     }
 
     #[test]
+    fn multiple_turns_in_one_run_keep_distinct_per_turn_artifacts() {
+        let workspace = temp_root("workspace-multi-turn");
+        let artifacts = temp_root("artifacts-multi-turn");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner = LocalProcessRunner::new(LocalProcessConfig::for_test(
+            workspace.clone(),
+            artifacts.clone(),
+        ));
+
+        let run_id = RunId::new("run-multi-turn");
+        let mut outcomes = Vec::new();
+        for turn in ["turn-1", "turn-2"] {
+            let mut running = runner
+                .spawn_process(
+                    LocalProcessRequest::new(
+                        run_id.clone(),
+                        "/bin/sh",
+                        vec![
+                            "-c".to_string(),
+                            format!("printf stdout-{turn}; printf stderr-{turn} >&2"),
+                        ],
+                        workspace.clone(),
+                        HashMap::new(),
+                    )
+                    .with_turn_id(turn),
+                )
+                .expect("spawn turn process");
+            let outcome = runner
+                .wait_running(&mut running)
+                .expect("wait turn process");
+            outcomes.push((turn, outcome));
+        }
+
+        // Each turn keeps a distinct artifact directory, distinct artifact ids,
+        // and its own stdout/stderr content -- no overwriting across turns.
+        let (turn1, outcome1) = &outcomes[0];
+        let (turn2, outcome2) = &outcomes[1];
+        assert_ne!(outcome1.stdout.path, outcome2.stdout.path);
+        assert_ne!(outcome1.stderr.path, outcome2.stderr.path);
+        assert_ne!(outcome1.stdout.artifact_id, outcome2.stdout.artifact_id);
+        assert_ne!(outcome1.stderr.artifact_id, outcome2.stderr.artifact_id);
+        assert!(
+            outcome1
+                .stdout
+                .artifact_id
+                .contains(&format!("turn-{turn1}"))
+        );
+        assert!(
+            outcome2
+                .stdout
+                .artifact_id
+                .contains(&format!("turn-{turn2}"))
+        );
+
+        for (turn, outcome) in &outcomes {
+            assert_eq!(
+                fs::read_to_string(&outcome.stdout.path).unwrap(),
+                format!("stdout-{turn}")
+            );
+            assert_eq!(
+                fs::read_to_string(&outcome.stderr.path).unwrap(),
+                format!("stderr-{turn}")
+            );
+            // Per-turn artifacts are nested under run_id/turns/<turn_id>.
+            let expected_dir = artifacts.join(run_id.as_str()).join("turns").join(turn);
+            assert_eq!(outcome.stdout.path.parent().unwrap(), expected_dir);
+        }
+
+        // Every turn's artifact is reconstructable from the run directory alone
+        // (the replay/rebuild surface): the on-disk layout enumerates each turn.
+        let turns_dir = artifacts.join(run_id.as_str()).join("turns");
+        let mut recorded_turns: Vec<String> = fs::read_dir(&turns_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        recorded_turns.sort();
+        assert_eq!(recorded_turns, vec!["turn-1", "turn-2"]);
+        for turn in &recorded_turns {
+            let turn_dir = turns_dir.join(turn);
+            assert!(turn_dir.join("stdout.txt").exists());
+            assert!(turn_dir.join("stderr.txt").exists());
+        }
+    }
+
+    #[test]
+    fn run_without_a_turn_id_keeps_the_legacy_single_turn_artifact_layout() {
+        let workspace = temp_root("workspace-legacy-layout");
+        let artifacts = temp_root("artifacts-legacy-layout");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner = LocalProcessRunner::new(LocalProcessConfig::for_test(
+            workspace.clone(),
+            artifacts.clone(),
+        ));
+
+        let mut running = runner
+            .spawn_process(LocalProcessRequest::new(
+                RunId::new("run-legacy"),
+                "/bin/sh",
+                vec!["-c".to_string(), "printf legacy-out".to_string()],
+                workspace.clone(),
+                HashMap::new(),
+            ))
+            .expect("spawn legacy process");
+        let outcome = runner
+            .wait_running(&mut running)
+            .expect("wait legacy process");
+
+        // No turn key -> legacy run_dir = artifact_root/run_id and legacy id shape.
+        assert_eq!(
+            outcome.stdout.path,
+            artifacts.join("run-legacy").join("stdout.txt")
+        );
+        assert_eq!(
+            outcome.stdout.artifact_id,
+            "artifact-runtime-run-legacy-stdout"
+        );
+        assert_eq!(
+            outcome.stderr.artifact_id,
+            "artifact-runtime-run-legacy-stderr"
+        );
+        assert!(!artifacts.join("run-legacy").join("turns").exists());
+    }
+
+    #[test]
     fn local_process_runner_times_out_and_collects_partial_artifacts() {
         let workspace = temp_root("workspace-timeout");
         let artifacts = temp_root("artifacts-timeout");
@@ -1614,6 +1834,7 @@ mod tests {
         let mut running = runner
             .spawn_process(LocalProcessRequest {
                 run_id: RunId::new("run-timeout"),
+                turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec![
                     "-c".to_string(),
@@ -1646,6 +1867,7 @@ mod tests {
         let mut running = runner
             .spawn_process(LocalProcessRequest {
                 run_id: RunId::new("run-timeout-tree"),
+                turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec![
                     "-c".to_string(),
@@ -1677,6 +1899,7 @@ mod tests {
         let mut running = runner
             .spawn_process(LocalProcessRequest {
                 run_id: RunId::new("run-output-limit"),
+                turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec![
                     "-c".to_string(),
@@ -1710,6 +1933,7 @@ mod tests {
         let outcome = runner
             .start_process(LocalProcessRequest {
                 run_id: RunId::new("run-remote"),
+                turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec!["-c".to_string(), "printf remote-ok".to_string()],
                 cwd: workspace,
@@ -1785,6 +2009,7 @@ mod tests {
         let error = runner
             .start_process(LocalProcessRequest {
                 run_id: RunId::new("run-env"),
+                turn_id: None,
                 program: "/usr/bin/env".to_string(),
                 argv: Vec::new(),
                 cwd: workspace,
@@ -1812,6 +2037,7 @@ mod tests {
         let error = runner
             .start_process(LocalProcessRequest {
                 run_id: RunId::new("run-reject"),
+                turn_id: None,
                 program: "/bin/echo".to_string(),
                 argv: vec!["nope".to_string()],
                 cwd: outside,

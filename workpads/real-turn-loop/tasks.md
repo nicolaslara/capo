@@ -707,7 +707,72 @@ Verification:
 
 ## RTL8 - Per-Turn Artifact Keying By turn_id Reconciled With Dispatch Run-Exit
 
-Status: pending.
+Status: done (gate green). `turn_id` is now threaded through
+`LocalProcessRequest` (a new `Option<String>` field, plus `new()`/`with_turn_id`
+helpers) and the runtime `run_dir`/artifact path in
+`crates/capo-runtime/src/lib.rs`: when a turn key is present the runtime keys the
+artifact directory and artifact ids per `(run_id, turn_id)`
+(`run_dir = artifact_root/run_id/turns/<turn_id>`, id
+`artifact-runtime-{run_id}-turn-{turn_id}-{stream}`), so multiple turns in one
+run no longer overwrite each other's `stdout.txt`/`stderr.txt`; with no turn key
+the legacy single-turn layout (`artifact_root/run_id/stdout.txt`, id
+`artifact-runtime-{run_id}-{stream}`) is preserved byte-for-byte for callers with
+no turn (tool wrappers, single-turn dispatch runs). The Codex workspace-write
+launch plan gained `runtime_request_for_turn`
+(`crates/capo-adapters/src/local_subscription.rs`), and the live provider
+(`execute_codex_live_provider`, `crates/capo-server/src/live_provider.rs`) now
+spawns with the per-turn request keyed to `context.turn_id`, so the recorded
+`stdout_artifact_id`/`stderr_artifact_id` carry the turn key. There is no
+duplicate run-completion model: `run_dispatch_turn` derives the dispatch plan id
+per turn (`dispatch_plan_id_for_turn` folds in `turn_id`), so each turn keys its
+own dispatch execution + `RunExited` (`append_dispatch_run_exit_with_metadata`)
+event, and the loop's `TurnFinished` ANNOTATES that single run-exit truth -- it
+does not fork a second completion event kind.
+
+Evidence:
+
+- Runtime threading: `crates/capo-runtime/src/lib.rs` adds
+  `LocalProcessRequest.turn_id: Option<String>` (+ `new`/`with_turn_id`),
+  `LocalRunningProcess.turn_id`, `run_dir_for`, `artifact_id_for`, and
+  `sanitize_artifact_key`; `spawn_process`/`wait_running`/`start_process` key the
+  per-turn dir and artifact id off the optional turn.
+- Launch-plan per-turn request: `runtime_request_for_turn` in
+  `crates/capo-adapters/src/local_subscription.rs`; live provider spawns with it
+  in `crates/capo-server/src/live_provider.rs`.
+- Callers with no turn updated to `turn_id: None` (legacy layout preserved):
+  `crates/capo-tools/src/runtime_wrappers.rs`,
+  `crates/capo-server/src/tests/safety_floor.rs`, and the runtime in-file tests.
+- New deterministic tests (no live provider):
+  `crates/capo-runtime/src/lib.rs` --
+  `multiple_turns_in_one_run_keep_distinct_per_turn_artifacts` (two turns in one
+  run produce distinct stdout/stderr paths + ids + content, nested under
+  `run_id/turns/<turn_id>`, and every turn is reconstructable by enumerating the
+  run directory after the processes exit) and
+  `run_without_a_turn_id_keeps_the_legacy_single_turn_artifact_layout` (no turn
+  key -> legacy `run_id/stdout.txt` path and `artifact-runtime-{run_id}-{stream}`
+  id, no `turns/` dir).
+  `crates/capo-server/src/tests/per_turn_artifacts.rs` (new module, wired in
+  `tests.rs`) --
+  `workspace_write_turns_in_one_run_keep_distinct_per_turn_artifacts` (the REAL
+  Codex workspace-write launch plan, with codex stubbed by `/bin/sh` emitting the
+  fixture JSONL, run twice in one run via `runtime_request_for_turn`: distinct
+  per-turn artifact paths/ids, each turn's batch reconstructable from disk, and
+  the run dir enumerates both turns) and
+  `turn_finished_annotates_dispatch_run_exit_without_a_second_completion_model`
+  (the loop's `TurnFinished` annotates exactly one dispatch `run.exited` + one
+  `adapter.dispatch_executed` per ingested turn, zero forked turn/run-completion
+  event kinds, and the reconciliation survives restart + `rebuild_projections`).
+- Commands run from `/Users/nicolas/devel/capo-wt/real-turn-loop`:
+  `cargo test -p capo-runtime -p capo-server` -> ok (capo-runtime 14 passed / 0
+  failed incl. the 2 new RTL8 runtime tests; capo-server 44 passed / 0 failed
+  incl. the 2 new RTL8 server tests). Objective gate: `cargo fmt --check` ->
+  clean; `cargo clippy --all-targets --all-features -- -D warnings` -> clean
+  (exit 0); `cargo test --workspace` -> exit 0, 0 failed across all binaries
+  (capo-runtime 14, capo-server 44, capo-cli 63 + server_transport 11,
+  capo-adapters 28 / 2 ignored, capo-controller 23, capo-state 32, capo-tools 21,
+  capo-query 21, capo-voice 19, etc.). `git diff --check` -> clean. No live Codex
+  smoke is required for RTL8 (the live workspace-write smoke is RTL13); all
+  proofs are deterministic.
 
 Acceptance:
 

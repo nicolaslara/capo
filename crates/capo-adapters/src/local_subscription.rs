@@ -40,11 +40,22 @@ impl LocalAdapterLaunchPlan {
     pub fn runtime_request(&self, run_id: RunId) -> LocalProcessRequest {
         LocalProcessRequest {
             run_id,
+            turn_id: None,
             program: self.program.clone(),
             argv: self.argv.clone(),
             cwd: self.workspace_root.clone(),
             env: HashMap::new(),
         }
+    }
+
+    /// Build a runtime request keyed to a specific turn so per-turn artifacts
+    /// (RTL8) do not overwrite each other within a single run.
+    pub fn runtime_request_for_turn(
+        &self,
+        run_id: RunId,
+        turn_id: impl Into<String>,
+    ) -> LocalProcessRequest {
+        self.runtime_request(run_id).with_turn_id(turn_id)
     }
 
     pub fn assert_subscription_safe(&self) -> Result<(), String> {
@@ -100,6 +111,7 @@ impl LocalAdapterSmokePlan {
     pub fn runtime_request(&self, run_id: RunId) -> LocalProcessRequest {
         LocalProcessRequest {
             run_id,
+            turn_id: None,
             program: self.program.clone(),
             argv: self.argv.clone(),
             cwd: self.workspace_root.clone(),

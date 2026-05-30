@@ -565,7 +565,10 @@ impl CapoServer {
         })?;
         let runner = LocalProcessRunner::new(launch_plan.runtime_config());
         let mut process = runner
-            .spawn_process(launch_plan.runtime_request(RunId::new(context.plan.run_id.to_string())))
+            .spawn_process(launch_plan.runtime_request_for_turn(
+                RunId::new(context.plan.run_id.to_string()),
+                context.turn_id,
+            ))
             .map_err(|error| {
                 ServerError::AdapterFixture(format!("runtime spawn failed: {error:?}"))
             })?;

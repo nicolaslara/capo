@@ -17,6 +17,7 @@ use crate::{
 mod dispatch;
 mod foundation;
 mod live_provider;
+mod per_turn_artifacts;
 mod replay;
 mod safety_floor;
 mod sessions;
