@@ -637,8 +637,10 @@ pub(crate) fn apply_projection_record(
         ProjectionRecord::ToolCall(tool_call) => transaction.execute(
             "INSERT INTO tool_calls(
                 tool_call_id, session_id, turn_id, tool_name, tool_origin, status,
-                input_artifact_id, output_artifact_id, updated_sequence
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                input_artifact_id, output_artifact_id, correlation_id,
+                permission_decision_id, capability_grant_use_id, started_at,
+                completed_at, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(tool_call_id) DO UPDATE SET
                 session_id = excluded.session_id,
                 turn_id = excluded.turn_id,
@@ -647,6 +649,11 @@ pub(crate) fn apply_projection_record(
                 status = excluded.status,
                 input_artifact_id = excluded.input_artifact_id,
                 output_artifact_id = excluded.output_artifact_id,
+                correlation_id = excluded.correlation_id,
+                permission_decision_id = excluded.permission_decision_id,
+                capability_grant_use_id = excluded.capability_grant_use_id,
+                started_at = excluded.started_at,
+                completed_at = excluded.completed_at,
                 updated_sequence = excluded.updated_sequence",
             params![
                 tool_call.tool_call_id.as_str(),
@@ -657,6 +664,11 @@ pub(crate) fn apply_projection_record(
                 tool_call.status,
                 tool_call.input_artifact_id,
                 tool_call.output_artifact_id,
+                tool_call.provenance.correlation_id,
+                tool_call.provenance.permission_decision_id,
+                tool_call.provenance.capability_grant_use_id,
+                tool_call.provenance.started_at,
+                tool_call.provenance.completed_at,
                 sequence,
             ],
         )?,

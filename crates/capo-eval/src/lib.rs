@@ -350,6 +350,7 @@ mod tests {
                 status: "completed".to_string(),
                 input_artifact_id: None,
                 output_artifact_id: Some("artifact-tool".to_string()),
+                provenance: Default::default(),
                 updated_sequence: 4,
             }],
             memory_packets: vec![MemoryPacketProjection {

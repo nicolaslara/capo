@@ -430,6 +430,7 @@ fn acp_fixture_replay_dedupes_stable_tool_updates_in_state() {
                                 .content
                                 .as_ref()
                                 .map(|_| "artifact-acp-tool-1-output".to_string()),
+                            provenance: Default::default(),
                             updated_sequence: 0,
                         })],
                     )
@@ -2532,6 +2533,102 @@ fn real_controller_turn_invokes_a_capo_tool_through_authorize_and_invoke() {
             && tool.status == "completed"
             && tool.turn_id.as_deref() == Some("turn-aci1-tool")
     }));
+}
+
+/// ACI7: a real dispatched tool call persists queryable per-call provenance
+/// (correlation_id, permission_decision_id, capability_grant_use_id) and
+/// wall-clock timing (started_at/completed_at) on the `ToolCall` projection, and
+/// the same provenance rebuilds identically on replay.
+#[test]
+fn real_controller_dispatch_persists_provenance_and_timing_that_replays_identically() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{CapoToolContext, CapoToolRequest, ToolExposureRequest};
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci7-prov-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open real controller");
+    let registration = controller.register_agent("aci7-worker").expect("agent");
+    let refs = controller
+        .send_task(&registration, "Record per-call provenance for a tool call")
+        .expect("send task");
+
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-aci7-prov"),
+        tool_call_id: ToolCallId::new("tool-aci7-prov"),
+    };
+    controller
+        .dispatch_tool_call(
+            &scope,
+            ToolExposureRequest::Capo(CapoToolRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: scope.session_id.clone(),
+                tool_id: "capo.agent_status".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                context: CapoToolContext {
+                    task_status: "task active".to_string(),
+                    agent_status: "agent running".to_string(),
+                    session_summary: "summary".to_string(),
+                    workpad_excerpt: "section".to_string(),
+                    evidence_note: "note".to_string(),
+                    capability_scope: "state:read:agent".to_string(),
+                },
+            }),
+        )
+        .expect("dispatch capo tool");
+
+    let read_provenance = || {
+        controller
+            .state()
+            .tool_calls_for_session(&refs.session_id)
+            .expect("tool calls")
+            .into_iter()
+            .find(|tool| tool.tool_call_id == scope.tool_call_id)
+            .expect("dispatched tool call")
+            .provenance
+    };
+
+    let before = read_provenance();
+    // The correlation_id ties command -> turn -> tool (it carries the turn and
+    // tool_call_id, the shared join key stamped on every event of the call).
+    let correlation_id = before.correlation_id.clone().expect("correlation_id");
+    assert!(correlation_id.contains("turn-aci7-prov"));
+    assert!(correlation_id.contains(scope.tool_call_id.as_str()));
+    // The permission-decision and capability-grant-use ids are pinned per call.
+    assert!(
+        before
+            .permission_decision_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("decision-"))
+    );
+    assert!(
+        before
+            .capability_grant_use_id
+            .as_deref()
+            .is_some_and(|id| id.contains(scope.tool_call_id.as_str()))
+    );
+    // Wall-clock timing is captured around the invocation.
+    let started = before.started_at.expect("started_at");
+    let completed = before.completed_at.expect("completed_at");
+    assert!(started > 0 && completed >= started);
+
+    // A restart/replay rebuilds the IDENTICAL provenance and timing.
+    controller
+        .state()
+        .rebuild_projections()
+        .expect("rebuild projections");
+    assert_eq!(
+        read_provenance(),
+        before,
+        "provenance must replay identically"
+    );
 }
 
 /// ACI1: the runtime-wrapper path is equally real -- a `capo.file_read` turn

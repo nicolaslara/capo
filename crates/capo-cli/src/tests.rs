@@ -5335,6 +5335,7 @@ fn voice_recent_work_reads_project_and_agent_work_without_mutating() {
                     status: "completed".to_string(),
                     input_artifact_id: None,
                     output_artifact_id: Some("artifact-voice-tool-output".to_string()),
+                    provenance: Default::default(),
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::ToolObservation(ToolObservationProjection {

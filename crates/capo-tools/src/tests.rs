@@ -532,6 +532,96 @@ fn shell_and_git_wrappers_execute_through_runtime_with_artifacts() {
 }
 
 #[test]
+fn file_read_redacts_a_configured_secret_in_the_output_artifact() {
+    // ACI7: redaction is enforced on OUTPUT, not only input. A configured secret
+    // pattern sitting in a file the agent reads must be scrubbed in the artifact
+    // the read produced.
+    let workspace = temp_root("tool-redact-output-workspace");
+    let artifacts = temp_root("tool-redact-output-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::write(
+        workspace.join("config.env"),
+        "DB_PASSWORD=SUPERSECRET\nname=ok\n",
+    )
+    .expect("seed file");
+
+    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts);
+    config.redaction_rules.push(RedactionRule {
+        pattern: "SUPERSECRET".to_string(),
+        replacement: "[REDACTED]".to_string(),
+    });
+    let wrappers = RuntimeToolWrappers::new(config);
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    let read = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-read-secret",
+            "run-read-secret",
+            "capo.file_read",
+            serde_json::json!({ "path": "config.env" }),
+        ),
+        &policy,
+    );
+    assert_eq!(read.status, "completed");
+    let output = read.output_artifacts.first().expect("read output artifact");
+    // The OUTPUT artifact is marked redacted and the secret is scrubbed on disk.
+    assert_eq!(output.redaction_state, "redacted");
+    let on_disk = fs::read_to_string(&output.uri).expect("read output artifact");
+    assert!(
+        !on_disk.contains("SUPERSECRET"),
+        "secret leaked into output artifact: {on_disk}"
+    );
+    assert!(on_disk.contains("[REDACTED]"));
+    // The benign content survives the scrub.
+    assert!(on_disk.contains("name=ok"));
+}
+
+#[test]
+fn file_read_credential_shape_scan_redacts_an_unnamed_secret_in_output() {
+    // ACI7: the default credential-shape scan catches a secret the operator did
+    // NOT name as a pattern -- the common case for tool output. With no
+    // configured rule, a credential-shaped token in the read file is still
+    // scrubbed in the artifact, while ordinary prose survives.
+    let workspace = temp_root("tool-credential-scan-workspace");
+    let artifacts = temp_root("tool-credential-scan-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let aws_key = "AKIAIOSFODNN7EXAMPLE";
+    fs::write(
+        workspace.join("notes.txt"),
+        format!("aws key {aws_key}\nthis is ordinary documentation prose\n"),
+    )
+    .expect("seed file");
+
+    // No RedactionRule configured: only the default credential-shape scan runs.
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    let read = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-read-key",
+            "run-read-key",
+            "capo.file_read",
+            serde_json::json!({ "path": "notes.txt" }),
+        ),
+        &policy,
+    );
+    assert_eq!(read.status, "completed");
+    let output = read.output_artifacts.first().expect("read output artifact");
+    assert_eq!(output.redaction_state, "redacted");
+    let on_disk = fs::read_to_string(&output.uri).expect("read output artifact");
+    assert!(
+        !on_disk.contains(aws_key),
+        "unnamed credential leaked into output artifact: {on_disk}"
+    );
+    assert!(on_disk.contains("[REDACTED:credential]"));
+    // The credential scan must not blank out ordinary prose.
+    assert!(on_disk.contains("ordinary documentation prose"));
+}
+
+#[test]
 fn git_commit_wrapper_commits_staged_changes_and_denies_static_profiles() {
     let workspace = temp_root("tool-wrapper-git-commit-workspace");
     let artifacts = temp_root("tool-wrapper-git-commit-artifacts");

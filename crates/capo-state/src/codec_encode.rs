@@ -338,7 +338,17 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             f: tool_call.input_artifact_id.clone(),
             g: tool_call.output_artifact_id.clone(),
             h: None,
-            payload_json: "{}".to_string(),
+            // ACI7: the per-call provenance + timing travels in the payload (the
+            // `a..h` slots are spent), so a replay rebuilds the queryable chain
+            // identically.
+            payload_json: json!({
+                "correlation_id": tool_call.provenance.correlation_id,
+                "permission_decision_id": tool_call.provenance.permission_decision_id,
+                "capability_grant_use_id": tool_call.provenance.capability_grant_use_id,
+                "started_at": tool_call.provenance.started_at,
+                "completed_at": tool_call.provenance.completed_at,
+            })
+            .to_string(),
         },
         ProjectionRecord::ToolObservation(observation) => ProjectionRecordRow {
             kind: "tool_observation",

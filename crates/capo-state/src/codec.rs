@@ -12,8 +12,8 @@ use crate::{
     PermissionApprovalProjection, ProjectProjection, ProjectionRecord, ReviewFindingProjection,
     RunProjection, RuntimeTargetProjection, SessionProjection, SourceBindingProjection, StateError,
     StateResult, TaskOutcomeReportProjection, TaskProjection, ToolCallProjection,
-    ToolObservationProjection, WorkpadFileProjection, WorkpadIndexResetProjection,
-    WorkpadTaskProjection, optional_id,
+    ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection,
+    WorkpadIndexResetProjection, WorkpadTaskProjection, optional_id,
 };
 
 #[derive(Debug)]
@@ -291,22 +291,48 @@ pub(crate) fn projection_record_from_row(
             h,
             payload_json,
         ),
-        "tool_call" => Ok(ProjectionRecord::ToolCall(ToolCallProjection {
-            tool_call_id: ToolCallId::new(record_id),
-            session_id: SessionId::new(required_field(
-                &projection_kind,
-                "tool_call",
-                a,
-                "session_id",
-            )?),
-            turn_id: b,
-            tool_name: required_field(&projection_kind, "tool_call", c, "tool_name")?,
-            tool_origin: required_field(&projection_kind, "tool_call", d, "tool_origin")?,
-            status: required_field(&projection_kind, "tool_call", e, "status")?,
-            input_artifact_id: f,
-            output_artifact_id: g,
-            updated_sequence: 0,
-        })),
+        "tool_call" => {
+            // ACI7: the per-call provenance + timing rides in the payload; parse
+            // it back so a replay rebuilds the queryable chain identically.
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            let provenance = ToolCallProvenance {
+                correlation_id: payload_optional_string(&payload, "correlation_id"),
+                permission_decision_id: payload_optional_string(&payload, "permission_decision_id"),
+                capability_grant_use_id: payload_optional_string(
+                    &payload,
+                    "capability_grant_use_id",
+                ),
+                started_at: payload_optional_i64(
+                    &projection_kind,
+                    &record_id,
+                    &payload,
+                    "started_at",
+                )?,
+                completed_at: payload_optional_i64(
+                    &projection_kind,
+                    &record_id,
+                    &payload,
+                    "completed_at",
+                )?,
+            };
+            Ok(ProjectionRecord::ToolCall(ToolCallProjection {
+                tool_call_id: ToolCallId::new(record_id),
+                session_id: SessionId::new(required_field(
+                    &projection_kind,
+                    "tool_call",
+                    a,
+                    "session_id",
+                )?),
+                turn_id: b,
+                tool_name: required_field(&projection_kind, "tool_call", c, "tool_name")?,
+                tool_origin: required_field(&projection_kind, "tool_call", d, "tool_origin")?,
+                status: required_field(&projection_kind, "tool_call", e, "status")?,
+                input_artifact_id: f,
+                output_artifact_id: g,
+                provenance,
+                updated_sequence: 0,
+            }))
+        }
         "tool_observation" => {
             let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
             Ok(ProjectionRecord::ToolObservation(

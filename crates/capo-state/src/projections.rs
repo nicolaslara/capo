@@ -403,7 +403,31 @@ pub struct ToolCallProjection {
     pub status: String,
     pub input_artifact_id: Option<String>,
     pub output_artifact_id: Option<String>,
+    /// Per-call provenance and wall-clock timing (ACI7). Bundled so the queryable
+    /// `command -> turn -> permission -> tool -> artifact` chain is one field and
+    /// the many existing construction sites default it with
+    /// [`ToolCallProvenance::default`].
+    pub provenance: ToolCallProvenance,
     pub updated_sequence: i64,
+}
+
+/// Per-tool-call provenance and timing (ACI7).
+///
+/// This is the queryable spine `tool-exposure.md` asks for: a `correlation_id`
+/// ties the command -> turn -> permission -> tool -> artifact -> adapter-event
+/// chain together, `permission_decision_id` and `capability_grant_use_id` pin
+/// the authorization that allowed the call, and `started_at`/`completed_at` are
+/// wall-clock millis-since-epoch (consistent with the ACI6 timing fields) for
+/// later evaluation. Every field is optional so a call that has not yet been
+/// authorized/started, and the many non-dispatch construction sites, default
+/// cleanly; the real loop dispatch fills them in.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ToolCallProvenance {
+    pub correlation_id: Option<String>,
+    pub permission_decision_id: Option<String>,
+    pub capability_grant_use_id: Option<String>,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

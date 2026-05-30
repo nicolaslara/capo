@@ -16,12 +16,24 @@
 //! `append_dispatch_run_exit`: a tool call annotates the in-flight run with its
 //! observed evidence; it does not duplicate run-completion semantics.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use capo_tools::{
     CapoToolResult, ToolAuditEvent, ToolExposure, ToolExposureRequest, ToolExposureResult,
     WrapperToolResult,
 };
 
 use super::*;
+
+/// Wall-clock millis-since-epoch for the per-call `started_at`/`completed_at`
+/// timing (ACI7), consistent with the ACI6 typed-test timing fields. A clock
+/// before the epoch (impossible in practice) is clamped to 0.
+fn epoch_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// Where a dispatched tool call hangs on the loop's scope tree, so the persisted
 /// events carry the same task/agent/session/run/turn provenance the rest of the
@@ -67,8 +79,28 @@ impl FakeBoundaryController {
         scope: &ToolDispatchScope,
         request: ToolExposureRequest,
     ) -> StateResult<ToolDispatchOutcome> {
+        // ACI7: capture wall-clock timing around the real authorize+invoke so the
+        // persisted `ToolCall` projection carries `started_at`/`completed_at` for
+        // later evaluation.
+        let started_at = epoch_millis();
         let result = exposure.authorize_and_invoke(request, &self.permission_policy);
+        let completed_at = epoch_millis();
         let normalized = NormalizedToolResult::from_result(&result);
+        // ACI7: the per-call provenance that ties command -> turn -> permission ->
+        // tool -> artifact into one queryable chain. The `correlation_id` is the
+        // turn-scoped identity already stamped on every event's item ref (the
+        // tool_call_id), and the permission-decision / grant-use ids pin the
+        // authorization that allowed (or denied) the call.
+        let provenance = capo_state::ToolCallProvenance {
+            correlation_id: Some(dispatch_correlation_id(scope)),
+            permission_decision_id: normalized.permission_decision_id.clone(),
+            capability_grant_use_id: normalized
+                .capability_grant_id
+                .as_ref()
+                .map(|grant_id| dispatch_grant_use_id(scope, grant_id)),
+            started_at: Some(started_at),
+            completed_at: Some(completed_at),
+        };
         // The persistable canonical kinds for this dispatch, in order. Audit
         // events with no loop counterpart (`tool.call_canceled`/`tool.call_failed`)
         // are dropped here, but their terminal STATUS is still applied to the
@@ -94,13 +126,18 @@ impl FakeBoundaryController {
         let mut observed_event_kinds = Vec::with_capacity(persistable.len());
         for (position, (index, kind, audit_event)) in persistable.iter().enumerate() {
             let kind = *kind;
-            let mut projections = self.dispatch_event_projections(kind, scope, &normalized);
+            let mut projections =
+                self.dispatch_event_projections(kind, scope, &normalized, &provenance);
             // Terminal projection for the non-completed paths: attach the final
             // `ToolCall` projection (status == normalized.status, i.e.
             // "denied"/"failed") to the dispatch's last persisted event so every
             // path drives the projection to its true terminal status.
             if !reaches_completed && position == last_index {
-                projections.push(terminal_tool_call_projection(scope, &normalized));
+                projections.push(terminal_tool_call_projection(
+                    scope,
+                    &normalized,
+                    &provenance,
+                ));
             }
             self.state.append_event(
                 scoped_event(
@@ -149,6 +186,7 @@ impl FakeBoundaryController {
         kind: EventKind,
         scope: &ToolDispatchScope,
         normalized: &NormalizedToolResult,
+        provenance: &capo_state::ToolCallProvenance,
     ) -> Vec<ProjectionRecord> {
         match kind {
             EventKind::ToolCallRequested => {
@@ -161,15 +199,35 @@ impl FakeBoundaryController {
                     status: "requested".to_string(),
                     input_artifact_id: normalized.input_artifact_id.clone(),
                     output_artifact_id: None,
+                    provenance: provenance.clone(),
                     updated_sequence: 0,
                 })]
             }
             EventKind::ToolCallCompleted => {
-                vec![terminal_tool_call_projection(scope, normalized)]
+                vec![terminal_tool_call_projection(scope, normalized, provenance)]
             }
             _ => Vec::new(),
         }
     }
+}
+
+/// The stable correlation id for one tool dispatch (ACI7): a turn-scoped value
+/// that ties the command -> turn -> permission -> tool -> artifact chain. The
+/// tool_call_id is the join key already stamped on every event's item ref; the
+/// session/run/turn prefix keeps the id self-describing for cross-projection
+/// queries.
+fn dispatch_correlation_id(scope: &ToolDispatchScope) -> String {
+    format!(
+        "corr-{}-{}-{}-{}",
+        scope.session_id, scope.run_id, scope.turn_id, scope.tool_call_id
+    )
+}
+
+/// The per-invocation capability-grant-use id (ACI7): the grant the permission
+/// decision issued, scoped to THIS tool call, so two calls that reuse the same
+/// grant still carry distinct grant-use ids.
+fn dispatch_grant_use_id(scope: &ToolDispatchScope, grant_id: &str) -> String {
+    format!("grant-use-{}-{}", scope.tool_call_id, grant_id)
 }
 
 /// The terminal `ToolCall` projection for a dispatch: status == the normalized
@@ -180,6 +238,7 @@ impl FakeBoundaryController {
 fn terminal_tool_call_projection(
     scope: &ToolDispatchScope,
     normalized: &NormalizedToolResult,
+    provenance: &capo_state::ToolCallProvenance,
 ) -> ProjectionRecord {
     ProjectionRecord::ToolCall(capo_state::ToolCallProjection {
         tool_call_id: scope.tool_call_id.clone(),
@@ -190,6 +249,7 @@ fn terminal_tool_call_projection(
         status: normalized.status.clone(),
         input_artifact_id: normalized.input_artifact_id.clone(),
         output_artifact_id: normalized.output_artifact_id.clone(),
+        provenance: provenance.clone(),
         updated_sequence: 0,
     })
 }
@@ -203,6 +263,12 @@ struct NormalizedToolResult {
     status: String,
     input_artifact_id: Option<String>,
     output_artifact_id: Option<String>,
+    /// The capability grant the permission decision issued for this call (ACI7).
+    /// `None` only for a degenerate result with no decision.
+    capability_grant_id: Option<String>,
+    /// The permission-decision id pinned to this call (ACI7), derived from the
+    /// issued grant so the projection can join back to the authorization.
+    permission_decision_id: Option<String>,
     events: Vec<ToolAuditEvent>,
 }
 
@@ -228,17 +294,21 @@ impl NormalizedToolResult {
         } else {
             "denied".to_string()
         };
+        let grant_id = result.permission_decision.capability_grant_id.clone();
         Self {
             tool_name: result.tool_id.clone(),
             tool_origin: "capo".to_string(),
             status,
             input_artifact_id: None,
             output_artifact_id: artifact_or_none(&result.output_artifact_id),
+            permission_decision_id: Some(permission_decision_id(&grant_id)),
+            capability_grant_id: Some(grant_id),
             events: result.events.clone(),
         }
     }
 
     fn from_runtime(result: &WrapperToolResult) -> Self {
+        let grant_id = result.permission_decision.capability_grant_id.clone();
         Self {
             tool_name: result.tool_id.clone(),
             tool_origin: "runtime".to_string(),
@@ -258,9 +328,18 @@ impl NormalizedToolResult {
                 .output_artifacts
                 .first()
                 .map(|artifact| artifact.artifact_id.clone()),
+            permission_decision_id: Some(permission_decision_id(&grant_id)),
+            capability_grant_id: Some(grant_id),
             events: result.events.clone(),
         }
     }
+}
+
+/// Derive the stable permission-decision id from the issued capability grant
+/// (ACI7). The grant id is the decision's identity; the `decision-` prefix marks
+/// it as the decision-projection join key rather than the raw grant.
+fn permission_decision_id(grant_id: &str) -> String {
+    format!("decision-{grant_id}")
 }
 
 /// Fold a runtime wrapper's terminal status onto the dispatch terminal-status

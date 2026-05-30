@@ -249,6 +249,11 @@ impl FakeBoundaryController {
                         output_artifact_id: adapter_event.content.as_ref().map(|_| {
                             format!("artifact-adapter-output-{}", adapter_event.raw_event_hash)
                         }),
+                        // ACI7: adapter-native tool provenance/timing is the
+                        // adapter dedup's concern (ACI9); the locally-dispatched
+                        // path is what carries the queryable permission/grant/timing
+                        // chain, so this defaults cleanly.
+                        provenance: capo_state::ToolCallProvenance::default(),
                         updated_sequence: 0,
                     }),
                 )))

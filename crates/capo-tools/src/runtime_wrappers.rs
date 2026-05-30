@@ -5,7 +5,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use capo_core::{BoundaryBinding, BoundaryKind};
 use capo_runtime::{
-    LocalProcessConfig, LocalProcessRequest, LocalProcessRunner, RuntimeError,
+    LocalProcessConfig, LocalProcessRequest, LocalProcessRunner, RedactionPolicy, RuntimeError,
     RuntimeOutputArtifact,
 };
 use serde_json::Value;
@@ -498,12 +498,13 @@ impl RuntimeToolWrappers {
     ) -> Result<WrapperExecution, String> {
         let path = self.resolve_workspace_path(&required_input(request, "path")?, false)?;
         let bytes = fs::read(&path).map_err(|error| error.to_string())?;
-        let artifact = self.write_tool_artifact(
+        // ACI7: redact the read content before it lands in the artifact -- a
+        // secret in a file the agent reads is tool OUTPUT and must be scrubbed.
+        let artifact = self.write_redacted_artifact(
             request,
             kind,
             &format!("{} bytes read from {}", bytes.len(), path.display()),
             &bytes,
-            "safe",
         )?;
         let typed_output = serde_json::json!({
             "status": "completed",
@@ -626,12 +627,11 @@ impl RuntimeToolWrappers {
         // ACI3: emit a real unified diff artifact (before -> after), not just a
         // before/after hash summary, so the change is reviewable.
         let diff = unified_diff(&before, &after, &path.display().to_string());
-        let artifact = self.write_tool_artifact(
+        let artifact = self.write_redacted_artifact(
             request,
             "file_write_diff",
             &format!("unified diff for {}", path.display()),
             diff.as_bytes(),
-            "safe",
         )?;
         let typed_output = serde_json::json!({
             "status": "completed",
@@ -692,12 +692,11 @@ impl RuntimeToolWrappers {
             applied.new_content.as_bytes(),
             &path.display().to_string(),
         );
-        let artifact = self.write_tool_artifact(
+        let artifact = self.write_redacted_artifact(
             request,
             "apply_patch_diff",
             &format!("unified diff for {}", path.display()),
             diff.as_bytes(),
-            "safe",
         )?;
 
         // Lint-on-edit: Rust-first via `rustfmt --check`, language-pluggable. Off
@@ -1155,20 +1154,36 @@ impl RuntimeToolWrappers {
             "{{\"tool_id\":\"{}\",\"input\":{}}}",
             request.tool_id, request.input
         );
-        let redacted = self.redact_bytes(payload.as_bytes());
-        let redaction_state = if redacted == payload.as_bytes() {
-            "safe"
-        } else {
-            "redacted"
-        };
+        // ACI7: input is redacted through the same policy as output (operator
+        // patterns PLUS the credential-shape scan), recording the real state.
+        let (redacted, redaction_state) = self.redact_bytes_with_state(payload.as_bytes());
         self.write_tool_artifact(
             request,
             "input",
             "wrapper input",
             &redacted,
-            redaction_state,
+            &redaction_state,
         )
         .expect("write wrapper input artifact")
+    }
+
+    /// Write a tool OUTPUT artifact, redacting its content through the wrapper
+    /// policy and recording the resulting `redaction_state` (ACI7).
+    ///
+    /// This is the OUTPUT seam: a read file, a `file_write`/`apply_patch` diff,
+    /// or any other content the tool produces is scrubbed (operator patterns PLUS
+    /// the credential-shape scan) before it lands in an artifact, so a secret in
+    /// tool output -- not only input -- is redacted. The recorded
+    /// `redaction_state` reflects whether anything actually matched.
+    fn write_redacted_artifact(
+        &self,
+        request: &WrapperToolRequest,
+        kind: &str,
+        summary: &str,
+        bytes: &[u8],
+    ) -> Result<WrapperArtifact, String> {
+        let (redacted, redaction_state) = self.redact_bytes_with_state(bytes);
+        self.write_tool_artifact(request, kind, summary, &redacted, &redaction_state)
     }
 
     fn write_tool_artifact(
@@ -1221,14 +1236,25 @@ impl RuntimeToolWrappers {
         LocalProcessRunner::new(config)
     }
 
+    /// The wrapper-boundary redaction policy: the operator-declared literal
+    /// patterns PLUS the default credential-shape scan (ACI7). Applied to BOTH
+    /// input and output artifacts so an unnamed secret in a tool's OUTPUT (a read
+    /// file, a diff, a search preview) is scrubbed, not only the input.
+    fn redaction_policy(&self) -> RedactionPolicy {
+        RedactionPolicy::new(self.config.redaction_rules.clone())
+    }
+
+    /// Redact `bytes` through the wrapper policy and return only the scrubbed
+    /// bytes. Use [`Self::redact_bytes_with_state`] when the resulting
+    /// `redaction_state` must be recorded.
     fn redact_bytes(&self, bytes: &[u8]) -> Vec<u8> {
-        let mut text = String::from_utf8_lossy(bytes).to_string();
-        for rule in &self.config.redaction_rules {
-            if text.contains(&rule.pattern) {
-                text = text.replace(&rule.pattern, &rule.replacement);
-            }
-        }
-        text.into_bytes()
+        self.redaction_policy().apply(bytes).0
+    }
+
+    /// Redact `bytes` through the wrapper policy, returning the scrubbed bytes
+    /// and the resulting `redaction_state` (`"redacted"`/`"safe"`) (ACI7).
+    fn redact_bytes_with_state(&self, bytes: &[u8]) -> (Vec<u8>, String) {
+        self.redaction_policy().apply(bytes)
     }
 
     fn resolve_workspace_path(&self, path: &str, allow_missing: bool) -> Result<PathBuf, String> {

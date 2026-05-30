@@ -200,6 +200,216 @@ pub struct RedactionRule {
     pub replacement: String,
 }
 
+/// The placeholder a credential-shape match is replaced with.
+pub const CREDENTIAL_REDACTION_PLACEHOLDER: &str = "[REDACTED:credential]";
+
+/// A real redaction policy: configurable literal [`RedactionRule`] patterns PLUS
+/// a default credential-shape / high-entropy scan (ACI7).
+///
+/// Today's runner redaction is a literal substring replace of operator-declared
+/// patterns only; that misses any secret the operator did not name (the common
+/// case for tool OUTPUT -- shell stdout/stderr, a read file, a diff -- which is
+/// exactly where credentials leak). This policy keeps the explicit-pattern pass
+/// AND layers a default scan that recognizes credential-shaped tokens (known key
+/// prefixes, bearer headers, and long high-entropy strings) so an unnamed secret
+/// is still scrubbed before it reaches an artifact or the agent. The same policy
+/// is applied at the runtime runner boundary (process stdout/stderr) and at the
+/// tool wrapper boundary (input AND output artifacts), so redaction is uniform.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RedactionPolicy {
+    rules: Vec<RedactionRule>,
+    scan_credentials: bool,
+}
+
+impl RedactionPolicy {
+    /// A policy with the given literal rules and the default credential-shape
+    /// scan enabled.
+    pub fn new(rules: Vec<RedactionRule>) -> Self {
+        Self {
+            rules,
+            scan_credentials: true,
+        }
+    }
+
+    /// A policy with explicit rules but the default credential scan disabled.
+    /// Used where only operator-declared patterns should apply.
+    pub fn rules_only(rules: Vec<RedactionRule>) -> Self {
+        Self {
+            rules,
+            scan_credentials: false,
+        }
+    }
+
+    /// Whether the default credential-shape scan is enabled.
+    pub fn scans_credentials(&self) -> bool {
+        self.scan_credentials
+    }
+
+    /// Apply the policy to `bytes`, returning the redacted bytes and a
+    /// `redaction_state` of `"redacted"` (something matched) or `"safe"`.
+    ///
+    /// The explicit literal rules run first (so an operator pattern always wins
+    /// its exact replacement), then the credential-shape scan rewrites any
+    /// remaining credential-shaped token to [`CREDENTIAL_REDACTION_PLACEHOLDER`].
+    pub fn apply(&self, bytes: &[u8]) -> (Vec<u8>, String) {
+        let mut text = String::from_utf8_lossy(bytes).to_string();
+        let mut redacted = false;
+        for rule in &self.rules {
+            if text.contains(&rule.pattern) {
+                text = text.replace(&rule.pattern, &rule.replacement);
+                redacted = true;
+            }
+        }
+        if self.scan_credentials {
+            let (scanned, scanned_any) = scan_credential_shapes(&text);
+            if scanned_any {
+                text = scanned;
+                redacted = true;
+            }
+        }
+        (
+            text.into_bytes(),
+            if redacted { "redacted" } else { "safe" }.to_string(),
+        )
+    }
+}
+
+/// Rewrite credential-shaped tokens in `text` to the credential placeholder,
+/// returning the rewritten text and whether anything matched (ACI7).
+///
+/// A token is credential-shaped when it carries a known secret prefix
+/// (`AKIA`/`ASIA`, `sk-`, `ghp_`/`gho_`/`github_pat_`, `xox[bap]-`, `AIza`,
+/// `glpat-`), or when it is a long, high-entropy run of credential characters
+/// (>= 20 chars of `[A-Za-z0-9_\-+/=.]` with high distinct-character diversity --
+/// the shape of base64/hex API keys and tokens). A `Bearer <token>` header has
+/// its token component scrubbed even if the token itself is short. Ordinary
+/// prose words, file paths, and identifiers stay below the entropy/length bar so
+/// the scan does not blank out useful output.
+fn scan_credential_shapes(text: &str) -> (String, bool) {
+    let mut out = String::with_capacity(text.len());
+    let mut redacted = false;
+    // Split on whitespace boundaries, preserving the exact whitespace so the
+    // redacted output keeps its line/column structure (callers diff and display
+    // it). A "token" is a maximal run of non-whitespace characters.
+    let mut token = String::new();
+    let mut prev_token: Option<String> = None;
+    let flush = |token: &mut String,
+                 prev_token: &mut Option<String>,
+                 out: &mut String,
+                 redacted: &mut bool| {
+        if token.is_empty() {
+            return;
+        }
+        let after_bearer = prev_token
+            .as_deref()
+            .is_some_and(|prev| prev.eq_ignore_ascii_case("bearer"));
+        if is_credential_shaped(token, after_bearer) {
+            out.push_str(CREDENTIAL_REDACTION_PLACEHOLDER);
+            *redacted = true;
+        } else {
+            out.push_str(token);
+        }
+        *prev_token = Some(std::mem::take(token));
+    };
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            flush(&mut token, &mut prev_token, &mut out, &mut redacted);
+            out.push(ch);
+            if ch == '\n' {
+                prev_token = None;
+            }
+        } else {
+            token.push(ch);
+        }
+    }
+    flush(&mut token, &mut prev_token, &mut out, &mut redacted);
+    (out, redacted)
+}
+
+/// Whether `raw` looks like a credential token. `after_bearer` lowers the bar
+/// for a token that directly follows a `Bearer` header.
+fn is_credential_shaped(raw: &str, after_bearer: bool) -> bool {
+    // Strip surrounding punctuation/quotes so `"sk-..."` or `(token),` is judged
+    // on the token itself, and strip a `key=value` prefix so `AWS_SECRET=AKIA...`
+    // scans the value.
+    let trimmed = raw.trim_matches(|c: char| {
+        matches!(
+            c,
+            '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':'
+        )
+    });
+    // Strip a `key=` assignment prefix so `AWS_SECRET=AKIA...` scans the value,
+    // but keep the value's own `=` (e.g. base64 padding): split on the FIRST `=`
+    // only when the key looks like an env-var/identifier name.
+    let value = match trimmed.split_once('=') {
+        Some((key, rest))
+            if !key.is_empty()
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && key.chars().any(|c| c.is_ascii_alphabetic()) =>
+        {
+            rest
+        }
+        _ => trimmed,
+    };
+    if value.is_empty() {
+        return false;
+    }
+    const KNOWN_PREFIXES: &[&str] = &[
+        "AKIA",
+        "ASIA",
+        "sk-",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "AIza",
+        "glpat-",
+    ];
+    if KNOWN_PREFIXES
+        .iter()
+        .any(|prefix| value.starts_with(prefix) && value.len() > prefix.len() + 4)
+    {
+        return true;
+    }
+    if after_bearer && value.len() >= 8 && value.chars().all(is_credential_char) {
+        return true;
+    }
+    // Long, high-entropy run of credential characters: the shape of a base64/hex
+    // API key. Require a minimum length, all credential characters, a mix of
+    // letters and digits, and enough distinct characters that an obvious
+    // repeated/structured string (a path, a hash-like word) does not trip it.
+    if value.len() >= 20 && value.chars().all(is_credential_char) {
+        let has_digit = value.chars().any(|c| c.is_ascii_digit());
+        let has_alpha = value.chars().any(|c| c.is_ascii_alphabetic());
+        let distinct = {
+            let mut seen = [false; 128];
+            let mut count = 0usize;
+            for c in value.chars() {
+                let idx = c as usize;
+                if idx < 128 && !seen[idx] {
+                    seen[idx] = true;
+                    count += 1;
+                }
+            }
+            count
+        };
+        if has_digit && has_alpha && distinct >= 12 {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_credential_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '/' | '=' | '.')
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalProcessRunner {
     config: LocalProcessConfig,
@@ -751,17 +961,14 @@ impl LocalProcessRunner {
     }
 
     fn redact_output(&self, bytes: &[u8]) -> RedactedOutput {
-        let mut text = String::from_utf8_lossy(bytes).to_string();
-        let mut redacted = false;
-        for rule in &self.config.redaction_rules {
-            if text.contains(&rule.pattern) {
-                text = text.replace(&rule.pattern, &rule.replacement);
-                redacted = true;
-            }
-        }
+        // ACI7: process stdout/stderr is the classic place credentials leak, so
+        // the runner applies the full redaction policy (operator patterns PLUS
+        // the default credential-shape scan), not only the literal patterns.
+        let (bytes, redaction_state) =
+            RedactionPolicy::new(self.config.redaction_rules.clone()).apply(bytes);
         RedactedOutput {
-            bytes: text.into_bytes(),
-            redaction_state: if redacted { "redacted" } else { "safe" }.to_string(),
+            bytes,
+            redaction_state,
         }
     }
 
@@ -2450,5 +2657,88 @@ mod tests {
             .expect("clock")
             .as_nanos();
         std::env::temp_dir().join(format!("capo-runtime-{name}-{nanos}"))
+    }
+
+    #[test]
+    fn redaction_policy_applies_rules_then_credential_scan() {
+        // ACI7: the explicit operator pattern wins its exact replacement, and the
+        // default credential-shape scan scrubs an UNNAMED credential too.
+        let policy = RedactionPolicy::new(vec![RedactionRule {
+            pattern: "NAMED".to_string(),
+            replacement: "[X]".to_string(),
+        }]);
+        let (bytes, state) = policy.apply(b"token NAMED and key AKIAIOSFODNN7EXAMPLE done");
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(state, "redacted");
+        assert!(text.contains("[X]"), "named rule should apply: {text}");
+        assert!(
+            !text.contains("AKIAIOSFODNN7EXAMPLE"),
+            "credential scan should scrub the unnamed key: {text}"
+        );
+        assert!(text.contains(CREDENTIAL_REDACTION_PLACEHOLDER));
+        // The benign words survive.
+        assert!(text.contains("token") && text.contains("done"));
+    }
+
+    #[test]
+    fn credential_scan_recognizes_credential_shapes() {
+        let policy = RedactionPolicy::new(Vec::new());
+        for secret in [
+            "AKIAIOSFODNN7EXAMPLE",
+            "sk-abcdEFGH1234ijklMNOP5678",
+            "ghp_abcdEFGH1234ijklMNOP5678qrst",
+            "AIzaSyA1b2C3d4E5f6G7h8I9j0KLmnopQRstuv",
+            "dGhpcyBpcyBhIGxvbmcgYmFzZTY0IDEyMzQ1Njc4OTA=",
+        ] {
+            let (bytes, state) = policy.apply(format!("value={secret}").as_bytes());
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(state, "redacted", "expected redaction for {secret}");
+            assert!(
+                !text.contains(secret),
+                "credential {secret} should be scrubbed: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_scan_leaves_ordinary_text_untouched() {
+        // ACI7: the scan must not blank out ordinary prose, paths, or short
+        // identifiers, or it would hide useful output from the agent.
+        let policy = RedactionPolicy::new(Vec::new());
+        let prose = "the quick brown fox jumps over /usr/local/bin/cargo \
+                     and runs test_case_42 then returns Ok(())";
+        let (bytes, state) = policy.apply(prose.as_bytes());
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(
+            state, "safe",
+            "ordinary text should not be redacted: {text}"
+        );
+        assert_eq!(text, prose);
+    }
+
+    #[test]
+    fn credential_scan_scrubs_a_bearer_token() {
+        let policy = RedactionPolicy::new(Vec::new());
+        let (bytes, state) = policy.apply(b"Authorization: Bearer abc123def456");
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(state, "redacted");
+        assert!(
+            !text.contains("abc123def456"),
+            "bearer token leaked: {text}"
+        );
+    }
+
+    #[test]
+    fn rules_only_policy_skips_the_credential_scan() {
+        // The rules-only policy applies declared patterns but does NOT run the
+        // default credential-shape scan.
+        let policy = RedactionPolicy::rules_only(Vec::new());
+        assert!(!policy.scans_credentials());
+        let (bytes, state) = policy.apply(b"key AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(state, "safe");
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "key AKIAIOSFODNN7EXAMPLE"
+        );
     }
 }

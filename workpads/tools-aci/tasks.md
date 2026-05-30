@@ -587,7 +587,62 @@ Must not do:
 
 ## ACI7 - Per-Call Provenance And Input-And-Output Redaction
 
-Status: pending.
+Status: done.
+
+Evidence:
+
+- Real redaction policy (`crates/capo-runtime/src/lib.rs`): new `RedactionPolicy`
+  combines the operator-declared literal `RedactionRule` patterns with a default
+  credential-shape/high-entropy scan (`scan_credential_shapes` /
+  `is_credential_shaped`: known key prefixes `AKIA`/`ASIA`/`sk-`/`ghp_`/`AIza`/
+  `glpat-`/`xox[bap]-`/`github_pat_`, `Bearer <token>` headers, and long
+  high-entropy credential-char runs with letter+digit mix and >=12 distinct
+  chars), returning `(bytes, redaction_state)`. `key=value` prefixes are stripped
+  on the FIRST `=` so base64 `=` padding is preserved. The runner's
+  `redact_output` now runs the full policy (process stdout/stderr gets the
+  credential scan, not just literal patterns). No new crate dependency -- the scan
+  is a hand-rolled token pass consistent with the existing FNV `content_hash`.
+- Input AND output redaction at the wrapper boundary
+  (`crates/capo-tools/src/runtime_wrappers.rs`): `redact_bytes` now delegates to
+  the policy, a new `redact_bytes_with_state` records the real `redaction_state`,
+  and a new `write_redacted_artifact` scrubs OUTPUT content before it lands in an
+  artifact. `file_read`, `file_write` (diff), and `apply_patch` (diff) output
+  artifacts now go through it, so a secret in tool OUTPUT -- not only input -- is
+  redacted; `record_input_artifact` uses the same policy.
+- `ToolInvocation`/`ToolObservation` projections carry provenance + timing
+  (`crates/capo-state/src/projections.rs`): `ToolCallProjection` gains a
+  `provenance: ToolCallProvenance` (`correlation_id`, `permission_decision_id`,
+  `capability_grant_use_id`, `started_at`, `completed_at`). Wired through the
+  schema (`tool_calls` columns), `apply.rs` INSERT/UPDATE, codec encode/decode
+  (provenance rides in the projection-record payload), and
+  `tool_calls_for_session`, so a restart/replay rebuilds it identically. The
+  `tool.invocation_started`/`tool.output_artifact_recorded`/`tool.output_observed`
+  events are persisted by the existing dispatch path (ACI1).
+- Queryable provenance end to end (`crates/capo-controller/src/tool_dispatch.rs`):
+  `dispatch_tool_call` captures wall-clock `started_at`/`completed_at` around the
+  real authorize+invoke and stamps the `ToolCall` projection with a
+  `correlation_id` (`corr-<session>-<run>-<turn>-<tool_call>`, the tool_call_id
+  being the shared event item ref / join key), a `permission_decision_id`
+  (`decision-<grant>`), and a per-invocation `capability_grant_use_id`
+  (`grant-use-<tool_call>-<grant>`). Non-dispatch construction sites default
+  provenance cleanly; the CLI wrapper ties a correlation/decision/grant id.
+- Tests added: `cargo test -p capo-runtime` (RedactionPolicy rules-then-scan,
+  credential-shape recognition, ordinary-text-left-untouched false-positive
+  guard, Bearer-token scrub, rules-only skips the scan); `cargo test -p
+  capo-tools` (`file_read_redacts_a_configured_secret_in_the_output_artifact`,
+  `file_read_credential_shape_scan_redacts_an_unnamed_secret_in_output` -- proving
+  a known secret in tool OUTPUT is redacted in the artifact, not only input);
+  `cargo test -p capo-state`
+  (`tool_call_provenance_and_timing_persist_and_rebuild_identically` -- projection
+  carries provenance/timing and rebuilds byte-identically on replay);
+  `cargo test -p capo-controller`
+  (`real_controller_dispatch_persists_provenance_and_timing_that_replays_identically`
+  -- the real dispatch path persists the queryable correlation/decision/grant
+  chain + timing and replays identically).
+- Gate run from `/Users/nicolas/devel/capo-wt/tools-aci`: `cargo fmt --check`
+  clean; `cargo clippy --all-targets --all-features -- -D warnings` exit 0;
+  `cargo test --workspace` => all 26 suites passed, 0 failed (capo-tools 86,
+  capo-state 37, capo-runtime 23, capo-controller 36); `git diff --check` clean.
 
 Acceptance:
 

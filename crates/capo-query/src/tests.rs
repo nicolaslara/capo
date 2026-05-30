@@ -104,6 +104,7 @@ fn project_dashboard_aggregates_agents_sessions_runs_evidence_and_events() {
                     status: "completed".to_string(),
                     input_artifact_id: None,
                     output_artifact_id: Some("artifact-tool-demo".to_string()),
+                    provenance: Default::default(),
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::ToolObservation(ToolObservationProjection {

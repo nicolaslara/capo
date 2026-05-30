@@ -316,6 +316,11 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             status TEXT NOT NULL,
             input_artifact_id TEXT,
             output_artifact_id TEXT,
+            correlation_id TEXT,
+            permission_decision_id TEXT,
+            capability_grant_use_id TEXT,
+            started_at INTEGER,
+            completed_at INTEGER,
             updated_sequence INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS tool_observations (

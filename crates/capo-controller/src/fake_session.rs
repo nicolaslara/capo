@@ -275,6 +275,7 @@ impl FakeBoundaryController {
                 status: "requested".to_string(),
                 input_artifact_id: None,
                 output_artifact_id: None,
+                provenance: capo_state::ToolCallProvenance::default(),
                 updated_sequence: 0,
             })],
         )?;
@@ -379,6 +380,7 @@ impl FakeBoundaryController {
                 status: "completed".to_string(),
                 input_artifact_id: None,
                 output_artifact_id: Some(tool_result.output_artifact_id.clone()),
+                provenance: capo_state::ToolCallProvenance::default(),
                 updated_sequence: 0,
             })],
         )?;
@@ -583,6 +585,7 @@ impl FakeBoundaryController {
                 status: "denied".to_string(),
                 input_artifact_id: None,
                 output_artifact_id: None,
+                provenance: capo_state::ToolCallProvenance::default(),
                 updated_sequence: 0,
             })],
         )?;

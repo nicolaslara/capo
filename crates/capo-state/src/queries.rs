@@ -13,7 +13,8 @@ use crate::{
     MemorySourceProjection, PermissionApprovalProjection, ReviewFindingProjection, RunProjection,
     RuntimeTargetProjection, SessionProjection, SourceBindingProjection, SqliteStateStore,
     StateError, StateResult, TaskOutcomeReportProjection, TaskProjection, ToolCallProjection,
-    ToolObservationProjection, WorkpadFileProjection, WorkpadTaskProjection, optional_id,
+    ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection, WorkpadTaskProjection,
+    optional_id,
 };
 
 impl SqliteStateStore {
@@ -1196,7 +1197,9 @@ impl SqliteStateStore {
         let connection = Connection::open(&self.db_path)?;
         let mut statement = connection.prepare(
             "SELECT tool_call_id, session_id, turn_id, tool_name, tool_origin, status,
-                    input_artifact_id, output_artifact_id, updated_sequence
+                    input_artifact_id, output_artifact_id, correlation_id,
+                    permission_decision_id, capability_grant_use_id, started_at,
+                    completed_at, updated_sequence
              FROM tool_calls
              WHERE session_id = ?1
              ORDER BY updated_sequence ASC, tool_call_id ASC",
@@ -1211,7 +1214,14 @@ impl SqliteStateStore {
                 status: row.get(5)?,
                 input_artifact_id: row.get(6)?,
                 output_artifact_id: row.get(7)?,
-                updated_sequence: row.get(8)?,
+                provenance: ToolCallProvenance {
+                    correlation_id: row.get(8)?,
+                    permission_decision_id: row.get(9)?,
+                    capability_grant_use_id: row.get(10)?,
+                    started_at: row.get(11)?,
+                    completed_at: row.get(12)?,
+                },
+                updated_sequence: row.get(13)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()

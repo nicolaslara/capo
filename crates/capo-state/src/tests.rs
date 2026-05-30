@@ -783,6 +783,7 @@ fn artifacts_tool_grants_memory_and_evidence_are_persisted_and_rebuilt() {
                     status: "completed".to_string(),
                     input_artifact_id: None,
                     output_artifact_id: Some(artifact_id.to_string()),
+                    provenance: Default::default(),
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::MemoryPacketRef(MemoryPacketProjection {
@@ -836,6 +837,60 @@ fn artifacts_tool_grants_memory_and_evidence_are_persisted_and_rebuilt() {
     assert_eq!(grants[0].decision_source, "allow_trusted_local_profile");
     assert_eq!(grants[0].persistence, "until_session_end");
     assert_eq!(grants[0].explanation, "test grant");
+}
+
+#[test]
+fn tool_call_provenance_and_timing_persist_and_rebuild_identically() {
+    // ACI7: the per-call provenance (correlation_id, permission_decision_id,
+    // capability_grant_use_id) and wall-clock timing (started_at/completed_at)
+    // are persisted on the `ToolCall` projection AND rebuild byte-identically on
+    // replay, so provenance is queryable and survives a restart.
+    let store = temp_store("tool-call-provenance-rebuild");
+    let session_id = SessionId::new("session-prov");
+
+    let provenance = ToolCallProvenance {
+        correlation_id: Some("corr-session-prov-run-1-turn-1-tool-prov".to_string()),
+        permission_decision_id: Some("decision-grant-allow-abc".to_string()),
+        capability_grant_use_id: Some("grant-use-tool-prov-grant-allow-abc".to_string()),
+        started_at: Some(1_700_000_000_123),
+        completed_at: Some(1_700_000_000_456),
+    };
+
+    store
+        .append_event(
+            NewEvent::new("event-tool-prov", EventKind::ToolCallCompleted, "test"),
+            &[ProjectionRecord::ToolCall(ToolCallProjection {
+                tool_call_id: ToolCallId::new("tool-prov"),
+                session_id: session_id.clone(),
+                turn_id: Some("turn-1".to_string()),
+                tool_name: "capo.file_read".to_string(),
+                tool_origin: "runtime".to_string(),
+                status: "completed".to_string(),
+                input_artifact_id: Some("artifact-input".to_string()),
+                output_artifact_id: Some("artifact-output".to_string()),
+                provenance: provenance.clone(),
+                updated_sequence: 0,
+            })],
+        )
+        .expect("append tool call with provenance");
+
+    // Provenance is queryable from the live projection.
+    let before = store
+        .tool_calls_for_session(&session_id)
+        .expect("read tool calls");
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].provenance, provenance);
+    assert_eq!(before[0].provenance.started_at, Some(1_700_000_000_123));
+    assert_eq!(before[0].provenance.completed_at, Some(1_700_000_000_456));
+
+    // A restart/replay (rebuild from the event-sourced projection records)
+    // reconstructs the exact same provenance and timing.
+    store.rebuild_projections().expect("rebuild projections");
+    let after = store
+        .tool_calls_for_session(&session_id)
+        .expect("read tool calls after rebuild");
+    assert_eq!(after, before, "tool call must rebuild identically");
+    assert_eq!(after[0].provenance, provenance);
 }
 
 #[test]
