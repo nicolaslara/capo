@@ -16,6 +16,12 @@ use capo_core::{BoundaryBinding, BoundaryKind, RunId};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+mod async_runner;
+
+pub use async_runner::{
+    AsyncLocalProcessRunner, AsyncRunningProcess, StreamSource, StreamingOutcome,
+};
+
 /// First runtime variants from the prototype plan.
 pub const PLANNED_RUNTIMES: &[&str] = &["fake", "local-process", "remote-process"];
 /// First tunnel variants from the runtime/tunnel plan.
@@ -1061,6 +1067,13 @@ impl LocalProcessRunner {
         }
     }
 
+    /// The runner's immutable configuration (workspace roots, artifact root,
+    /// env allowlist, redaction rules, output cap). Used by the streaming runner
+    /// which reuses the same configuration surface.
+    pub(crate) fn config(&self) -> &LocalProcessConfig {
+        &self.config
+    }
+
     fn apply_request_env(
         &self,
         command: &mut Command,
@@ -1093,7 +1106,7 @@ impl LocalProcessRunner {
         }
     }
 
-    fn ensure_cwd_allowed(&self, cwd: &Path) -> RuntimeResult<()> {
+    pub(crate) fn ensure_cwd_allowed(&self, cwd: &Path) -> RuntimeResult<()> {
         let cwd = normalize_path(cwd)?;
         let allowed = self.config.workspace_roots.iter().any(|root| {
             normalize_path(root)
@@ -1115,7 +1128,7 @@ impl LocalProcessRunner {
     /// With no turn key this is the legacy `artifact_root/run_id`. With a turn
     /// key the artifacts are nested under `artifact_root/run_id/turns/<turn_id>`
     /// so multiple turns in the same run keep distinct `stdout.txt`/`stderr.txt`.
-    fn run_dir_for(&self, run_id: &RunId, turn_id: Option<&str>) -> PathBuf {
+    pub(crate) fn run_dir_for(&self, run_id: &RunId, turn_id: Option<&str>) -> PathBuf {
         let run_dir = self.config.artifact_root.join(run_id.as_str());
         match turn_id {
             Some(turn_id) => run_dir.join("turns").join(sanitize_artifact_key(turn_id)),
@@ -1141,6 +1154,7 @@ impl LocalProcessRunner {
             size_bytes: bytes.len() as i64,
             content_hash: content_hash(bytes),
             redaction_state: redaction_state.to_string(),
+            truncated: false,
         })
     }
 
@@ -1159,6 +1173,7 @@ impl LocalProcessRunner {
             size_bytes: bytes.len() as i64,
             content_hash: content_hash(bytes),
             redaction_state: redaction_state.to_string(),
+            truncated: false,
         }
     }
 }
@@ -1260,6 +1275,15 @@ pub struct RuntimeOutputArtifact {
     pub size_bytes: i64,
     pub content_hash: String,
     pub redaction_state: String,
+    /// Whether the captured output was truncated at the output cap.
+    ///
+    /// The synchronous runner never truncates (it errors on overflow and the
+    /// tool wrappers buffer the whole output), so it always records `false`.
+    /// The streaming runner ([`AsyncLocalProcessRunner`]) streams-and-truncates:
+    /// a successful run that exceeds the cap keeps its (capped) artifact and
+    /// records `truncated = true` here as artifact metadata rather than failing
+    /// the run.
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1894,7 +1918,7 @@ fn normalize_path(path: &Path) -> RuntimeResult<PathBuf> {
 /// With no turn key this is the legacy `artifact-runtime-{run_id}-{stream}`.
 /// With a turn key the turn is folded in so per-turn artifacts in the same run
 /// have distinct ids: `artifact-runtime-{run_id}-turn-{turn_id}-{stream}`.
-fn artifact_id_for(run_id: &RunId, turn_id: Option<&str>, stream: &str) -> String {
+pub(crate) fn artifact_id_for(run_id: &RunId, turn_id: Option<&str>, stream: &str) -> String {
     match turn_id {
         Some(turn_id) => format!(
             "artifact-runtime-{run_id}-turn-{}-{stream}",
@@ -1908,7 +1932,7 @@ fn artifact_id_for(run_id: &RunId, turn_id: Option<&str>, stream: &str) -> Strin
 ///
 /// Keeps the key filesystem-safe and free of separators so it cannot escape the
 /// run directory or collide across turns.
-fn sanitize_artifact_key(key: &str) -> String {
+pub(crate) fn sanitize_artifact_key(key: &str) -> String {
     let sanitized: String = key
         .chars()
         .map(|ch| {
@@ -1926,7 +1950,7 @@ fn sanitize_artifact_key(key: &str) -> String {
     }
 }
 
-fn content_hash(bytes: &[u8]) -> String {
+pub(crate) fn content_hash(bytes: &[u8]) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -1981,7 +2005,7 @@ fn process_group_is_alive(pid: u32) -> bool {
 
 /// Send `signal` to the whole process group led by `pid` (negative PID target).
 #[cfg(unix)]
-fn kill_process_group(pid: u32, signal: &str) {
+pub(crate) fn kill_process_group(pid: u32, signal: &str) {
     // Defence in depth alongside `process_group_is_alive`: refuse to signal the
     // self/init groups even if a caller reaches here with a low PID.
     if !is_reapable_pid(pid) {

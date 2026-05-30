@@ -35,3 +35,4 @@ capo-state = { path = "crates/capo-state" }
 capo-tools = { path = "crates/capo-tools" }
 capo-voice = { path = "crates/capo-voice" }
 capo-workpads = { path = "crates/capo-workpads" }
+tokio = { version = "1", default-features = false }
