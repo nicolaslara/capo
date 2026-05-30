@@ -174,7 +174,16 @@ impl TaskOutcomeReport {
 fn is_terminal_outcome(status: &str) -> bool {
     matches!(
         status,
-        "completed" | "canceled" | "failed" | "interrupted" | "exited" | "exited_unknown"
+        // `recovered` (RTL10): a crashed in-flight run reaped and reconciled on
+        // restart is terminal and no longer active-looking, so it is a valid
+        // outcome to report on, like the other terminal run statuses.
+        "completed"
+            | "canceled"
+            | "failed"
+            | "interrupted"
+            | "exited"
+            | "exited_unknown"
+            | "recovered"
     )
 }
 

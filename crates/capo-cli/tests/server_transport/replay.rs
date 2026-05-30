@@ -128,7 +128,9 @@ fn cli_replays_codex_fixture_through_running_server_process() {
         "--state",
         &state_root.display().to_string(),
     ]);
-    assert!(status.contains("run_status=exited_unknown"));
+    // RTL10: restart recovery reaps the orphaned in-flight run and records a
+    // terminal `run.recovered`, so the reconciled run reports `recovered`.
+    assert!(status.contains("run_status=recovered"));
     assert!(status.contains("adapter_kind=codex_exec"));
     assert!(status.contains("evidence_count=1"));
     assert!(status.contains("turn_ids=turn-codex-local"));

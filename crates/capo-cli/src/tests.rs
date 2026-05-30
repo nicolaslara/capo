@@ -3386,7 +3386,10 @@ fn cli_drives_fake_controller_and_exports_evidence() {
     assert!(exported.starts_with("<!-- capo:evidence-export -->"));
     assert!(exported.contains("## State Refs"));
     assert!(exported.contains("- Session status: `canceled`"));
-    assert!(exported.contains("- Run status: `exited_unknown`"));
+    // RTL10: restart recovery reaps the orphaned in-flight run and records a
+    // terminal `run.recovered`, so the reconciled run status is `recovered`
+    // (replacing the blunt `exited_unknown` the old recovery sweep wrote).
+    assert!(exported.contains("- Run status: `recovered`"));
     assert!(exported.contains("- `evidence-fake-codex`"));
     assert!(exported.contains("artifact=`artifact-tool-session-fake-codex`"));
     assert!(exported.contains("## Tool Calls"));
@@ -3774,7 +3777,9 @@ fn server_cli_routes_agent_work_through_server_boundary() {
         state_root.display().to_string(),
     ])
     .expect("server recovered status");
-    assert!(recovered_status.contains("run_status=exited_unknown"));
+    // RTL10: the orphan reaper records a terminal `run.recovered`, so the
+    // reconciled run reports `recovered` rather than the old `exited_unknown`.
+    assert!(recovered_status.contains("run_status=recovered"));
 }
 
 #[test]
@@ -6645,7 +6650,9 @@ fn prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence() {
     let reviewer_evidence = fs::read_to_string(evidence_dir.join("session-fake-reviewer.md"))
         .expect("reviewer evidence");
     assert!(codex_evidence.contains("- Session status: `canceled`"));
-    assert!(codex_evidence.contains("- Run status: `exited_unknown`"));
+    // RTL10: restart recovery reaps the orphaned in-flight run and records a
+    // terminal `run.recovered`, so the reconciled run status is `recovered`.
+    assert!(codex_evidence.contains("- Run status: `recovered`"));
     assert!(codex_evidence.contains("tool.result_delivered"));
     assert!(codex_evidence.contains("## Tool Observations"));
     assert!(codex_evidence.contains("`tool-observation-fake-codex` name=`provider.native_search`"));
@@ -6671,7 +6678,7 @@ fn prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence() {
             .expect("read codex run")
             .expect("codex run")
             .status,
-        "exited_unknown"
+        "recovered"
     );
     assert_eq!(
         reopened

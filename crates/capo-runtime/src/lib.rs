@@ -246,6 +246,7 @@ impl LocalProcessRunner {
             run_id: request.run_id.clone(),
             runtime_process_ref: format!("local-process-{}", request.run_id),
             external_pid: None,
+            boot_id: None,
             status: "exited".to_string(),
             redaction_state: stdout.redaction_state.clone(),
         };
@@ -350,6 +351,10 @@ impl LocalProcessRunner {
                 run_id: request.run_id.clone(),
                 runtime_process_ref: format!("local-process-{}", request.run_id),
                 external_pid: Some(external_pid),
+                // Stamp the spawning boot id so restart recovery only reaps this
+                // process group within the same boot (a reused PID after a
+                // reboot must not be signalled).
+                boot_id: boot_id(),
                 status: "running".to_string(),
                 redaction_state: "redacted".to_string(),
             },
@@ -609,13 +614,32 @@ impl LocalProcessRunner {
     /// descendants* are reaped rather than left running.
     ///
     /// The returned [`OrphanReap`] carries a stable
-    /// `observed_runtime_state_hash` (over the PID and the observed liveness)
-    /// that the recovery layer folds into its idempotency key, so repeated
-    /// restarts that observe the same runtime state never emit a second recovery
-    /// event.
+    /// `observed_runtime_state_hash` (over the PID, the recorded boot id, and the
+    /// observed liveness) that the recovery layer folds into its idempotency key,
+    /// so repeated restarts that observe the same runtime state never emit a
+    /// second recovery event.
+    ///
+    /// `recorded_boot_id` is the [`boot_id`] captured at spawn time. Because PIDs
+    /// and process-group ids are recycled by the OS, the persisted PID is only a
+    /// meaningful handle within the boot that recorded it. If the recorded boot
+    /// id is absent or differs from the current boot's id, this does NOT signal
+    /// anything (a recycled PID after a reboot would otherwise SIGKILL an
+    /// unrelated process group) and records the run as `already_gone`.
     #[cfg(unix)]
-    pub fn reap_orphan_process_group(external_pid: u32) -> OrphanReap {
-        let alive_before = process_group_is_alive(external_pid);
+    pub fn reap_orphan_process_group(
+        external_pid: u32,
+        recorded_boot_id: Option<&str>,
+    ) -> OrphanReap {
+        let current_boot_id = boot_id();
+        // Only reap within the same boot: a PID persisted before a reboot is
+        // almost certainly recycled onto an unrelated process group afterwards.
+        let same_boot = match (recorded_boot_id, current_boot_id.as_deref()) {
+            (Some(recorded), Some(current)) => recorded == current,
+            // No recorded or unreadable current boot id => identity cannot be
+            // verified, so we conservatively decline to signal.
+            _ => false,
+        };
+        let alive_before = same_boot && process_group_is_alive(external_pid);
         if alive_before {
             kill_process_group(external_pid, "-TERM");
             thread::sleep(Duration::from_millis(100));
@@ -630,7 +654,11 @@ impl LocalProcessRunner {
             external_pid,
             reaped: alive_before,
             observed_state: observed_state.to_string(),
-            observed_runtime_state_hash: orphan_state_hash(external_pid, observed_state),
+            observed_runtime_state_hash: orphan_state_hash(
+                external_pid,
+                recorded_boot_id,
+                observed_state,
+            ),
         }
     }
 
@@ -638,13 +666,20 @@ impl LocalProcessRunner {
     /// so the orphan is recorded as already gone (Capo never spawns process
     /// groups off Unix).
     #[cfg(not(unix))]
-    pub fn reap_orphan_process_group(external_pid: u32) -> OrphanReap {
+    pub fn reap_orphan_process_group(
+        external_pid: u32,
+        recorded_boot_id: Option<&str>,
+    ) -> OrphanReap {
         let observed_state = "already_gone";
         OrphanReap {
             external_pid,
             reaped: false,
             observed_state: observed_state.to_string(),
-            observed_runtime_state_hash: orphan_state_hash(external_pid, observed_state),
+            observed_runtime_state_hash: orphan_state_hash(
+                external_pid,
+                recorded_boot_id,
+                observed_state,
+            ),
         }
     }
 
@@ -855,6 +890,11 @@ pub struct LocalRuntimeProcessRef {
     pub run_id: RunId,
     pub runtime_process_ref: String,
     pub external_pid: Option<u32>,
+    /// The machine boot id ([`boot_id`]) observed when this process was spawned.
+    /// Persisted alongside the PID so restart recovery only reaps the persisted
+    /// process group within the same boot (a reused PID after a reboot must not
+    /// be signalled). `None` when the boot id was unreadable at spawn time.
+    pub boot_id: Option<String>,
     pub status: String,
     pub redaction_state: String,
 }
@@ -931,10 +971,13 @@ pub struct OrphanReap {
     /// `true` if the process was still alive and was reaped; `false` if it had
     /// already exited (a true orphan whose terminal status is unknown).
     pub reaped: bool,
-    /// The observed runtime state: `alive_reaped` or `already_gone`.
+    /// The observed runtime state: `alive_reaped` or `already_gone`. A group
+    /// observed under a different boot id than was recorded at spawn time (a
+    /// recycled PID after a reboot) is reported as `already_gone` without being
+    /// signalled.
     pub observed_state: String,
-    /// A stable hash over `(external_pid, observed_state)` for the recovery
-    /// idempotency key.
+    /// A stable hash over `(external_pid, recorded_boot_id, observed_state)` for
+    /// the recovery idempotency key.
     pub observed_runtime_state_hash: String,
 }
 
@@ -1564,10 +1607,35 @@ fn content_hash(bytes: &[u8]) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
+/// The lowest PID the orphan reaper will ever signal as a process *group*.
+///
+/// `kill -<pid>` targets a process *group*, and the low group ids are
+/// catastrophic to signal: group 0 is the *caller's own* group (so
+/// `kill -KILL -0` would SIGKILL Capo and every child it spawned), and group 1
+/// is init's group. A corrupted/zero/low PID in the durable in-flight marker
+/// must therefore never reach `/bin/kill`; we treat anything `<= 1` as "no
+/// process to reap" (see [`is_reapable_pid`]).
+const MIN_REAPABLE_PID: u32 = 2;
+
+/// Whether `pid` is safe to use as a negative-PID process-*group* signal target.
+///
+/// Guards against `kill -<0|1>` (self-group / init) reaching the reaper from a
+/// corrupted or zero-defaulted marker PID.
+fn is_reapable_pid(pid: u32) -> bool {
+    pid >= MIN_REAPABLE_PID
+}
+
 /// Probe whether the process *group* led by `pid` still has any live member,
 /// without affecting it (`kill -0 -<pid>`).
 #[cfg(unix)]
 fn process_group_is_alive(pid: u32) -> bool {
+    // Never probe (or, downstream, signal) the self/init groups: a low PID from
+    // a corrupted marker must read as "not alive" so the reaper records
+    // `already_gone` rather than `kill -0 -0` (which would succeed against our
+    // own group and lead the reaper to SIGKILL it).
+    if !is_reapable_pid(pid) {
+        return false;
+    }
     // `kill -0 -<pid>` succeeds iff at least one process in the group exists and
     // we may signal it; it never delivers a signal. We probe the *group* (not
     // the leader PID) so a backgrounded descendant whose group leader already
@@ -1586,6 +1654,11 @@ fn process_group_is_alive(pid: u32) -> bool {
 /// Send `signal` to the whole process group led by `pid` (negative PID target).
 #[cfg(unix)]
 fn kill_process_group(pid: u32, signal: &str) {
+    // Defence in depth alongside `process_group_is_alive`: refuse to signal the
+    // self/init groups even if a caller reaches here with a low PID.
+    if !is_reapable_pid(pid) {
+        return;
+    }
     let _ = Command::new("/bin/kill")
         .arg(signal)
         .arg(format!("-{pid}"))
@@ -1594,10 +1667,76 @@ fn kill_process_group(pid: u32, signal: &str) {
         .status();
 }
 
+/// A coarse identity token for the machine's current boot, recorded alongside a
+/// run's PID at spawn time (RTL10) and re-checked on restart before any reap.
+///
+/// PIDs (and process-group ids) are recycled freely by the OS, so a PID
+/// persisted before a crash is only a meaningful handle *within the same boot*.
+/// After a reboot the persisted PID/PGID is almost certainly attached to an
+/// unrelated process group, and reaping it would SIGKILL an innocent group. We
+/// therefore stamp each marker with the boot id and skip reaping (recording the
+/// run as already gone) when it differs from the boot id observed on restart.
+///
+/// The token is derived from the kernel's recorded boot instant
+/// (`/proc/stat`'s `btime` on Linux, `kern.boottime` on macOS). If neither is
+/// readable we return `None`; callers treat an unknown boot id conservatively
+/// (no reap), so an unverifiable identity never escalates to a group kill.
+pub fn boot_id() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = fs::read_to_string("/proc/stat").ok()?;
+        for line in stat.lines() {
+            if let Some(btime) = line.strip_prefix("btime ") {
+                let btime = btime.trim();
+                if !btime.is_empty() {
+                    return Some(format!("linux-btime-{btime}"));
+                }
+            }
+        }
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("/usr/sbin/sysctl")
+            .arg("-n")
+            .arg("kern.boottime")
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        // Format: `{ sec = 1700000000, usec = 0 } Tue ...`; the `sec` field is a
+        // stable per-boot value.
+        let sec = text
+            .split("sec =")
+            .nth(1)?
+            .trim_start()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?;
+        if sec.is_empty() {
+            return None;
+        }
+        Some(format!("macos-boottime-{sec}"))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
 /// A stable hash over the observed orphan runtime state for recovery
-/// idempotency. Stable across restarts that observe the same PID + liveness.
-fn orphan_state_hash(pid: u32, observed_state: &str) -> String {
-    content_hash(format!("{pid}:{observed_state}").as_bytes())
+/// idempotency. Stable across restarts that observe the same PID + recorded boot
+/// id + liveness.
+fn orphan_state_hash(pid: u32, recorded_boot_id: Option<&str>, observed_state: &str) -> String {
+    content_hash(
+        format!(
+            "{pid}:{}:{observed_state}",
+            recorded_boot_id.unwrap_or("no-boot-id")
+        )
+        .as_bytes(),
+    )
 }
 
 #[cfg(test)]
@@ -2183,11 +2322,12 @@ mod tests {
             })
             .expect("spawn orphan tree");
         let pid = running.process.external_pid.expect("pid recorded");
+        let recorded_boot_id = running.process.boot_id.clone();
         // Let the parent exit but the descendant keep sleeping.
         let _ = running.child.wait();
         thread::sleep(Duration::from_millis(100));
 
-        let reap = LocalProcessRunner::reap_orphan_process_group(pid);
+        let reap = LocalProcessRunner::reap_orphan_process_group(pid, recorded_boot_id.as_deref());
         assert!(reap.reaped, "a live orphan group must be reaped");
         assert_eq!(reap.observed_state, "alive_reaped");
         assert_eq!(reap.external_pid, pid);
@@ -2223,17 +2363,85 @@ mod tests {
             })
             .expect("spawn short process");
         let pid = running.process.external_pid.expect("pid recorded");
+        let recorded_boot_id = running.process.boot_id.clone();
         let _ = running.child.wait();
         thread::sleep(Duration::from_millis(100));
 
-        let reap = LocalProcessRunner::reap_orphan_process_group(pid);
+        let reap = LocalProcessRunner::reap_orphan_process_group(pid, recorded_boot_id.as_deref());
         assert!(!reap.reaped);
         assert_eq!(reap.observed_state, "already_gone");
         // Stable hash: re-observing the same gone PID hashes identically.
         assert_eq!(
             reap.observed_runtime_state_hash,
-            LocalProcessRunner::reap_orphan_process_group(pid).observed_runtime_state_hash
+            LocalProcessRunner::reap_orphan_process_group(pid, recorded_boot_id.as_deref())
+                .observed_runtime_state_hash
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_orphan_process_group_does_not_reap_across_a_reboot_boundary() {
+        // RTL10 safety: PIDs/PGIDs are recycled across reboots, so a live group
+        // observed under a *different* boot id than the one recorded at spawn
+        // must NOT be signalled -- it is almost certainly an unrelated process
+        // group. The reaper records it as `already_gone` (no kill).
+        let workspace = temp_root("workspace-reap-reboot");
+        let artifacts = temp_root("artifacts-reap-reboot");
+        fs::create_dir_all(&workspace).unwrap();
+        let marker = workspace.join("survivor-across-reboot.txt");
+        let runner =
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+        let mut running = runner
+            .spawn_process(LocalProcessRequest {
+                run_id: RunId::new("run-reap-reboot"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    format!("(sleep 2; printf survived > {}) &", marker.display()),
+                ],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("spawn process group");
+        let pid = running.process.external_pid.expect("pid recorded");
+        let _ = running.child.wait();
+        thread::sleep(Duration::from_millis(100));
+
+        // Recorded boot id from a *different* boot than the current one.
+        let reap = LocalProcessRunner::reap_orphan_process_group(
+            pid,
+            Some("linux-btime-000000000-stale-reboot"),
+        );
+        assert!(
+            !reap.reaped,
+            "a recycled PID after a reboot must not be reaped"
+        );
+        assert_eq!(reap.observed_state, "already_gone");
+
+        // The live descendant is left alone and writes its marker.
+        thread::sleep(Duration::from_millis(2200));
+        assert!(
+            marker.exists(),
+            "the group under a different boot id must be left untouched"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_orphan_process_group_never_signals_self_or_init_groups() {
+        // RTL10 safety: a corrupted/zero/low PID in the durable marker must never
+        // become `kill -<0|1>` (self group / init). Both report `already_gone`
+        // with no signal, regardless of the recorded boot id.
+        let current = boot_id();
+        for pid in [0u32, 1u32] {
+            let reap = LocalProcessRunner::reap_orphan_process_group(pid, current.as_deref());
+            assert!(!reap.reaped, "pid {pid} must never be reaped");
+            assert_eq!(reap.observed_state, "already_gone");
+        }
+        assert!(!is_reapable_pid(0));
+        assert!(!is_reapable_pid(1));
+        assert!(is_reapable_pid(2));
     }
 
     fn temp_root(name: &str) -> PathBuf {

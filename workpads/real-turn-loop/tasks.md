@@ -947,7 +947,7 @@ Must not do:
 
 ## RTL10 - Crash-Safe In-Flight Runs: Persist Before Spawn, Reap Orphans On Restart
 
-Status: done (gate green). The live path now persists the in-flight marker
+Status: done (gate re-greened after the recovery-status cutover). The live path now persists the in-flight marker
 (start-requested + the pid/process-group reference) the instant the spawn
 returns and BEFORE the run is waited on: `CapoServer::execute_codex_live_provider`
 (`crates/capo-server/src/live_provider.rs`) calls the new
@@ -1026,6 +1026,41 @@ Evidence:
   capo-query 21, capo-voice 19, capo cli 63 + server_transport 11, etc.). No live
   Codex smoke is required for RTL10 (the live workspace-write smoke is RTL13); all
   proofs are deterministic.
+
+- Gate re-green (recovery-status cutover + new production marker test): after the
+  RTL10 reaper replaced `mark_active_runs_exited_unknown`, restart recovery now
+  records a terminal `run.recovered` (not the old `exited_unknown`) as the
+  reconciled run status. Five recover-path tests still asserted the old
+  `exited_unknown` terminal status and were updated to `recovered`:
+  `crates/capo-cli/src/tests.rs` (`cli_drives_fake_controller_and_exports_evidence`
+  -- exported "Run status"; `prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence`
+  -- exported "Run status" + `run_for_session` status; `server_cli_routes_agent_work_through_server_boundary`
+  -- `run_status=`), `crates/capo-server/src/tests/foundation.rs`
+  (`client_tracks_mock_agent_through_server_boundary_and_recovers` dashboard
+  `run_status`), and `crates/capo-cli/tests/server_transport/{basic.rs,replay.rs}`
+  (`run_status=`). `recovered` is a terminal, no-longer-active run status, so
+  `capo_eval::is_terminal_outcome` (`crates/capo-eval/src/lib.rs`) now accepts it
+  -- `eval task-outcome` had rejected the recovered run with "task outcome reports
+  require completed or interrupted runs, got recovered". The new production marker
+  test `live_path_persists_the_in_flight_start_marker_before_completion`
+  (`crates/capo-server/src/tests/crash_recovery.rs`) drove a no-op `exit 0` codex
+  stub that produced no stdout, so the read-only live spawn failed parsing before
+  the marker assertions ran; its stub now streams the read-only
+  `codex-exec.jsonl` fixture so the spawn completes and the persisted in-flight
+  marker is asserted on the production path. Also fixed an unused `pid` binding in
+  the same test (clippy `-D warnings`) and re-ran `cargo fmt`. Commands run from
+  `/Users/nicolas/devel/capo-wt/real-turn-loop`: `cargo fmt --check` -> clean (exit
+  0); `cargo clippy --all-targets --all-features -- -D warnings` -> clean (exit 0);
+  `cargo test --workspace` -> exit 0, 304 passed, 0 failed across all binaries
+  (capo-server 50, capo-cli 63 + server_transport 11, capo-eval 4, capo-state 36,
+  capo-runtime 16, capo-controller 23, capo-adapters 29 / 2 ignored, etc.). Files
+  changed: `crates/capo-eval/src/lib.rs`,
+  `crates/capo-server/src/tests/crash_recovery.rs`,
+  `crates/capo-server/src/tests/foundation.rs`, `crates/capo-cli/src/tests.rs`,
+  `crates/capo-cli/tests/server_transport/basic.rs`,
+  `crates/capo-cli/tests/server_transport/replay.rs` (plus a mechanical `cargo fmt`
+  reflow of `crates/capo-controller/src/lib.rs`, `crates/capo-runtime/src/lib.rs`,
+  `crates/capo-server/src/safety_floor.rs`).
 
 Acceptance:
 

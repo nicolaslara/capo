@@ -590,6 +590,10 @@ impl CapoServer {
                 "status": "running",
                 "runtime_process_ref": process.runtime_process_ref,
                 "external_pid": external_pid,
+                // The boot id observed at spawn time, persisted so restart
+                // recovery only reaps this process group within the same boot
+                // (a PID/PGID recycled after a reboot must not be signalled).
+                "boot_id": process.boot_id,
                 "marker": "start_requested_inflight",
             })
             .to_string(),

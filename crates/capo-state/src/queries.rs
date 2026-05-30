@@ -273,14 +273,16 @@ impl SqliteStateStore {
         let mut inflight = Vec::with_capacity(active.len());
         for run in active {
             let mut external_pid = None;
+            let mut boot_id = None;
             let mut runtime_process_ref = None;
             let mut rows =
                 statement.query_map(params![run.run_id.as_str()], |row| row.get::<_, String>(0))?;
             for payload in rows.by_ref() {
                 let payload = payload?;
                 if let Some(found) = parse_inflight_marker(&payload) {
-                    external_pid = found.0;
-                    runtime_process_ref = found.1;
+                    external_pid = found.external_pid;
+                    boot_id = found.boot_id;
+                    runtime_process_ref = found.runtime_process_ref;
                     if external_pid.is_some() {
                         break;
                     }
@@ -291,6 +293,7 @@ impl SqliteStateStore {
                 session_id: run.session_id,
                 status: run.status,
                 external_pid,
+                boot_id,
                 runtime_process_ref,
             });
         }
@@ -1434,13 +1437,28 @@ impl SqliteStateStore {
 /// Extract `(external_pid, runtime_process_ref)` from a `run.started` payload
 /// if it carries the in-flight marker (RTL10). Returns `None` when the payload
 /// is not the in-flight marker shape.
-fn parse_inflight_marker(payload_json: &str) -> Option<(Option<u32>, Option<String>)> {
+/// The fields the in-flight `run.started` marker carries that restart recovery
+/// needs to probe and reap the persisted process group (RTL10).
+struct InFlightMarker {
+    external_pid: Option<u32>,
+    boot_id: Option<String>,
+    runtime_process_ref: Option<String>,
+}
+
+fn parse_inflight_marker(payload_json: &str) -> Option<InFlightMarker> {
     let value: serde_json::Value = serde_json::from_str(payload_json).ok()?;
     let object = value.as_object()?;
     let external_pid = object
         .get("external_pid")
         .and_then(|pid| pid.as_u64())
-        .and_then(|pid| u32::try_from(pid).ok());
+        .and_then(|pid| u32::try_from(pid).ok())
+        // A zero PID is not a real process group target (it would be the
+        // caller's own group); treat it as "no process to reap".
+        .filter(|pid| *pid != 0);
+    let boot_id = object
+        .get("boot_id")
+        .and_then(|boot| boot.as_str())
+        .map(ToString::to_string);
     let runtime_process_ref = object
         .get("runtime_process_ref")
         .and_then(|reference| reference.as_str())
@@ -1448,7 +1466,11 @@ fn parse_inflight_marker(payload_json: &str) -> Option<(Option<u32>, Option<Stri
     if external_pid.is_none() && runtime_process_ref.is_none() {
         return None;
     }
-    Some((external_pid, runtime_process_ref))
+    Some(InFlightMarker {
+        external_pid,
+        boot_id,
+        runtime_process_ref,
+    })
 }
 
 fn source_binding_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceBindingProjection> {

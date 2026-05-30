@@ -157,6 +157,11 @@ pub struct InFlightRun {
     /// with no persisted PID (e.g. a deterministic/mock run that never spawned a
     /// process) reaps as "no process to reap".
     pub external_pid: Option<u32>,
+    /// The machine boot id observed when the process was spawned, persisted
+    /// alongside the PID. Restart recovery only reaps the process group when this
+    /// matches the current boot id, so a PID/PGID recycled after a reboot is
+    /// never signalled. `None` when the boot id was unreadable at spawn time.
+    pub boot_id: Option<String>,
     pub runtime_process_ref: Option<String>,
 }
 

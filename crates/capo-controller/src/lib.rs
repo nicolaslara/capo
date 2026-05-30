@@ -19,11 +19,11 @@ use capo_memory::{
     MemoryBackend, MemoryCandidate, MemoryReviewState, MemorySensitivity, MemorySourceKind,
     MemorySourceRef, SourceLinkedMemoryPacketRequest,
 };
-use capo_runtime::{FakeRuntimeStartRequest, RuntimeRunner};
+use capo_runtime::{FakeRuntimeStartRequest, LocalProcessRunner, RuntimeRunner};
 use capo_state::{
     AgentProjection, ArtifactRecord, EventKind, EventRecord, NewEvent, ProjectProjection,
-    ProjectionRecord, RedactionState, RunProjection, SessionProjection, SqliteStateStore,
-    StateError, StateResult, TaskProjection,
+    ProjectionRecord, RedactionState, RunProjection, RunReapKind, RunReapObservation,
+    SessionProjection, SqliteStateStore, StateError, StateResult, TaskProjection,
 };
 use capo_tools::{
     FakeToolRequest, PermissionDecision, PermissionPolicy, PermissionRequest, ToolExposure,
@@ -199,6 +199,21 @@ impl FakeBoundaryController {
         self.stop_agent_name(agent_name, reason)
     }
 
+    /// Restart recovery: reap orphaned in-flight process groups and reconcile
+    /// the read model, framed as a single recovery attempt (RTL10).
+    ///
+    /// This is the one production restart-recovery seam (driven by
+    /// `ServerCommand::Recover`). It replaces the blunt
+    /// `mark_active_runs_exited_unknown` -- which marked *every* live-looking run
+    /// `exited_unknown` and left any still-running children orphaned -- with the
+    /// crash-safe reaper: for each in-flight run it loads the PID/boot-id its
+    /// spawn persisted before returning, probes that process group, reaps it if
+    /// still alive within the same boot, and records
+    /// `run.orphaned`/`run.exited`/`run.recovered`. The whole sweep stays inside
+    /// the `begin_recovery`/`complete_recovery` bracket the state model's Restart
+    /// Recovery order requires, so it projects into `recovery_attempts` exactly
+    /// like before. Phase 1 reaps and records; it does not reattach (full
+    /// liveness-probe reattach stays in `safety-gates`).
     pub fn recover_command(&self, command: &CommandEnvelope) -> StateResult<RecoveryReport> {
         require_intent(command, CommandIntent::Recover);
         let recovery_attempt_id = format!(
@@ -208,9 +223,7 @@ impl FakeBoundaryController {
         );
         let started = self.state.begin_recovery(&recovery_attempt_id)?;
         self.state.rebuild_projections()?;
-        let recovered_runs = self
-            .state
-            .mark_active_runs_exited_unknown(&self.project_id, &recovery_attempt_id)?;
+        let recovered_runs = self.reap_orphaned_runs(&recovery_attempt_id)?;
         let completed = self.state.complete_recovery(&recovery_attempt_id)?;
         Ok(RecoveryReport {
             recovery_attempt_id,
@@ -219,6 +232,49 @@ impl FakeBoundaryController {
             watermark: self.state.watermark("default")?,
             recovered_run_count: recovered_runs.len(),
         })
+    }
+
+    /// Probe (and, if alive within the same boot, reap) every in-flight run's
+    /// persisted process group, then record the per-run recovery outcome.
+    ///
+    /// Returns the reconciled `Run` projections. Must run inside a recovery
+    /// attempt bracket ([`Self::recover_command`]); exposed separately so tests
+    /// can drive a restart sweep deterministically.
+    pub fn reap_orphaned_runs(&self, recovery_attempt_id: &str) -> StateResult<Vec<RunProjection>> {
+        let inflight = self.state.inflight_runs_for_project(&self.project_id)?;
+        let observations: Vec<RunReapObservation> = inflight
+            .into_iter()
+            .map(|run| {
+                let (kind, observed_runtime_state_hash) = match run.external_pid {
+                    Some(pid) => {
+                        let reap = LocalProcessRunner::reap_orphan_process_group(
+                            pid,
+                            run.boot_id.as_deref(),
+                        );
+                        let kind = if reap.reaped {
+                            RunReapKind::AliveReaped
+                        } else {
+                            RunReapKind::AlreadyGone
+                        };
+                        (kind, reap.observed_runtime_state_hash)
+                    }
+                    None => (
+                        RunReapKind::NoProcess,
+                        stable_hash(format!("no-process:{}", run.run_id).as_bytes()),
+                    ),
+                };
+                RunReapObservation {
+                    run_id: run.run_id,
+                    session_id: run.session_id,
+                    previous_status: run.status,
+                    kind,
+                    external_pid: run.external_pid,
+                    observed_runtime_state_hash,
+                }
+            })
+            .collect();
+        self.state
+            .reap_orphaned_runs(&self.project_id, recovery_attempt_id, &observations)
     }
 
     pub fn register_agent(&self, agent_name: &str) -> StateResult<FakeAgentRegistration> {

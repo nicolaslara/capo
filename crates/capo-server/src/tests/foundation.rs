@@ -103,7 +103,9 @@ fn client_tracks_mock_agent_through_server_boundary_and_recovers() {
         .as_ref()
         .expect("session survives recovery");
     assert_eq!(session.status, "active");
-    assert_eq!(session.run_status.as_deref(), Some("exited_unknown"));
+    // RTL10: restart recovery reaps the orphaned in-flight run and records a
+    // terminal `run.recovered`, so the reconciled run status is `recovered`.
+    assert_eq!(session.run_status.as_deref(), Some("recovered"));
     assert_eq!(session.tool_call_count, 1);
     assert_eq!(session.tool_observation_count, 0);
     assert_eq!(session.memory_packet_count, 1);

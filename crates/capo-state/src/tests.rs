@@ -509,7 +509,7 @@ fn inflight_runs_carry_the_persisted_pid_marker() {
                 run_id: Some(run_id.clone()),
                 turn_id: Some("turn-1".to_string()),
                 item_id: Some("local-process-run-inflight".to_string()),
-                payload_json: "{\"status\":\"running\",\"runtime_process_ref\":\"local-process-run-inflight\",\"external_pid\":4242,\"marker\":\"start_requested_inflight\"}".to_string(),
+                payload_json: "{\"status\":\"running\",\"runtime_process_ref\":\"local-process-run-inflight\",\"external_pid\":4242,\"boot_id\":\"linux-btime-1700000000\",\"marker\":\"start_requested_inflight\"}".to_string(),
                 idempotency_key: Some("server-run-started-inflight:run-inflight:4242".to_string()),
                 redaction_state: RedactionState::Safe,
             },
@@ -527,9 +527,61 @@ fn inflight_runs_carry_the_persisted_pid_marker() {
     assert_eq!(inflight.len(), 1);
     assert_eq!(inflight[0].run_id, run_id);
     assert_eq!(inflight[0].external_pid, Some(4242));
+    // The persisted boot id is read back so restart recovery can refuse to reap
+    // a recycled PID across a reboot.
+    assert_eq!(
+        inflight[0].boot_id.as_deref(),
+        Some("linux-btime-1700000000")
+    );
     assert_eq!(
         inflight[0].runtime_process_ref.as_deref(),
         Some("local-process-run-inflight")
+    );
+}
+
+#[test]
+fn inflight_runs_treat_a_zero_pid_marker_as_no_process() {
+    // RTL10 safety: a zero `external_pid` in a marker (e.g. from a defaulted
+    // payload) is not a real process group target -- `kill -<0>` would hit the
+    // caller's own group -- so it reads back as "no process to reap".
+    let store = temp_store("inflight-zero-pid");
+    let project_id = ProjectId::new("project-capo");
+    let session_id = SessionId::new("session-zero");
+    let run_id = RunId::new("run-zero");
+
+    start_running_run(&store, &project_id, &session_id, &run_id);
+    store
+        .append_event(
+            NewEvent {
+                event_id: "event-run-started-inflight-zero".to_string(),
+                kind: EventKind::RunStarted,
+                actor: "capo-server".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(session_id.clone()),
+                run_id: Some(run_id.clone()),
+                turn_id: Some("turn-1".to_string()),
+                item_id: Some("local-process-run-zero".to_string()),
+                payload_json: "{\"status\":\"running\",\"runtime_process_ref\":\"local-process-run-zero\",\"external_pid\":0,\"marker\":\"start_requested_inflight\"}".to_string(),
+                idempotency_key: Some("server-run-started-inflight:run-zero:0".to_string()),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Run(RunProjection {
+                run_id: run_id.clone(),
+                session_id: session_id.clone(),
+                status: "running".to_string(),
+                recovery_of_run_id: None,
+                updated_sequence: 0,
+            })],
+        )
+        .expect("persist zero-pid marker");
+
+    let inflight = store.inflight_runs_for_project(&project_id).unwrap();
+    assert_eq!(inflight.len(), 1);
+    assert_eq!(
+        inflight[0].external_pid, None,
+        "a zero pid must not be a reapable process group target"
     );
 }
 

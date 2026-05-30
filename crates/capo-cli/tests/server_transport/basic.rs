@@ -103,7 +103,9 @@ fn cli_talks_to_running_server_process_over_loopback_transport() {
         "--state",
         &state_root.display().to_string(),
     ]);
-    assert!(restarted_status.contains("run_status=exited_unknown"));
+    // RTL10: restart recovery reaps the orphaned in-flight run and records a
+    // terminal `run.recovered`, so the reconciled run reports `recovered`.
+    assert!(restarted_status.contains("run_status=recovered"));
     assert!(restarted.wait().expect("restarted wait").success());
 }
 
