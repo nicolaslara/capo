@@ -956,6 +956,181 @@ fn turn_loop_interrupt_and_stop_commands_map_onto_finished_outcomes() {
     }));
 }
 
+/// FIX2 regression: two interrupts on the SAME session but DIFFERENT turns must
+/// each persist a DISTINCT, turn-keyed `session.interrupted` event, and each
+/// must reconstruct correctly via `reconstruct_turn_finished` scoped to its own
+/// turn.
+///
+/// Before FIX2(a) the interrupt event_id (and thus the idempotency key) was
+/// `event-session-interrupted-{session_id}` -- session-scoped, no turn id. A
+/// second interrupt in the same session (different turn) deduped against the
+/// first key, so NO second event was persisted even though `interrupt_turn`
+/// still returned a `TurnFinished` claiming `Interrupted`. Including the turn id
+/// in the event_id makes the two interrupts distinct and individually
+/// reconstructable by turn.
+#[test]
+fn two_interrupts_on_same_session_distinct_turns_persist_and_reconstruct() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+
+    let controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("two-interrupt-session")),
+    )
+    .expect("open controller");
+    let registration = controller
+        .register_agent("loop-worker")
+        .expect("register agent");
+    let refs = controller
+        .send_task(&registration, "interrupt me twice")
+        .expect("send task");
+
+    let first_turn = TurnId::new("turn-interrupt-a");
+    let second_turn = TurnId::new("turn-interrupt-b");
+
+    let first = controller
+        .interrupt_turn(&registration, &refs, &first_turn, "first interrupt")
+        .expect("first interrupt turn");
+    let second = controller
+        .interrupt_turn(&registration, &refs, &second_turn, "second interrupt")
+        .expect("second interrupt turn");
+
+    assert_eq!(first.turn_id, first_turn);
+    assert_eq!(second.turn_id, second_turn);
+
+    // Both terminal events were actually persisted, keyed to their own turn --
+    // the second did NOT dedup away against a session-scoped key.
+    let events = controller
+        .state()
+        .recent_events_for_session(&refs.session_id, 64)
+        .expect("events");
+    let interrupted_turns: Vec<&str> = events
+        .iter()
+        .filter(|event| event.kind == "session.interrupted")
+        .filter_map(|event| event.turn_id.as_deref())
+        .collect();
+    assert!(
+        interrupted_turns.contains(&"turn-interrupt-a"),
+        "first turn's interrupt must be persisted, got {interrupted_turns:?}"
+    );
+    assert!(
+        interrupted_turns.contains(&"turn-interrupt-b"),
+        "second turn's interrupt must be persisted (no dedup collision), got {interrupted_turns:?}"
+    );
+
+    // Distinct event ids / idempotency keys (the FIX2(a) keying), so a replay
+    // leaves each interrupt persisted exactly once.
+    let first_event = events
+        .iter()
+        .find(|event| {
+            event.kind == "session.interrupted"
+                && event.turn_id.as_deref() == Some("turn-interrupt-a")
+        })
+        .expect("first interrupted event");
+    let second_event = events
+        .iter()
+        .find(|event| {
+            event.kind == "session.interrupted"
+                && event.turn_id.as_deref() == Some("turn-interrupt-b")
+        })
+        .expect("second interrupted event");
+    assert_ne!(first_event.event_id, second_event.event_id);
+    assert_ne!(first_event.idempotency_key, second_event.idempotency_key);
+
+    // Each turn reconstructs correctly and INDEPENDENTLY from the persisted,
+    // turn-keyed event log.
+    let reconstructed_first = controller
+        .reconstruct_turn_finished(&refs, &first_turn)
+        .expect("reconstruct first turn");
+    let reconstructed_second = controller
+        .reconstruct_turn_finished(&refs, &second_turn)
+        .expect("reconstruct second turn");
+    assert_eq!(reconstructed_first.turn_id, first_turn);
+    assert_eq!(reconstructed_first.stop_reason, TurnStopReason::Interrupted);
+    assert!(reconstructed_first.observed_terminal_event());
+    assert_eq!(reconstructed_second.turn_id, second_turn);
+    assert_eq!(
+        reconstructed_second.stop_reason,
+        TurnStopReason::Interrupted
+    );
+    assert!(reconstructed_second.observed_terminal_event());
+}
+
+/// FIX2(b): a command-path interrupt/stop (which names an agent, not a turn)
+/// must resolve the session's active turn and persist a NON-NULL `turn_id`, so
+/// the terminal event is reconstructable by turn rather than orphaned at
+/// `turn_id = NULL`.
+#[test]
+fn command_path_interrupt_and_stop_persist_non_null_turn_id() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+
+    // Interrupt via the command entry point.
+    let interrupt_controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("cmd-interrupt-session")),
+    )
+    .expect("open controller");
+    let interrupt_registration = interrupt_controller
+        .register_agent("loop-worker")
+        .expect("register agent");
+    let interrupt_refs = interrupt_controller
+        .send_task(&interrupt_registration, "command interrupt me")
+        .expect("send task");
+    interrupt_controller
+        .interrupt_agent_name("loop-worker", "operator paused")
+        .expect("interrupt via command path");
+
+    let interrupt_event = interrupt_controller
+        .state()
+        .recent_events_for_session(&interrupt_refs.session_id, 64)
+        .expect("events")
+        .into_iter()
+        .find(|event| event.kind == "session.interrupted")
+        .expect("session.interrupted event persisted");
+    let interrupt_turn = interrupt_event
+        .turn_id
+        .clone()
+        .expect("command-path interrupt must persist a non-null turn_id");
+    // The resolved turn is the session's active (send_task) turn.
+    assert_eq!(interrupt_turn, "turn-loop-worker");
+    // ...and the terminal event reconstructs by that turn.
+    let reconstructed = interrupt_controller
+        .reconstruct_turn_finished(&interrupt_refs, &TurnId::new(interrupt_turn))
+        .expect("reconstruct command-path interrupt");
+    assert_eq!(reconstructed.stop_reason, TurnStopReason::Interrupted);
+    assert!(reconstructed.observed_terminal_event());
+
+    // Stop via the command entry point.
+    let stop_controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("cmd-stop-session")),
+    )
+    .expect("open controller");
+    let stop_registration = stop_controller
+        .register_agent("loop-worker")
+        .expect("register agent");
+    let stop_refs = stop_controller
+        .send_task(&stop_registration, "command stop me")
+        .expect("send task");
+    stop_controller
+        .stop_agent_name("loop-worker", "operator stopped")
+        .expect("stop via command path");
+
+    let stop_event = stop_controller
+        .state()
+        .recent_events_for_session(&stop_refs.session_id, 64)
+        .expect("events")
+        .into_iter()
+        .find(|event| event.kind == "session.stopped")
+        .expect("session.stopped event persisted");
+    let stop_turn = stop_event
+        .turn_id
+        .expect("command-path stop must persist a non-null turn_id");
+    assert_eq!(stop_turn, "turn-loop-worker");
+}
+
 #[test]
 fn turn_loop_run_turn_maps_terminal_adapter_events_onto_stop_reasons() {
     use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};

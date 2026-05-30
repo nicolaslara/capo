@@ -145,7 +145,12 @@ impl FakeBoundaryController {
     ) -> StateResult<FakeReadModelObservation> {
         let registration = self.registration_for_agent_name(agent_name)?;
         let refs = self.refs_for_agent_name(agent_name)?;
-        self.interrupt(&registration, &refs, reason)
+        // Resolve the session's active turn from the persisted log so the
+        // command-issued interrupt persists turn_id != NULL and is
+        // reconstructable by turn, rather than routing through the turn-less
+        // `interrupt` (which left turn_id NULL).
+        let turn_id = self.active_turn_for_session(&refs.session_id)?;
+        self.interrupt_with_turn(&registration, &refs, reason, turn_id.as_ref())
     }
 
     pub fn stop_agent_name(
@@ -155,7 +160,22 @@ impl FakeBoundaryController {
     ) -> StateResult<FakeReadModelObservation> {
         let registration = self.registration_for_agent_name(agent_name)?;
         let refs = self.refs_for_agent_name(agent_name)?;
-        self.stop(&registration, &refs, reason)
+        // Resolve the session's active turn (see `interrupt_agent_name`) so the
+        // command-issued stop persists a non-null turn_id.
+        let turn_id = self.active_turn_for_session(&refs.session_id)?;
+        self.stop_with_turn(&registration, &refs, reason, turn_id.as_ref())
+    }
+
+    /// Resolve the active turn id for a session from the persisted event log.
+    ///
+    /// The operator command surface names an agent, not a turn, so the terminal
+    /// `interrupt`/`stop` it issues must recover the turn it is terminating from
+    /// what the session actually ran. The latest turn-keyed event wins.
+    fn active_turn_for_session(&self, session_id: &SessionId) -> StateResult<Option<TurnId>> {
+        Ok(self
+            .state
+            .latest_turn_for_session(session_id)?
+            .map(TurnId::new))
     }
 
     pub fn interrupt(
@@ -197,8 +217,20 @@ impl FakeBoundaryController {
             .attach_session(refs.session_id.clone(), refs.external_session_ref.clone());
         let adapter_output = self.adapter.interrupt(&adapter_session, reason);
 
+        // Key the event_id (and thus the idempotency key) to the turn when one
+        // is supplied, mirroring `abort_run_for_ceiling`. Without the turn id, a
+        // second interrupt in the SAME session but a DIFFERENT turn would dedup
+        // against the first session-scoped key -- persisting no event while the
+        // returned `TurnFinished` still claims `Interrupted`. Including the turn
+        // id makes each per-turn interrupt a distinct, reconstructable event.
+        let interrupted_event_id = match turn_id {
+            Some(turn_id) => {
+                format!("event-session-interrupted-{}-{}", refs.session_id, turn_id)
+            }
+            None => format!("event-session-interrupted-{}", refs.session_id),
+        };
         let mut interrupted_event = scoped_event(
-            &format!("event-session-interrupted-{}", refs.session_id),
+            &interrupted_event_id,
             EventKind::SessionInterrupted,
             &self.project_id,
             &refs.task_id,
@@ -299,8 +331,17 @@ impl FakeBoundaryController {
             .attach_session(refs.session_id.clone(), refs.external_session_ref.clone());
         let adapter_output = self.adapter.stop(&adapter_session, reason);
 
+        // Key the event_id (and thus the idempotency key) to the turn when one
+        // is supplied, mirroring `abort_run_for_ceiling`/`interrupt_with_turn`.
+        // Without the turn id, a second stop in the SAME session but a DIFFERENT
+        // turn would dedup against the first session-scoped key -- persisting no
+        // event while the returned `TurnFinished` still claims `Stopped`.
+        let stopped_event_id = match turn_id {
+            Some(turn_id) => format!("event-session-stopped-{}-{}", refs.session_id, turn_id),
+            None => format!("event-session-stopped-{}", refs.session_id),
+        };
         let mut stopped_event = scoped_event(
-            &format!("event-session-stopped-{}", refs.session_id),
+            &stopped_event_id,
             EventKind::SessionStopped,
             &self.project_id,
             &refs.task_id,

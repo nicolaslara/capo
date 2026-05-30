@@ -1476,6 +1476,33 @@ impl SqliteStateStore {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StateError::from)
     }
+
+    /// The `turn_id` of the most recently appended event for a session that
+    /// carries a (non-null) turn id, or `None` when the session has no
+    /// turn-keyed events yet.
+    ///
+    /// This is the command-path turn resolver: an operator `interrupt`/`stop`
+    /// command names an agent, not a turn, so the controller resolves the
+    /// session's active turn from the persisted event log here and routes the
+    /// terminal event through the turn-keyed path. Highest `sequence` wins, so
+    /// the answer is the latest turn the session actually ran (the first
+    /// `send_task` turn, or the latest `redirect` turn), making the persisted
+    /// `session.interrupted`/`session.stopped` reconstructable by that turn.
+    pub fn latest_turn_for_session(&self, session_id: &SessionId) -> StateResult<Option<String>> {
+        let connection = Connection::open(&self.db_path)?;
+        let turn_id = connection
+            .query_row(
+                "SELECT turn_id
+                 FROM events
+                 WHERE session_id = ?1 AND turn_id IS NOT NULL
+                 ORDER BY sequence DESC
+                 LIMIT 1",
+                params![session_id.as_str()],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(turn_id.flatten())
+    }
 }
 
 /// Extract `(external_pid, runtime_process_ref)` from a `run.started` payload
