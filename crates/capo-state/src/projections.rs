@@ -98,6 +98,68 @@ pub struct RunProjection {
     pub updated_sequence: i64,
 }
 
+/// How a restart observed a previously in-flight run's process group, after
+/// probing (and, if alive, reaping) it (RTL10).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunReapKind {
+    /// The process group was still alive on restart and was reaped (Capo cannot
+    /// reattach in phase 1, so a live orphan is terminated and recorded). The
+    /// run is recorded as `run.orphaned` then a terminal `run.exited`.
+    AliveReaped,
+    /// The process was already gone and no terminal event existed. The run is
+    /// recorded as a terminal `run.exited` with unknown exit detail.
+    AlreadyGone,
+    /// No process was ever spawned for the run (e.g. a deterministic/mock run
+    /// that crashed before spawning), so there is nothing to reap. The run is
+    /// recorded as a terminal `run.exited` with unknown exit detail.
+    NoProcess,
+}
+
+impl RunReapKind {
+    pub const fn observation_kind(self) -> &'static str {
+        match self {
+            Self::AliveReaped => "alive_reaped",
+            Self::AlreadyGone => "already_gone",
+            Self::NoProcess => "no_process",
+        }
+    }
+}
+
+/// One run's reap observation, produced by the recovery layer after it probed
+/// (and possibly reaped) the persisted process group via the runtime, and
+/// consumed by [`crate::SqliteStateStore::reap_orphaned_runs`] to emit the
+/// recovery events idempotently.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunReapObservation {
+    pub run_id: RunId,
+    pub session_id: SessionId,
+    pub previous_status: String,
+    pub kind: RunReapKind,
+    pub external_pid: Option<u32>,
+    /// A stable hash over the observed runtime state, part of the recovery
+    /// idempotency key so repeated restarts that observe the same state never
+    /// emit a second recovery event.
+    pub observed_runtime_state_hash: String,
+}
+
+/// A run that looked live at startup, paired with the PID/process-group
+/// reference its spawning side persisted *before* the spawn returned (RTL10).
+///
+/// This is the durable in-flight handle the orphan reaper uses on restart:
+/// Capo no longer owns the `Child`, so the persisted `external_pid` is the only
+/// way to probe and reap the orphaned process group.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InFlightRun {
+    pub run_id: RunId,
+    pub session_id: SessionId,
+    pub status: String,
+    /// The PID persisted before the spawn returned, if one was recorded. A run
+    /// with no persisted PID (e.g. a deterministic/mock run that never spawned a
+    /// process) reaps as "no process to reap".
+    pub external_pid: Option<u32>,
+    pub runtime_process_ref: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityGrantProjection {
     pub capability_grant_id: String,

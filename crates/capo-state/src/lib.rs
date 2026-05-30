@@ -291,6 +291,167 @@ impl SqliteStateStore {
         Ok(recovered)
     }
 
+    /// Reap orphaned in-flight runs on restart and record the outcome (RTL10).
+    ///
+    /// This improves on [`Self::mark_active_runs_exited_unknown`], which blindly
+    /// marks *every* live-looking run `exited_unknown` and orphans any children
+    /// still running. The recovery layer first probes (and, if alive, reaps via
+    /// the runtime's process-group reaper) the PID each run persisted before its
+    /// spawn returned, then hands the per-run [`RunReapObservation`]s here. For
+    /// each run this emits the events the `state-model.md` Restart Recovery
+    /// section prescribes:
+    ///
+    /// - a still-alive (now reaped) orphan: `run.orphaned` then a terminal
+    ///   `run.exited` (unknown exit) and finally `run.recovered` recovery
+    ///   metadata for the reconciled run;
+    /// - an already-gone run with no terminal event, or a run that never
+    ///   spawned: a terminal `run.exited` (unknown exit) then `run.recovered`.
+    ///
+    /// Every event carries an idempotency key of
+    /// `(run_id, recovery_observation_kind, observed_runtime_state_hash)`
+    /// (intentionally excluding `recovery_attempt_id`), so a repeated restart
+    /// that observes the same runtime state appends nothing. Returns the final
+    /// `Run` projections.
+    pub fn reap_orphaned_runs(
+        &self,
+        project_id: &ProjectId,
+        recovery_attempt_id: &str,
+        observations: &[RunReapObservation],
+    ) -> StateResult<Vec<RunProjection>> {
+        let mut recovered = Vec::new();
+        for observation in observations {
+            let RunReapObservation {
+                run_id,
+                session_id,
+                previous_status,
+                kind,
+                external_pid,
+                observed_runtime_state_hash,
+            } = observation;
+            let observation_kind = kind.observation_kind();
+
+            // A still-alive orphan is recorded as orphaned first (a restart
+            // found a process without an owner), before its terminal exit.
+            if matches!(kind, RunReapKind::AliveReaped) {
+                self.append_recovery_event(
+                    project_id,
+                    recovery_attempt_id,
+                    EventKind::RunOrphaned,
+                    "orphaned",
+                    "orphaned",
+                    observation,
+                    observation_kind,
+                    observed_runtime_state_hash,
+                    *external_pid,
+                    previous_status,
+                )?;
+            }
+
+            // Phase 1 reaps and records; it never reattaches, so every reaped or
+            // gone run reaches a terminal `run.exited` with unknown exit detail.
+            self.append_recovery_event(
+                project_id,
+                recovery_attempt_id,
+                EventKind::RunExited,
+                "exited_unknown",
+                "exited_unknown",
+                observation,
+                observation_kind,
+                observed_runtime_state_hash,
+                *external_pid,
+                previous_status,
+            )?;
+
+            // Recovery metadata for the reconciled run, closing the loop.
+            let recovered_run = RunProjection {
+                run_id: run_id.clone(),
+                session_id: session_id.clone(),
+                status: "recovered".to_string(),
+                recovery_of_run_id: None,
+                updated_sequence: 0,
+            };
+            self.append_recovery_event(
+                project_id,
+                recovery_attempt_id,
+                EventKind::RunRecovered,
+                "recovered",
+                "recovered",
+                observation,
+                observation_kind,
+                observed_runtime_state_hash,
+                *external_pid,
+                previous_status,
+            )?;
+            recovered.push(recovered_run);
+        }
+        Ok(recovered)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_recovery_event(
+        &self,
+        project_id: &ProjectId,
+        recovery_attempt_id: &str,
+        kind: EventKind,
+        status: &str,
+        event_slug: &str,
+        observation: &RunReapObservation,
+        observation_kind: &str,
+        observed_runtime_state_hash: &str,
+        external_pid: Option<u32>,
+        previous_status: &str,
+    ) -> StateResult<i64> {
+        let run = RunProjection {
+            run_id: observation.run_id.clone(),
+            session_id: observation.session_id.clone(),
+            status: status.to_string(),
+            recovery_of_run_id: None,
+            updated_sequence: 0,
+        };
+        // Idempotency intentionally excludes `recovery_attempt_id`: a repeated
+        // restart that observes the same `(run, observation_kind, state_hash)`
+        // appends nothing. The attempt id stays payload/correlation metadata.
+        let idempotency_key = format!(
+            "recovery:run:{}:{}:{}:{}",
+            observation.run_id, event_slug, observation_kind, observed_runtime_state_hash
+        );
+        let event_id = format!(
+            "event-recovery-{}-{}-{}",
+            event_slug,
+            observation.run_id,
+            &observed_runtime_state_hash
+                .strip_prefix("fnv1a64:")
+                .unwrap_or(observed_runtime_state_hash)
+        );
+        let payload = serde_json::json!({
+            "recovery_attempt_id": recovery_attempt_id,
+            "previous_status": previous_status,
+            "status": status,
+            "recovery_observation_kind": observation_kind,
+            "observed_runtime_state_hash": observed_runtime_state_hash,
+            "external_pid": external_pid,
+        })
+        .to_string();
+        self.append_event(
+            NewEvent {
+                event_id,
+                kind,
+                actor: "capo-recovery".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(observation.session_id.clone()),
+                run_id: Some(observation.run_id.clone()),
+                turn_id: None,
+                item_id: None,
+                payload_json: payload,
+                idempotency_key: Some(idempotency_key),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Run(run)],
+        )
+    }
+
     pub fn record_artifact(&self, artifact: ArtifactRecord) -> StateResult<()> {
         if !artifact.redaction_state.is_persistable_artifact() {
             return Err(StateError::UnsafeArtifactRedactionState(

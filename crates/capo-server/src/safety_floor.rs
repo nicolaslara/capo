@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 
 use capo_core::{CommandIntent, CommandTarget, RunId, SessionId};
 use capo_runtime::{LocalProcessRunner, LocalRunningProcess};
-use capo_state::{EventKind, NewEvent, RedactionState};
+use capo_state::{EventKind, NewEvent, RedactionState, RunReapKind, RunReapObservation};
 use capo_tools::confine_write_path;
 
 use crate::util::{command_identity_hash, stable_hash};
@@ -481,6 +481,67 @@ impl CapoServer {
         )
         .map_err(ServerError::State)?;
         Ok(())
+    }
+
+    /// RTL10: reap orphaned in-flight runs on restart and record the outcome.
+    ///
+    /// This is the crash-safe replacement for the blunt
+    /// `mark_active_runs_exited_unknown` recovery: instead of marking every
+    /// live-looking run `exited_unknown` (and orphaning any children still
+    /// running), it loads each in-flight run together with the PID its spawn
+    /// persisted before returning ([`SqliteStateStore::inflight_runs_for_project`]),
+    /// probes that PID, and -- if the process group is still alive -- reaps it
+    /// with the runtime's process-group reaper
+    /// ([`LocalProcessRunner::reap_orphan_process_group`]). It then records the
+    /// per-run outcome via [`SqliteStateStore::reap_orphaned_runs`], emitting
+    /// `run.orphaned`/`run.exited`/`run.recovered` consistent with the state
+    /// model's restart-recovery order, keyed by
+    /// `(run_id, recovery_observation_kind, observed_runtime_state_hash)` so
+    /// repeated restarts are idempotent.
+    ///
+    /// Phase 1 reaps and records; it does not reattach (full liveness-probe
+    /// reattach stays in `safety-gates`), so even a still-alive orphan is
+    /// terminated and recorded as exited.
+    pub fn reap_orphaned_runs_on_restart(&self, recovery_attempt_id: &str) -> ServerResult<usize> {
+        let inflight = self
+            .controller
+            .state()
+            .inflight_runs_for_project(&self.project_id)
+            .map_err(ServerError::State)?;
+        let observations: Vec<RunReapObservation> = inflight
+            .into_iter()
+            .map(|run| {
+                let (kind, observed_runtime_state_hash) = match run.external_pid {
+                    Some(pid) => {
+                        let reap = LocalProcessRunner::reap_orphan_process_group(pid);
+                        let kind = if reap.reaped {
+                            RunReapKind::AliveReaped
+                        } else {
+                            RunReapKind::AlreadyGone
+                        };
+                        (kind, reap.observed_runtime_state_hash)
+                    }
+                    None => (
+                        RunReapKind::NoProcess,
+                        stable_hash(format!("no-process:{}", run.run_id).as_bytes()),
+                    ),
+                };
+                RunReapObservation {
+                    run_id: run.run_id,
+                    session_id: run.session_id,
+                    previous_status: run.status,
+                    kind,
+                    external_pid: run.external_pid,
+                    observed_runtime_state_hash,
+                }
+            })
+            .collect();
+        let recovered = self
+            .controller
+            .state()
+            .reap_orphaned_runs(&self.project_id, recovery_attempt_id, &observations)
+            .map_err(ServerError::State)?;
+        Ok(recovered.len())
     }
 }
 

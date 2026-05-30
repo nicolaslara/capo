@@ -485,6 +485,206 @@ fn run_aborted_event_projects_aborted_status_and_rebuilds_identically() {
 }
 
 #[test]
+fn inflight_runs_carry_the_persisted_pid_marker() {
+    // RTL10: the in-flight marker (a `run.started` event carrying `external_pid`
+    // + the process-group reference, persisted before the spawn returned) is
+    // what the orphan reaper reads to recover a crashed run.
+    let store = temp_store("inflight-marker");
+    let project_id = ProjectId::new("project-capo");
+    let session_id = SessionId::new("session-inflight");
+    let run_id = RunId::new("run-inflight");
+
+    start_running_run(&store, &project_id, &session_id, &run_id);
+    // Persist the in-flight pid marker as the live spawn path does.
+    store
+        .append_event(
+            NewEvent {
+                event_id: "event-run-started-inflight".to_string(),
+                kind: EventKind::RunStarted,
+                actor: "capo-server".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(session_id.clone()),
+                run_id: Some(run_id.clone()),
+                turn_id: Some("turn-1".to_string()),
+                item_id: Some("local-process-run-inflight".to_string()),
+                payload_json: "{\"status\":\"running\",\"runtime_process_ref\":\"local-process-run-inflight\",\"external_pid\":4242,\"marker\":\"start_requested_inflight\"}".to_string(),
+                idempotency_key: Some("server-run-started-inflight:run-inflight:4242".to_string()),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Run(RunProjection {
+                run_id: run_id.clone(),
+                session_id: session_id.clone(),
+                status: "running".to_string(),
+                recovery_of_run_id: None,
+                updated_sequence: 0,
+            })],
+        )
+        .expect("persist in-flight marker");
+
+    let inflight = store.inflight_runs_for_project(&project_id).unwrap();
+    assert_eq!(inflight.len(), 1);
+    assert_eq!(inflight[0].run_id, run_id);
+    assert_eq!(inflight[0].external_pid, Some(4242));
+    assert_eq!(
+        inflight[0].runtime_process_ref.as_deref(),
+        Some("local-process-run-inflight")
+    );
+}
+
+#[test]
+fn reap_orphaned_runs_records_orphan_and_exit_and_is_idempotent_across_restarts() {
+    // RTL10: a restart mid-run reaps the orphaned process group and records the
+    // outcome. A still-alive (now reaped) orphan records `run.orphaned`, a
+    // terminal `run.exited`, and `run.recovered`; the run is no longer
+    // active-looking; repeated restarts that observe the same runtime state
+    // append nothing; and the recovered run rebuilds identically from the log.
+    let store = temp_store("reap-orphaned");
+    let project_id = ProjectId::new("project-capo");
+    let session_id = SessionId::new("session-orphan");
+    let run_id = RunId::new("run-orphan");
+
+    start_running_run(&store, &project_id, &session_id, &run_id);
+    assert_eq!(store.active_looking_runs().unwrap().len(), 1);
+
+    let observation = RunReapObservation {
+        run_id: run_id.clone(),
+        session_id: session_id.clone(),
+        previous_status: "running".to_string(),
+        kind: RunReapKind::AliveReaped,
+        external_pid: Some(4242),
+        observed_runtime_state_hash: "fnv1a64:deadbeefdeadbeef".to_string(),
+    };
+
+    let recovered = store
+        .reap_orphaned_runs(
+            &project_id,
+            "recovery-1",
+            std::slice::from_ref(&observation),
+        )
+        .expect("reap orphaned runs");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].status, "recovered");
+
+    // orphaned -> exited -> recovered were all recorded for the reaped orphan.
+    let events = store.recent_events_for_session(&session_id, 16).unwrap();
+    let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+    assert!(kinds.contains(&"run.orphaned"), "kinds: {kinds:?}");
+    assert!(kinds.contains(&"run.exited"), "kinds: {kinds:?}");
+    assert!(kinds.contains(&"run.recovered"), "kinds: {kinds:?}");
+
+    // The recovered run is terminal: recovery never resurrects it.
+    assert!(store.active_looking_runs().unwrap().is_empty());
+    let event_count_after_first = store.event_count().unwrap();
+
+    // A repeated restart that observes the SAME runtime state appends nothing.
+    let recovered_again = store
+        .reap_orphaned_runs(
+            &project_id,
+            "recovery-2",
+            std::slice::from_ref(&observation),
+        )
+        .expect("reap orphaned runs again");
+    assert_eq!(recovered_again.len(), 1);
+    assert_eq!(store.event_count().unwrap(), event_count_after_first);
+
+    // Rebuild from the event log: the run is still recovered/terminal.
+    store.rebuild_projections().expect("rebuild projections");
+    assert_eq!(
+        store.run(&run_id).unwrap().expect("run").status,
+        "recovered"
+    );
+    assert!(store.active_looking_runs().unwrap().is_empty());
+}
+
+#[test]
+fn reap_orphaned_runs_records_exit_for_an_already_gone_run_without_orphan_event() {
+    // A run whose process was already gone (no terminal event) reaches a
+    // terminal `run.exited` directly -- it is never recorded as orphaned,
+    // because no live process was found on restart.
+    let store = temp_store("reap-already-gone");
+    let project_id = ProjectId::new("project-capo");
+    let session_id = SessionId::new("session-gone");
+    let run_id = RunId::new("run-gone");
+
+    start_running_run(&store, &project_id, &session_id, &run_id);
+
+    let observation = RunReapObservation {
+        run_id: run_id.clone(),
+        session_id: session_id.clone(),
+        previous_status: "running".to_string(),
+        kind: RunReapKind::AlreadyGone,
+        external_pid: Some(9999),
+        observed_runtime_state_hash: "fnv1a64:0000000000000001".to_string(),
+    };
+    store
+        .reap_orphaned_runs(&project_id, "recovery-1", &[observation])
+        .expect("reap already-gone run");
+
+    let kinds: Vec<String> = store
+        .recent_events_for_session(&session_id, 16)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.kind)
+        .collect();
+    assert!(!kinds.iter().any(|kind| kind == "run.orphaned"));
+    assert!(kinds.iter().any(|kind| kind == "run.exited"));
+    assert!(kinds.iter().any(|kind| kind == "run.recovered"));
+    assert!(store.active_looking_runs().unwrap().is_empty());
+}
+
+fn start_running_run(
+    store: &SqliteStateStore,
+    project_id: &ProjectId,
+    session_id: &SessionId,
+    run_id: &RunId,
+) {
+    store
+        .append_event(
+            NewEvent {
+                event_id: format!("event-run-started-{run_id}"),
+                kind: EventKind::RunStarted,
+                actor: "test".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(session_id.clone()),
+                run_id: Some(run_id.clone()),
+                turn_id: None,
+                item_id: None,
+                payload_json: "{}".to_string(),
+                idempotency_key: Some(format!("run:start:{run_id}")),
+                redaction_state: RedactionState::Safe,
+            },
+            &[
+                ProjectionRecord::Session(SessionProjection {
+                    session_id: session_id.clone(),
+                    project_id: project_id.clone(),
+                    task_id: None,
+                    agent_id: AgentId::new("agent-orphan"),
+                    title: "Orphan session".to_string(),
+                    status: "active".to_string(),
+                    current_goal: "recover an orphaned run".to_string(),
+                    latest_summary: None,
+                    latest_confidence: None,
+                    latest_blocker: None,
+                    external_session_ref: None,
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Run(RunProjection {
+                    run_id: run_id.clone(),
+                    session_id: session_id.clone(),
+                    status: "running".to_string(),
+                    recovery_of_run_id: None,
+                    updated_sequence: 0,
+                }),
+            ],
+        )
+        .expect("start run");
+}
+
+#[test]
 fn artifacts_tool_grants_memory_and_evidence_are_persisted_and_rebuilt() {
     let store = temp_store("artifact-rebuild");
     let project_id = ProjectId::new("project-capo");

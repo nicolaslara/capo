@@ -597,6 +597,57 @@ impl LocalProcessRunner {
         }
     }
 
+    /// Reap an orphaned process group by its persisted PID after a restart.
+    ///
+    /// On restart Capo no longer owns the spawned [`Child`] handle, so the only
+    /// durable reference to a run that was in-flight when the controller died is
+    /// the PID/process-group reference it persisted *before* the spawn returned
+    /// (RTL10). This probes that PID with a no-op signal (`kill -0`) to observe
+    /// liveness, and if it is still alive sends the same `SIGTERM` then `SIGKILL`
+    /// process-group teardown the timeout/hard-kill paths use
+    /// ([`Self::terminate_process_group`]), so the orphaned child *and all of its
+    /// descendants* are reaped rather than left running.
+    ///
+    /// The returned [`OrphanReap`] carries a stable
+    /// `observed_runtime_state_hash` (over the PID and the observed liveness)
+    /// that the recovery layer folds into its idempotency key, so repeated
+    /// restarts that observe the same runtime state never emit a second recovery
+    /// event.
+    #[cfg(unix)]
+    pub fn reap_orphan_process_group(external_pid: u32) -> OrphanReap {
+        let alive_before = process_group_is_alive(external_pid);
+        if alive_before {
+            kill_process_group(external_pid, "-TERM");
+            thread::sleep(Duration::from_millis(100));
+            kill_process_group(external_pid, "-KILL");
+        }
+        let observed_state = if alive_before {
+            "alive_reaped"
+        } else {
+            "already_gone"
+        };
+        OrphanReap {
+            external_pid,
+            reaped: alive_before,
+            observed_state: observed_state.to_string(),
+            observed_runtime_state_hash: orphan_state_hash(external_pid, observed_state),
+        }
+    }
+
+    /// Non-Unix fallback: there is no portable process-group reaping primitive,
+    /// so the orphan is recorded as already gone (Capo never spawns process
+    /// groups off Unix).
+    #[cfg(not(unix))]
+    pub fn reap_orphan_process_group(external_pid: u32) -> OrphanReap {
+        let observed_state = "already_gone";
+        OrphanReap {
+            external_pid,
+            reaped: false,
+            observed_state: observed_state.to_string(),
+            observed_runtime_state_hash: orphan_state_hash(external_pid, observed_state),
+        }
+    }
+
     fn control(
         &self,
         process: &LocalRuntimeProcessRef,
@@ -869,6 +920,22 @@ pub struct OrphanRecovery {
     pub runtime_process_ref: String,
     pub recovered_status: String,
     pub detail: String,
+}
+
+/// The result of probing and reaping an orphaned process group by PID on
+/// restart (RTL10). See [`LocalProcessRunner::reap_orphan_process_group`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OrphanReap {
+    /// The PID Capo persisted before the spawn returned.
+    pub external_pid: u32,
+    /// `true` if the process was still alive and was reaped; `false` if it had
+    /// already exited (a true orphan whose terminal status is unknown).
+    pub reaped: bool,
+    /// The observed runtime state: `alive_reaped` or `already_gone`.
+    pub observed_state: String,
+    /// A stable hash over `(external_pid, observed_state)` for the recovery
+    /// idempotency key.
+    pub observed_runtime_state_hash: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1497,6 +1564,42 @@ fn content_hash(bytes: &[u8]) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
+/// Probe whether the process *group* led by `pid` still has any live member,
+/// without affecting it (`kill -0 -<pid>`).
+#[cfg(unix)]
+fn process_group_is_alive(pid: u32) -> bool {
+    // `kill -0 -<pid>` succeeds iff at least one process in the group exists and
+    // we may signal it; it never delivers a signal. We probe the *group* (not
+    // the leader PID) so a backgrounded descendant whose group leader already
+    // exited still reads as alive -- that descendant is exactly the orphan we
+    // must reap.
+    Command::new("/bin/kill")
+        .arg("-0")
+        .arg(format!("-{pid}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Send `signal` to the whole process group led by `pid` (negative PID target).
+#[cfg(unix)]
+fn kill_process_group(pid: u32, signal: &str) {
+    let _ = Command::new("/bin/kill")
+        .arg(signal)
+        .arg(format!("-{pid}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// A stable hash over the observed orphan runtime state for recovery
+/// idempotency. Stable across restarts that observe the same PID + liveness.
+fn orphan_state_hash(pid: u32, observed_state: &str) -> String {
+    content_hash(format!("{pid}:{observed_state}").as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2046,6 +2149,91 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, RuntimeError::CwdOutsideWorkspace { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_orphan_process_group_kills_a_live_descendant_tree_by_pid() {
+        // RTL10: simulate a controller crash mid-run. The runtime spawned a
+        // process group with a backgrounded descendant that would survive its
+        // parent; on restart Capo no longer holds the `Child`, only the
+        // persisted PID. Reaping by that PID must terminate the whole group --
+        // so the descendant's delayed marker never appears.
+        let workspace = temp_root("workspace-reap-tree");
+        let artifacts = temp_root("artifacts-reap-tree");
+        fs::create_dir_all(&workspace).unwrap();
+        let marker = workspace.join("orphan-survived.txt");
+        let runner =
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+
+        let mut running = runner
+            .spawn_process(LocalProcessRequest {
+                run_id: RunId::new("run-reap-tree"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    // A backgrounded descendant writes the marker after a delay;
+                    // the parent exits immediately, leaving the descendant as
+                    // the orphan we must reap by the persisted group PID.
+                    format!("(sleep 2; printf survived > {}) &", marker.display()),
+                ],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("spawn orphan tree");
+        let pid = running.process.external_pid.expect("pid recorded");
+        // Let the parent exit but the descendant keep sleeping.
+        let _ = running.child.wait();
+        thread::sleep(Duration::from_millis(100));
+
+        let reap = LocalProcessRunner::reap_orphan_process_group(pid);
+        assert!(reap.reaped, "a live orphan group must be reaped");
+        assert_eq!(reap.observed_state, "alive_reaped");
+        assert_eq!(reap.external_pid, pid);
+
+        // Give the descendant well past its delay; if reaping worked it never
+        // wrote the marker.
+        thread::sleep(Duration::from_millis(2200));
+        assert!(
+            !marker.exists(),
+            "reaping the process group must kill the descendant before it writes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_orphan_process_group_reports_already_gone_for_a_dead_pid() {
+        // A process that has already exited has no group to reap; the reaper
+        // reports `already_gone` so recovery records a terminal exit, and the
+        // observed-state hash is stable for idempotency.
+        let workspace = temp_root("workspace-reap-gone");
+        let artifacts = temp_root("artifacts-reap-gone");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner =
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+        let mut running = runner
+            .spawn_process(LocalProcessRequest {
+                run_id: RunId::new("run-reap-gone"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec!["-c".to_string(), "exit 0".to_string()],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("spawn short process");
+        let pid = running.process.external_pid.expect("pid recorded");
+        let _ = running.child.wait();
+        thread::sleep(Duration::from_millis(100));
+
+        let reap = LocalProcessRunner::reap_orphan_process_group(pid);
+        assert!(!reap.reaped);
+        assert_eq!(reap.observed_state, "already_gone");
+        // Stable hash: re-observing the same gone PID hashes identically.
+        assert_eq!(
+            reap.observed_runtime_state_hash,
+            LocalProcessRunner::reap_orphan_process_group(pid).observed_runtime_state_hash
+        );
     }
 
     fn temp_root(name: &str) -> PathBuf {

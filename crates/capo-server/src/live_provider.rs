@@ -666,6 +666,12 @@ impl CapoServer {
             .map_err(|error| {
                 ServerError::AdapterFixture(format!("runtime spawn failed: {error:?}"))
             })?;
+        // RTL10: persist the in-flight marker (start-requested + the
+        // pid/process-group reference) the instant the spawn returns, BEFORE we
+        // wait on it. A crash mid-run can then find this run via the durable
+        // event log and reap its orphaned process group by the persisted PID on
+        // restart, instead of leaving the child running.
+        self.append_run_started_inflight(origin, context.plan, context.turn_id, &process.process)?;
         let outcome = runner
             .wait_running_with_timeout(&mut process, Duration::from_secs(timeout_seconds))
             .map_err(|error| {

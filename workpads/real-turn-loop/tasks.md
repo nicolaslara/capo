@@ -947,7 +947,85 @@ Must not do:
 
 ## RTL10 - Crash-Safe In-Flight Runs: Persist Before Spawn, Reap Orphans On Restart
 
-Status: pending.
+Status: done (gate green). The live path now persists the in-flight marker
+(start-requested + the pid/process-group reference) the instant the spawn
+returns and BEFORE the run is waited on: `CapoServer::execute_codex_live_provider`
+(`crates/capo-server/src/live_provider.rs`) calls the new
+`CapoServer::append_run_started_inflight` (`crates/capo-server/src/dispatch.rs`)
+right after `spawn_process`, recording a `run.started` event carrying
+`external_pid`/`runtime_process_ref`/`marker:start_requested_inflight` (keyed per
+`(run, pid)`), so a crash mid-run leaves a durable handle in the event log.
+On restart the new `CapoServer::reap_orphaned_runs_on_restart`
+(`crates/capo-server/src/safety_floor.rs`) replaces the blunt
+`mark_active_runs_exited_unknown`: it loads in-flight runs with their persisted
+pid (`SqliteStateStore::inflight_runs_for_project`), probes the process GROUP by
+that pid (`kill -0 -<pid>`, so a backgrounded descendant whose leader already
+exited still reads alive), and if alive reaps the whole group with the proven
+`SIGTERM`/`SIGKILL` teardown via the new pid-only runtime reaper
+`LocalProcessRunner::reap_orphan_process_group`
+(`crates/capo-runtime/src/lib.rs`, reusing `terminate_process_group`). It then
+records the outcome through `SqliteStateStore::reap_orphaned_runs`
+(`crates/capo-state/src/lib.rs`), emitting `run.orphaned` (alive orphan) ->
+`run.exited` (terminal, unknown exit -- phase 1 reaps and records, it does NOT
+reattach) -> `run.recovered` consistent with the `state-model.md` Restart
+Recovery order. New `EventKind::RunOrphaned`/`RunRecovered`
+(`crates/capo-state/src/event.rs`) append through `append_event` with idempotency
+keys of `(run_id, recovery_observation_kind, observed_runtime_state_hash)`
+(intentionally excluding `recovery_attempt_id`), so repeated restarts that
+observe the same runtime state append nothing. Full liveness-probe reattach
+stays in `safety-gates`.
+
+Evidence:
+
+- Persist-before-wait + recovery wiring:
+  `crates/capo-server/src/live_provider.rs` (in-flight marker persisted right
+  after `spawn_process`, before `wait_running_with_timeout`),
+  `crates/capo-server/src/dispatch.rs` (`append_run_started_inflight`),
+  `crates/capo-server/src/safety_floor.rs` (`reap_orphaned_runs_on_restart`:
+  loads in-flight runs, probes/reaps via the runtime, records the outcome).
+- Pid-only runtime reaper: `LocalProcessRunner::reap_orphan_process_group` +
+  `process_group_is_alive`/`kill_process_group`/`orphan_state_hash` +
+  `OrphanReap` in `crates/capo-runtime/src/lib.rs` (reuses
+  `terminate_process_group`; non-Unix records `already_gone`).
+- State recovery primitive + query + types: `SqliteStateStore::reap_orphaned_runs`
+  / `append_recovery_event` (`crates/capo-state/src/lib.rs`),
+  `SqliteStateStore::inflight_runs_for_project` + `parse_inflight_marker`
+  (`crates/capo-state/src/queries.rs`), `InFlightRun`/`RunReapObservation`/
+  `RunReapKind` (`crates/capo-state/src/projections.rs`),
+  `EventKind::RunOrphaned`/`RunRecovered` (`crates/capo-state/src/event.rs`).
+- New deterministic tests (no live provider):
+  `crates/capo-runtime/src/lib.rs` --
+  `reap_orphan_process_group_kills_a_live_descendant_tree_by_pid` (a real
+  backgrounded descendant whose parent already exited is reaped by the persisted
+  group pid before it writes its delayed marker) and
+  `reap_orphan_process_group_reports_already_gone_for_a_dead_pid` (a gone pid
+  reports `already_gone` with a stable observed-state hash).
+  `crates/capo-state/src/tests.rs` --
+  `inflight_runs_carry_the_persisted_pid_marker`,
+  `reap_orphaned_runs_records_orphan_and_exit_and_is_idempotent_across_restarts`
+  (alive orphan -> `run.orphaned`/`run.exited`/`run.recovered`; run no longer
+  active-looking; a repeated restart with the same state appends nothing; the
+  recovered run rebuilds identically from the log), and
+  `reap_orphaned_runs_records_exit_for_an_already_gone_run_without_orphan_event`.
+  `crates/capo-server/src/tests/crash_recovery.rs` (new module, wired in
+  `tests.rs`) --
+  `restart_mid_turn_reaps_the_orphaned_process_group_and_leaves_a_consistent_read_model`
+  (a real in-flight process group + persisted pid stands in for a crash mid-turn:
+  `reap_orphaned_runs_on_restart` kills the orphaned descendant before its
+  marker, leaves the run terminal `recovered` -- no half-open `running` -- with
+  `run.orphaned`/`run.exited`/`run.recovered` recorded, a second restart appends
+  nothing, and replay rebuilds the recovered run identically).
+- Commands run from `/Users/nicolas/devel/capo-wt/real-turn-loop`:
+  `cargo test -p capo-runtime reap_orphan` -> ok, 2 passed (run 5x, 0 failures);
+  `cargo test -p capo-server crash_recovery` -> ok, 1 passed (run 5x, 0
+  failures); `cargo test -p capo-state` -> ok, 35 passed (3 new). Objective gate:
+  `cargo fmt --check` -> clean (exit 0); `cargo clippy --all-targets
+  --all-features -- -D warnings` -> clean (exit 0); `cargo test --workspace` ->
+  exit 0, 0 failed across all binaries (capo-runtime 16, capo-state 35,
+  capo-server 49, capo-controller 23, capo-adapters 29 / 2 ignored, capo-tools 21,
+  capo-query 21, capo-voice 19, capo cli 63 + server_transport 11, etc.). No live
+  Codex smoke is required for RTL10 (the live workspace-write smoke is RTL13); all
+  proofs are deterministic.
 
 Acceptance:
 

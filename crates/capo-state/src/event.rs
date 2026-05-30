@@ -54,6 +54,8 @@ pub enum EventKind {
     CheckpointCreated,
     RunHardKilled,
     RunAborted,
+    RunOrphaned,
+    RunRecovered,
 }
 
 impl EventKind {
@@ -111,6 +113,8 @@ impl EventKind {
             Self::CheckpointCreated => "checkpoint.created",
             Self::RunHardKilled => "run.hard_killed",
             Self::RunAborted => "run.aborted",
+            Self::RunOrphaned => "run.orphaned",
+            Self::RunRecovered => "run.recovered",
         }
     }
 }

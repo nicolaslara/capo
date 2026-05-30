@@ -15,6 +15,7 @@ use crate::{
 };
 
 mod codex_workspace_write;
+mod crash_recovery;
 mod dispatch;
 mod foundation;
 mod live_provider;

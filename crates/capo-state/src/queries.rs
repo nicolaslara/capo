@@ -9,11 +9,11 @@ use crate::{
     AdapterDispatchPromptMaterializationProjection, AdapterDispatchPromptSourceProjection,
     AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
     AgentProjection, CapabilityGrantProjection, ConnectivityExposureProjection, EventRecord,
-    EvidenceProjection, MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
-    PermissionApprovalProjection, ReviewFindingProjection, RunProjection, RuntimeTargetProjection,
-    SessionProjection, SourceBindingProjection, SqliteStateStore, StateError, StateResult,
-    TaskOutcomeReportProjection, TaskProjection, ToolCallProjection, ToolObservationProjection,
-    WorkpadFileProjection, WorkpadTaskProjection, optional_id,
+    EvidenceProjection, InFlightRun, MemoryPacketProjection, MemoryRecordProjection,
+    MemorySourceProjection, PermissionApprovalProjection, ReviewFindingProjection, RunProjection,
+    RuntimeTargetProjection, SessionProjection, SourceBindingProjection, SqliteStateStore,
+    StateError, StateResult, TaskOutcomeReportProjection, TaskProjection, ToolCallProjection,
+    ToolObservationProjection, WorkpadFileProjection, WorkpadTaskProjection, optional_id,
 };
 
 impl SqliteStateStore {
@@ -247,6 +247,54 @@ impl SqliteStateStore {
         })?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StateError::from)
+    }
+
+    /// In-flight runs for crash recovery: every active-looking run in the
+    /// project, paired with the PID/process-group reference its spawning side
+    /// persisted before the spawn returned (RTL10).
+    ///
+    /// The PID is read from the latest `run.started` event for the run that
+    /// carries an `external_pid` in its payload (the in-flight marker the live
+    /// path persists before waiting). A run with no such marker (a
+    /// deterministic/mock run that never spawned a process) reports
+    /// `external_pid: None` and reaps as "no process to reap".
+    pub fn inflight_runs_for_project(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<InFlightRun>> {
+        let active = self.active_looking_runs_for_project(project_id)?;
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT payload_json
+             FROM events
+             WHERE run_id = ?1 AND kind = 'run.started'
+             ORDER BY sequence DESC",
+        )?;
+        let mut inflight = Vec::with_capacity(active.len());
+        for run in active {
+            let mut external_pid = None;
+            let mut runtime_process_ref = None;
+            let mut rows =
+                statement.query_map(params![run.run_id.as_str()], |row| row.get::<_, String>(0))?;
+            for payload in rows.by_ref() {
+                let payload = payload?;
+                if let Some(found) = parse_inflight_marker(&payload) {
+                    external_pid = found.0;
+                    runtime_process_ref = found.1;
+                    if external_pid.is_some() {
+                        break;
+                    }
+                }
+            }
+            inflight.push(InFlightRun {
+                run_id: run.run_id,
+                session_id: run.session_id,
+                status: run.status,
+                external_pid,
+                runtime_process_ref,
+            });
+        }
+        Ok(inflight)
     }
 
     pub fn capability_grants(&self) -> StateResult<Vec<CapabilityGrantProjection>> {
@@ -1381,6 +1429,26 @@ impl SqliteStateStore {
         events.reverse();
         Ok(events)
     }
+}
+
+/// Extract `(external_pid, runtime_process_ref)` from a `run.started` payload
+/// if it carries the in-flight marker (RTL10). Returns `None` when the payload
+/// is not the in-flight marker shape.
+fn parse_inflight_marker(payload_json: &str) -> Option<(Option<u32>, Option<String>)> {
+    let value: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+    let object = value.as_object()?;
+    let external_pid = object
+        .get("external_pid")
+        .and_then(|pid| pid.as_u64())
+        .and_then(|pid| u32::try_from(pid).ok());
+    let runtime_process_ref = object
+        .get("runtime_process_ref")
+        .and_then(|reference| reference.as_str())
+        .map(ToString::to_string);
+    if external_pid.is_none() && runtime_process_ref.is_none() {
+        return None;
+    }
+    Some((external_pid, runtime_process_ref))
 }
 
 fn source_binding_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceBindingProjection> {

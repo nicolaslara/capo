@@ -546,6 +546,66 @@ impl CapoServer {
             .map_err(ServerError::State)
     }
 
+    /// RTL10: persist the in-flight marker for a live run the instant its spawn
+    /// returns -- a `run.started` event carrying the `external_pid` and
+    /// process-group reference, before the run is waited on.
+    ///
+    /// The run stays `running` (it is in-flight, not done), but its PID is now
+    /// durable: a crash mid-run leaves this event in the log, so restart
+    /// recovery can probe and reap the orphaned process group by that PID
+    /// instead of leaving the child running. Keyed per `(run, pid)` so a retried
+    /// spawn at the same pid is idempotent.
+    pub(crate) fn append_run_started_inflight(
+        &self,
+        origin: &ServerClientOrigin,
+        plan: &AdapterDispatchPlanProjection,
+        turn_id: &str,
+        process: &capo_runtime::LocalRuntimeProcessRef,
+    ) -> ServerResult<i64> {
+        let external_pid = process.external_pid;
+        let running_run = RunProjection {
+            run_id: plan.run_id.clone(),
+            session_id: plan.session_id.clone(),
+            status: "running".to_string(),
+            recovery_of_run_id: None,
+            updated_sequence: 0,
+        };
+        let event = NewEvent {
+            event_id: format!(
+                "event-server-run-started-inflight-{}-{}",
+                stable_hash(plan.run_id.as_str().as_bytes()),
+                external_pid.unwrap_or_default()
+            ),
+            kind: EventKind::RunStarted,
+            actor: origin.actor_id.clone(),
+            project_id: Some(plan.project_id.clone()),
+            task_id: None,
+            agent_id: Some(plan.agent_id.clone()),
+            session_id: Some(plan.session_id.clone()),
+            run_id: Some(plan.run_id.clone()),
+            turn_id: Some(turn_id.to_string()),
+            item_id: Some(process.runtime_process_ref.clone()),
+            payload_json: serde_json::json!({
+                "dispatch_plan_id": plan.dispatch_plan_id,
+                "status": "running",
+                "runtime_process_ref": process.runtime_process_ref,
+                "external_pid": external_pid,
+                "marker": "start_requested_inflight",
+            })
+            .to_string(),
+            idempotency_key: Some(format!(
+                "server-run-started-inflight:{}:{}",
+                plan.run_id,
+                external_pid.unwrap_or_default()
+            )),
+            redaction_state: RedactionState::Safe,
+        };
+        self.controller
+            .state()
+            .append_event(event, &[ProjectionRecord::Run(running_run)])
+            .map_err(ServerError::State)
+    }
+
     pub(crate) fn dispatch_replay_projection(
         &self,
         plan: &AdapterDispatchPlanProjection,
