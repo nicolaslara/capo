@@ -265,6 +265,15 @@ impl FakeBoundaryController {
                 &run_id,
             )
             .with_turn(turn_id.to_string())
+            // Stamp the shared item ref (the tool_call_id) on every tool.* event of
+            // this one synthetic turn-context tool call so
+            // `persisted_turn_ref`/`reconstruct_turn_finished`'s dedup collapses
+            // tool.call_requested/invocation_started/call_completed into a SINGLE
+            // observed tool ref per call -- matching the replay-identity invariant
+            // the real dispatch path already honors. Without it the distinct
+            // per-kind payloads fall through to the raw_event_hash/payload_json
+            // fallback and over-count one call as three refs.
+            .with_item(tool_call_id.to_string())
             .with_payload(format!("{{\"tool\":\"{}\"}}", tool_result.tool_name)),
             &[ProjectionRecord::ToolCall(capo_state::ToolCallProjection {
                 tool_call_id: tool_call_id.clone(),
@@ -294,6 +303,7 @@ impl FakeBoundaryController {
                 &run_id,
             )
             .with_turn(turn_id.to_string())
+            .with_item(tool_call_id.to_string())
             .with_payload(format!(
                 "{{\"capability_grant_id\":\"{}\",\"tool_call_id\":\"{}\"}}",
                 permission.capability_grant_id, tool_result.tool_call_id
@@ -312,6 +322,7 @@ impl FakeBoundaryController {
                 &run_id,
             )
             .with_turn(turn_id.to_string())
+            .with_item(tool_call_id.to_string())
             .with_payload(format!(
                 "{{\"tool_call_id\":\"{}\",\"tool\":\"{}\",\"instrumentation\":\"full\"}}",
                 tool_result.tool_call_id, tool_result.tool_name
@@ -330,6 +341,7 @@ impl FakeBoundaryController {
                 &run_id,
             )
             .with_turn(turn_id.to_string())
+            .with_item(tool_call_id.to_string())
             .with_payload(format!(
                 "{{\"tool_call_id\":\"{}\",\"output_artifact_id\":\"{}\",\"redaction_state\":\"safe\"}}",
                 tool_result.tool_call_id, tool_result.output_artifact_id
@@ -348,6 +360,7 @@ impl FakeBoundaryController {
                 &run_id,
             )
             .with_turn(turn_id.to_string())
+            .with_item(tool_call_id.to_string())
             .with_payload(format!(
                 "{{\"tool_call_id\":\"{}\",\"summary\":\"{}\"}}",
                 tool_result.tool_call_id,
@@ -367,6 +380,7 @@ impl FakeBoundaryController {
                 &run_id,
             )
             .with_turn(turn_id.to_string())
+            .with_item(tool_call_id.to_string())
             .with_payload(format!(
                 "{{\"tool\":\"{}\",\"output_artifact_id\":\"{}\"}}",
                 tool_result.tool_name, tool_result.output_artifact_id
@@ -396,6 +410,7 @@ impl FakeBoundaryController {
                 &run_id,
             )
             .with_turn(turn_id.to_string())
+            .with_item(tool_result.tool_call_id.to_string())
             .with_payload(format!(
                 "{{\"tool_call_id\":\"{}\",\"external_session_ref\":\"{}\",\"delivery\":\"fake-adapter-accepted\"}}",
                 tool_result.tool_call_id, adapter_session.external_session_ref
@@ -572,6 +587,10 @@ impl FakeBoundaryController {
                 run_id,
             )
             .with_turn(turn_id.to_string())
+            // Share the tool_call_id item ref with the rest of this call's tool.*
+            // events (here only the one denied request) so reconstruction dedups on
+            // the same identity the allow path uses.
+            .with_item(tool_call_id.to_string())
             .with_payload(format!(
                 "{{\"tool\":\"capo.session_summary\",\"status\":\"permission_denied\",\"adapter_status\":\"{}\"}}",
                 escape_json(adapter_status)

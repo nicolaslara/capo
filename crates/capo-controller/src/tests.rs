@@ -3299,6 +3299,182 @@ fn real_controller_dispatched_tool_call_reconstructs_as_single_observed_ref() {
     );
 }
 
+/// ACI1 replay identity across a true restart: the single-observed-ref invariant
+/// must survive reopening the store from disk. The live test above derives the
+/// outcome from the controller that did the dispatch; this one dispatches ONE
+/// tool call, then reconstructs `TurnFinished` from a FRESH controller opened
+/// over the same on-disk state root (nothing in-memory carries over), and
+/// asserts the dispatched call still collapses to EXACTLY ONE observed tool ref.
+/// This pins the regression the FIXREPLAY remediation targets: the tool.* events
+/// of one call (`tool.call_requested` / `tool.invocation_started` /
+/// `tool.call_completed`) share the stamped item_id (the tool_call_id), so the
+/// `reconstruct_turn_finished` dedup keyed on `persisted_turn_ref` reads them
+/// back from the log as one ref, not three -- even after a restart.
+#[test]
+fn real_controller_dispatched_tool_call_reconstructs_single_observed_ref_after_restart() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{CapoToolContext, CapoToolRequest, ToolExposureRequest};
+
+    let state_root = temp_root();
+    let scripted =
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci1-replay-restart-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        &state_root,
+        scripted,
+    )
+    .expect("open real controller");
+    let registration = controller
+        .register_agent("aci1-replay-restart-worker")
+        .expect("agent");
+    let refs = controller
+        .send_task(
+            &registration,
+            "Inspect agent status once for restart replay",
+        )
+        .expect("send task");
+
+    let turn_id = TurnId::new("turn-aci1-replay-restart");
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: turn_id.clone(),
+        tool_call_id: ToolCallId::new("tool-aci1-replay-restart-status"),
+    };
+    controller
+        .dispatch_tool_call(
+            &scope,
+            ToolExposureRequest::Capo(CapoToolRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: scope.session_id.clone(),
+                tool_id: "capo.agent_status".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                context: CapoToolContext {
+                    task_status: "task active".to_string(),
+                    agent_status: "agent running".to_string(),
+                    session_summary: "summary".to_string(),
+                    workpad_excerpt: "section".to_string(),
+                    evidence_note: "note".to_string(),
+                    capability_scope: "state:read:agent".to_string(),
+                },
+            }),
+        )
+        .expect("dispatch capo tool");
+
+    // The live reconstruction (the controller that did the dispatch).
+    let live = controller
+        .core()
+        .reconstruct_turn_finished(&refs, &turn_id)
+        .expect("reconstruct turn live");
+    assert_eq!(
+        live.observed_tool_refs.len(),
+        1,
+        "live reconstruction must already be a single observed ref, got {:?}",
+        live.observed_tool_refs
+    );
+
+    // RESTART: a fresh controller opened over the same on-disk state root, which
+    // never saw the in-memory dispatch. Reconstruction here reads the persisted,
+    // turn-keyed event log only -- the genuine replay-identity proof.
+    let reopened = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        &state_root,
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci1-replay-restart-session")),
+    )
+    .expect("reopen controller from disk");
+    reopened
+        .state()
+        .rebuild_projections()
+        .expect("rebuild projections on restart");
+    let replayed = reopened
+        .reconstruct_turn_finished(&refs, &turn_id)
+        .expect("reconstruct turn after restart");
+
+    // One dispatched tool call -> EXACTLY one observed tool ref after a restart,
+    // identical to the live reconstruction (no over-count from the 3 tool.*
+    // events of the single call).
+    assert_eq!(
+        replayed.observed_tool_refs.len(),
+        1,
+        "expected a single observed tool ref per dispatched tool call after restart, got {:?}",
+        replayed.observed_tool_refs
+    );
+    assert_eq!(
+        replayed.observed_tool_refs[0],
+        scope.tool_call_id.to_string()
+    );
+    assert_eq!(
+        replayed.observed_tool_refs, live.observed_tool_refs,
+        "the single-observed-ref invariant must be identical live and after restart",
+    );
+}
+
+/// ACI1 replay identity for the `send_task` turn-context tool shim: the synthetic
+/// `capo.session_summary` call the memory-packet shim emits per turn must ALSO
+/// collapse to exactly ONE observed tool ref. Its tool.* events
+/// (`tool.call_requested` / `tool.invocation_started` / `tool.call_completed`)
+/// previously carried distinct per-kind payloads and NO shared item_id, so
+/// `reconstruct_turn_finished` over-counted one call as three refs (it fell
+/// through to the payload_json fallback). Stamping the shared tool_call_id item
+/// ref makes the dedup collapse them to one, identical before and after a
+/// restart -- the same invariant the real `dispatch_tool_call` path honors.
+#[test]
+fn send_task_turn_context_tool_reconstructs_as_single_observed_ref() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+
+    let state_root = temp_root();
+    let scripted =
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci1-sendtask-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        &state_root,
+        scripted,
+    )
+    .expect("open real controller");
+    let registration = controller
+        .register_agent("aci1-sendtask-worker")
+        .expect("agent");
+    let refs = controller
+        .send_task(&registration, "summarize the turn once")
+        .expect("send task");
+
+    // The `send_task` shim keys its turn-context tool call onto `turn-<agent>`.
+    let turn_id = TurnId::new("turn-aci1-sendtask-worker");
+    let live = controller
+        .core()
+        .reconstruct_turn_finished(&refs, &turn_id)
+        .expect("reconstruct turn live");
+    assert_eq!(
+        live.observed_tool_refs.len(),
+        1,
+        "the send_task turn-context tool call must be a single observed ref, got {:?}",
+        live.observed_tool_refs
+    );
+    assert_eq!(live.observed_tool_refs[0], "tool-aci1-sendtask-worker");
+
+    // The invariant survives a true restart: a fresh controller over the same
+    // on-disk root reconstructs the identical single ref from the event log.
+    let reopened = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        &state_root,
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci1-sendtask-session")),
+    )
+    .expect("reopen controller from disk");
+    reopened
+        .state()
+        .rebuild_projections()
+        .expect("rebuild projections on restart");
+    let replayed = reopened
+        .reconstruct_turn_finished(&refs, &turn_id)
+        .expect("reconstruct turn after restart");
+    assert_eq!(
+        replayed.observed_tool_refs, live.observed_tool_refs,
+        "the send_task single-observed-ref invariant must be identical after restart",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // ACI11: full tools E2E gate through the real loop + restart/replay identity
 // ---------------------------------------------------------------------------
