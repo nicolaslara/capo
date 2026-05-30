@@ -15,6 +15,7 @@ use crate::{
 };
 
 mod codex_workspace_write;
+mod controller_routing;
 mod crash_recovery;
 mod dispatch;
 mod foundation;

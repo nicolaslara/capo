@@ -11,6 +11,7 @@ use capo_state::{
     ProjectionRecord, RedactionState,
 };
 
+mod controller_routing;
 mod dashboard;
 mod dispatch;
 mod live_provider;
@@ -21,6 +22,8 @@ mod turn_orchestration;
 mod types;
 mod util;
 
+use controller_routing::ControllerRoute;
+pub use controller_routing::{ControllerSelection, REAL_CONTROLLER_OPT_IN_ENV};
 use dispatch::DispatchExecutionOutcome;
 use live_provider::{LiveProviderLocalRunRequest, LiveProviderPreflightRequest};
 pub use safety_floor::{
@@ -43,16 +46,51 @@ const MAX_ADAPTER_FIXTURE_BYTES: usize = 256 * 1024;
 pub struct CapoServer {
     project_id: ProjectId,
     controller: FakeBoundaryController,
+    controller_selection: ControllerSelection,
 }
 
 impl CapoServer {
+    /// Open the server with the default ([`ControllerSelection::Fake`]) routing.
+    ///
+    /// The opt-in [`REAL_CONTROLLER_OPT_IN_ENV`] env gate is honored here so a
+    /// host that constructs the server through `open` still picks up the real
+    /// path when the operator opts in, without scattering the decision across
+    /// call sites; the default remains fake until the RTL12 cutover.
     pub fn open(project_id: ProjectId, state_root: impl AsRef<Path>) -> ServerResult<Self> {
+        Self::open_with_controller(project_id, state_root, ControllerSelection::from_env())
+    }
+
+    /// Open the server with an explicit [`ControllerSelection`] -- the single
+    /// typed switch (RTL11) that routes `SendTask`/`SteerAgent` and the rest of
+    /// the command surface through either the fake or the real controller. The
+    /// orchestration core is one [`FakeBoundaryController`]; the real routing is
+    /// a zero-cost view over it (see `controller_routing.rs`).
+    pub fn open_with_controller(
+        project_id: ProjectId,
+        state_root: impl AsRef<Path>,
+        controller_selection: ControllerSelection,
+    ) -> ServerResult<Self> {
         let controller = FakeBoundaryController::open(project_id.clone(), state_root)
             .map_err(ServerError::State)?;
         Ok(Self {
             project_id,
             controller,
+            controller_selection,
         })
+    }
+
+    /// The controller routing in effect (the RTL11 single-switch value).
+    pub fn controller_selection(&self) -> ControllerSelection {
+        self.controller_selection
+    }
+
+    /// The command-routing view bound to the selected controller. Command
+    /// handling (`register`/`send`/`steer`/`interrupt`/`stop`/`recover`) flows
+    /// through this; state/dispatch/projection helpers continue to use the one
+    /// orchestration core directly, since those persist identically regardless
+    /// of which handle drove the command.
+    fn command_controller(&self) -> ControllerRoute<'_> {
+        ControllerRoute::new(self.controller_selection, &self.controller)
     }
 
     pub fn handle(&self, request: ServerRequest) -> ServerResult<ServerResponse> {
@@ -70,7 +108,7 @@ impl CapoServer {
                     Some(name),
                 );
                 let registration = self
-                    .controller
+                    .command_controller()
                     .register_agent_command(&command)
                     .map_err(ServerError::State)?;
                 self.record_server_request_handled(&command, &origin, "register_agent", None, None)
@@ -120,7 +158,7 @@ impl CapoServer {
                     .structured_args
                     .push(("scenario".to_string(), scenario));
                 let run = self
-                    .controller
+                    .command_controller()
                     .send_task_command(&command)
                     .map_err(ServerError::State)?;
                 self.record_server_request_handled(
@@ -171,7 +209,7 @@ impl CapoServer {
                 command
                     .structured_args
                     .push(("agent".to_string(), agent_name.clone()));
-                self.controller
+                self.command_controller()
                     .redirect_command(&command)
                     .map_err(ServerError::State)?;
                 self.record_server_request_handled(
@@ -228,7 +266,7 @@ impl CapoServer {
                 command
                     .structured_args
                     .push(("agent".to_string(), agent_name.clone()));
-                self.controller
+                self.command_controller()
                     .interrupt_command(&command)
                     .map_err(ServerError::State)?;
                 self.record_server_request_handled(
@@ -285,7 +323,7 @@ impl CapoServer {
                 command
                     .structured_args
                     .push(("agent".to_string(), agent_name.clone()));
-                self.controller
+                self.command_controller()
                     .stop_command(&command)
                     .map_err(ServerError::State)?;
                 self.record_server_request_handled(

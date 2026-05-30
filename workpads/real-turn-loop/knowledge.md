@@ -260,6 +260,46 @@ artifacts pass the existing credential scan
 (`scan_artifacts_for_sensitive_markers`) with `unknown`/`contains_sensitive`
 artifacts quarantined per the `state-model.md` artifact privacy contract.
 
+### The Single-Switch Controller Cutover (RTL11)
+
+The controller routing is exactly one typed value, not a constellation of
+booleans. `ControllerSelection` (`crates/capo-server/src/controller_routing.rs`)
+is a two-variant enum -- `Fake` (the phase-1 default) and `Real` -- and it is
+the whole routing decision. `CapoServer` carries one
+`controller_selection: ControllerSelection`, chosen once at construction:
+`CapoServer::open` resolves it from `ControllerSelection::from_env()` (the opt-in
+gate `CAPO_SERVER_REAL_CONTROLLER`, mirroring the live-provider opt-in posture),
+and `CapoServer::open_with_controller` takes it explicitly so deterministic
+suites pin a routing without touching the environment.
+
+The command surface (`register`/`send`/`steer`/`interrupt`/`stop`/`recover`)
+routes through `ControllerRoute`, a per-call view bound to the selection. The
+orchestration core remains one `FakeBoundaryController`; the real routing wraps a
+clone of that same core via `RealBoundaryController::from_core` (a path-only
+`SqliteStateStore` clone, so both share one database and one event log). The
+real handle's control flow IS the real one (see `real_controller.rs`) -- routing
+a command through it persists through the exact same `append_event`/projection
+path, so the parity invariant holds by construction. State/dispatch/projection
+helpers keep using the one core directly because those persist identically
+regardless of which handle drove the command. The typed
+`ServerCommand`/`ServerResponse` boundary is unchanged; clients cannot observe
+which handle served a command (`crates/capo-server/src/tests/controller_routing.rs`
+asserts the two routings produce equivalent observable lifecycles for
+`send`/`steer`/`interrupt` and `send`/`steer`/`stop`).
+
+Default-chat safety: the phase-1 default is `ControllerSelection::Fake`, so until
+the RTL12 cutover default chat keeps routing through the fake controller and the
+real path is strictly opt-in (env or explicit construction). Default chat never
+silently routes to a fake echo behind the operator's back after the switch flips,
+because the flip is the one visible `ControllerSelection` value.
+
+Rollback (documented for the RTL12 flip): the cutover changes exactly one value
+-- the default `ControllerSelection` (and/or the operator's
+`CAPO_SERVER_REAL_CONTROLLER` opt-in). To roll back, restore the default to
+`ControllerSelection::Fake` (or unset `CAPO_SERVER_REAL_CONTROLLER`). No event
+schema, projection, or `ServerCommand` change is involved, so rollback is a
+one-value revert with no data migration.
+
 ## Non-Goals
 
 - Do not create a second execution pipeline beside the dispatch state machine;

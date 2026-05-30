@@ -76,6 +76,19 @@ impl RealBoundaryController {
         })
     }
 
+    /// Wrap an already-opened orchestration core as the production handle.
+    ///
+    /// The core IS the real control flow (see the module doc); this is the
+    /// zero-cost view a host (e.g. the server boundary) uses to drive the SAME
+    /// store/projection path through the real handle without re-opening the
+    /// SQLite state. Because [`SqliteStateStore`] is just a path handle, the
+    /// wrapped core and its source share one database, so routing a command
+    /// through this view persists byte-identically to driving the core
+    /// directly.
+    pub fn from_core(core: FakeBoundaryController) -> Self {
+        Self { core }
+    }
+
     /// Open the real controller with an explicit permission policy, mirroring
     /// [`FakeBoundaryController::open_with_permission_policy`].
     pub fn open_with_permission_policy(

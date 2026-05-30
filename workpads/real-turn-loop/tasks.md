@@ -1091,7 +1091,72 @@ Verification:
 
 ## RTL11 - Route Default Chat/Steer Through The Real Loop With Scripted-Mock Fallback
 
-Status: pending.
+Status: done (gate green). `SendTask`/`SteerAgent` and the rest of the command
+surface (`register`/`interrupt`/`stop`/`recover`) now route through ONE typed
+switch, `ControllerSelection` (`crates/capo-server/src/controller_routing.rs`):
+a two-variant enum (`Fake` default, `Real`) that is the whole routing decision,
+not scattered booleans. `CapoServer` carries one
+`controller_selection: ControllerSelection` chosen once at construction --
+`open` resolves it from `ControllerSelection::from_env()` (opt-in gate
+`CAPO_SERVER_REAL_CONTROLLER`, mirroring the live-provider opt-in posture) and
+`open_with_controller` takes it explicitly so deterministic suites pin a routing
+without touching the environment. Command handling flows through
+`ControllerRoute`, a per-call view bound to the selection; the orchestration
+core stays one `FakeBoundaryController` and the real routing wraps a clone of
+that same core via the new `RealBoundaryController::from_core` (a path-only
+`SqliteStateStore` clone, so both share one database/event log/projection set --
+the scripted-mock fallback is exactly that real handle over the scripted core).
+The typed `ServerCommand`/`ServerResponse` boundary is unchanged. The phase-1
+default is `Fake`, so default chat keeps routing through the fake controller and
+the real path is strictly opt-in until the RTL12 cutover; the single-switch
+cutover and its one-value rollback (restore the default to
+`ControllerSelection::Fake` / unset `CAPO_SERVER_REAL_CONTROLLER`, no schema or
+projection migration) are recorded in `knowledge.md`.
+
+Evidence:
+
+- Single typed switch + per-call routing view:
+  `crates/capo-server/src/controller_routing.rs` (`ControllerSelection`
+  {`Fake`/`Real`}, `from_env`/`from_opt_in`/`is_real`, `REAL_CONTROLLER_OPT_IN_ENV
+  = CAPO_SERVER_REAL_CONTROLLER`, and the boxed `ControllerRoute` forwarding
+  `register`/`send`/`redirect`/`interrupt`/`stop`/`recover`); module wired and
+  `ControllerSelection`/`REAL_CONTROLLER_OPT_IN_ENV` re-exported in
+  `crates/capo-server/src/lib.rs`.
+- `CapoServer` selection field + constructors:
+  `crates/capo-server/src/lib.rs` (`controller_selection` field,
+  `open_with_controller`, `open` -> `from_env`, `controller_selection()`
+  accessor, private `command_controller()` -> `ControllerRoute`); command call
+  sites in `lib.rs` (`SendTask`/`SteerAgent`/`InterruptAgent`/`StopAgent`/
+  `RegisterAgent`) and `crates/capo-server/src/server_core.rs` (`recover`) route
+  through `self.command_controller()`.
+- Zero-cost real-handle view over the shared core:
+  `RealBoundaryController::from_core` in
+  `crates/capo-controller/src/real_controller.rs`.
+- Rollback + design recorded in `workpads/real-turn-loop/knowledge.md`
+  ("The Single-Switch Controller Cutover (RTL11)").
+- New deterministic tests (no live provider):
+  `crates/capo-server/src/tests/controller_routing.rs` (new module, wired in
+  `tests.rs`) --
+  `both_routings_handle_send_steer_and_interrupt_equivalently` and
+  `both_routings_handle_send_steer_and_stop_equivalently` (the fake and real
+  routings produce equivalent observable lifecycles -- final agent/session/run
+  status, the causal session event-kind sequence, and response payload variants
+  -- for `register -> send -> steer -> interrupt` and `-> stop`, through the
+  unchanged `ServerCommand` surface),
+  `default_selection_is_fake_and_chat_does_not_silently_route_real` (phase-1
+  default is `Fake`; a server opened with the default routes through the fake
+  controller and the command surface still works), and
+  `opt_in_env_selects_the_real_controller_as_a_single_switch` (truthy opt-in ->
+  `Real`; falsey/empty -> `Fake`).
+- Commands run from `/Users/nicolas/devel/capo-wt/real-turn-loop`:
+  `cargo test -p capo-server controller_routing` -> ok, 4 passed. Objective gate:
+  `cargo fmt --check` -> clean (exit 0); `cargo clippy --all-targets
+  --all-features -- -D warnings` -> clean (exit 0); `cargo test --workspace` ->
+  exit 0, 308 passed / 0 failed / 2 ignored across all binaries (capo-server 54
+  incl. the 4 RTL11 tests, capo-controller 23, capo-adapters 29 / 2 ignored,
+  capo-state 36, capo-runtime 18, capo-tools 21, capo-query 21, capo-voice 19,
+  capo cli 63 + server_transport 11, etc.). No live Codex smoke is required for
+  RTL11 (the live workspace-write smoke is RTL13); all proofs are deterministic.
 
 Acceptance:
 
