@@ -402,6 +402,16 @@ pub struct ToolDefinition {
 /// One of the `tool-exposure.md` risk levels.
 pub const TOOL_RISK_LEVELS: &[&str] = &["low", "medium", "high", "critical"];
 
+/// Captured runtime process streams that redaction scrubs but that are not
+/// fields of a tool's JSON input/output schema.
+///
+/// ACI2: a wrapper's narrow output keeps stdout/stderr in artifacts, never
+/// inline, so these names cannot appear in `schema_json`/`output_schema`. They
+/// are still legitimate redaction targets (this is exactly where secrets leak),
+/// so [`ToolDefinition::redaction_policy_fields_are_coherent`] accepts them
+/// alongside declared schema fields rather than treating the policy as free text.
+pub const RUNTIME_CAPTURE_FIELDS: &[&str] = &["stdout", "stderr"];
+
 impl ToolDefinition {
     /// Whether `risk` is one of the `tool-exposure.md` levels.
     pub fn risk_is_valid(&self) -> bool {
@@ -419,6 +429,65 @@ impl ToolDefinition {
     pub fn validate_output(&self, result: &serde_json::Value) -> Vec<String> {
         validate_against_schema(&self.output_schema, "output", result)
     }
+
+    /// Field names declared by the input `schema_json` (`{"input":{...}}`).
+    pub fn declared_input_fields(&self) -> Vec<String> {
+        descriptor_field_names(&self.schema_json, "input")
+    }
+
+    /// Field names declared by the `output_schema` (`{"output":{...}}`).
+    pub fn declared_output_fields(&self) -> Vec<String> {
+        descriptor_field_names(&self.output_schema, "output")
+    }
+
+    /// The `fields` the declared `redaction_policy_json` scrubs.
+    pub fn redaction_policy_fields(&self) -> Vec<String> {
+        let Ok(policy) = serde_json::from_str::<serde_json::Value>(&self.redaction_policy_json)
+        else {
+            return Vec::new();
+        };
+        policy
+            .get("fields")
+            .and_then(serde_json::Value::as_array)
+            .map(|fields| {
+                fields
+                    .iter()
+                    .filter_map(|field| field.as_str().map(ToString::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether every field the redaction policy names is a real target: a
+    /// declared input field, a declared output field, or a recognized runtime
+    /// capture stream ([`RUNTIME_CAPTURE_FIELDS`]). ACI2: keeps the policy
+    /// coherent with the tool's actual surface rather than free text. Returns
+    /// the list of policy fields that reference nothing real (empty == coherent).
+    pub fn incoherent_redaction_fields(&self) -> Vec<String> {
+        let inputs = self.declared_input_fields();
+        let outputs = self.declared_output_fields();
+        self.redaction_policy_fields()
+            .into_iter()
+            .filter(|field| {
+                !inputs.contains(field)
+                    && !outputs.contains(field)
+                    && !RUNTIME_CAPTURE_FIELDS.contains(&field.as_str())
+            })
+            .collect()
+    }
+}
+
+/// Field names declared by a `{"<root>":{"field":"type"}}` descriptor.
+fn descriptor_field_names(schema_json: &str, root_key: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(schema_json)
+        .ok()
+        .and_then(|schema| {
+            schema
+                .get(root_key)
+                .and_then(serde_json::Value::as_object)
+                .map(|fields| fields.keys().cloned().collect())
+        })
+        .unwrap_or_default()
 }
 
 /// Validate a value object against a `{"<root>":{"field":"type"}}` descriptor.

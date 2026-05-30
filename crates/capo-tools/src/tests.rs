@@ -1303,9 +1303,10 @@ fn capo_registry_emitted_results_validate_against_their_output_schema() {
 
     for tool_id in CAPO_OWNED_TOOLS {
         let definition = registry.describe_tool(tool_id).expect("tool definition");
+        let call_id = ToolCallId::new(format!("call-aci2-{tool_id}"));
         let result = registry.authorize_and_invoke(
             CapoToolRequest {
-                tool_call_id: ToolCallId::new(format!("call-aci2-{tool_id}")),
+                tool_call_id: call_id.clone(),
                 session_id: SessionId::new("session-aci2"),
                 tool_id: tool_id.to_string(),
                 capability_profile_id: "trusted-local-dev".to_string(),
@@ -1313,6 +1314,23 @@ fn capo_registry_emitted_results_validate_against_their_output_schema() {
             },
             &policy,
         );
+
+        // Validate the *live* result fields the handler populated, not just the
+        // re-typed projection: a rendered, non-empty `output` and a real
+        // recorded `output_artifact_id` keyed to this call. This is what makes
+        // the schema↔result coupling observable rather than a structural
+        // tautology that can only break if projection and schema drift together.
+        assert!(
+            !result.output.trim().is_empty(),
+            "{tool_id} must render a non-empty output, got {:?}",
+            result.output
+        );
+        assert!(
+            result.output_artifact_id.contains(call_id.as_str()),
+            "{tool_id} must record a real output artifact for this call, got {:?}",
+            result.output_artifact_id
+        );
+
         let errors = definition.validate_output(&result.narrow_output());
         assert!(
             errors.is_empty(),
