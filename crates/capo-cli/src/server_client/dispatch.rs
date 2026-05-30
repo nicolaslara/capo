@@ -256,6 +256,10 @@ pub(crate) fn server_dispatch_live_run_local(
     let live_execution_opt_in = std::env::var("CAPO_SERVER_RUN_CODEX_LIVE").as_deref() == Ok("1");
     let mock_runtime_opt_in =
         std::env::var("CAPO_SERVER_MOCK_LIVE_PROVIDER_RUNTIME").as_deref() == Ok("1");
+    // RTL9: a live workspace write must be attended. The CLI defaults to
+    // unattended (read-only/dry-run); `--attended` opts in to a live write, which
+    // still also needs `CAPO_SERVER_RUN_CODEX_LIVE` and the caller opt-in.
+    let unattended = !args.iter().any(|arg| arg == "--attended");
     let response = handle(
         parsed,
         args,
@@ -273,6 +277,7 @@ pub(crate) fn server_dispatch_live_run_local(
                 // The spawn-path codex binary is resolved server-side from
                 // `CAPO_CODEX_BIN`; the CLI passes no explicit override.
                 codex_program_override: None,
+                unattended,
             },
         )?,
     )?;

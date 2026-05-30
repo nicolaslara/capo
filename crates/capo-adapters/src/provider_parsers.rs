@@ -79,7 +79,12 @@ fn parse_codex_record(raw: &Value) -> Vec<NormalizedAdapterEvent> {
             event.content = content;
             event.status = Some("completed".to_string());
         }
-        "exec_command.begin" | "exec_command.end" | "tool_call.started" | "tool_call.completed" => {
+        "exec_command.begin"
+        | "exec_command.end"
+        | "patch_apply.begin"
+        | "patch_apply.end"
+        | "tool_call.started"
+        | "tool_call.completed" => {
             let call_ref = string_at(raw, &["call_id"])
                 .or_else(|| string_at(raw, &["tool_call_id"]))
                 .or_else(|| string_at(raw, &["id"]));
@@ -105,10 +110,22 @@ fn parse_codex_record(raw: &Value) -> Vec<NormalizedAdapterEvent> {
             } else {
                 "adapter.tool_call_completed".to_string()
             };
+            // Workspace-write tool calls (e.g. `patch_apply.*`) name themselves
+            // `apply_patch`; the read-only `exec_command.*` family defaults to
+            // `exec_command`. The OBSERVED tool result -- the changes/diff Codex
+            // applied -- is captured into `content` so the projection's
+            // `tool.observation_recorded` carries the observed write result,
+            // distinct from any agent-reported `item.completed` message claim.
             event.tool_name = string_at(raw, &["tool_name"])
                 .or_else(|| string_at(raw, &["name"]))
+                .or_else(|| {
+                    provider_kind
+                        .starts_with("patch_apply")
+                        .then(|| "apply_patch".to_string())
+                })
                 .or_else(|| Some("exec_command".to_string()));
             event.status = Some(operation.to_string());
+            event.content = codex_tool_result_content(raw);
         }
         "turn.completed" | "thread.completed" => {
             event.kind = "adapter.turn_completed".to_string();
@@ -121,6 +138,25 @@ fn parse_codex_record(raw: &Value) -> Vec<NormalizedAdapterEvent> {
     }
 
     vec![event]
+}
+
+/// Extract the OBSERVED result of a Codex tool call into a single string.
+///
+/// Workspace-write round-trips report the applied changes under a handful of
+/// shapes (`changes`/`unified_diff`/`output`/`aggregated_output`/
+/// `formatted_output`); this reduces them to one observed-result string so the
+/// projection records a `tool.observation_recorded` carrying what Codex actually
+/// did, separate from the agent's own `item.completed` message text.
+fn codex_tool_result_content(raw: &Value) -> Option<String> {
+    string_at(raw, &["aggregated_output"])
+        .or_else(|| string_at(raw, &["formatted_output"]))
+        .or_else(|| string_at(raw, &["output"]))
+        .or_else(|| string_at(raw, &["unified_diff"]))
+        .or_else(|| {
+            raw.get("changes")
+                .filter(|changes| !changes.is_null())
+                .map(Value::to_string)
+        })
 }
 
 fn parse_claude_record(raw: &Value) -> Vec<NormalizedAdapterEvent> {

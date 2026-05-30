@@ -826,7 +826,91 @@ Verification:
 
 ## RTL9 - Codex Workspace-Write Adapter With Live Tool-Result Round-Trip
 
-Status: pending.
+Status: done (gate green). The live execution path now selects the Codex profile
+from a resolved [`WriteMode`]: the spawn arm in
+`CapoServer::run_live_provider_local`
+(`crates/capo-server/src/live_provider.rs`) builds
+`CodexExecAdapter::local_workspace_write_launch_plan` (the RTL6 workspace-write
+profile, already off `--sandbox read-only --ephemeral`) for a `LiveWrite` and the
+read-only `local_launch_plan` for the `DryRun` default. The write mode is
+resolved in the `RunLiveProviderLocal` handler through the RTL6
+`resolve_write_mode(live_execution_opt_in, unattended)` gate, so a live write
+requires the caller opt-in AND the `CAPO_SERVER_RUN_CODEX_LIVE` env AND an
+attended run; anything short stays read-only/dry-run. Before a live write spawns,
+the path engages the RTL6 confinement (`confine_workspace_write`) and captures the
+single pre-write checkpoint (`create_pre_write_checkpoint` ->
+`checkpoint.created`), so the first real edit is confined and reversible by one
+command; the live arm of `run_dispatch_turn` (RTL7) already runs inside an active
+resource ceiling. The Codex parser
+(`crates/capo-adapters/src/provider_parsers.rs`) now recognizes the
+`patch_apply.begin`/`patch_apply.end` workspace-write family (named `apply_patch`)
+and captures the OBSERVED tool result (the applied diff/output:
+`unified_diff`/`output`/`aggregated_output`/`formatted_output`/`changes`) into the
+event content, so the existing projection records a `tool.observation_recorded`
+(with a content-anchored `artifact_id`) distinct from the agent's reported
+`item.completed` message claim (`session.summary_updated`). The new
+`mock_provider_output_jsonl` write round-trip makes the adapter fully testable
+without a live provider. One real workspace-write provider (Codex) is sufficient
+to declare the loop real; the Claude write adapter is breadth, deferred to
+`depth` (the deterministic mock path proves the round-trip; the live opt-in smoke
+is RTL13).
+
+Evidence:
+
+- Codex workspace-write parse + observed tool-result capture:
+  `crates/capo-adapters/src/provider_parsers.rs`
+  (`patch_apply.begin`/`patch_apply.end` -> `apply_patch`;
+  `codex_tool_result_content` reduces the applied-changes shapes to one observed
+  string in `event.content`). New write fixture
+  `crates/capo-adapters/fixtures/codex-exec-workspace-write.jsonl` (thread
+  started -> agent message claim -> apply_patch begin/end with the applied diff ->
+  turn completed).
+- Profile selection + confinement + checkpoint on the live arm:
+  `crates/capo-server/src/live_provider.rs` (`LiveProviderLocalRunRequest` gains
+  `write_mode: WriteMode`; the spawn arm picks the workspace-write vs read-only
+  launch plan, creates the confined workspace, and takes the pre-write checkpoint
+  before the spawn for a `LiveWrite`). Write-mode resolution in the handler:
+  `crates/capo-server/src/lib.rs` (`resolve_write_mode(live_execution_opt_in,
+  unattended)`). Typed boundary: `RunLiveProviderLocal` gains an `unattended`
+  flag (`crates/capo-server/src/types.rs`, codec round-trip in
+  `crates/capo-server/src/transport/codec.rs` with a safe `unattended == true`
+  default), threaded through `LiveProviderTurn`
+  (`crates/capo-server/src/turn_orchestration.rs`) and the CLI
+  (`--attended` opt-in in `crates/capo-cli/src/server_client/dispatch.rs`;
+  operator-control planner stays read-only in
+  `crates/capo-cli/src/operator_control.rs`).
+- New deterministic tests (no live provider):
+  `crates/capo-adapters/src/tests.rs` ::
+  `codex_workspace_write_fixture_maps_a_tool_result_round_trip` (the observed
+  apply_patch result carries the applied diff/output, distinct from the agent
+  message claim).
+  `crates/capo-server/src/tests/codex_workspace_write.rs` (new module, wired in
+  `tests.rs`): `workspace_write_mock_round_trip_records_observed_tool_result_distinct_from_agent_claim`
+  (the RTL9 acceptance mock round-trip: an `apply_patch`
+  `tool.observation_recorded` with a content-anchored artifact, separate from the
+  agent's `session.summary_updated` claim),
+  `ingested_write_turn_rebuilds_identically_after_restart_replay`
+  (reopen + `rebuild_projections` -> byte-identical observations/tool calls/
+  session/event count),
+  `live_write_uses_workspace_write_profile_and_checkpoints_before_spawn` (a
+  `WriteMode::LiveWrite` run driven through a deterministic `/bin/sh` codex stub
+  via `codex_program_override`: the provider executes, a `checkpoint.created`
+  event is recorded before the confined write lands in the workspace, and the
+  observed apply_patch result is recorded), and
+  `default_run_stays_read_only_and_takes_no_checkpoint` (the `DryRun` default
+  spawns the read-only profile and takes NO checkpoint even with the caller
+  opt-in).
+- Commands run from `/Users/nicolas/devel/capo-wt/real-turn-loop`:
+  `cargo test -p capo-server codex_workspace_write` -> ok, 4 passed;
+  `cargo test -p capo-adapters codex` -> ok, 6 passed / 1 ignored (the live smoke
+  stays gated). Objective gate: `cargo fmt --check` -> clean; `cargo clippy
+  --all-targets --all-features -- -D warnings` -> clean (exit 0); `cargo test
+  --workspace` -> exit 0, 0 failed across all binaries (294 passed total;
+  capo-server 48 incl. the 4 RTL9 tests, capo-adapters 29 incl. the RTL9 parse
+  test, capo-cli 63 + server_transport 11, capo-controller 23, capo-state 32,
+  capo-runtime 14, capo-tools 21, capo-query 21, capo-voice 19, etc.).
+  `git diff --check` -> clean. No live Codex smoke is required for RTL9 (the live
+  workspace-write smoke is RTL13); all proofs are deterministic.
 
 Acceptance:
 

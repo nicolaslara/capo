@@ -112,6 +112,12 @@ pub struct LiveProviderTurn {
     /// deterministic without process-global env mutation. Ignored on the mock
     /// path (which never spawns) and when not absolute.
     pub codex_program_override: Option<String>,
+    /// RTL9: whether this turn runs unattended. Forwarded to
+    /// `RunLiveProviderLocal` so the handler can resolve the write mode through
+    /// the RTL6 gate. An unattended turn can never reach a live workspace write
+    /// (it forces the read-only dry-run profile); a live write needs the caller
+    /// opt-in AND `CAPO_SERVER_RUN_CODEX_LIVE` AND `unattended == false`.
+    pub unattended: bool,
 }
 
 /// One turn's worth of inputs for the loop's dispatch-driven execution.
@@ -246,6 +252,7 @@ impl CapoServer {
                     usage_before,
                     turn_token_cost,
                     codex_program_override,
+                    unattended,
                 } = *live;
                 // RTL7: a live-provider turn must run inside an active ceiling.
                 // The wall-clock bound is wired to the runtime timeout below; a
@@ -318,6 +325,7 @@ impl CapoServer {
                         mock_provider_output_jsonl,
                         timeout_seconds,
                         codex_program_override,
+                        unattended,
                     }))?;
                 let ServerResponsePayload::DispatchRun(run) = run_response.payload else {
                     return Err(ServerError::AdapterFixture(

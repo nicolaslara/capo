@@ -251,6 +251,7 @@ fn encode_command(command: &ServerCommand) -> Value {
             mock_provider_output_jsonl,
             timeout_seconds,
             codex_program_override,
+            unattended,
         } => json!({
             "type": "run_live_provider_local",
             "dispatch_plan_id": dispatch_plan_id,
@@ -261,6 +262,7 @@ fn encode_command(command: &ServerCommand) -> Value {
             "mock_provider_output_jsonl": mock_provider_output_jsonl,
             "timeout_seconds": timeout_seconds,
             "codex_program_override": codex_program_override,
+            "unattended": unattended,
         }),
         ServerCommand::Recover => json!({ "type": "recover" }),
     }
@@ -355,6 +357,9 @@ fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
             mock_provider_output_jsonl: optional_string(value, "mock_provider_output_jsonl")?,
             timeout_seconds: required_usize(value, "timeout_seconds")? as u64,
             codex_program_override: optional_string(value, "codex_program_override")?,
+            // Safe default: a turn with no explicit `unattended` flag is treated
+            // as unattended, which forces the read-only dry-run profile (RTL6/9).
+            unattended: optional_bool(value, "unattended")?.unwrap_or(true),
         }),
         "recover" => Ok(ServerCommand::Recover),
         other => Err(TransportError::Protocol(format!(

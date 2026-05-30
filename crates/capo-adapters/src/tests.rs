@@ -66,6 +66,54 @@ fn codex_jsonl_fixture_maps_to_normalized_events() {
 }
 
 #[test]
+fn codex_workspace_write_fixture_maps_a_tool_result_round_trip() {
+    // RTL9: the workspace-write round-trip parses into a tool-call observation
+    // that carries the OBSERVED applied result (the diff/output), distinct from
+    // the agent's own `item.completed` message claim.
+    let parsed =
+        CodexExecAdapter::parse_jsonl(include_str!("../fixtures/codex-exec-workspace-write.jsonl"))
+            .unwrap();
+
+    // The agent's reported claim is an item message, not the observed tool result.
+    let claim = parsed
+        .events
+        .iter()
+        .find(|event| event.kind == "adapter.item_completed")
+        .expect("agent message claim");
+    assert_eq!(claim.role.as_deref(), Some("assistant"));
+    assert_eq!(
+        claim.content.as_deref(),
+        Some("I will add a greeting to NOTES.md.")
+    );
+
+    // The OBSERVED tool result is the `apply_patch` completion, carrying the
+    // applied diff/output -- separate from the agent's message above.
+    let observed_write = parsed
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == "adapter.tool_call_completed"
+                && event.tool_name.as_deref() == Some("apply_patch")
+        })
+        .expect("observed apply_patch tool result");
+    assert_eq!(
+        observed_write.external_item_ref.as_deref(),
+        Some("codex-write-tool-1")
+    );
+    let observed_content = observed_write.content.as_deref().expect("observed result");
+    assert!(observed_content.contains("Applied patch to NOTES.md"));
+
+    // The observed tool result projects into a tool observation distinct from
+    // the agent claim (the summary path), which is exactly the RTL9 contract.
+    let observation = observed_write
+        .tool_observation()
+        .expect("tool observation for the observed write");
+    assert_eq!(observation.tool_name, "apply_patch");
+    assert_eq!(observation.observed_status, "completed");
+    assert_eq!(observation.instrumentation_level, "observed_only");
+}
+
+#[test]
 fn codex_exec_agent_message_text_maps_to_assistant_content() {
     let parsed = CodexExecAdapter::parse_jsonl(
         r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"CAPO_UI_LIVE_OK"}}"#,

@@ -13,6 +13,7 @@ use capo_state::{
 };
 
 use crate::dispatch::{DispatchExecutionOutcome, DispatchReplayMetadata};
+use crate::safety_floor::{RunTurnRef, WriteMode};
 use crate::util::{
     adapter_label, command_identity_hash, parse_adapter_events, provider_kind_for_adapter,
     stable_hash,
@@ -53,6 +54,14 @@ pub(crate) struct LiveProviderLocalRunRequest<'a> {
     /// resolving `codex` from PATH. Ops set it from `CAPO_CODEX_BIN`; tests pass
     /// a stub so the spawn path is deterministic. `None` keeps `codex`.
     pub(crate) codex_program_override: Option<&'a str>,
+    /// RTL9: the resolved write mode for this turn. `DryRun` (the default) runs
+    /// Codex with the read-only profile and touches nothing; `LiveWrite` runs the
+    /// workspace-write profile inside the confined, pre-write-checkpointed
+    /// workspace. The handler resolves this via the RTL6
+    /// [`crate::resolve_write_mode`] gate (caller opt-in AND
+    /// `CAPO_SERVER_RUN_CODEX_LIVE` env AND attended), so the live spawn arm only
+    /// ever applies edits when all three hold.
+    pub(crate) write_mode: WriteMode,
 }
 
 struct LiveExecutionContext<'a> {
@@ -438,8 +447,25 @@ impl CapoServer {
             );
         }
 
-        let mut launch_plan =
-            CodexExecAdapter::local_launch_plan(workspace, artifacts, request.goal.to_string());
+        // RTL9: choose the Codex profile from the resolved write mode. The
+        // default (`DryRun`) keeps the read-only one-shot profile and touches
+        // nothing; a `LiveWrite` (caller opt-in AND `CAPO_SERVER_RUN_CODEX_LIVE`
+        // AND attended -- all resolved by the RTL6 gate before this runs) uses
+        // the workspace-write profile so Codex can apply edits inside the
+        // confined workspace. The provider never spawns without passing the
+        // preflight/execution gate above regardless of profile.
+        let mut launch_plan = match request.write_mode {
+            WriteMode::DryRun => CodexExecAdapter::local_launch_plan(
+                workspace.clone(),
+                artifacts.clone(),
+                request.goal.to_string(),
+            ),
+            WriteMode::LiveWrite => CodexExecAdapter::local_workspace_write_launch_plan(
+                workspace.clone(),
+                artifacts.clone(),
+                request.goal.to_string(),
+            ),
+        };
         // Test/operations seam: when an absolute codex-binary override is supplied
         // (ops set it via `CAPO_CODEX_BIN`, threaded in at the command handler;
         // tests pass it directly), run THAT binary instead of resolving `codex`
@@ -454,6 +480,35 @@ impl CapoServer {
         {
             launch_plan.program = codex_bin.to_string();
         }
+
+        // RTL6/RTL9: a live write is confined and reversible. Confine the
+        // workspace and capture the single pre-write checkpoint BEFORE the
+        // provider spawns, so the first real edit is recoverable by one
+        // documented restore command. A dry run touches nothing, so it needs
+        // neither.
+        if request.write_mode == WriteMode::LiveWrite {
+            // The confined workspace must exist before it can be snapshotted;
+            // creating it here (rather than only in `execute_codex_live_provider`)
+            // keeps confinement+checkpoint strictly before any spawn.
+            fs::create_dir_all(&launch_plan.workspace_root).map_err(|error| {
+                ServerError::AdapterFixture(format!(
+                    "failed to create dispatch workspace before checkpoint: {error}"
+                ))
+            })?;
+            let workspace_str = launch_plan.workspace_root.to_string_lossy().to_string();
+            self.confine_workspace_write(&workspace_str, &workspace_str)?;
+            self.create_pre_write_checkpoint(
+                origin,
+                RunTurnRef {
+                    session_id: plan.session_id.as_str(),
+                    run_id: plan.run_id.as_str(),
+                    turn_id: &target_turn_id,
+                },
+                &workspace_str,
+                &launch_plan.artifact_root.to_string_lossy(),
+            )?;
+        }
+
         let context = LiveExecutionContext {
             plan: &plan,
             gate: &gate,

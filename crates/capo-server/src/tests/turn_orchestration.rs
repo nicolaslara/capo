@@ -450,6 +450,7 @@ fn live_mode_under_ceiling(
         usage_before,
         turn_token_cost,
         codex_program_override: None,
+        unattended: true,
     }))
 }
 

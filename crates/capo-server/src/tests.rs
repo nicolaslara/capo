@@ -14,6 +14,7 @@ use crate::{
     ServerResponse, ServerResponsePayload, send_tcp, serve_tcp,
 };
 
+mod codex_workspace_write;
 mod dispatch;
 mod foundation;
 mod live_provider;

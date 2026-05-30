@@ -695,6 +695,9 @@ Operator input: {line}
             // Ops set the spawn-path codex binary via `CAPO_CODEX_BIN`, resolved
             // server-side; the operator-control flow passes no explicit override.
             codex_program_override: None,
+            // The operator-control planner flow stays read-only/dry-run: a live
+            // workspace write goes through the attended `dispatch run-live` path.
+            unattended: true,
         })?;
         let ServerResponsePayload::DispatchRun(run) = run else {
             return Err("server returned unexpected response for Codex live run".to_string());

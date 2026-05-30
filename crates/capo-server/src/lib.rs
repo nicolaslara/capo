@@ -732,6 +732,7 @@ impl CapoServer {
                 mock_provider_output_jsonl,
                 timeout_seconds,
                 codex_program_override,
+                unattended,
             } => {
                 // Spawn-path codex-binary override: prefer the explicit command
                 // field (threaded in-process by the loop / tests); otherwise fall
@@ -743,6 +744,12 @@ impl CapoServer {
                         .ok()
                         .filter(|path| std::path::Path::new(path.trim()).is_absolute())
                 });
+                // RTL9: resolve the write mode through the RTL6 gate. A live
+                // workspace write requires the caller opt-in AND
+                // `CAPO_SERVER_RUN_CODEX_LIVE` AND an attended run; anything short
+                // of all three stays read-only/dry-run. The mock-output path never
+                // spawns a provider, so its profile is irrelevant.
+                let write_mode = resolve_write_mode(live_execution_opt_in, unattended);
                 let summary = self.run_live_provider_local(
                     &origin,
                     LiveProviderLocalRunRequest {
@@ -754,6 +761,7 @@ impl CapoServer {
                         mock_provider_output_jsonl: mock_provider_output_jsonl.as_deref(),
                         timeout_seconds,
                         codex_program_override: codex_program_override.as_deref().map(str::trim),
+                        write_mode,
                     },
                 )?;
                 let command_hash = command_identity_hash(format!(

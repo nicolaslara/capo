@@ -196,6 +196,12 @@ pub enum ServerCommand {
         /// pass a stub so the spawn path is deterministic. `None`/relative keeps
         /// `codex`.
         codex_program_override: Option<String>,
+        /// RTL9: whether this turn is running unattended. An unattended turn can
+        /// never reach a live workspace write here (that is `goal-autonomy`
+        /// territory); the handler resolves the write mode via the RTL6 gate
+        /// (`live_execution_opt_in` AND `CAPO_SERVER_RUN_CODEX_LIVE` AND
+        /// `!unattended`), so a `true` here forces the read-only dry-run profile.
+        unattended: bool,
     },
     Recover,
 }
