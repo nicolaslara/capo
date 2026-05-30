@@ -947,14 +947,34 @@ impl RuntimeToolWrappers {
         let stderr = fs::read_to_string(&outcome.stderr.path).unwrap_or_default();
         let combined = format!("{stdout}\n{stderr}");
         let passed = outcome.exit_code == Some(0);
-        let failing = extract_failing_items(&combined, passed, caps);
+
+        // Establish the redaction seam AT THE WRAPPER BOUNDARY (mirroring
+        // `search`): scrub `combined` once, then derive BOTH the inline
+        // `failing_items` and the artifact bytes from the redacted text. This is
+        // what the declared `failing_items` redaction policy promises -- a secret
+        // printed on a failing line (or via the first-N-lines fallback) is
+        // scrubbed before it reaches the agent inline, not just in the artifact.
+        let redacted_bytes = self.redact_bytes(combined.as_bytes());
+        let redacted_combined = String::from_utf8_lossy(&redacted_bytes);
+        let failing = extract_failing_items(&redacted_combined, passed, caps);
+
+        // Preserve the runner-computed redaction provenance instead of hardcoding
+        // "redacted": the bounded runner already scrubs stdout/stderr and records
+        // whether anything matched, so a clean run is honestly labeled "safe".
+        let redaction_state = if outcome.stdout.redaction_state == "redacted"
+            || outcome.stderr.redaction_state == "redacted"
+        {
+            "redacted"
+        } else {
+            "safe"
+        };
 
         let artifact = self.write_tool_artifact(
             request,
             "test_run_output",
             &format!("test_run output for `{command_display}`"),
-            self.redact_bytes(combined.as_bytes()).as_slice(),
-            "redacted",
+            redacted_bytes.as_slice(),
+            redaction_state,
         )?;
 
         let failing_items_json: Vec<Value> = failing

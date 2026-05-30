@@ -2514,7 +2514,9 @@ fn test_run_failing_command_captures_bounded_failing_items_and_full_artifact() {
     let full = fs::read_to_string(&artifact.uri).expect("output artifact");
     assert!(full.contains("test mod::a ... ok"));
     assert!(full.contains("test mod::b ... FAILED"));
-    assert_eq!(artifact.redaction_state, "redacted");
+    // No redaction rule matched this output, so the provenance is honestly "safe"
+    // (the runner-computed state) rather than a hardcoded "redacted".
+    assert_eq!(artifact.redaction_state, "safe");
 }
 
 #[test]
@@ -2625,4 +2627,99 @@ fn test_run_redacts_secrets_in_the_output_artifact() {
         "secret leaked into the test_run output artifact: {full}"
     );
     assert!(full.contains("[REDACTED]"));
+}
+
+#[test]
+fn test_run_redacts_secrets_in_inline_failing_items() {
+    // ACI6: a secret printed on a recognized FAILING line must be scrubbed in the
+    // inline `failing_items` (the field the redaction policy declares), not just
+    // in the output artifact. The wrapper establishes the redaction seam at its
+    // own boundary (mirroring `capo.search`) rather than relying on the runner.
+    let workspace = temp_root("aci6-failing-items-redact-workspace");
+    let artifacts = temp_root("aci6-failing-items-redact-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts);
+    config.redaction_rules.push(RedactionRule {
+        pattern: "SECRET_TOKEN_xyz789".to_string(),
+        replacement: "[REDACTED]".to_string(),
+    });
+    let wrappers = RuntimeToolWrappers::new(config);
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    // A failing pytest-shaped line carrying a secret in the test id; this is what
+    // would surface in the clear via the first-N-lines fallback or the parsed
+    // failing-test name if the inline list were built from un-redacted output.
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-failing-redact",
+            "run-failing-redact",
+            "capo.test_run",
+            serde_json::json!({
+                "program": "/bin/sh",
+                "argv": [
+                    "-c",
+                    "echo 'FAILED tests/test_db.py::test_conn[SECRET_TOKEN_xyz789]'; exit 1"
+                ],
+                "cwd": "."
+            }),
+        ),
+        &policy,
+    );
+    assert_eq!(result.status, "failed", "summary: {}", result.summary);
+    let typed = result.narrow_output();
+    assert_eq!(typed["passed"], serde_json::json!(false));
+    let failing = serde_json::to_string(&typed["failing_items"]).expect("failing_items json");
+    assert!(
+        !failing.contains("SECRET_TOKEN_xyz789"),
+        "secret leaked into inline failing_items: {failing}"
+    );
+    assert!(
+        failing.contains("[REDACTED]"),
+        "expected redacted marker in failing_items: {failing}"
+    );
+}
+
+#[test]
+fn test_run_clean_output_is_labeled_safe() {
+    // ACI6: redaction provenance must be honest. A run with no matching secret is
+    // labeled `redaction_state == "safe"`, not hardcoded "redacted" -- otherwise
+    // the gate/audit consuming this record gets misleading evidence.
+    let workspace = temp_root("aci6-clean-safe-workspace");
+    let artifacts = temp_root("aci6-clean-safe-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts);
+    // A redaction rule is configured but the command output never matches it.
+    config.redaction_rules.push(RedactionRule {
+        pattern: "SECRET_TOKEN_xyz789".to_string(),
+        replacement: "[REDACTED]".to_string(),
+    });
+    let wrappers = RuntimeToolWrappers::new(config);
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-clean-safe",
+            "run-clean-safe",
+            "capo.test_run",
+            serde_json::json!({
+                "program": "/bin/sh",
+                "argv": ["-c", "echo 'all good, nothing sensitive here'; exit 0"],
+                "cwd": "."
+            }),
+        ),
+        &policy,
+    );
+    assert_eq!(result.status, "exited", "summary: {}", result.summary);
+    let typed = result.narrow_output();
+    let artifact_id = typed["output_artifact_id"].as_str().expect("artifact id");
+    let artifact = result
+        .output_artifacts
+        .iter()
+        .find(|artifact| artifact.artifact_id == artifact_id)
+        .expect("output artifact");
+    assert_eq!(
+        artifact.redaction_state, "safe",
+        "clean run should be labeled safe, got {}",
+        artifact.redaction_state
+    );
 }
