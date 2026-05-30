@@ -447,8 +447,12 @@ impl NormalizedToolResult {
             // on. A wrapper may carry finer-grained terminal statuses for the
             // loop (e.g. `precondition_failed`, or the runtime's `exited`), but
             // the persisted dispatch status must stay in the shared vocabulary so
-            // a non-completed outcome is never mis-bucketed as a completion.
-            status: normalize_runtime_status(&result.status),
+            // a non-completed outcome is never mis-bucketed as a completion. The
+            // process-runner's `exited` is NOT itself a pass/fail discriminator
+            // (a non-zero exit also reports `exited`), so it is folded using the
+            // wrapper's own `passed` signal: `exited` + passed -> `completed`,
+            // `exited` + !passed -> `failed`.
+            status: normalize_runtime_status(&result.status, wrapper_passed(result)),
             input_artifact_id: result
                 .input_artifact
                 .as_ref()
@@ -484,21 +488,45 @@ fn permission_decision_id(grant_id: &str) -> String {
     format!("decision-{grant_id}")
 }
 
+/// The wrapper's own pass signal: the process-runner wrappers (`shell_run`,
+/// `test_run`, `git_*`) compute `passed = exit_code == Some(0)` and carry it on
+/// the typed output. This is the authoritative pass/fail discriminator for an
+/// `exited` process; the raw runner status (`exited`) does not encode it.
+/// Defaults to `false` (treat as failure) when the field is absent or non-bool,
+/// so an unknown shape is never optimistically bucketed as a completion.
+fn wrapper_passed(result: &WrapperToolResult) -> bool {
+    result
+        .typed_output
+        .get("passed")
+        .and_then(|passed| passed.as_bool())
+        .unwrap_or(false)
+}
+
 /// Fold a runtime wrapper's terminal status onto the dispatch terminal-status
 /// vocabulary downstream consumers match on.
 ///
-/// Most wrapper statuses are already canonical (`completed`/`denied`, and the
-/// process-runner's `exited`/`failed` which the loop understands). The
-/// non-completing guards (`precondition_failed` for a stale file_write, and
-/// `no_match` for an apply_patch hunk no strategy could locate) are real
-/// terminal FAILURES for dispatch/projection purposes (no write, no artifact),
-/// so they are folded onto `failed` here; the precise `precondition_failed` /
-/// `no_match` semantics (expected/actual hashes, rejected hunk index, nearest
-/// candidate) still travel on the wrapper result's own status and typed output
-/// for the loop to reflect and retry.
-fn normalize_runtime_status(status: &str) -> String {
+/// Most wrapper statuses are already canonical (`completed`/`failed`/`denied`).
+/// Two classes need folding:
+///
+/// 1. The process-runner's `exited` is NOT a pass/fail discriminator on its own
+///    -- a successful AND a non-zero-exit `shell_run`/`test_run`/`git_*` both
+///    report `exited`. Folding it through unchanged would persist
+///    `status="exited"` and make a non-zero exit indistinguishable from success
+///    at the projection level, dropping the discriminator the safety-gates
+///    `score_run` consumes. We fold it using the wrapper's own `passed` signal
+///    (`exited` + passed -> `completed`, else -> `failed`). The raw `exited`
+///    detail still survives on `observed_evidence.observed_status`.
+/// 2. The non-completing guards (`precondition_failed` for a stale file_write,
+///    `no_match` for an apply_patch hunk no strategy could locate) are real
+///    terminal FAILURES for dispatch/projection purposes (no write, no
+///    artifact), so they are folded onto `failed`; the precise semantics
+///    (expected/actual hashes, rejected hunk index, nearest candidate) still
+///    travel on the wrapper result's own status and typed output for the loop to
+///    reflect and retry.
+fn normalize_runtime_status(status: &str, passed: bool) -> String {
     match status {
-        "precondition_failed" | "no_match" => "failed".to_string(),
+        "exited" if passed => "completed".to_string(),
+        "exited" | "precondition_failed" | "no_match" => "failed".to_string(),
         other => other.to_string(),
     }
 }

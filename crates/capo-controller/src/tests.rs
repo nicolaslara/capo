@@ -3228,6 +3228,203 @@ fn real_controller_apply_patch_no_match_folds_onto_shared_failed_status() {
     assert_eq!(projection.turn_id.as_deref(), Some("turn-aci4-no-match"));
 }
 
+/// FP1 pass path: a PASSING `capo.test_run` (exit 0). The process-runner reports
+/// the raw status `exited` for ANY terminated process -- it is not itself a
+/// pass/fail discriminator. The dispatch MUST fold `exited` onto the shared
+/// vocabulary using the wrapper's own `passed` signal, so a successful run
+/// persists a `completed` ToolCall projection (never the raw `exited`, which
+/// would make a non-zero exit indistinguishable from success). The raw `exited`
+/// detail still survives on the observed-evidence observation row. Deterministic
+/// via `/bin/sh`, no live provider.
+#[test]
+fn real_controller_passing_test_run_persists_completed_projection() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{
+        RuntimeToolConfig, ToolExposureRequest, ToolExposureResult, WrapperToolRequest,
+    };
+
+    let workspace = temp_root();
+    let artifacts = temp_root();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("fp1-pass-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open real controller")
+    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace, artifacts));
+    let registration = controller.register_agent("fp1-pass-worker").expect("agent");
+    let refs = controller
+        .send_task(&registration, "Run a passing test command")
+        .expect("send task");
+
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-fp1-pass"),
+        tool_call_id: ToolCallId::new("tool-fp1-test-pass"),
+    };
+    let outcome = controller
+        .dispatch_tool_call(
+            &scope,
+            ToolExposureRequest::Runtime(WrapperToolRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: scope.session_id.clone(),
+                run_id: scope.run_id.clone(),
+                tool_id: "capo.test_run".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                input: serde_json::json!({
+                    "program": "/bin/sh",
+                    "argv": ["-c", "echo 'mod::ok ... ok'; exit 0"],
+                    "cwd": ".",
+                }),
+            }),
+        )
+        .expect("dispatch passing test_run");
+
+    // The wrapper carries the raw runner status `exited` and `passed == true`.
+    let ToolExposureResult::Runtime(result) = &outcome.result else {
+        panic!("expected a runtime test_run result");
+    };
+    assert_eq!(result.status, "exited");
+    assert_eq!(result.typed_output["passed"], serde_json::json!(true));
+    // The dispatch folds `exited` + passed -> `completed`.
+    assert_eq!(outcome.status, "completed");
+    assert!(
+        outcome
+            .observed_event_kinds
+            .contains(&"tool.call_completed".to_string()),
+        "a passing run reaches the completed audit event"
+    );
+
+    // The persisted ToolCall projection is `completed`, never the raw `exited`.
+    let tools = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    let projection = tools
+        .iter()
+        .find(|tool| tool.tool_call_id == scope.tool_call_id)
+        .expect("passing test_run projection present");
+    assert_eq!(projection.status, "completed");
+    assert_eq!(projection.tool_origin, "runtime");
+
+    // The raw runner detail still survives on the observed-evidence row.
+    let observed = controller
+        .state()
+        .tool_observations_for_session(&refs.session_id)
+        .expect("tool observations")
+        .into_iter()
+        .find(|observation| observation.tool_call_id.as_ref() == Some(&scope.tool_call_id))
+        .expect("observed runtime observation");
+    assert_eq!(observed.source, "runtime_output");
+    assert_eq!(
+        observed.observed_status, "exited",
+        "the raw runner status is preserved on observed_evidence.observed_status"
+    );
+}
+
+/// FP1 fail path: a FAILING `capo.shell_run` (non-zero exit). The runner maps a
+/// non-zero exit to the raw status `failed` (and `passed == false`), which the
+/// dispatch keeps in the shared vocabulary as `failed` -- distinct from the
+/// passing run's `completed` above, so the pass/fail discriminator the
+/// safety-gates `score_run` will consume is never dropped. Together with the
+/// passing test it pins both ends of the `exited` fold: a passing run does NOT
+/// collapse to the same bucket as a non-zero exit. Deterministic via `/bin/sh`,
+/// no live provider.
+#[test]
+fn real_controller_failing_shell_run_persists_failed_projection() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{
+        RuntimeToolConfig, ToolExposureRequest, ToolExposureResult, WrapperToolRequest,
+    };
+
+    let workspace = temp_root();
+    let artifacts = temp_root();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("fp1-fail-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open real controller")
+    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace, artifacts));
+    let registration = controller.register_agent("fp1-fail-worker").expect("agent");
+    let refs = controller
+        .send_task(&registration, "Run a failing shell command")
+        .expect("send task");
+
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-fp1-fail"),
+        tool_call_id: ToolCallId::new("tool-fp1-shell-fail"),
+    };
+    let outcome = controller
+        .dispatch_tool_call(
+            &scope,
+            ToolExposureRequest::Runtime(WrapperToolRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: scope.session_id.clone(),
+                run_id: scope.run_id.clone(),
+                tool_id: "capo.shell_run".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                input: serde_json::json!({
+                    "program": "/bin/sh",
+                    "argv": ["-c", "echo boom; exit 3"],
+                    "cwd": ".",
+                }),
+            }),
+        )
+        .expect("dispatch failing shell_run");
+
+    // A non-zero exit: the runner maps the raw status to `failed` (distinct from
+    // the `exited` it reports for a success), and `passed == false`.
+    let ToolExposureResult::Runtime(result) = &outcome.result else {
+        panic!("expected a runtime shell_run result");
+    };
+    assert_eq!(result.status, "failed");
+    assert_eq!(result.typed_output["passed"], serde_json::json!(false));
+    assert_eq!(result.typed_output["exit_status"], serde_json::json!(3));
+    // The dispatch keeps the failure in the shared vocabulary as `failed`, NOT
+    // `completed` -- the pass/fail discriminator survives.
+    assert_eq!(outcome.status, "failed");
+
+    // The persisted ToolCall projection is `failed`, distinguishable from the
+    // passing-run `completed` above.
+    let tools = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    let projection = tools
+        .iter()
+        .find(|tool| tool.tool_call_id == scope.tool_call_id)
+        .expect("failing shell_run projection present");
+    assert_eq!(projection.status, "failed");
+
+    // The raw runner detail still survives on the observed-evidence row.
+    let observed = controller
+        .state()
+        .tool_observations_for_session(&refs.session_id)
+        .expect("tool observations")
+        .into_iter()
+        .find(|observation| observation.tool_call_id.as_ref() == Some(&scope.tool_call_id))
+        .expect("observed runtime observation");
+    assert_eq!(observed.source, "runtime_output");
+    assert_eq!(
+        observed.observed_status, "failed",
+        "the raw runner status is preserved on observed_evidence.observed_status"
+    );
+}
+
 /// ACI1 replay identity: one dispatched tool call must reconstruct to exactly
 /// ONE observed tool ref, not three. The tool.* events of a single call share a
 /// stamped item_id (the tool_call_id) so `reconstruct_turn_finished`'s dedup
@@ -3621,6 +3818,11 @@ fn real_controller_full_tools_e2e_persists_observed_and_reported_and_replays_ide
         test_result.narrow_output()["passed"],
         serde_json::json!(true)
     );
+    // FP1: the runner reports `exited` for a passing test_run, but the dispatch
+    // outcome folds that onto the shared vocabulary using the wrapper's own
+    // `passed` signal -- a passing run is `completed`, never the raw `exited`.
+    assert_eq!(test_result.status, "exited");
+    assert_eq!(test.status, "completed");
 
     // 4) GO2 capo.complete_subtask -- an `agent_reported` completion CLAIM,
     //    NOT observed evidence.
