@@ -58,6 +58,23 @@ pub enum EventKind {
     RunRecovered,
 }
 
+/// The terminal outcome a projected turn-ending event carries, in the
+/// projected-event vocabulary (`evidence.recorded`/`session.interrupted`/
+/// `session.stopped`/`run.exited`).
+///
+/// This is the single owner of "which projected kinds end a turn and what they
+/// mean". Both the controller's event-sourced turn re-derivation
+/// (`reconstruct_turn_finished`) and the thread read-model projection map their
+/// own outcome type from this one, so the two read models cannot disagree about
+/// a turn's terminal status or drift in which kinds are terminal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectedTurnOutcome {
+    Completed,
+    Interrupted,
+    Stopped,
+    Failed,
+}
+
 impl EventKind {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -115,6 +132,118 @@ impl EventKind {
             Self::RunAborted => "run.aborted",
             Self::RunOrphaned => "run.orphaned",
             Self::RunRecovered => "run.recovered",
+        }
+    }
+
+    /// Parse a persisted projected-kind string back into the typed kind, or
+    /// `None` for an unrecognized kind. The inverse of [`Self::as_str`]; callers
+    /// that read the persisted `EventRecord.kind` string classify through this so
+    /// they share one vocabulary with the append side instead of re-listing kind
+    /// literals.
+    pub fn from_wire(kind: &str) -> Option<Self> {
+        // Enumerate the variants so this stays exhaustive with `as_str`: adding
+        // a kind to the enum makes this match it by construction.
+        const ALL: &[EventKind] = &[
+            EventKind::ProjectRegistered,
+            EventKind::TaskDiscovered,
+            EventKind::AgentRegistered,
+            EventKind::SessionStarted,
+            EventKind::SessionRedirected,
+            EventKind::SessionSummaryUpdated,
+            EventKind::RunStarted,
+            EventKind::RunExited,
+            EventKind::PermissionRequested,
+            EventKind::PermissionDecided,
+            EventKind::PermissionApprovalQueued,
+            EventKind::CapabilityGrantCreated,
+            EventKind::CapabilityGrantUsed,
+            EventKind::ConnectivityExposureRequested,
+            EventKind::ConnectivityExposureChanged,
+            EventKind::ConnectivityExposureRevoked,
+            EventKind::ConnectivityHealthChanged,
+            EventKind::RuntimeTargetRegistered,
+            EventKind::RuntimeTargetStatusChanged,
+            EventKind::AdapterReadinessChecked,
+            EventKind::AdapterSmokeRecorded,
+            EventKind::AdapterDispatchPlanned,
+            EventKind::AdapterDispatchGateChecked,
+            EventKind::AdapterDispatchReplayed,
+            EventKind::AdapterDispatchExecutionRequested,
+            EventKind::AdapterDispatchExecuted,
+            EventKind::AdapterDispatchPromptSourceRecorded,
+            EventKind::AdapterDispatchPromptMaterialized,
+            EventKind::ToolCallRequested,
+            EventKind::ToolInvocationStarted,
+            EventKind::ToolObservationRecorded,
+            EventKind::ToolOutputArtifactRecorded,
+            EventKind::ToolOutputObserved,
+            EventKind::ToolCallCompleted,
+            EventKind::ToolResultDelivered,
+            EventKind::MemoryPacketBuilt,
+            EventKind::MemoryRecordIngested,
+            EventKind::MemoryRecordInvalidated,
+            EventKind::TaskOutcomeReportGenerated,
+            EventKind::ReviewFindingRecorded,
+            EventKind::EvidenceRecorded,
+            EventKind::WorkpadIndexed,
+            EventKind::WorkpadTaskImported,
+            EventKind::WorkpadProposalWritten,
+            EventKind::ServerRequestHandled,
+            EventKind::RecoveryStarted,
+            EventKind::RecoveryCompleted,
+            EventKind::SessionInterrupted,
+            EventKind::SessionStopped,
+            EventKind::CheckpointCreated,
+            EventKind::RunHardKilled,
+            EventKind::RunAborted,
+            EventKind::RunOrphaned,
+            EventKind::RunRecovered,
+        ];
+        ALL.iter()
+            .copied()
+            .find(|candidate| candidate.as_str() == kind)
+    }
+
+    /// `true` for the projected `tool.*` kinds the dispatch/replay path emits for
+    /// one tool call -- the request, the start, the recorded observation, the
+    /// observed runtime output, the recorded output artifact, the completion, and
+    /// the delivered result. Single owner of the projected tool-kind set, shared
+    /// by the controller's turn re-derivation and the thread read model so the
+    /// two cannot disagree about which kinds are tool content.
+    ///
+    /// This is the projected-event counterpart of
+    /// `capo_adapters::NormalizedAdapterEvent::is_tool_event` (which classifies
+    /// the upstream `adapter.tool_call_*` events the replay path maps onto these
+    /// kinds).
+    pub const fn is_tool_event(self) -> bool {
+        matches!(
+            self,
+            Self::ToolCallRequested
+                | Self::ToolInvocationStarted
+                | Self::ToolObservationRecorded
+                | Self::ToolOutputObserved
+                | Self::ToolOutputArtifactRecorded
+                | Self::ToolCallCompleted
+                | Self::ToolResultDelivered
+        )
+    }
+
+    /// `true` for the projected kind the replay path emits for assistant
+    /// output/summary content (`session.summary_updated`).
+    pub const fn is_summary_event(self) -> bool {
+        matches!(self, Self::SessionSummaryUpdated)
+    }
+
+    /// The terminal turn outcome this projected kind carries, or `None` for a
+    /// non-terminal kind. Single owner of the turn-terminal taxonomy over the
+    /// projected event log.
+    pub const fn terminal_turn_outcome(self) -> Option<ProjectedTurnOutcome> {
+        match self {
+            Self::EvidenceRecorded => Some(ProjectedTurnOutcome::Completed),
+            Self::SessionInterrupted => Some(ProjectedTurnOutcome::Interrupted),
+            Self::SessionStopped => Some(ProjectedTurnOutcome::Stopped),
+            Self::RunExited => Some(ProjectedTurnOutcome::Failed),
+            _ => None,
         }
     }
 }

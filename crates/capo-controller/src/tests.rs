@@ -1338,6 +1338,132 @@ fn turn_loop_projected_turn_rebuilds_identically_after_restart_replay() {
     );
 }
 
+/// ST5 review fix: the thread read model's `item_text` must be proven against
+/// the REAL persisted payload shapes the production append paths emit, not
+/// fabricated `{"latest_summary":...}` payloads no path produces.
+///
+/// This drives the genuine controller append paths -- a scripted adapter turn
+/// (the adapter-replay path, whose `session.summary_updated`/`tool.*` events
+/// carry `adapter_event_payload_json`: `normalized_kind`/`tool_name`/`status`,
+/// NOT prose) and a command-path interrupt (the `session_control` path, whose
+/// `session.interrupted` event carries `{reason, adapter_summary}`) -- then
+/// reads `session_thread` over the durable log and asserts the rendered item
+/// text matches what those real payloads carry.
+#[test]
+fn session_thread_item_text_matches_real_controller_append_payloads() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    let controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("thread-real-session")),
+    )
+    .expect("open controller");
+    let registration = controller.register_agent("loop-worker").expect("agent");
+    let refs = controller
+        .send_task(&registration, "Render a real multi-turn thread")
+        .expect("send task");
+
+    // Turn A: a real scripted adapter turn projected through the adapter-replay
+    // append path (summary + tool + terminal completion), keyed to turn-real-a.
+    let turn_a = TurnId::new("turn-real-a");
+    let batch = ScriptedMockTurn::new("turn-real-a")
+        .message_completed("msg-1", "state inspected")
+        .tool_requested("tool-1", "capo.agent_status")
+        .tool_completed("tool-1", "capo.agent_status", "agent is running")
+        .turn_completed("done-1")
+        .normalized_events(&refs.external_session_ref);
+    controller
+        .run_turn(&refs, &turn_a, &batch)
+        .expect("run real adapter turn");
+
+    // Turn B: a real command-path interrupt projected through the
+    // session_control append path, keyed to its own turn.
+    let turn_b = TurnId::new("turn-real-b");
+    controller
+        .interrupt_turn(&registration, &refs, &turn_b, "halting for review")
+        .expect("interrupt turn");
+
+    // Read the thread as the server's ReadThread does: a pure projection over
+    // the durable, turn-keyed event log.
+    let thread = controller
+        .state()
+        .session_thread(&refs.session_id, 0, 1024)
+        .expect("session thread");
+    // `send_task` opens the session's own active turn, so the thread carries
+    // that plus the two turns this test drives; assert by id rather than count.
+    assert!(
+        thread.turns.len() >= 2,
+        "at least the two real turns this test drove are present"
+    );
+    let turn_a_view = thread
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == "turn-real-a")
+        .expect("turn-real-a present");
+    let turn_b_view = thread
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == "turn-real-b")
+        .expect("turn-real-b present");
+
+    // The adapter-replay `session.summary_updated` payload carries no prose
+    // (`normalized_kind`/`tool_name`/`status`/`content_hash` only -- the
+    // assistant text itself is only hashed), so the assistant output item
+    // renders the composed label from the real refs -- the `normalized_kind`
+    // and its `status` -- NOT a fabricated `latest_summary` string.
+    let summary_item = turn_a_view
+        .items
+        .iter()
+        .find(|item| item.kind == capo_state::ThreadItemKind::Output)
+        .expect("an Output item from the real summary event");
+    assert_eq!(summary_item.event_kind, "session.summary_updated");
+    assert_eq!(
+        summary_item.text.as_deref(),
+        Some("adapter.item_completed (completed)"),
+        "real adapter-replay summary payload renders the composed normalized_kind (status) label"
+    );
+
+    // The tool items render the composed `tool_name (status)` label from the
+    // real adapter-replay tool payloads -- the scripted turn projects a request
+    // and a completion (plus a recorded observation), each a distinct tool item.
+    let tool_labels: Vec<&str> = turn_a_view
+        .items
+        .iter()
+        .filter(|item| item.kind == capo_state::ThreadItemKind::Tool)
+        .filter_map(|item| item.text.as_deref())
+        .collect();
+    assert!(
+        tool_labels.contains(&"capo.agent_status (requested)"),
+        "real adapter-replay tool request payload renders the composed label, got {tool_labels:?}"
+    );
+    assert!(
+        tool_labels.contains(&"capo.agent_status (completed)"),
+        "real adapter-replay tool completion payload renders the composed label, got {tool_labels:?}"
+    );
+
+    // The real terminal completion event closes turn A.
+    assert_eq!(turn_a_view.status, capo_state::ThreadTurnStatus::Completed);
+
+    // The command-path `session.interrupted` payload is `{reason,
+    // adapter_summary}`; `item_text` reads `adapter_summary` (the scripted
+    // mock's closing summary), proving the prose path against the real shape.
+    assert_eq!(
+        turn_b_view.status,
+        capo_state::ThreadTurnStatus::Interrupted
+    );
+    let interrupted_item = turn_b_view
+        .items
+        .iter()
+        .find(|item| item.event_kind == "session.interrupted")
+        .expect("a session.interrupted item");
+    assert_eq!(
+        interrupted_item.text.as_deref(),
+        Some("Scripted mock interrupted session: halting for review"),
+        "real session.interrupted payload renders adapter_summary"
+    );
+}
+
 /// Replay-identity on a LONG multi-turn session: flood a session with far more
 /// than 256 persisted events across many turns, then reconstruct an EARLY turn
 /// purely from the persisted, turn-keyed event log and assert the reconstructed

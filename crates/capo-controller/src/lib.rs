@@ -22,8 +22,9 @@ use capo_memory::{
 use capo_runtime::{FakeRuntimeStartRequest, LocalProcessRunner, RuntimeRunner};
 use capo_state::{
     AgentProjection, ArtifactRecord, EventKind, EventRecord, NewEvent, ProjectProjection,
-    ProjectionRecord, RedactionState, RunProjection, RunReapKind, RunReapObservation,
-    SessionProjection, SqliteStateStore, StateError, StateResult, TaskProjection,
+    ProjectedTurnOutcome, ProjectionRecord, RedactionState, RunProjection, RunReapKind,
+    RunReapObservation, SessionProjection, SqliteStateStore, StateError, StateResult,
+    TaskProjection,
 };
 use capo_tools::{
     FakeToolRequest, PermissionDecision, PermissionPolicy, PermissionRequest, ToolExposure,

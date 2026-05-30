@@ -29,7 +29,8 @@ mod thread;
 pub use broadcast::{EventBroadcaster, EventSubscription};
 pub use error::{StateError, StateResult};
 pub use event::{
-    ArtifactRecord, EventKind, EventRecord, NewEvent, RecoveryAttempt, RedactionState,
+    ArtifactRecord, EventKind, EventRecord, NewEvent, ProjectedTurnOutcome, RecoveryAttempt,
+    RedactionState,
 };
 pub use projections::*;
 pub use thread::{SessionThread, ThreadItem, ThreadItemKind, ThreadTurn, ThreadTurnStatus};

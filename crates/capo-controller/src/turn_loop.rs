@@ -85,6 +85,25 @@ impl TurnStopReason {
             AdapterTerminalOutcome::Interrupted => Self::Interrupted,
         }
     }
+
+    /// Map the SHARED projected-turn terminal outcome (the single owner of "which
+    /// persisted kinds end a turn", `capo_state::ProjectedTurnOutcome`) onto the
+    /// loop's stop reason. This is the projection-side counterpart of
+    /// [`Self::from_terminal_outcome`]: the live batch derivation classifies
+    /// adapter events into `AdapterTerminalOutcome`, while the event-sourced
+    /// re-derivation classifies persisted projected KINDS into
+    /// `ProjectedTurnOutcome`; both fold into the same `TurnStopReason` so the
+    /// two paths agree. Unlike the adapter outcome, this carries `Stopped` (the
+    /// command-path `session.stopped` terminal), so a reconstructed stopped turn
+    /// reports `Stopped` instead of defaulting to `Completed`.
+    const fn from_projected_turn_outcome(outcome: ProjectedTurnOutcome) -> Self {
+        match outcome {
+            ProjectedTurnOutcome::Completed => Self::Completed,
+            ProjectedTurnOutcome::Interrupted => Self::Interrupted,
+            ProjectedTurnOutcome::Stopped => Self::Stopped,
+            ProjectedTurnOutcome::Failed => Self::Failed,
+        }
+    }
 }
 
 /// The outcome emitted at the end of one observe -> project -> emit cycle.
@@ -218,33 +237,33 @@ impl FakeBoundaryController {
         let mut observed_tool_refs = Vec::new();
         let mut terminal_outcome = None;
         for event in &events {
-            match event.kind.as_str() {
-                "session.summary_updated" => {
-                    summary_refs.push(persisted_turn_ref(event));
+            // Classify the persisted projected kind through the SAME shared
+            // taxonomy the thread read model uses (`EventKind::is_summary_event`
+            // / `is_tool_event` / `terminal_turn_outcome`), so the controller's
+            // event-sourced re-derivation and the thread projection cannot
+            // disagree about which kinds are summary/tool/terminal content. An
+            // unrecognized kind is bookkeeping the turn outcome ignores.
+            let Some(kind) = EventKind::from_wire(&event.kind) else {
+                continue;
+            };
+            if kind.is_summary_event() {
+                summary_refs.push(persisted_turn_ref(event));
+            } else if kind.is_tool_event() {
+                // The projected tool kinds; `tool.observation_recorded` and the
+                // other per-call kinds share the same item ref, so dedup keeps a
+                // single ref per tool.
+                let tool_ref = persisted_turn_ref(event);
+                if !observed_tool_refs.contains(&tool_ref) {
+                    observed_tool_refs.push(tool_ref);
                 }
-                // The projected tool kinds; `tool.observation_recorded` shares
-                // the same item ref so dedup keeps a single ref per tool.
-                "tool.call_requested"
-                | "tool.invocation_started"
-                | "tool.call_completed"
-                | "tool.observation_recorded" => {
-                    let tool_ref = persisted_turn_ref(event);
-                    if !observed_tool_refs.contains(&tool_ref) {
-                        observed_tool_refs.push(tool_ref);
-                    }
-                }
-                "evidence.recorded" => terminal_outcome = Some(AdapterTerminalOutcome::Completed),
-                "session.interrupted" => {
-                    terminal_outcome = Some(AdapterTerminalOutcome::Interrupted)
-                }
-                "run.exited" => terminal_outcome = Some(AdapterTerminalOutcome::Failed),
-                _ => {}
+            } else if let Some(outcome) = kind.terminal_turn_outcome() {
+                terminal_outcome = Some(outcome);
             }
         }
         Ok(TurnFinished {
             turn_id: turn_id.clone(),
             stop_reason: terminal_outcome
-                .map(TurnStopReason::from_terminal_outcome)
+                .map(TurnStopReason::from_projected_turn_outcome)
                 .unwrap_or(TurnStopReason::Completed),
             observed_terminal_event: terminal_outcome.is_some(),
             summary_refs,

@@ -7,8 +7,8 @@ use capo_state::SqliteStateStore;
 
 use super::*;
 use crate::{
-    EVENT_TAIL_METHOD, EventNotification, ServerEvent, SubscriptionBacklog,
-    jsonrpc_request_roundtrip, jsonrpc_response_roundtrip,
+    EVENT_TAIL_METHOD, EventNotification, ServerEvent, ServerThread, ServerThreadItem,
+    ServerThreadTurn, SubscriptionBacklog, jsonrpc_request_roundtrip, jsonrpc_response_roundtrip,
 };
 
 /// Every committed sequence in the store, in order, read straight from the log.
@@ -303,6 +303,128 @@ fn subscribe_command_and_subscribed_payload_round_trip_on_the_wire() {
         payload: ServerResponsePayload::Subscribed(backlog),
     };
     assert_eq!(jsonrpc_response_roundtrip(&response), response);
+}
+
+#[test]
+fn read_thread_command_and_thread_payload_round_trip_on_the_wire() {
+    // ST5: the typed `ReadThread` command maps onto a JSON-RPC request and back.
+    let request = ServerRequest::cli(ServerCommand::ReadThread {
+        session_id: "session-xyz".to_string(),
+        from_sequence: 7,
+    });
+    assert_eq!(jsonrpc_request_roundtrip(&request), request);
+
+    // The `Thread` payload round-trips through a full response, including a turn
+    // with one item that has BOTH `item_ref` and `text` set and another that has
+    // neither (the optional `None` fields, which the wire encodes as JSON null
+    // and the client decode path must read back as `None`).
+    let thread = ServerThread {
+        session_id: "session-xyz".to_string(),
+        from_sequence: 7,
+        next_sequence: 11,
+        turns: vec![ServerThreadTurn {
+            turn_id: "turn-1".to_string(),
+            status: "completed".to_string(),
+            first_sequence: 8,
+            last_sequence: 11,
+            items: vec![
+                ServerThreadItem {
+                    sequence: 8,
+                    event_id: "event-out".to_string(),
+                    kind: "output".to_string(),
+                    event_kind: "session.summary_updated".to_string(),
+                    item_ref: Some("item-1".to_string()),
+                    text: Some("inspected state".to_string()),
+                    redaction_state: "safe".to_string(),
+                },
+                ServerThreadItem {
+                    sequence: 11,
+                    event_id: "event-term".to_string(),
+                    kind: "terminal".to_string(),
+                    event_kind: "evidence.recorded".to_string(),
+                    item_ref: None,
+                    text: None,
+                    redaction_state: "safe".to_string(),
+                },
+            ],
+        }],
+    };
+    let response = ServerResponse {
+        request_id: "server-read-thread-session-xyz-7".to_string(),
+        client_id: "local-cli".to_string(),
+        actor_id: "local-user".to_string(),
+        input_origin: ServerInputOrigin::Cli,
+        payload: ServerResponsePayload::Thread(thread),
+    };
+    assert_eq!(jsonrpc_response_roundtrip(&response), response);
+}
+
+#[test]
+fn read_thread_projects_real_turn_events_into_the_server_thread_payload() {
+    // ST5 integration: drive real turn-keyed events through the server boundary
+    // (a deterministic adapter-fixture replay), then `ReadThread` and assert the
+    // projected `ServerThread` -- proving the read_model -> wire contract on a
+    // real append, not a fabricated payload.
+    let root = temp_root();
+    let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
+    handle(
+        &server,
+        ServerCommand::RegisterAgent {
+            name: "codex-local".to_string(),
+        },
+    );
+    let session_id = "session-codex-local-1";
+    handle(
+        &server,
+        ServerCommand::StartSession {
+            agent_name: "codex-local".to_string(),
+            goal: "Read a real thread through the server".to_string(),
+            adapter: "codex".to_string(),
+            session_id: Some(session_id.to_string()),
+            run_id: Some("run-codex-local-1".to_string()),
+        },
+    );
+    server
+        .handle(ServerRequest::local_cli(
+            "replay-codex-for-thread",
+            ServerCommand::ReplayAdapterFixture {
+                adapter: "codex".to_string(),
+                session_id: session_id.to_string(),
+                run_id: "run-codex-local-1".to_string(),
+                turn_id: "turn-codex-local-1".to_string(),
+                fixture_name: "crates/capo-adapters/fixtures/codex-exec.jsonl".to_string(),
+                fixture_jsonl: include_str!("../../../capo-adapters/fixtures/codex-exec.jsonl")
+                    .to_string(),
+            },
+        ))
+        .expect("replay codex fixture");
+
+    let response = handle(
+        &server,
+        ServerCommand::ReadThread {
+            session_id: session_id.to_string(),
+            from_sequence: 0,
+        },
+    );
+    let ServerResponsePayload::Thread(thread) = response.payload else {
+        panic!("expected a thread response payload");
+    };
+    assert_eq!(thread.session_id, session_id);
+    assert_eq!(thread.from_sequence, 0);
+    let turn = thread
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == "turn-codex-local-1")
+        .expect("the replayed turn is projected");
+    // The fixture replay ends in a completed turn (`evidence.recorded`).
+    assert_eq!(turn.status, "completed");
+    // The replay projected summary + tool items; the actual reply text is only
+    // hashed, so every item carries the composed-label / ref text, never empty.
+    assert!(!turn.items.is_empty(), "the turn projects its items");
+    assert!(turn.items.iter().any(|item| item.kind == "tool"));
+    assert!(turn.items.iter().any(|item| item.kind == "output"));
+    // The wire watermark composes with a Subscribe tail.
+    assert!(thread.next_sequence >= turn.last_sequence);
 }
 
 #[test]

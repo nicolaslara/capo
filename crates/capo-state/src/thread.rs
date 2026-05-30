@@ -37,7 +37,7 @@
 
 use capo_core::SessionId;
 
-use crate::EventRecord;
+use crate::{EventKind, EventRecord, ProjectedTurnOutcome};
 
 /// How a turn ended, derived from its terminal event. `InProgress` means the
 /// turn produced items but the projected events carry no terminal marker yet
@@ -61,6 +61,19 @@ impl ThreadTurnStatus {
             Self::Failed => "failed",
         }
     }
+
+    /// Map the shared projected-turn terminal outcome onto the thread's status.
+    /// The thread does not own its own terminal taxonomy; it reads the single
+    /// owner ([`ProjectedTurnOutcome`]) so it cannot disagree with the
+    /// controller's turn re-derivation about what a terminal kind means.
+    const fn from_terminal_outcome(outcome: ProjectedTurnOutcome) -> Self {
+        match outcome {
+            ProjectedTurnOutcome::Completed => Self::Completed,
+            ProjectedTurnOutcome::Interrupted => Self::Interrupted,
+            ProjectedTurnOutcome::Stopped => Self::Stopped,
+            ProjectedTurnOutcome::Failed => Self::Failed,
+        }
+    }
 }
 
 /// The role of a single item on the turn timeline. The kinds map directly onto
@@ -70,7 +83,10 @@ impl ThreadTurnStatus {
 pub enum ThreadItemKind {
     /// Incremental assistant output / summary text (`session.summary_updated`).
     Output,
-    /// A tool observation (`tool.*`).
+    /// A tool observation -- any of the projected `tool.*` kinds for a call
+    /// (request, start, observation, observed output, output artifact,
+    /// completion, delivered result), classified through
+    /// [`EventKind::is_tool_event`].
     Tool,
     /// A terminal annotation for the turn (`evidence.recorded`,
     /// `session.interrupted`, `session.stopped`, `run.exited`). Kept as an item
@@ -202,18 +218,22 @@ impl SessionThread {
 
 /// Classify a projected event into a thread item, or `None` when the event kind
 /// is not conversation content (lifecycle/bookkeeping kinds the thread ignores).
+///
+/// The kind classification is NOT re-listed here: it routes through the shared
+/// [`EventKind`] taxonomy ([`EventKind::is_summary_event`] /
+/// [`EventKind::is_tool_event`] / [`EventKind::terminal_turn_outcome`]) so the
+/// thread read model and the controller's event-sourced turn re-derivation
+/// classify the same persisted kinds the same way and cannot drift.
 fn project_item(event: &EventRecord) -> Option<ThreadItem> {
-    let kind = match event.kind.as_str() {
-        "session.summary_updated" => ThreadItemKind::Output,
-        "tool.call_requested"
-        | "tool.invocation_started"
-        | "tool.call_completed"
-        | "tool.observation_recorded"
-        | "tool.result_delivered" => ThreadItemKind::Tool,
-        "evidence.recorded" | "session.interrupted" | "session.stopped" | "run.exited" => {
-            ThreadItemKind::Terminal
-        }
-        _ => return None,
+    let event_kind = EventKind::from_wire(&event.kind)?;
+    let kind = if event_kind.is_summary_event() {
+        ThreadItemKind::Output
+    } else if event_kind.is_tool_event() {
+        ThreadItemKind::Tool
+    } else if event_kind.terminal_turn_outcome().is_some() {
+        ThreadItemKind::Terminal
+    } else {
+        return None;
     };
     Some(ThreadItem {
         sequence: event.sequence,
@@ -228,34 +248,53 @@ fn project_item(event: &EventRecord) -> Option<ThreadItem> {
 
 /// Map a terminal event kind onto the turn status it sets, or `None` for a
 /// non-terminal item. A turn with no terminal event stays `InProgress`.
+///
+/// The terminal taxonomy itself lives on [`EventKind::terminal_turn_outcome`]
+/// (the single owner); this only translates that shared outcome into the
+/// thread's status type.
 fn terminal_status_for(kind: &str) -> Option<ThreadTurnStatus> {
-    match kind {
-        "evidence.recorded" => Some(ThreadTurnStatus::Completed),
-        "session.interrupted" => Some(ThreadTurnStatus::Interrupted),
-        "session.stopped" => Some(ThreadTurnStatus::Stopped),
-        "run.exited" => Some(ThreadTurnStatus::Failed),
-        _ => None,
-    }
+    EventKind::from_wire(kind)?
+        .terminal_turn_outcome()
+        .map(ThreadTurnStatus::from_terminal_outcome)
 }
 
 /// Extract the human-facing text for an item from its `payload_json`.
 ///
-/// Different append paths shape their payloads differently, so this reads
-/// whichever text-bearing field is present without re-deriving content:
+/// The real append paths shape their payloads differently, so this reads
+/// whichever text-bearing field each actually emits, without re-deriving
+/// content. The keys below are the ones production payloads carry:
 ///
-/// - A path that stores a rendered line uses `latest_summary` / `detail` /
-///   `latest_blocker` (e.g. the controller's session projection summary text).
-/// - The adapter-replay path stores structured refs (`tool_name`, `status`,
-///   `normalized_kind`, `content_hash`) rather than a prose line; when no prose
-///   field is present we compose a stable one-line label from those so a tool
-///   item still renders meaningfully.
+/// - `session.interrupted` / `session.stopped` (the controller's
+///   `session_control` path) carry `{ "reason", "adapter_summary" }`, so
+///   `adapter_summary` (the adapter's closing summary) is preferred, then
+///   `reason`.
+/// - The adapter-replay path (`session.summary_updated`, the `tool.*` kinds,
+///   `evidence.recorded`, `run.exited`, replayed `session.interrupted`) stores
+///   structured refs (`tool_name`, `status`, `normalized_kind`, `content_hash`)
+///   rather than a prose line -- the assistant text itself is only hashed, not
+///   re-persisted -- so when no prose field is present we compose a stable
+///   one-line label from those refs (e.g. `shell (completed)` for a tool item,
+///   `adapter.item_completed (completed)` for an assistant-output item) so the
+///   item still renders meaningfully and is locatable by its ref.
+///
+/// `latest_summary` / `detail` / `latest_blocker` / `message` are also accepted
+/// for any future append path that stores a rendered prose line directly in the
+/// event payload (and for the projection's own unit fixtures); no current
+/// production path emits them, so they sit below the keys that do.
 ///
 /// Returns `None` only when the payload carries no usable field, leaving the
 /// render to fall back to the item ref / event kind.
 fn item_text(event: &EventRecord) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(&event.payload_json).ok()?;
     let object = value.as_object()?;
-    for key in ["latest_summary", "detail", "latest_blocker", "message"] {
+    for key in [
+        "adapter_summary",
+        "latest_summary",
+        "detail",
+        "latest_blocker",
+        "message",
+        "reason",
+    ] {
         if let Some(text) = object.get(key).and_then(serde_json::Value::as_str)
             && !text.is_empty()
         {
@@ -427,5 +466,61 @@ mod tests {
         assert_eq!(thread.turns.len(), 1);
         assert_eq!(thread.turns[0].turn_id, "turn-b");
         assert_eq!(thread.next_sequence, 6);
+    }
+
+    #[test]
+    fn projects_every_tool_kind_including_output_observed_and_artifact() {
+        // Regression for the dropped tool-output items: the tool-dispatch path
+        // persists `tool.output_observed` and `tool.output_artifact_recorded`
+        // (the events carrying the actual runtime output), so the projection
+        // must classify them -- and every other projected `tool.*` kind -- as
+        // Tool items rather than silently skipping them. The kind set is driven
+        // from the shared `EventKind` taxonomy so it stays anchored to the real
+        // vocabulary the append paths emit.
+        let tool_kinds = [
+            EventKind::ToolCallRequested,
+            EventKind::ToolInvocationStarted,
+            EventKind::ToolObservationRecorded,
+            EventKind::ToolOutputObserved,
+            EventKind::ToolOutputArtifactRecorded,
+            EventKind::ToolCallCompleted,
+            EventKind::ToolResultDelivered,
+        ];
+        let events: Vec<EventRecord> = tool_kinds
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                event(
+                    index as i64 + 1,
+                    &format!("e{index}"),
+                    kind.as_str(),
+                    Some("turn-tools"),
+                    "{\"tool_name\":\"shell\",\"status\":\"completed\"}",
+                )
+            })
+            .collect();
+        let thread = SessionThread::project(SessionId::new("session-thread"), 0, &events);
+        assert_eq!(thread.turns.len(), 1);
+        // Every tool kind is present as a Tool item -- none dropped.
+        assert_eq!(thread.turns[0].items.len(), tool_kinds.len());
+        assert!(
+            thread.turns[0]
+                .items
+                .iter()
+                .all(|item| item.kind == ThreadItemKind::Tool)
+        );
+        // The previously-dropped output kinds are now projected.
+        assert!(
+            thread.turns[0]
+                .items
+                .iter()
+                .any(|item| { item.event_kind == EventKind::ToolOutputObserved.as_str() })
+        );
+        assert!(
+            thread.turns[0]
+                .items
+                .iter()
+                .any(|item| { item.event_kind == EventKind::ToolOutputArtifactRecorded.as_str() })
+        );
     }
 }
