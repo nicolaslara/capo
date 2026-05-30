@@ -568,7 +568,74 @@ Must not do:
 
 ## RTL7 - Per-Run Resource Ceiling With Controller-Enforced Abort
 
-Status: pending.
+Status: done (gate green). The per-run resource ceiling lives in
+`crates/capo-controller/src/resource_ceiling.rs`: `RunResourceCeiling`
+(`max_turns`/`max_wall_clock`/`max_token_cost`) plus `RunResourceUsage`
+accounting. `RunResourceCeiling::breach(usage)` is the single pure classifier the
+loop and the live arm both consult, returning the FIRST breach in a fixed
+priority order (turns -> wall-clock -> token/cost) so the abort reason is
+deterministic. The controller enforces the ceiling IN THE LOOP:
+`FakeBoundaryController::run_turn_within_ceiling` accounts the turn about to run
+(one more turn + its token cost) BEFORE projecting, and if that trips the ceiling
+it aborts via `abort_run_for_ceiling` and returns `CeilingTurnOutcome::Aborted`
+WITHOUT projecting the turn. Exceeding any ceiling appends a durable
+`run.aborted` event (new `EventKind::RunAborted` -> `run.aborted` in
+`crates/capo-state/src/event.rs`, idempotent on `(project, run_id, breach.code)`)
+carrying a `Run` projection of status `aborted`, so the run is durable and
+rebuilds identically on replay. The wall-clock ceiling is wired to the existing
+timeout path: the live-provider arm of `CapoServer::run_dispatch_turn`
+(`crates/capo-server/src/turn_orchestration.rs`) now carries a
+`RunResourceCeiling` instead of a raw `timeout_seconds`, derives the runtime
+`wait_running_with_timeout` timeout from `ceiling.wall_clock_timeout_seconds()`,
+and REJECTS a live-provider turn whose ceiling does not bound wall-clock -- so the
+live Codex path always runs inside an active ceiling, never without one. The
+ceiling is documented as a strict SUBSET of `goal-autonomy`'s `GoalBudget` (which
+extends this enforcement floor rather than replacing it), per `knowledge.md`'s
+"The RTL Safety Floor" section.
+
+Evidence:
+
+- Ceiling module + types: `crates/capo-controller/src/resource_ceiling.rs`
+  (`RunResourceCeiling`/`RunResourceUsage`/`CeilingBreach`/`CeilingTurnOutcome`,
+  `breach`, `run_turn_within_ceiling`, `abort_run_for_ceiling`); module wired and
+  types re-exported in `crates/capo-controller/src/lib.rs`.
+- New event kind: `EventKind::RunAborted` (`run.aborted`) in
+  `crates/capo-state/src/event.rs`; it appends through
+  `SqliteStateStore::append_event` with an idempotency key and a `Run` projection
+  so it survives restart/replay (no exhaustive `EventKind` match elsewhere needed
+  updating -- all consumers match on `kind.as_str()`).
+- Wall-clock-to-timeout wiring + active-ceiling prerequisite:
+  `crates/capo-server/src/turn_orchestration.rs` (`DispatchTurnMode::LiveProvider`
+  now carries `ceiling: RunResourceCeiling`; `run_dispatch_turn` derives
+  `timeout_seconds` from it and rejects a live turn with no wall-clock bound).
+- Deterministic tests (no live provider):
+  `crates/capo-controller/src/tests.rs` --
+  `resource_ceiling_classifies_the_first_breach_in_priority_order` (the pure
+  classifier: within bounds = no breach; turns win priority; then wall-clock; then
+  token/cost; unbounded ceiling has no wall-clock timeout),
+  `run_that_exceeds_max_turns_aborts_with_run_aborted_event_and_projects_no_further_turn`
+  (RTL7 acceptance: turn 1 within `max_turns=1` projects and completes; turn 2
+  aborts BEFORE projecting -- a `run.aborted` event keyed to the aborting turn is
+  recorded, the run projection is `aborted`, none of turn 2's batch reaches the
+  read models, and exactly one event is appended for the over-ceiling turn), and
+  `aborted_run_stays_aborted_after_restart_replay_and_abort_is_idempotent`
+  (restart/replay: reopen + `rebuild_projections` leaves the run `aborted` with no
+  new events; re-recording the same breach is idempotent).
+  `crates/capo-state/src/tests.rs` --
+  `run_aborted_event_projects_aborted_status_and_rebuilds_identically` (the
+  `run.aborted` event projects an `aborted` Run, an aborted run is not
+  active-looking, the abort is idempotent, and the status rebuilds identically
+  from the event log).
+- Commands run from `/Users/nicolas/devel/capo-wt/real-turn-loop`:
+  `cargo test -p capo-controller -p capo-state` -> ok (capo-controller 22 passed,
+  capo-state 32 passed; the 3 new RTL7 controller tests + 1 state test included).
+  Objective gate: `cargo fmt --check` -> clean; `cargo clippy --all-targets
+  --all-features -- -D warnings` -> clean (exit 0); `cargo test --workspace` ->
+  281 passed, 0 failed across all binaries (capo-controller 22, capo-state 32,
+  capo-server 39, capo-adapters 28, capo-runtime 12, capo-tools 21, capo-query 21,
+  capo-voice 19, capo cli 63 + server_transport 11, etc.). `git diff --check` ->
+  clean (exit 0). No live Codex smoke is required for RTL7 (the live
+  workspace-write smoke is RTL13); all proofs are deterministic.
 
 Acceptance:
 

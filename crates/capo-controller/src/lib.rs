@@ -33,12 +33,16 @@ mod adapter_replay;
 mod fake_session;
 mod local_dispatch;
 mod real_controller;
+mod resource_ceiling;
 mod session_control;
 mod turn_loop;
 
 pub use local_dispatch::LocalAdapterDispatchRunStart;
 pub use real_controller::{
     RealAgentRegistration, RealBoundaryController, RealReadModelObservation, RealRunRefs,
+};
+pub use resource_ceiling::{
+    CeilingBreach, CeilingTurnOutcome, RunResourceCeiling, RunResourceUsage,
 };
 pub use turn_loop::{TurnFinished, TurnStopReason};
 

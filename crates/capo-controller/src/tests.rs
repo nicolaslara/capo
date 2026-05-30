@@ -1431,6 +1431,296 @@ fn real_controller_projected_turn_rebuilds_identically_after_restart_replay() {
     );
 }
 
+#[test]
+fn resource_ceiling_classifies_the_first_breach_in_priority_order() {
+    use std::time::Duration;
+
+    // RTL7: the pure classifier the loop and the live arm both consult. Turns
+    // are checked before wall-clock before token/cost, so the abort reason is
+    // deterministic for a given usage.
+    let ceiling = RunResourceCeiling::for_live_provider(2, Duration::from_secs(30), 1_000);
+
+    // Within every bound: no breach.
+    assert_eq!(
+        ceiling.breach(RunResourceUsage {
+            turns_taken: 2,
+            wall_clock_elapsed: Duration::from_secs(30),
+            token_cost: 1_000,
+        }),
+        None
+    );
+    // Over max turns: turns win the priority order even if other bounds are also
+    // over.
+    assert_eq!(
+        ceiling.breach(RunResourceUsage {
+            turns_taken: 3,
+            wall_clock_elapsed: Duration::from_secs(99),
+            token_cost: 9_999,
+        }),
+        Some(CeilingBreach::MaxTurns {
+            limit: 2,
+            observed: 3
+        })
+    );
+    // Turns OK, wall-clock over: wall-clock is the breach.
+    assert_eq!(
+        ceiling.breach(RunResourceUsage {
+            turns_taken: 1,
+            wall_clock_elapsed: Duration::from_secs(31),
+            token_cost: 10,
+        }),
+        Some(CeilingBreach::WallClock {
+            limit: Duration::from_secs(30),
+            observed: Duration::from_secs(31)
+        })
+    );
+    // Turns + wall-clock OK, token/cost over: token/cost is the breach.
+    assert_eq!(
+        ceiling.breach(RunResourceUsage {
+            turns_taken: 1,
+            wall_clock_elapsed: Duration::from_secs(5),
+            token_cost: 1_001,
+        }),
+        Some(CeilingBreach::TokenCost {
+            limit: 1_000,
+            observed: 1_001
+        })
+    );
+    // The live-provider ceiling always bounds wall-clock and yields a >=1s
+    // runtime timeout; the unbounded ceiling does not.
+    assert!(ceiling.bounds_wall_clock());
+    assert_eq!(ceiling.wall_clock_timeout_seconds(), Some(30));
+    assert!(!RunResourceCeiling::unbounded().bounds_wall_clock());
+    assert_eq!(
+        RunResourceCeiling::unbounded().wall_clock_timeout_seconds(),
+        None
+    );
+}
+
+#[test]
+fn run_that_exceeds_max_turns_aborts_with_run_aborted_event_and_projects_no_further_turn() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    // RTL7 acceptance: a scripted run that exceeds max-turns aborts with a
+    // `run.aborted` event and no further turns are projected.
+    let controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("ceiling-session")),
+    )
+    .expect("open controller");
+    let registration = controller.register_agent("ceiling-worker").expect("agent");
+    let refs = controller
+        .send_task(&registration, "Run under a max-turns=1 ceiling")
+        .expect("send task");
+
+    let ceiling = RunResourceCeiling::max_turns(1);
+
+    // Turn 1 is within the ceiling: it projects and completes.
+    let turn1 = TurnId::new("turn-ceiling-1");
+    let batch1 = ScriptedMockTurn::new("turn-ceiling-1")
+        .message_completed("msg-1", "first turn")
+        .tool_requested("tool-1", "capo.agent_status")
+        .tool_completed("tool-1", "capo.agent_status", "ok")
+        .turn_completed("done-1")
+        .normalized_events(&refs.external_session_ref);
+    let outcome1 = controller
+        .run_turn_within_ceiling(
+            &refs,
+            &turn1,
+            &batch1,
+            &ceiling,
+            RunResourceUsage::default(),
+            0,
+        )
+        .expect("turn 1");
+    let finished1 = match &outcome1 {
+        CeilingTurnOutcome::Completed(finished) => finished,
+        CeilingTurnOutcome::Aborted(breach) => panic!("turn 1 must not abort: {breach:?}"),
+    };
+    assert_eq!(finished1.turn_id, turn1);
+    assert_eq!(finished1.stop_reason, TurnStopReason::Completed);
+    let event_count_after_turn1 = controller.state().event_count().expect("count");
+    assert!(
+        !controller
+            .state()
+            .recent_events_for_session(&refs.session_id, 64)
+            .expect("events")
+            .iter()
+            .any(|event| event.kind == "run.aborted"),
+        "the within-ceiling turn must not abort the run"
+    );
+
+    // Turn 2 would be the 2nd turn (over max_turns=1): the loop aborts BEFORE
+    // projecting it.
+    let turn2 = TurnId::new("turn-ceiling-2");
+    let batch2 = ScriptedMockTurn::new("turn-ceiling-2")
+        .message_completed("msg-2", "second turn")
+        .turn_completed("done-2")
+        .normalized_events(&refs.external_session_ref);
+    let usage_after_turn1 = RunResourceUsage {
+        turns_taken: 1,
+        ..RunResourceUsage::default()
+    };
+    let outcome2 = controller
+        .run_turn_within_ceiling(&refs, &turn2, &batch2, &ceiling, usage_after_turn1, 0)
+        .expect("turn 2");
+    assert_eq!(
+        outcome2.breach(),
+        Some(CeilingBreach::MaxTurns {
+            limit: 1,
+            observed: 2
+        }),
+        "turn 2 must abort against max_turns=1"
+    );
+    assert!(outcome2.finished().is_none());
+
+    // A `run.aborted` event was recorded, keyed to the aborting turn, and the
+    // run projection is now `aborted`.
+    let events = controller
+        .state()
+        .recent_events_for_session(&refs.session_id, 64)
+        .expect("events");
+    let aborted = events
+        .iter()
+        .find(|event| event.kind == "run.aborted")
+        .expect("run.aborted event recorded");
+    assert_eq!(aborted.turn_id.as_deref(), Some("turn-ceiling-2"));
+    assert!(aborted.payload_json.contains("max_turns_exceeded"));
+    assert_eq!(
+        controller
+            .state()
+            .run(&refs.run_id)
+            .expect("run")
+            .expect("run present")
+            .status,
+        "aborted"
+    );
+
+    // No further turn was projected: turn-ceiling-2's content never reached the
+    // read models, and exactly one event (the abort) was appended after turn 1.
+    assert!(
+        !events.iter().any(|event| {
+            event.turn_id.as_deref() == Some("turn-ceiling-2") && event.kind != "run.aborted"
+        }),
+        "the aborted turn must not project any of its batch"
+    );
+    let tools = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    assert!(
+        tools
+            .iter()
+            .all(|tool| tool.turn_id.as_deref() != Some("turn-ceiling-2")),
+        "the aborted turn must not project a tool call"
+    );
+    assert_eq!(
+        controller.state().event_count().expect("count"),
+        event_count_after_turn1 + 1,
+        "exactly one event (run.aborted) is appended for the over-ceiling turn"
+    );
+}
+
+#[test]
+fn aborted_run_stays_aborted_after_restart_replay_and_abort_is_idempotent() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    // RTL7: restart/replay proves the aborted run stays aborted after rebuild,
+    // and re-recording the same breach is idempotent (the run aborts exactly
+    // once).
+    let state_root = temp_root();
+    let controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        &state_root,
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("ceiling-replay-session")),
+    )
+    .expect("open controller");
+    let registration = controller
+        .register_agent("ceiling-replay-worker")
+        .expect("agent");
+    let refs = controller
+        .send_task(&registration, "Run under a max-turns=1 ceiling")
+        .expect("send task");
+
+    let ceiling = RunResourceCeiling::max_turns(1);
+    let turn1 = TurnId::new("turn-replay-ceiling-1");
+    let batch1 = ScriptedMockTurn::new("turn-replay-ceiling-1")
+        .message_completed("msg-1", "first turn")
+        .turn_completed("done-1")
+        .normalized_events(&refs.external_session_ref);
+    controller
+        .run_turn_within_ceiling(
+            &refs,
+            &turn1,
+            &batch1,
+            &ceiling,
+            RunResourceUsage::default(),
+            0,
+        )
+        .expect("turn 1");
+    let turn2 = TurnId::new("turn-replay-ceiling-2");
+    let batch2 = ScriptedMockTurn::new("turn-replay-ceiling-2")
+        .message_completed("msg-2", "second turn")
+        .turn_completed("done-2")
+        .normalized_events(&refs.external_session_ref);
+    let usage_after_turn1 = RunResourceUsage {
+        turns_taken: 1,
+        ..RunResourceUsage::default()
+    };
+    let aborted = controller
+        .run_turn_within_ceiling(&refs, &turn2, &batch2, &ceiling, usage_after_turn1, 0)
+        .expect("turn 2");
+    assert!(aborted.breach().is_some());
+    assert_eq!(
+        controller
+            .state()
+            .run(&refs.run_id)
+            .expect("run")
+            .expect("present")
+            .status,
+        "aborted"
+    );
+    let event_count_before = controller.state().event_count().expect("count");
+
+    // Restart: reopen from the same root and rebuild projections from the event
+    // log alone. The run is still aborted.
+    let reopened = SqliteStateStore::open(&state_root).expect("reopen state");
+    reopened.rebuild_projections().expect("rebuild projections");
+    assert_eq!(
+        reopened
+            .run(&refs.run_id)
+            .expect("run")
+            .expect("present")
+            .status,
+        "aborted",
+        "an aborted run stays aborted after restart/replay"
+    );
+    assert_eq!(
+        reopened.event_count().expect("count"),
+        event_count_before,
+        "rebuild appends no events"
+    );
+
+    // Re-recording the same breach is idempotent: the abort event's idempotency
+    // key dedups, so no new event is appended and the run stays aborted once.
+    controller
+        .abort_run_for_ceiling(
+            &refs,
+            &turn2,
+            CeilingBreach::MaxTurns {
+                limit: 1,
+                observed: 2,
+            },
+        )
+        .expect("re-abort");
+    assert_eq!(
+        controller.state().event_count().expect("count"),
+        event_count_before,
+        "re-recording the same breach appends nothing"
+    );
+}
+
 /// Tiny test-only adapter over the two coexisting controllers so the parity
 /// test can drive an identical scripted sequence on each without duplicating
 /// the body. Both arms call the SAME public method names; the point of the test

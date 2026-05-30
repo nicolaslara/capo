@@ -383,6 +383,108 @@ fn recovery_marks_active_looking_runs_exited_unknown_once() {
 }
 
 #[test]
+fn run_aborted_event_projects_aborted_status_and_rebuilds_identically() {
+    // RTL7: the `run.aborted` event (emitted when a per-run resource ceiling is
+    // exceeded) carries a `Run` projection of status `aborted`, has an
+    // idempotency key, and rebuilds identically from the event log.
+    let store = temp_store("run-aborted-projection");
+    let project_id = ProjectId::new("project-capo");
+    let session_id = SessionId::new("session-ceiling");
+    let run_id = RunId::new("run-ceiling");
+
+    store
+        .append_event(
+            NewEvent {
+                event_id: "event-run-started".to_string(),
+                kind: EventKind::RunStarted,
+                actor: "test".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(session_id.clone()),
+                run_id: Some(run_id.clone()),
+                turn_id: None,
+                item_id: None,
+                payload_json: "{}".to_string(),
+                idempotency_key: Some("run:start".to_string()),
+                redaction_state: RedactionState::Safe,
+            },
+            &[
+                ProjectionRecord::Session(SessionProjection {
+                    session_id: session_id.clone(),
+                    project_id: project_id.clone(),
+                    task_id: None,
+                    agent_id: AgentId::new("agent-ceiling"),
+                    title: "Ceiling session".to_string(),
+                    status: "active".to_string(),
+                    current_goal: "run under a ceiling".to_string(),
+                    latest_summary: None,
+                    latest_confidence: None,
+                    latest_blocker: None,
+                    external_session_ref: None,
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Run(RunProjection {
+                    run_id: run_id.clone(),
+                    session_id: session_id.clone(),
+                    status: "running".to_string(),
+                    recovery_of_run_id: None,
+                    updated_sequence: 0,
+                }),
+            ],
+        )
+        .expect("start run");
+
+    let aborted_event = NewEvent {
+        event_id: "event-run-aborted".to_string(),
+        kind: EventKind::RunAborted,
+        actor: "capo-controller".to_string(),
+        project_id: Some(project_id.clone()),
+        task_id: None,
+        agent_id: None,
+        session_id: Some(session_id.clone()),
+        run_id: Some(run_id.clone()),
+        turn_id: Some("turn-2".to_string()),
+        item_id: Some(run_id.to_string()),
+        payload_json: "{\"reason_code\":\"max_turns_exceeded\",\"status\":\"aborted\"}".to_string(),
+        idempotency_key: Some(
+            "run-aborted:project-capo:run-ceiling:max_turns_exceeded".to_string(),
+        ),
+        redaction_state: RedactionState::Safe,
+    };
+    let aborted_projection = RunProjection {
+        run_id: run_id.clone(),
+        session_id: session_id.clone(),
+        status: "aborted".to_string(),
+        recovery_of_run_id: None,
+        updated_sequence: 0,
+    };
+    store
+        .append_event(
+            aborted_event.clone(),
+            &[ProjectionRecord::Run(aborted_projection.clone())],
+        )
+        .expect("abort run");
+
+    assert_eq!(EventKind::RunAborted.as_str(), "run.aborted");
+    assert_eq!(store.run(&run_id).unwrap().expect("run").status, "aborted");
+    // An aborted run is not active-looking, so recovery never resurrects it.
+    assert!(store.active_looking_runs().unwrap().is_empty());
+    assert_eq!(store.event_count().unwrap(), 2);
+
+    // Idempotent: re-appending the same abort appends nothing and the run stays
+    // aborted.
+    store
+        .append_event(aborted_event, &[ProjectionRecord::Run(aborted_projection)])
+        .expect("re-abort run idempotently");
+    assert_eq!(store.event_count().unwrap(), 2);
+
+    // Rebuild from the event log: the run is still aborted.
+    store.rebuild_projections().expect("rebuild projections");
+    assert_eq!(store.run(&run_id).unwrap().expect("run").status, "aborted");
+}
+
+#[test]
 fn artifacts_tool_grants_memory_and_evidence_are_persisted_and_rebuilt() {
     let store = temp_store("artifact-rebuild");
     let project_id = ProjectId::new("project-capo");

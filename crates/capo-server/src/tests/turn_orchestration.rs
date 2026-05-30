@@ -2,7 +2,8 @@ use super::*;
 
 use crate::{DispatchTurnMode, DispatchTurnRequest};
 use capo_controller::{
-    FakeBoundaryController, RealBoundaryController, TurnFinished, TurnStopReason,
+    FakeBoundaryController, RealBoundaryController, RunResourceCeiling, TurnFinished,
+    TurnStopReason,
 };
 
 const CODEX_FIXTURE: &str = include_str!("../../../capo-adapters/fixtures/codex-exec.jsonl");
@@ -383,7 +384,11 @@ fn loop_turn_drives_the_live_substrate_through_preflight_and_run() {
                 mock_runtime_opt_in: true,
                 mock_provider_output_name: Some("codex-exec.jsonl".to_string()),
                 mock_provider_output_jsonl: Some(CODEX_FIXTURE.to_string()),
-                timeout_seconds: 1,
+                ceiling: RunResourceCeiling::for_live_provider(
+                    8,
+                    std::time::Duration::from_secs(1),
+                    100_000,
+                ),
             },
         })
         .expect("run dispatch turn");

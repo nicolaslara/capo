@@ -31,7 +31,7 @@
 //! (`capo_controller::RealBoundaryController`) is the production consumer and
 //! inherits this contract.
 
-use capo_controller::{FakeBoundaryController, TurnFinished};
+use capo_controller::{FakeBoundaryController, RunResourceCeiling, TurnFinished};
 use capo_core::TurnId;
 
 use crate::util::parse_adapter_events;
@@ -53,6 +53,12 @@ pub enum DispatchTurnMode {
     /// reusing [`CapoServer::preflight_live_provider`]. In phase 1 the run is
     /// driven with a mock provider output so the substrate is fully testable
     /// without a live provider; the real Codex round-trip plugs in at RTL9.
+    ///
+    /// RTL7: a live-provider turn always runs inside an active per-run resource
+    /// ceiling. The `ceiling` MUST bound wall-clock (the wall-clock ceiling is
+    /// wired to the runtime's `wait_running_with_timeout`); `run_dispatch_turn`
+    /// rejects a live turn whose ceiling does not. The live Codex path therefore
+    /// never runs without a ceiling.
     LiveProvider {
         capability_profile: String,
         runtime_scope: String,
@@ -65,7 +71,10 @@ pub enum DispatchTurnMode {
         mock_runtime_opt_in: bool,
         mock_provider_output_name: Option<String>,
         mock_provider_output_jsonl: Option<String>,
-        timeout_seconds: u64,
+        /// The per-run resource ceiling this live turn runs inside. Its
+        /// wall-clock bound drives the runtime timeout; a ceiling without a
+        /// wall-clock bound is rejected.
+        ceiling: RunResourceCeiling,
     },
 }
 
@@ -179,8 +188,19 @@ impl CapoServer {
                 mock_runtime_opt_in,
                 mock_provider_output_name,
                 mock_provider_output_jsonl,
-                timeout_seconds,
+                ceiling,
             } => {
+                // RTL7: a live-provider turn must run inside an active ceiling.
+                // The wall-clock bound is wired to the runtime timeout below; a
+                // ceiling that does not bound wall-clock is rejected here, so the
+                // live Codex path never runs without one.
+                let Some(timeout_seconds) = ceiling.wall_clock_timeout_seconds() else {
+                    return Err(ServerError::AdapterFixture(
+                        "live-provider turn requires an active resource ceiling with a \
+                         wall-clock bound"
+                            .to_string(),
+                    ));
+                };
                 // Preflight: reuse the existing preflight_live_provider via
                 // PreflightLiveProvider. The loop never runs a provider without
                 // this preflight gate.

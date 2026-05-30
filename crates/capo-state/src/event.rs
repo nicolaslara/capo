@@ -53,6 +53,7 @@ pub enum EventKind {
     SessionStopped,
     CheckpointCreated,
     RunHardKilled,
+    RunAborted,
 }
 
 impl EventKind {
@@ -109,6 +110,7 @@ impl EventKind {
             Self::SessionStopped => "session.stopped",
             Self::CheckpointCreated => "checkpoint.created",
             Self::RunHardKilled => "run.hard_killed",
+            Self::RunAborted => "run.aborted",
         }
     }
 }
