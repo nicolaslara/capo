@@ -3299,6 +3299,346 @@ fn real_controller_dispatched_tool_call_reconstructs_as_single_observed_ref() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// ACI11: full tools E2E gate through the real loop + restart/replay identity
+// ---------------------------------------------------------------------------
+
+/// ACI11 E2E gate: a single real session drives the whole ACI tool surface
+/// through `RealBoundaryController::dispatch_tool_call` -- a `capo.file_read`,
+/// a `capo.apply_patch` (with lint-on-edit), and a `capo.test_run` -- and then
+/// emits a GO2 `capo.complete_subtask` agent report. The test asserts the four
+/// load-bearing ACI11 invariants AT ONCE, with NO live provider:
+///
+/// 1. Observed evidence (the three runtime-wrapper calls) is persisted as
+///    `source=runtime_output` observation rows, distinct from
+/// 2. the agent's `agent_reported` completion CLAIM, so completion is never
+///    reachable by agent assertion alone;
+/// 3. per-call provenance (correlation/decision/grant ids + wall-clock timing)
+///    is queryable on every dispatched tool call; and
+/// 4. the entire projection set -- tool calls, observations, and the report --
+///    rebuilds byte-identically after a restart (reopen the store, rebuild
+///    projections from the log).
+#[test]
+fn real_controller_full_tools_e2e_persists_observed_and_reported_and_replays_identically() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{
+        AgentReportRequest, RuntimeToolConfig, ToolExposureRequest, ToolExposureResult,
+        WrapperToolRequest,
+    };
+
+    // A scratch workspace seeded with a file to read and a Rust file to patch.
+    let state_root = temp_root();
+    let workspace = temp_root();
+    let artifacts = temp_root();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("notes.txt"), "alpha\nbravo\ncharlie\n").expect("seed read file");
+    std::fs::write(workspace.join("edit.rs"), "fn main() {}\n").expect("seed edit file");
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci11-e2e-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        &state_root,
+        scripted,
+    )
+    .expect("open real controller")
+    .with_runtime_tools(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts.clone(),
+    ));
+    let registration = controller
+        .register_agent("aci11-e2e-worker")
+        .expect("agent");
+    let refs = controller
+        .send_task(&registration, "Read, patch, test, then report completion")
+        .expect("send task");
+
+    let turn = TurnId::new("turn-aci11-e2e");
+    let scope = |tool_call_id: &str| ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: turn.clone(),
+        tool_call_id: ToolCallId::new(tool_call_id),
+    };
+
+    // 1) capo.file_read -- observed evidence.
+    let read_call = ToolCallId::new("tool-aci11-read");
+    let read = controller
+        .dispatch_tool_call(
+            &scope("tool-aci11-read"),
+            ToolExposureRequest::Runtime(WrapperToolRequest {
+                tool_call_id: read_call.clone(),
+                session_id: refs.session_id.clone(),
+                run_id: refs.run_id.clone(),
+                tool_id: "capo.file_read".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                input: serde_json::json!({"path": "notes.txt"}),
+            }),
+        )
+        .expect("dispatch file_read");
+    assert_eq!(read.status, "completed");
+
+    // 2) capo.apply_patch with lint-on-edit -- observed evidence; the well-formed
+    //    Rust edit passes rustfmt --check.
+    let patch_call = ToolCallId::new("tool-aci11-patch");
+    let patch = controller
+        .dispatch_tool_call(
+            &scope("tool-aci11-patch"),
+            ToolExposureRequest::Runtime(WrapperToolRequest {
+                tool_call_id: patch_call.clone(),
+                session_id: refs.session_id.clone(),
+                run_id: refs.run_id.clone(),
+                tool_id: "capo.apply_patch".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                input: serde_json::json!({
+                    "path": "edit.rs",
+                    "hunks": [{
+                        "search": "fn main() {}\n",
+                        "replace": "fn main() {\n    let _x = 1;\n}\n",
+                    }],
+                }),
+            }),
+        )
+        .expect("dispatch apply_patch");
+    let ToolExposureResult::Runtime(patch_result) = &patch.result else {
+        panic!("expected a runtime apply_patch result");
+    };
+    assert_eq!(
+        patch_result.status, "completed",
+        "summary: {}",
+        patch_result.summary
+    );
+    assert_eq!(
+        patch_result.narrow_output()["lint_status"],
+        serde_json::json!("passed"),
+        "lint-on-edit must run and pass on the well-formed Rust edit",
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("edit.rs")).expect("edited file"),
+        "fn main() {\n    let _x = 1;\n}\n",
+    );
+
+    // 3) capo.test_run -- observed evidence; a deterministic /bin/sh fake.
+    let test_call = ToolCallId::new("tool-aci11-test");
+    let test = controller
+        .dispatch_tool_call(
+            &scope("tool-aci11-test"),
+            ToolExposureRequest::Runtime(WrapperToolRequest {
+                tool_call_id: test_call.clone(),
+                session_id: refs.session_id.clone(),
+                run_id: refs.run_id.clone(),
+                tool_id: "capo.test_run".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                input: serde_json::json!({
+                    "program": "/bin/sh",
+                    "argv": ["-c", "echo 'test mod::ok ... ok'; exit 0"],
+                    "cwd": ".",
+                }),
+            }),
+        )
+        .expect("dispatch test_run");
+    let ToolExposureResult::Runtime(test_result) = &test.result else {
+        panic!("expected a runtime test_run result");
+    };
+    assert_eq!(
+        test_result.narrow_output()["passed"],
+        serde_json::json!(true)
+    );
+
+    // 4) GO2 capo.complete_subtask -- an `agent_reported` completion CLAIM,
+    //    NOT observed evidence.
+    let report_call = ToolCallId::new("tool-aci11-report");
+    let report = controller
+        .dispatch_tool_call(
+            &scope("tool-aci11-report"),
+            ToolExposureRequest::AgentReport(AgentReportRequest {
+                tool_call_id: report_call.clone(),
+                session_id: refs.session_id.clone(),
+                tool_id: "capo.complete_subtask".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                confidence: 90,
+                body: serde_json::json!({"subtask_id": "ST-1", "summary": "read+patch+test done"}),
+                submission_id: Some("sub-aci11".to_string()),
+            }),
+        )
+        .expect("dispatch agent report");
+    let ToolExposureResult::AgentReport(record) = &report.result else {
+        panic!("expected an agent-report result");
+    };
+    assert_eq!(record.source, "agent_reported");
+    assert!(record.accepted);
+
+    // -- Snapshot the projections before the restart. --
+    let read_tools = || {
+        controller
+            .state()
+            .tool_calls_for_session(&refs.session_id)
+            .expect("tool calls")
+    };
+    let read_observations = || {
+        controller
+            .state()
+            .tool_observations_for_session(&refs.session_id)
+            .expect("tool observations")
+    };
+    let tools_before = read_tools();
+    let observations_before = read_observations();
+    let event_count_before = controller.state().event_count().expect("event count");
+
+    // The three runtime wrappers persisted as observed evidence (runtime_output);
+    // the report persisted as the agent claim (agent_reported). Co-queryable yet
+    // a distinct class: completion is never reachable by the claim alone.
+    for observed_call in [&read_call, &patch_call, &test_call] {
+        let observed = observations_before
+            .iter()
+            .find(|observation| observation.tool_call_id.as_ref() == Some(observed_call))
+            .expect("observed runtime observation");
+        assert_eq!(observed.source, "runtime_output");
+        assert!(
+            capo_tools::source_is_observed_evidence(&observed.source),
+            "a runtime wrapper result is observed evidence"
+        );
+    }
+    let reported = observations_before
+        .iter()
+        .find(|observation| observation.tool_call_id.as_ref() == Some(&report_call))
+        .expect("agent-reported observation");
+    assert_eq!(reported.source, "agent_reported");
+    assert!(
+        !capo_tools::source_is_observed_evidence(&reported.source),
+        "an agent report is NOT observed evidence -- a claim never masquerades as proof"
+    );
+    assert_eq!(reported.confidence, "90");
+
+    // Per-call provenance is queryable on every dispatched tool call.
+    for call in [&read_call, &patch_call, &test_call, &report_call] {
+        let tool = tools_before
+            .iter()
+            .find(|tool| &tool.tool_call_id == call)
+            .unwrap_or_else(|| panic!("tool call {} present", call.as_str()));
+        let provenance = &tool.provenance;
+        let correlation = provenance
+            .correlation_id
+            .as_deref()
+            .expect("correlation_id");
+        assert!(correlation.contains("turn-aci11-e2e"));
+        assert!(correlation.contains(call.as_str()));
+        assert!(provenance.started_at.expect("started_at") > 0);
+        assert!(
+            provenance.completed_at.expect("completed_at")
+                >= provenance.started_at.expect("started_at")
+        );
+    }
+
+    // -- Restart: reopen the store and rebuild projections from the log. --
+    let reopened = SqliteStateStore::open(&state_root).expect("reopen state");
+    reopened.rebuild_projections().expect("rebuild projections");
+    assert_eq!(
+        reopened
+            .tool_calls_for_session(&refs.session_id)
+            .expect("tool calls"),
+        tools_before,
+        "tool-call projections (incl. provenance/timing) must rebuild identically",
+    );
+    assert_eq!(
+        reopened
+            .tool_observations_for_session(&refs.session_id)
+            .expect("tool observations"),
+        observations_before,
+        "observed-vs-reported observation projections must rebuild identically",
+    );
+    assert_eq!(
+        reopened.event_count().expect("event count"),
+        event_count_before,
+        "replay introduces no new events",
+    );
+}
+
+/// ACI11 live smoke (opt-in): one real `capo.shell_run` against a scratch
+/// workspace through the SAME `dispatch_tool_call` substrate the deterministic
+/// E2E gate uses. It is `#[ignore]` and additionally guarded by an explicit env
+/// gate mirroring `CAPO_SERVER_RUN_CODEX_LIVE`, so it never runs for everyone
+/// else. It is PAIRED with a deterministic assertion (the persisted observed
+/// `runtime_output` observation + completed tool-call projection), so completion
+/// is never operator-asserted alone. The always-on deterministic pairing is
+/// `real_controller_full_tools_e2e_persists_observed_and_reported_and_replays_identically`.
+#[test]
+#[ignore = "live tool smoke: set CAPO_TOOLS_RUN_LIVE=1 to run it"]
+fn live_shell_run_smoke_is_paired_with_a_deterministic_assertion() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{
+        RuntimeToolConfig, ToolExposureRequest, ToolExposureResult, WrapperToolRequest,
+    };
+
+    if std::env::var("CAPO_TOOLS_RUN_LIVE").as_deref() != Ok("1") {
+        eprintln!("skipping live shell_run smoke: set CAPO_TOOLS_RUN_LIVE=1 to run it");
+        return;
+    }
+
+    let state_root = temp_root();
+    let workspace = temp_root();
+    let artifacts = temp_root();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci11-live-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        &state_root,
+        scripted,
+    )
+    .expect("open real controller")
+    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace, artifacts));
+    let registration = controller
+        .register_agent("aci11-live-worker")
+        .expect("agent");
+    let refs = controller
+        .send_task(&registration, "Run a real shell command")
+        .expect("send task");
+
+    let call = ToolCallId::new("tool-aci11-live-shell");
+    let outcome = controller
+        .dispatch_tool_call(
+            &ToolDispatchScope {
+                task_id: refs.task_id.clone(),
+                agent_id: refs.agent_id.clone(),
+                session_id: refs.session_id.clone(),
+                run_id: refs.run_id.clone(),
+                turn_id: TurnId::new("turn-aci11-live"),
+                tool_call_id: call.clone(),
+            },
+            ToolExposureRequest::Runtime(WrapperToolRequest {
+                tool_call_id: call.clone(),
+                session_id: refs.session_id.clone(),
+                run_id: refs.run_id.clone(),
+                tool_id: "capo.shell_run".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                input: serde_json::json!({
+                    "program": "/bin/sh",
+                    "argv": ["-c", "echo capo-aci11-live"],
+                    "cwd": ".",
+                }),
+            }),
+        )
+        .expect("dispatch live shell_run");
+
+    // Deterministic pairing: the live run persists observed evidence, NOT an
+    // operator attestation. (Secrets in the output are stripped by the wrapper
+    // redaction policy before the artifact is written; see the redaction tests.)
+    let ToolExposureResult::Runtime(result) = &outcome.result else {
+        panic!("expected a runtime shell_run result");
+    };
+    assert_eq!(result.status, "exited");
+    let observed = controller
+        .state()
+        .tool_observations_for_session(&refs.session_id)
+        .expect("tool observations")
+        .into_iter()
+        .find(|observation| observation.tool_call_id.as_ref() == Some(&call))
+        .expect("observed live shell observation");
+    assert_eq!(observed.source, "runtime_output");
+}
+
 /// Tiny test-only adapter over the two coexisting controllers so the parity
 /// test can drive an identical scripted sequence on each without duplicating
 /// the body. Both arms call the SAME public method names; the point of the test

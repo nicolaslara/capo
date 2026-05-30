@@ -930,7 +930,70 @@ Verification:
 
 ## ACI11 - Deterministic Tool Tests, Redaction, Replay, And E2E Gate
 
-Status: pending.
+Status: done.
+
+Evidence:
+
+- Deterministic full-surface gate (`crates/capo-tools/src/tests.rs`):
+  `aci11_every_tool_runs_deterministically_for_clean_and_failure_paths` walks the
+  WHOLE tool surface with NO live provider (no process spawn, no disk via the
+  `fake://` artifacts) -- every runtime wrapper (`CAPO_WRAPPER_TOOLS`) on a clean
+  path (completed, schema-valid, `fake://` artifacts) AND a failure path
+  (scripted handler error -> non-completed `tool.call_failed`, schema-valid typed
+  output); every Capo-owned registry tool (`CAPO_OWNED_TOOLS`) clean + a deny path
+  for the mutating tools (read-only profile -> `tool.call_canceled`); and every
+  GO2 reporting tool (`CAPO_REPORTING_TOOLS`) as an `agent_reported` claim that is
+  never observed evidence. It complements the per-strategy ACI4/ACI5/ACI6/ACI10
+  tests by proving the whole surface is deterministically exercisable for clean
+  AND failure in one pass.
+- Input AND output redaction (`crates/capo-tools/src/tests.rs`):
+  `aci11_known_secret_is_redacted_from_both_input_and_output_artifacts` passes a
+  known INPUT secret as `capo.file_write` content (recorded in the redacted input
+  artifact) and reads a known OUTPUT secret from a seeded file (recorded in the
+  redacted output artifact), then RECURSIVELY scans every persisted file under the
+  artifact root (`walk_files`) and asserts NEITHER cleartext secret survives
+  anywhere on disk, while benign neighbours survive the scrub. This is the
+  load-bearing redaction invariant: a known secret never appears in any persisted
+  artifact, input or output.
+- Restart/replay reopening the store from disk (`crates/capo-state/src/tests.rs`):
+  `aci11_reopened_store_rebuilds_tool_call_observation_and_report_projections_identically`
+  seeds all three tool-projection classes (a `ToolCall`/ToolInvocation projection
+  with provenance + timing, an OBSERVED `runtime_output` observation, and an
+  `agent_reported` report) PLUS an adapter-native observation with a STABLE
+  external id sent twice; the second append dedupes on its stable external id
+  (`tool-exposure.md:352`, 3 rows not 4). It then performs a TRUE restart -- a
+  fresh `SqliteStateStore::open` over the same on-disk root + `rebuild_projections`
+  -- and asserts the tool-call, observation, and report projections rebuild
+  byte-identically and no new events are introduced.
+- Full ACI tools E2E gate through the real loop
+  (`crates/capo-controller/src/tests.rs`):
+  `real_controller_full_tools_e2e_persists_observed_and_reported_and_replays_identically`
+  drives ONE real session through `RealBoundaryController::dispatch_tool_call`:
+  `capo.file_read`, `capo.apply_patch` (asserting `lint_status == passed` on a
+  well-formed Rust edit, i.e. lint-on-edit ran), and `capo.test_run`, then a GO2
+  `capo.complete_subtask` report. It asserts all four ACI11 invariants at once:
+  (1) the three wrappers persist as `source=runtime_output` observed evidence,
+  (2) distinct from the `agent_reported` completion CLAIM (so completion is never
+  reachable by agent assertion alone), (3) per-call provenance
+  (correlation/decision/grant ids + wall-clock timing) is queryable on every
+  dispatched call, and (4) the entire projection set rebuilds byte-identically
+  after a restart (reopen the store, rebuild from the log).
+- Opt-in live smoke paired with a deterministic assertion
+  (`crates/capo-controller/src/tests.rs`):
+  `live_shell_run_smoke_is_paired_with_a_deterministic_assertion` is `#[ignore]`
+  AND guarded by an explicit `CAPO_TOOLS_RUN_LIVE=1` env gate (mirroring
+  `CAPO_SERVER_RUN_CODEX_LIVE`); it runs ONE real `capo.shell_run` against a
+  scratch workspace through the SAME `dispatch_tool_call` substrate and asserts
+  the persisted observed `runtime_output` observation + completed call (output
+  scrubbed by the wrapper redaction policy), so completion is never
+  operator-asserted alone -- the always-on deterministic pairing is the E2E gate
+  above. Verified opt-in: `CAPO_TOOLS_RUN_LIVE=1 cargo test -p capo-controller --
+  --ignored live_shell_run_smoke` => 1 passed.
+- Gate run from `/Users/nicolas/devel/capo-wt/tools-aci`: `cargo fmt --check`
+  clean; `cargo clippy --all-targets --all-features -- -D warnings` exit 0;
+  `cargo test --workspace` => all suites passed, 0 failed (capo-tools 106,
+  capo-state 39, capo-controller 39 + 1 ignored live smoke); `git diff --check`
+  clean.
 
 Acceptance:
 

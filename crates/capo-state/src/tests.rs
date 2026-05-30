@@ -1023,6 +1023,225 @@ fn tool_call_provenance_and_timing_persist_and_rebuild_identically() {
     assert_eq!(after[0].provenance, provenance);
 }
 
+/// ACI11: REOPEN the state store from disk (a true restart, not just an
+/// in-process rebuild), rebuild projections from the event log, and assert the
+/// tool-call, observation, AND agent-report projections rebuild IDENTICALLY,
+/// and that an adapter-native tool update with a stable external id deduped on
+/// append (`tool-exposure.md:352`).
+///
+/// This is the load-bearing replay-identity gate for ACI11: a fresh
+/// `SqliteStateStore::open` over the same root sees only the persisted event
+/// log, derives the read models from scratch, and yields byte-identical
+/// projections across all three tool classes -- so a Capo restart loses
+/// nothing and an adapter that re-sends the same `toolCallId` never doubles a
+/// row.
+#[test]
+fn aci11_reopened_store_rebuilds_tool_call_observation_and_report_projections_identically() {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("capo-state-aci11-reopen-{nanos}"));
+
+    let project_id = ProjectId::new("project-capo");
+    let session_id = SessionId::new("session-aci11-reopen");
+    let tool_call = ToolCallId::new("tool-aci11-observed");
+    let report_call = ToolCallId::new("tool-aci11-report");
+    let adapter_call = ToolCallId::new("tool-aci11-adapter");
+
+    // -- First "boot": write the three tool-projection classes + an
+    //    adapter-native observation with a stable external id. --
+    let (tools_before, observations_before, event_count_before) = {
+        let store = SqliteStateStore::open(&root).expect("open state store");
+
+        // 1) A tool-call (ToolInvocation) projection with provenance.
+        store
+            .append_event(
+                NewEvent::new("event-aci11-call", EventKind::ToolCallCompleted, "runtime"),
+                &[ProjectionRecord::ToolCall(ToolCallProjection {
+                    tool_call_id: tool_call.clone(),
+                    session_id: session_id.clone(),
+                    turn_id: Some("turn-aci11".to_string()),
+                    tool_name: "capo.file_read".to_string(),
+                    tool_origin: "runtime".to_string(),
+                    status: "completed".to_string(),
+                    input_artifact_id: Some("artifact-input".to_string()),
+                    output_artifact_id: Some("artifact-output".to_string()),
+                    provenance: ToolCallProvenance {
+                        correlation_id: Some("corr-aci11".to_string()),
+                        permission_decision_id: Some("decision-aci11".to_string()),
+                        capability_grant_use_id: Some("grant-use-aci11".to_string()),
+                        started_at: Some(1_700_000_000_001),
+                        completed_at: Some(1_700_000_000_002),
+                    },
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append tool call");
+
+        // 2) An OBSERVED runtime-evidence observation for that call.
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-aci11-observed".to_string(),
+                    kind: EventKind::ToolObservationRecorded,
+                    actor: "runtime".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: Some(session_id.clone()),
+                    run_id: None,
+                    turn_id: Some("turn-aci11".to_string()),
+                    item_id: Some(tool_call.to_string()),
+                    payload_json: "{\"source\":\"runtime_output\"}".to_string(),
+                    idempotency_key: Some("runtime-observed:tool-aci11-observed".to_string()),
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::ToolObservation(
+                    ToolObservationProjection {
+                        tool_observation_id: "obs-aci11-observed".to_string(),
+                        session_id: session_id.clone(),
+                        tool_call_id: Some(tool_call.clone()),
+                        source: "runtime_output".to_string(),
+                        external_tool_ref: None,
+                        tool_name: "capo.file_read".to_string(),
+                        observed_status: "completed".to_string(),
+                        instrumentation_level: "full".to_string(),
+                        confidence: "observed".to_string(),
+                        raw_event_hash: "fnv1a64:observedhash".to_string(),
+                        artifact_id: Some("artifact-output".to_string()),
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append observed observation");
+
+        // 3) An `agent_reported` claim (distinct class), carrying confidence.
+        store
+            .append_event(
+                NewEvent {
+                    event_id: "event-aci11-report".to_string(),
+                    kind: EventKind::ToolObservationRecorded,
+                    actor: "agent-report".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: Some(session_id.clone()),
+                    run_id: None,
+                    turn_id: Some("turn-aci11".to_string()),
+                    item_id: Some(report_call.to_string()),
+                    payload_json: "{\"source\":\"agent_reported\"}".to_string(),
+                    idempotency_key: Some("agent-report:sub-aci11".to_string()),
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::ToolObservation(
+                    ToolObservationProjection {
+                        tool_observation_id: "obs-aci11-report".to_string(),
+                        session_id: session_id.clone(),
+                        tool_call_id: Some(report_call.clone()),
+                        source: "agent_reported".to_string(),
+                        external_tool_ref: None,
+                        tool_name: "capo.complete_subtask".to_string(),
+                        observed_status: "reported".to_string(),
+                        instrumentation_level: "structured_observed".to_string(),
+                        confidence: "90".to_string(),
+                        raw_event_hash: "agent-report:tool-aci11-report".to_string(),
+                        artifact_id: None,
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("append agent report");
+
+        // 4) An adapter-native tool update with a STABLE external id, sent TWICE
+        //    with the same idempotency key. The second append must dedupe
+        //    (tool-exposure.md:352: a `toolCallId` is stable within a session).
+        let append_adapter = |event_suffix: &str| {
+            store
+                .append_event(
+                    NewEvent {
+                        event_id: format!("event-aci11-adapter-{event_suffix}"),
+                        kind: EventKind::ToolObservationRecorded,
+                        actor: "adapter-replay".to_string(),
+                        project_id: Some(project_id.clone()),
+                        task_id: None,
+                        agent_id: None,
+                        session_id: Some(session_id.clone()),
+                        run_id: None,
+                        turn_id: Some("turn-aci11".to_string()),
+                        item_id: Some(adapter_call.to_string()),
+                        payload_json: "{\"source\":\"adapter_event\"}".to_string(),
+                        idempotency_key: Some(
+                            "tool-observation:tool-aci11-adapter:completed".to_string(),
+                        ),
+                        redaction_state: RedactionState::Safe,
+                    },
+                    &[ProjectionRecord::ToolObservation(
+                        ToolObservationProjection {
+                            tool_observation_id: "obs-aci11-adapter".to_string(),
+                            session_id: session_id.clone(),
+                            tool_call_id: Some(adapter_call.clone()),
+                            source: "adapter_event".to_string(),
+                            external_tool_ref: Some(adapter_call.to_string()),
+                            tool_name: "exec_command".to_string(),
+                            observed_status: "completed".to_string(),
+                            instrumentation_level: "observed_only".to_string(),
+                            confidence: "high".to_string(),
+                            raw_event_hash: "fnv1a64:adapterhash".to_string(),
+                            artifact_id: None,
+                            updated_sequence: 0,
+                        },
+                    )],
+                )
+                .expect("append adapter observation")
+        };
+        append_adapter("first");
+        // Same stable external id / idempotency key -> deduped (no second row).
+        append_adapter("duplicate");
+
+        let tools = store
+            .tool_calls_for_session(&session_id)
+            .expect("read tool calls");
+        let observations = store
+            .tool_observations_for_session(&session_id)
+            .expect("read observations");
+        // 3 observations (observed + report + adapter), NOT 4: the adapter
+        // duplicate deduped on its stable external id.
+        assert_eq!(
+            observations.len(),
+            3,
+            "the adapter-native duplicate must dedupe on its stable external id"
+        );
+        let event_count = store.event_count().expect("event count");
+        (tools, observations, event_count)
+    };
+
+    // -- Restart: a FRESH store reopened from the same root on disk derives the
+    //    read models from the persisted event log alone. --
+    let reopened = SqliteStateStore::open(&root).expect("reopen state store");
+    reopened.rebuild_projections().expect("rebuild projections");
+
+    assert_eq!(
+        reopened
+            .tool_calls_for_session(&session_id)
+            .expect("reopened tool calls"),
+        tools_before,
+        "tool-call projection must rebuild identically after reopen",
+    );
+    assert_eq!(
+        reopened
+            .tool_observations_for_session(&session_id)
+            .expect("reopened observations"),
+        observations_before,
+        "observation + report projections must rebuild identically after reopen",
+    );
+    assert_eq!(
+        reopened.event_count().expect("reopened event count"),
+        event_count_before,
+        "reopen + rebuild introduces no new events",
+    );
+}
+
 #[test]
 fn memory_records_and_sources_are_persisted_rebuilt_and_packet_filterable() {
     let store = temp_store("memory-record-rebuild");

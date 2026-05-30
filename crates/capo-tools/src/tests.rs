@@ -3640,3 +3640,294 @@ fn fake_agent_report_registry_emits_agent_reported_claims_and_dedupes() {
     );
     assert_eq!(ledger.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// ACI11: deterministic full-surface gate + input-AND-output redaction
+// ---------------------------------------------------------------------------
+
+/// ACI11: run a deterministic fake/scripted test for EVERY tool, on BOTH the
+/// clean and a failure path, with NO live provider (no process spawn, no disk).
+///
+/// This is the consolidated ACI11 gate: it walks the whole tool surface --
+/// every runtime wrapper (`CAPO_WRAPPER_TOOLS`), every Capo-owned registry tool
+/// (`CAPO_OWNED_TOOLS`), and every GO2 reporting tool (`CAPO_REPORTING_TOOLS`)
+/// -- through the deterministic fakes, asserting that each clean result is
+/// schema-valid and each failure path produces the structured failure shape the
+/// real loop reflects on. Because the fakes pin timing and never touch disk, the
+/// result is replayable; the per-tool ACI4/ACI5/ACI6/ACI10 tests cover the
+/// strategy-level behaviour, while this gate proves the whole surface is
+/// deterministically exercisable for clean AND failure in one pass.
+#[test]
+fn aci11_every_tool_runs_deterministically_for_clean_and_failure_paths() {
+    let trusted = PermissionPolicy::allow_trusted_local();
+
+    // -- Every runtime wrapper, clean + failure. --
+    let fake = FakeRuntimeToolWrappers::new(fake_wrapper_config());
+    for tool_id in CAPO_WRAPPER_TOOLS {
+        let definition = fake.describe_tool(tool_id).expect("wrapper definition");
+
+        // Clean: completed, schema-valid, with input + output artifacts that were
+        // never written to disk (a `fake://` uri).
+        let clean = fake.authorize_and_invoke(
+            wrapper_request(
+                &format!("aci11-clean-{tool_id}"),
+                "run-aci11-clean",
+                tool_id,
+                serde_json::json!({"path": "src/lib.rs"}),
+            ),
+            &trusted,
+            ScriptedWrapperOutcome::ok(b"deterministic fake output".to_vec()),
+        );
+        assert!(
+            clean.events.iter().any(|e| e.kind == "tool.call_completed"),
+            "fake clean {tool_id} must complete"
+        );
+        assert!(
+            clean
+                .output_artifacts
+                .iter()
+                .all(|a| a.uri.starts_with("fake://")),
+            "fake {tool_id} must not touch disk"
+        );
+        let clean_errors = definition.validate_output(&clean.narrow_output());
+        assert!(
+            clean_errors.is_empty(),
+            "fake clean {tool_id} output must validate: {clean_errors:?}"
+        );
+
+        // Failure: a scripted handler error emits the non-completed `failed`
+        // shape with a schema-valid typed output -- no `tool.call_completed`.
+        let failed = fake.authorize_and_invoke(
+            wrapper_request(
+                &format!("aci11-fail-{tool_id}"),
+                "run-aci11-fail",
+                tool_id,
+                serde_json::json!({}),
+            ),
+            &trusted,
+            ScriptedWrapperOutcome::Failed {
+                error: format!("scripted failure for {tool_id}"),
+            },
+        );
+        assert_eq!(failed.status, "failed");
+        assert!(
+            !failed
+                .events
+                .iter()
+                .any(|e| e.kind == "tool.call_completed"),
+            "a failed {tool_id} must not complete"
+        );
+        assert!(
+            failed.events.iter().any(|e| e.kind == "tool.call_failed"),
+            "a failed {tool_id} must emit tool.call_failed"
+        );
+        let failed_errors = definition.validate_output(&failed.narrow_output());
+        assert!(
+            failed_errors.is_empty(),
+            "fake failed {tool_id} output must validate: {failed_errors:?}"
+        );
+    }
+
+    // -- Every Capo-owned registry tool, clean + denied (failure). --
+    let capo_fake = FakeCapoToolRegistry;
+    let read_only = PermissionPolicy::static_read_only_local();
+    for tool_id in CAPO_OWNED_TOOLS {
+        let definition = CapoToolRegistry
+            .describe_tool(tool_id)
+            .expect("capo definition");
+
+        let clean = capo_fake.authorize_and_invoke(
+            CapoToolRequest {
+                tool_call_id: ToolCallId::new(format!("aci11-capo-clean-{tool_id}")),
+                session_id: SessionId::new("session-aci11"),
+                tool_id: tool_id.to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                context: tool_context(),
+            },
+            &trusted,
+            "scripted output",
+        );
+        assert!(clean.events.iter().any(|e| e.kind == "tool.call_completed"));
+        assert!(
+            definition
+                .validate_output(&clean.narrow_output())
+                .is_empty(),
+            "fake clean capo {tool_id} output must validate"
+        );
+
+        // Failure path: a read-only profile denies a mutating tool; a read tool
+        // is still allowed, so only mutating tools exercise the deny branch here.
+        if definition.mutates_state {
+            let denied = capo_fake.authorize_and_invoke(
+                CapoToolRequest {
+                    tool_call_id: ToolCallId::new(format!("aci11-capo-deny-{tool_id}")),
+                    session_id: SessionId::new("session-aci11"),
+                    tool_id: tool_id.to_string(),
+                    capability_profile_id: "read-only-local".to_string(),
+                    context: tool_context(),
+                },
+                &read_only,
+                "should-never-be-used",
+            );
+            assert_eq!(
+                denied.permission_decision.effect, "deny",
+                "a read-only profile must deny mutating capo {tool_id}"
+            );
+            assert!(denied.events.iter().any(|e| e.kind == "tool.call_canceled"));
+        }
+    }
+
+    // -- Every GO2 reporting tool runs deterministically as an `agent_reported`
+    //    claim (never observed evidence). --
+    let report_fake = FakeAgentReportRegistry::new();
+    for tool_id in CAPO_REPORTING_TOOLS {
+        let record = report_fake.authorize_and_invoke(
+            report_request(
+                &format!("aci11-report-{tool_id}"),
+                tool_id,
+                serde_json::json!({"summary": "scripted report"}),
+            ),
+            &trusted,
+        );
+        assert_eq!(
+            record.source, EVIDENCE_SOURCE_AGENT_REPORTED,
+            "GO2 {tool_id} must persist as an agent_reported claim"
+        );
+        assert!(
+            !record.is_observed_evidence(),
+            "GO2 {tool_id} is never observed evidence"
+        );
+    }
+}
+
+/// ACI11: a known secret supplied as tool INPUT and a known secret sitting in
+/// tool OUTPUT are BOTH stripped from the persisted artifacts on disk.
+///
+/// This is the load-bearing redaction invariant: the secret never appears in
+/// ANY artifact the wrappers write -- neither the input artifact (the recorded
+/// request, redacted through the same policy) nor the output artifact (the read
+/// content / the diff). A `file_write` carries the input secret in its
+/// `content`; a subsequent `file_read` of a seeded file carries the output
+/// secret. After both calls, the test scans every file under the artifact root
+/// and asserts neither cleartext secret survives.
+#[test]
+fn aci11_known_secret_is_redacted_from_both_input_and_output_artifacts() {
+    let workspace = temp_root("aci11-redact-workspace");
+    let artifacts = temp_root("aci11-redact-artifacts");
+    fs::create_dir_all(&workspace).expect("workspace");
+
+    // The OUTPUT secret: it sits in a file the agent reads.
+    let output_secret = "OUTPUT-SUPERSECRET-abc123";
+    fs::write(
+        workspace.join("config.env"),
+        format!("DB_PASSWORD={output_secret}\nname=ok\n"),
+    )
+    .expect("seed output secret");
+
+    // The INPUT secret: the agent passes it as `file_write` content.
+    let input_secret = "INPUT-SUPERSECRET-xyz789";
+
+    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts.clone());
+    config.redaction_rules.push(RedactionRule {
+        pattern: output_secret.to_string(),
+        replacement: "[REDACTED]".to_string(),
+    });
+    config.redaction_rules.push(RedactionRule {
+        pattern: input_secret.to_string(),
+        replacement: "[REDACTED]".to_string(),
+    });
+    let wrappers = RuntimeToolWrappers::new(config);
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    // 1) file_write: the input secret rides in the request input -> input artifact.
+    let write = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "aci11-write-secret",
+            "run-aci11-write",
+            "capo.file_write",
+            serde_json::json!({"path": "out.txt", "content": format!("token={input_secret}\n")}),
+        ),
+        &policy,
+    );
+    assert_eq!(write.status, "completed", "summary: {}", write.summary);
+
+    // 2) file_read: the output secret rides in the read content -> output artifact.
+    let read = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "aci11-read-secret",
+            "run-aci11-read",
+            "capo.file_read",
+            serde_json::json!({"path": "config.env"}),
+        ),
+        &policy,
+    );
+    assert_eq!(read.status, "completed");
+
+    // The recorded artifacts are marked redacted (the policy matched).
+    assert_eq!(
+        write
+            .input_artifact
+            .as_ref()
+            .expect("write input")
+            .redaction_state,
+        "redacted",
+        "the input secret must be redacted in the recorded input artifact"
+    );
+    assert_eq!(
+        read.output_artifacts
+            .first()
+            .expect("read output")
+            .redaction_state,
+        "redacted",
+        "the output secret must be redacted in the read output artifact"
+    );
+
+    // The strongest assertion: scan EVERY persisted artifact file and prove
+    // NEITHER cleartext secret survives anywhere on disk.
+    let mut scanned = 0usize;
+    for path in walk_files(&artifacts) {
+        let bytes = fs::read(&path).expect("read artifact");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains(input_secret),
+            "input secret leaked into persisted artifact {}",
+            path.display()
+        );
+        assert!(
+            !text.contains(output_secret),
+            "output secret leaked into persisted artifact {}",
+            path.display()
+        );
+        scanned += 1;
+    }
+    assert!(
+        scanned > 0,
+        "the wrappers must have persisted artifacts to scan"
+    );
+
+    // The benign neighbours survived the scrub (redaction is targeted, not a wipe).
+    let read_artifact = fs::read_to_string(&read.output_artifacts[0].uri).expect("read output");
+    assert!(read_artifact.contains("name=ok"));
+}
+
+/// Recursively collect every regular file under `root` (depth-first). A tiny
+/// helper so the redaction gate can assert a secret is absent from EVERY
+/// persisted artifact, not just the one it queried.
+fn walk_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
