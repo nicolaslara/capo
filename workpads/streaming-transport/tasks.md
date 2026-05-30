@@ -223,7 +223,11 @@ Evidence:
 
 ## ST4 - events_after, Broadcast Channel, And Typed Subscribe
 
-Status: pending.
+Status: done. (The `capo-web` `/api/events` conversion bullet is deferred to ST8,
+which owns git-tracking `capo-web` and is the bullet's stated home -- "full
+delete covered in ST8"; `capo-web` does not exist in this worktree yet, so the
+core query/broadcast/Subscribe contract landed here and ST8 wires the SSE tail
+onto it.)
 
 Acceptance:
 
@@ -256,6 +260,54 @@ Must not do:
 
 - Do not stream by re-serializing a full read model per interval (the poll
   antipattern this workpad removes).
+
+Evidence:
+
+- `events_after(since_sequence, limit)` (and a session-scoped
+  `events_after_for_session`) added to `crates/capo-state/src/queries.rs`:
+  `SELECT ... WHERE sequence > ?1 ORDER BY sequence ASC LIMIT ?2`, a forward read
+  of the existing monotonic `last_insert_rowid()` sequence. It returns events
+  strictly after the watermark (never the watermark event itself), so pairing it
+  with a broadcast resume from the same watermark is gap- and dup-free.
+- Broadcast channel: new `crates/capo-state/src/broadcast.rs`
+  (`EventBroadcaster` / `EventSubscription`), a small `std::sync::mpsc` fan-out
+  (no tokio reactor, keeping capo-state reactor-free and tests deterministic).
+  `SqliteStateStore` carries an `Arc<EventBroadcaster>` (shared across clones;
+  manual `Debug`/`Eq`/`PartialEq` keep path-identity and exclude the runtime
+  side-channel, so all existing derives' semantics hold). The append path
+  publishes the committed `EventRecord` *after* `transaction.commit()`
+  (`append_event` and `decide_permission_approval`), so no event is fanned out
+  ahead of its durable watermark. An idempotent no-op append publishes nothing.
+- Typed `ServerCommand::Subscribe { session_id: Option<String>, from_sequence }`
+  plus `ServerResponsePayload::Subscribed(SubscriptionBacklog)` and a
+  `ServerEvent` wire shape added in `crates/capo-server/src/types.rs`, with
+  JSON-RPC encode/decode in `transport/codec.rs` (+`required_i64` in
+  `transport/wire.rs`). Live events ride the ST2 server-initiated notification:
+  `EventNotification::for_event` / `decode_event` and `EVENT_TAIL_METHOD`
+  ("event") in `transport.rs`; `Subscribe` is classified read-only
+  (no second writer). The broadcast carries discrete committed events keyed by
+  sequence -- never a re-serialized read-model snapshot.
+- Backlog-to-live seam: `CapoServer::subscribe` (`lib.rs`) subscribes to the
+  broadcast *before* snapshotting the backlog and seeds the live `EventStream`
+  (`crates/capo-server/src/event_tail.rs`) watermark from the backlog's
+  `next_sequence`; `EventStream::next_batch` drops any live event with
+  `sequence <= delivered_through`, so the seam has no gap and no duplicate.
+- Deterministic tests (scripted commands / no live provider):
+  capo-state `events_after_returns_only_events_strictly_after_the_watermark_in_order`
+  and `committed_events_fan_out_to_live_subscribers_after_append`
+  (`crates/capo-state/src/tests.rs`); capo-server
+  `subscribe_backlog_returns_only_events_after_the_watermark_in_order`,
+  `event_tail_has_no_gap_and_no_duplicate_across_the_backlog_to_live_seam`,
+  `session_scoped_subscribe_tails_only_the_named_session`,
+  `subscribe_command_and_subscribed_payload_round_trip_on_the_wire`, and
+  `live_event_notification_frame_round_trips`
+  (`crates/capo-server/src/tests/event_tail.rs`).
+- Objective gate run from `/Users/nicolas/devel/capo-wt/streaming-transport`:
+  `cargo fmt --check` ok (exit 0); `cargo clippy --all-targets --all-features --
+  -D warnings` ok (exit 0); `cargo test --workspace` ok (exit 0; 0 failures
+  workspace-wide -- capo-state 41 passed, capo-server 72 passed/1 ignored,
+  capo-cli `server_transport` 11 passed, all other crates green). Focused
+  `cargo test -p capo-server --lib event_tail`: 5 passed, 0 failed.
 
 ## ST5 - Multi-Turn Thread Read Model Projected From Events
 

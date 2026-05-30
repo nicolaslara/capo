@@ -2710,3 +2710,120 @@ fn reviewed_memory_record(
         updated_sequence: 0,
     }
 }
+
+/// Append a minimal, distinctly-keyed event for the ST4 event-tail tests.
+fn append_tail_event(store: &SqliteStateStore, project_id: &ProjectId, ordinal: usize) -> i64 {
+    store
+        .append_event(
+            NewEvent {
+                event_id: format!("event-tail-{ordinal}"),
+                kind: EventKind::SessionSummaryUpdated,
+                actor: "tail-test".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(SessionId::new("session-tail")),
+                run_id: None,
+                turn_id: None,
+                item_id: None,
+                payload_json: format!("{{\"ordinal\":{ordinal}}}"),
+                idempotency_key: Some(format!("tail:{ordinal}")),
+                redaction_state: RedactionState::Safe,
+            },
+            &[],
+        )
+        .expect("append tail event")
+}
+
+#[test]
+fn events_after_returns_only_events_strictly_after_the_watermark_in_order() {
+    let store = temp_store("events-after");
+    let project_id = ProjectId::new("project-capo");
+
+    let mut sequences = Vec::new();
+    for ordinal in 0..5 {
+        sequences.push(append_tail_event(&store, &project_id, ordinal));
+    }
+    // Sequences are monotonic and strictly increasing (the append-only log).
+    assert!(
+        sequences.windows(2).all(|pair| pair[0] < pair[1]),
+        "sequences must be strictly increasing: {sequences:?}"
+    );
+
+    // A watermark in the middle returns exactly the events after it, in order.
+    let watermark = sequences[1];
+    let after = store
+        .events_after(watermark, 1024)
+        .expect("events_after returns");
+    let returned: Vec<i64> = after.iter().map(|event| event.sequence).collect();
+    assert_eq!(returned, sequences[2..].to_vec());
+    assert!(
+        after.iter().all(|event| event.sequence > watermark),
+        "every returned event must be strictly after the watermark"
+    );
+
+    // A watermark of 0 returns the whole log (no event has sequence 0).
+    let from_zero = store.events_after(0, 1024).expect("events_after(0)");
+    assert_eq!(
+        from_zero
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        sequences,
+    );
+
+    // A watermark at/after the tail returns nothing (no gap-filling, no replay).
+    let tail = *sequences.last().expect("at least one event");
+    assert!(
+        store
+            .events_after(tail, 1024)
+            .expect("after tail")
+            .is_empty(),
+        "no events exist after the latest sequence"
+    );
+
+    // The `limit` bounds the catch-up page; callers advance the watermark to page.
+    let first_page = store.events_after(0, 2).expect("first page");
+    assert_eq!(
+        first_page
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        sequences[..2].to_vec(),
+    );
+}
+
+#[test]
+fn committed_events_fan_out_to_live_subscribers_after_append() {
+    let store = temp_store("events-broadcast");
+    let project_id = ProjectId::new("project-capo");
+
+    // Subscribing before any write means the subscriber sees every event the
+    // store commits, fanned out after the transaction commits.
+    let subscription = store.event_broadcaster().subscribe();
+    let seq0 = append_tail_event(&store, &project_id, 0);
+    let seq1 = append_tail_event(&store, &project_id, 1);
+
+    let delivered = subscription.drain_pending();
+    let delivered_sequences: Vec<i64> = delivered.iter().map(|event| event.sequence).collect();
+    assert_eq!(delivered_sequences, vec![seq0, seq1]);
+    // A live-delivered event is identical to the catch-up read for that sequence.
+    let backlog = store.events_after(0, 1024).expect("backlog");
+    assert_eq!(delivered, backlog);
+
+    // A duplicate (idempotent) append commits nothing new and fans nothing out.
+    append_tail_event(&store, &project_id, 1);
+    assert!(
+        subscription.drain_pending().is_empty(),
+        "an idempotent no-op append must not be broadcast"
+    );
+
+    // Dropping the subscription unsubscribes it on the next publish (pruned).
+    drop(subscription);
+    append_tail_event(&store, &project_id, 2);
+    assert_eq!(
+        store.event_broadcaster().subscriber_count(),
+        0,
+        "a dropped subscriber is pruned from the fan-out on the next publish"
+    );
+}

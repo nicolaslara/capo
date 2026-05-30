@@ -306,12 +306,45 @@ pub struct EventNotification {
     pub params: Value,
 }
 
+/// The JSON-RPC method name for a live event-tail notification (ST4). The
+/// server pushes one of these per newly-committed event to a subscribed client
+/// on the persistent connection; `params` is the same event shape the
+/// `subscribed` catch-up backlog carries, so a client decodes a backlog event
+/// and a live event identically.
+pub const EVENT_TAIL_METHOD: &str = "event";
+
 impl EventNotification {
     pub fn new(method: impl Into<String>, params: Value) -> Self {
         Self {
             method: method.into(),
             params,
         }
+    }
+
+    /// Build the live event-tail notification frame for a committed event (ST4).
+    /// The frame is `{"jsonrpc":"2.0","method":"event","params":{"event":{...}}}`
+    /// where the inner object is the same shape as a `subscribed` backlog entry.
+    pub fn for_event(event: &crate::ServerEvent) -> Self {
+        Self {
+            method: EVENT_TAIL_METHOD.to_string(),
+            params: serde_json::json!({ "event": codec::encode_event(event) }),
+        }
+    }
+
+    /// Decode the [`crate::ServerEvent`] carried by a live event-tail
+    /// notification frame, the inverse of [`Self::for_event`].
+    pub fn decode_event(&self) -> TransportResult<crate::ServerEvent> {
+        if self.method != EVENT_TAIL_METHOD {
+            return Err(TransportError::Protocol(format!(
+                "not an event-tail notification: method={}",
+                self.method
+            )));
+        }
+        let event = self
+            .params
+            .get("event")
+            .ok_or_else(|| TransportError::Protocol("missing params.event".to_string()))?;
+        codec::decode_event(event)
     }
 
     /// Serialize this notification to a single JSON-RPC 2.0 wire frame.
@@ -332,6 +365,22 @@ impl EventNotification {
             params: notification.params,
         })
     }
+}
+
+/// Round-trip a [`ServerRequest`] through the JSON-RPC 2.0 request codec
+/// (encode then decode), for deterministic wire-shape tests. Exercises the same
+/// encode/decode path `send_tcp` and the connection read loop use.
+#[cfg(test)]
+pub(crate) fn jsonrpc_request_roundtrip(request: &ServerRequest) -> ServerRequest {
+    jsonrpc::decode_request(&jsonrpc::encode_request(request)).expect("request round-trips")
+}
+
+/// Round-trip a [`ServerResponse`] through the JSON-RPC 2.0 success-response
+/// codec (encode then decode), for deterministic wire-shape tests.
+#[cfg(test)]
+pub(crate) fn jsonrpc_response_roundtrip(response: &ServerResponse) -> ServerResponse {
+    jsonrpc::decode_response(&jsonrpc::encode_success_response(response))
+        .expect("response round-trips")
 }
 
 pub fn serve_tcp(

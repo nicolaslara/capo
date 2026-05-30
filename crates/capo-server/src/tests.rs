@@ -18,6 +18,7 @@ mod codex_workspace_write;
 mod controller_routing;
 mod crash_recovery;
 mod dispatch;
+mod event_tail;
 mod foundation;
 mod live_provider;
 mod live_smoke;

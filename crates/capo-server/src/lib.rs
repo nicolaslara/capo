@@ -15,6 +15,7 @@ use capo_state::{
 mod controller_routing;
 mod dashboard;
 mod dispatch;
+mod event_tail;
 mod live_provider;
 mod safety_floor;
 mod server_core;
@@ -26,12 +27,15 @@ mod util;
 use controller_routing::ControllerRoute;
 pub use controller_routing::{ControllerSelection, REAL_CONTROLLER_OPT_IN_ENV};
 use dispatch::DispatchExecutionOutcome;
+pub use event_tail::EventStream;
 use live_provider::{LiveProviderLocalRunRequest, LiveProviderPreflightRequest};
 pub use safety_floor::{
     LIVE_WRITE_OPT_IN_ENV, RunTurnRef, WorkspaceCheckpoint, WorkspaceWriteOutcome,
     WorkspaceWriteRequest, WriteMode, resolve_write_mode, resolve_write_mode_with_env,
 };
-pub use transport::{EventNotification, TransportError, send_tcp, serve_tcp};
+pub use transport::{EVENT_TAIL_METHOD, EventNotification, TransportError, send_tcp, serve_tcp};
+#[cfg(test)]
+pub(crate) use transport::{jsonrpc_request_roundtrip, jsonrpc_response_roundtrip};
 pub use turn_orchestration::{
     DispatchTurnMode, DispatchTurnOutcome, DispatchTurnRequest, LiveProviderTurn,
 };
@@ -42,6 +46,13 @@ use util::{
 };
 
 const MAX_ADAPTER_FIXTURE_BYTES: usize = 256 * 1024;
+
+/// Maximum events returned in a single subscription catch-up backlog page (ST4).
+/// A subscriber reconnecting against a long log reads a bounded page rather than
+/// the entire history in one query; it pages by advancing `from_sequence` to the
+/// backlog's `next_sequence` and re-subscribing. Generous enough that an ordinary
+/// session's whole history fits in one page.
+const EVENT_TAIL_BACKLOG_LIMIT: usize = 4096;
 
 #[derive(Clone, Debug)]
 pub struct CapoServer {
@@ -1068,7 +1079,86 @@ impl CapoServer {
                     ServerResponsePayload::Recovery(recovery),
                 )
             }
+            ServerCommand::Subscribe {
+                session_id,
+                from_sequence,
+            } => {
+                // The request/response transport returns the catch-up backlog
+                // here; the live tail is delivered as JSON-RPC notifications
+                // through the persistent connection (the broadcast subscription
+                // is obtained via `CapoServer::subscribe`). `Subscribe` is
+                // read-only: it reads the log and registers a subscriber, never
+                // appending an event.
+                let backlog = self.read_subscription_backlog(session_id, from_sequence)?;
+                self.response(
+                    request_id,
+                    origin,
+                    ServerResponsePayload::Subscribed(backlog),
+                )
+            }
         }
+    }
+
+    /// Open an event tail (ST4): the catch-up backlog plus a live [`EventStream`]
+    /// over newly-committed events.
+    ///
+    /// The broadcast subscription is taken **before** the backlog snapshot is
+    /// read, so no event committed between the snapshot and the first live poll
+    /// is missed (no gap). The returned [`SubscriptionBacklog::next_sequence`]
+    /// seeds the stream's delivery watermark, so a live event already present in
+    /// the backlog is dropped at the seam (no duplicate). A `None` `session_id`
+    /// tails every committed event; `Some(id)` tails one session.
+    pub fn subscribe(
+        &self,
+        session_id: Option<String>,
+        from_sequence: i64,
+    ) -> ServerResult<(SubscriptionBacklog, EventStream)> {
+        // Subscribe first, then snapshot the backlog: any event committed after
+        // this point is captured live, and the seam watermark below drops the
+        // overlap.
+        let subscription = self.controller.state().event_broadcaster().subscribe();
+        let backlog = self.read_subscription_backlog(session_id.clone(), from_sequence)?;
+        let stream = EventStream::new(subscription, backlog.next_sequence, session_id);
+        Ok((backlog, stream))
+    }
+
+    /// Read the catch-up backlog for a subscription: every committed event
+    /// strictly after `from_sequence` (optionally one session), in order, plus
+    /// the watermark the live tail resumes from.
+    fn read_subscription_backlog(
+        &self,
+        session_id: Option<String>,
+        from_sequence: i64,
+    ) -> ServerResult<SubscriptionBacklog> {
+        let records = match &session_id {
+            Some(session_id) => self
+                .controller
+                .state()
+                .events_after_for_session(
+                    &SessionId::new(session_id.clone()),
+                    from_sequence,
+                    EVENT_TAIL_BACKLOG_LIMIT,
+                )
+                .map_err(ServerError::State)?,
+            None => self
+                .controller
+                .state()
+                .events_after(from_sequence, EVENT_TAIL_BACKLOG_LIMIT)
+                .map_err(ServerError::State)?,
+        };
+        // The live tail resumes strictly after the highest backlog sequence;
+        // with an empty backlog it resumes from the caller's watermark.
+        let next_sequence = records
+            .last()
+            .map(|record| record.sequence)
+            .unwrap_or(from_sequence);
+        let events = records.into_iter().map(ServerEvent::from_record).collect();
+        Ok(SubscriptionBacklog {
+            session_id,
+            from_sequence,
+            next_sequence,
+            events,
+        })
     }
 }
 

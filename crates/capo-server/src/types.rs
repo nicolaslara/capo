@@ -204,6 +204,75 @@ pub enum ServerCommand {
         unattended: bool,
     },
     Recover,
+    /// Tail the append-only event log (ST4). The subscriber catches up on the
+    /// backlog strictly after `from_sequence` (optionally filtered to one
+    /// session) and then receives newly-committed events live. A `None`
+    /// `session_id` tails every committed event; `Some(id)` tails one session.
+    Subscribe {
+        session_id: Option<String>,
+        from_sequence: i64,
+    },
+}
+
+/// A single committed event as it crosses the server transport boundary (ST4).
+///
+/// This is the wire shape of one entry in the event tail -- the catch-up backlog
+/// and each live notification carry it. It mirrors `capo_state::EventRecord`
+/// (the row the append-only log stores and `events_after` reads back) so a tail
+/// is a faithful forward read of the log, never a re-serialized read-model
+/// snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServerEvent {
+    pub sequence: i64,
+    pub event_id: String,
+    pub kind: String,
+    pub actor: String,
+    pub project_id: Option<String>,
+    pub task_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub session_id: Option<String>,
+    pub run_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub item_id: Option<String>,
+    pub payload_json: String,
+    pub redaction_state: String,
+}
+
+impl ServerEvent {
+    pub(crate) fn from_record(record: capo_state::EventRecord) -> Self {
+        Self {
+            sequence: record.sequence,
+            event_id: record.event_id,
+            kind: record.kind,
+            actor: record.actor,
+            project_id: record.project_id.map(|id| id.to_string()),
+            task_id: record.task_id.map(|id| id.to_string()),
+            agent_id: record.agent_id.map(|id| id.to_string()),
+            session_id: record.session_id.map(|id| id.to_string()),
+            run_id: record.run_id.map(|id| id.to_string()),
+            turn_id: record.turn_id,
+            item_id: record.item_id,
+            payload_json: record.payload_json,
+            redaction_state: record.redaction_state,
+        }
+    }
+}
+
+/// The response to a [`ServerCommand::Subscribe`] (ST4): the catch-up backlog
+/// plus the watermark the live tail resumes from.
+///
+/// `events` are every committed event strictly after the requested
+/// `from_sequence` (and matching the session filter), in sequence order.
+/// `next_sequence` is the highest sequence delivered in the backlog (or the
+/// requested `from_sequence` when the backlog is empty); the live tail then
+/// delivers only events with a strictly greater sequence, so there is no gap and
+/// no duplicate at the backlog-to-live seam.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionBacklog {
+    pub session_id: Option<String>,
+    pub from_sequence: i64,
+    pub next_sequence: i64,
+    pub events: Vec<ServerEvent>,
 }
 
 impl ServerCommand {
@@ -220,6 +289,11 @@ impl ServerCommand {
             ServerCommand::ListAgents
                 | ServerCommand::AgentStatus { .. }
                 | ServerCommand::Dashboard { .. }
+                // Subscribe only reads the event log (catch-up backlog) and
+                // registers a broadcast subscriber; it never appends an event or
+                // mutates a projection, so it need not be serialized behind the
+                // single-writer lock.
+                | ServerCommand::Subscribe { .. }
         )
     }
 }
@@ -247,6 +321,10 @@ pub enum ServerResponsePayload {
     DispatchGated(DispatchGateSummary),
     DispatchRun(DispatchRunSummary),
     Recovery(RecoverySummary),
+    /// The catch-up backlog for a [`ServerCommand::Subscribe`] (ST4). Live
+    /// events that follow are pushed as JSON-RPC notifications
+    /// (`crate::EventNotification`), not as further responses to this request.
+    Subscribed(SubscriptionBacklog),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -633,5 +711,16 @@ fn default_request_id(command: &ServerCommand) -> String {
             )
         }
         ServerCommand::Recover => "server-recover".to_string(),
+        ServerCommand::Subscribe {
+            session_id,
+            from_sequence,
+        } => format!(
+            "server-subscribe-{}-{}",
+            session_id
+                .as_deref()
+                .map(slug)
+                .unwrap_or_else(|| "all".to_string()),
+            from_sequence
+        ),
     }
 }

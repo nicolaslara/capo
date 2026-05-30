@@ -77,6 +77,13 @@ pub(super) fn optional_i64(value: &Value, key: &str) -> TransportResult<Option<i
     }
 }
 
+pub(super) fn required_i64(value: &Value, key: &str) -> TransportResult<i64> {
+    value
+        .get(key)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| TransportError::Protocol(format!("missing {key} integer")))
+}
+
 pub(super) fn required_string_array(value: &Value, key: &str) -> TransportResult<Vec<String>> {
     value
         .get(key)

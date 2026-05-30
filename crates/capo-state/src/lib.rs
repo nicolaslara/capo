@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use capo_core::{
     AgentId, BoundaryBinding, BoundaryKind, EvidenceId, MemoryPacketId, ProjectId, RunId,
@@ -14,6 +15,7 @@ use capo_core::{
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 mod apply;
+mod broadcast;
 mod codec;
 mod codec_adapter;
 mod codec_encode;
@@ -23,6 +25,7 @@ mod projections;
 mod queries;
 mod schema;
 
+pub use broadcast::{EventBroadcaster, EventSubscription};
 pub use error::{StateError, StateResult};
 pub use event::{
     ArtifactRecord, EventKind, EventRecord, NewEvent, RecoveryAttempt, RedactionState,
@@ -65,11 +68,39 @@ impl FakeStateStore {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// SQLite-backed event store.
+///
+/// Identity is the database path: two handles to the same `db_path` are equal
+/// and a clone shares the same path and the same event-broadcast hub. The
+/// [`EventBroadcaster`] is deliberately excluded from equality and the `Debug`
+/// rendering -- it is a runtime fan-out side-channel (ST4), not part of the
+/// store's persisted identity -- so the manual impls below mirror the old
+/// derived behavior (path equality) while carrying the broadcaster.
+#[derive(Clone)]
 pub struct SqliteStateStore {
     root: PathBuf,
     db_path: PathBuf,
+    /// Process-local fan-out of committed events (ST4). Shared across clones so
+    /// every handle to this store publishes to and subscribes from one hub.
+    event_broadcaster: Arc<EventBroadcaster>,
 }
+
+impl std::fmt::Debug for SqliteStateStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteStateStore")
+            .field("root", &self.root)
+            .field("db_path", &self.db_path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for SqliteStateStore {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root && self.db_path == other.db_path
+    }
+}
+
+impl Eq for SqliteStateStore {}
 
 impl SqliteStateStore {
     pub fn open(root: impl AsRef<Path>) -> StateResult<Self> {
@@ -85,7 +116,19 @@ impl SqliteStateStore {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&mut connection)?;
-        Ok(Self { root, db_path })
+        Ok(Self {
+            root,
+            db_path,
+            event_broadcaster: Arc::new(EventBroadcaster::new()),
+        })
+    }
+
+    /// The process-local event-broadcast hub (ST4). A subscriber created here
+    /// receives every event committed through this store handle or any of its
+    /// clones, fanned out *after* the write commits. The transport's `Subscribe`
+    /// pairs this live tail with the [`Self::events_after`] catch-up backlog.
+    pub fn event_broadcaster(&self) -> &Arc<EventBroadcaster> {
+        &self.event_broadcaster
     }
 
     /// Open a fresh connection to the store with the concurrency pragmas every
@@ -174,7 +217,21 @@ impl SqliteStateStore {
         }
         update_watermark(&transaction, "default", sequence)?;
         transaction.commit()?;
+        // Fan the committed event out to live subscribers only after the write
+        // is durable (ST4): a subscriber must never see an event ahead of the
+        // watermark a reconnecting subscriber would later read from the log.
+        self.publish_committed_event(sequence, &event);
         Ok(sequence)
+    }
+
+    /// Fan a just-committed [`NewEvent`] out to live subscribers (ST4). The
+    /// record built here mirrors the row the read queries (`events_after`,
+    /// `recent_events_for_session`) reconstruct from the `events` table, so a
+    /// live-tailed event is the same record a catch-up backlog read would return
+    /// for the same sequence.
+    fn publish_committed_event(&self, sequence: i64, event: &NewEvent) {
+        self.event_broadcaster
+            .publish(&committed_event_record(sequence, event));
     }
 
     pub fn decide_permission_approval(
@@ -234,6 +291,10 @@ impl SqliteStateStore {
             ],
         )?;
         let sequence = transaction.last_insert_rowid();
+        // Capture the committed event shapes to fan out *after* commit (ST4); the
+        // `decided_event`/`grant_event` are only borrowed by `params!` above, so
+        // they are still readable here.
+        let mut committed = vec![committed_event_record(sequence, &decided_event)];
         let approval_record = ProjectionRecord::PermissionApproval(decided_approval);
         insert_projection_record(&transaction, sequence, &approval_record)?;
         apply_projection_record(&transaction, sequence, &approval_record)?;
@@ -261,6 +322,7 @@ impl SqliteStateStore {
                 ],
             )?;
             let grant_sequence = transaction.last_insert_rowid();
+            committed.push(committed_event_record(grant_sequence, &grant_event));
             let grant_record = ProjectionRecord::CapabilityGrant(grant);
             insert_projection_record(&transaction, grant_sequence, &grant_record)?;
             apply_projection_record(&transaction, grant_sequence, &grant_record)?;
@@ -270,6 +332,9 @@ impl SqliteStateStore {
         };
         update_watermark(&transaction, "default", final_sequence)?;
         transaction.commit()?;
+        for event in &committed {
+            self.event_broadcaster.publish(event);
+        }
         Ok(final_sequence)
     }
 
@@ -659,6 +724,31 @@ where
 
 fn escape_json(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Build the [`EventRecord`] for a just-committed [`NewEvent`] at `sequence`
+/// (ST4 broadcast fan-out). It reconstructs exactly the columns the `events`
+/// table read queries (`events_after`, `recent_events_for_session`) project, so
+/// an event delivered live is identical to the one a later catch-up read would
+/// return for the same sequence -- which is what makes the backlog-to-live seam
+/// dedupe by sequence sound.
+fn committed_event_record(sequence: i64, event: &NewEvent) -> EventRecord {
+    EventRecord {
+        sequence,
+        event_id: event.event_id.clone(),
+        kind: event.kind.as_str().to_string(),
+        actor: event.actor.clone(),
+        project_id: event.project_id.clone(),
+        task_id: event.task_id.clone(),
+        agent_id: event.agent_id.clone(),
+        session_id: event.session_id.clone(),
+        run_id: event.run_id.clone(),
+        turn_id: event.turn_id.clone(),
+        item_id: event.item_id.clone(),
+        payload_json: event.payload_json.clone(),
+        idempotency_key: event.idempotency_key.clone(),
+        redaction_state: event.redaction_state.as_str().to_string(),
+    }
 }
 
 trait FromStringId {

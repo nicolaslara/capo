@@ -1443,6 +1443,101 @@ impl SqliteStateStore {
         Ok(events)
     }
 
+    /// Events strictly after a caller-supplied sequence watermark, in ascending
+    /// sequence order (ST4).
+    ///
+    /// This is the forward read of the append-only log the streaming event tail
+    /// is built on: a subscriber supplies the highest sequence it has already
+    /// seen (`from_sequence`) and gets exactly the events committed since, in
+    /// order. The store already exposes a monotonic `sequence`
+    /// (`last_insert_rowid()` in `append_event`) and a `default` projection
+    /// watermark, so this only surfaces a forward read of them; it never returns
+    /// the watermark event itself (`sequence > since_sequence`, strictly), so
+    /// pairing it with a broadcast subscription that resumes from the same
+    /// watermark yields no gap and no duplicate at the seam.
+    ///
+    /// `limit` bounds the catch-up batch so a subscriber reconnecting against a
+    /// very long log reads a bounded page rather than the whole history in one
+    /// query; callers page by advancing `from_sequence` to the last returned
+    /// sequence.
+    pub fn events_after(&self, since_sequence: i64, limit: usize) -> StateResult<Vec<EventRecord>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT sequence, event_id, kind, actor, project_id, task_id, agent_id, session_id,
+                    run_id, turn_id, item_id, payload_json, idempotency_key, redaction_state
+             FROM events
+             WHERE sequence > ?1
+             ORDER BY sequence ASC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![since_sequence, limit as i64], |row| {
+            Ok(EventRecord {
+                sequence: row.get(0)?,
+                event_id: row.get(1)?,
+                kind: row.get(2)?,
+                actor: row.get(3)?,
+                project_id: optional_id(row.get::<_, Option<String>>(4)?),
+                task_id: optional_id(row.get::<_, Option<String>>(5)?),
+                agent_id: optional_id(row.get::<_, Option<String>>(6)?),
+                session_id: optional_id(row.get::<_, Option<String>>(7)?),
+                run_id: optional_id(row.get::<_, Option<String>>(8)?),
+                turn_id: row.get(9)?,
+                item_id: row.get(10)?,
+                payload_json: row.get(11)?,
+                idempotency_key: row.get(12)?,
+                redaction_state: row.get(13)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    /// Events strictly after `since_sequence` for one session, in ascending
+    /// sequence order (ST4, session-scoped tail).
+    ///
+    /// Same forward-read semantics as [`Self::events_after`] but filtered to a
+    /// single session, so a `Subscribe { session_id, from_sequence }` that names
+    /// a session catches up on only that session's committed events.
+    pub fn events_after_for_session(
+        &self,
+        session_id: &SessionId,
+        since_sequence: i64,
+        limit: usize,
+    ) -> StateResult<Vec<EventRecord>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT sequence, event_id, kind, actor, project_id, task_id, agent_id, session_id,
+                    run_id, turn_id, item_id, payload_json, idempotency_key, redaction_state
+             FROM events
+             WHERE sequence > ?1 AND session_id = ?2
+             ORDER BY sequence ASC
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![since_sequence, session_id.as_str(), limit as i64],
+            |row| {
+                Ok(EventRecord {
+                    sequence: row.get(0)?,
+                    event_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    actor: row.get(3)?,
+                    project_id: optional_id(row.get::<_, Option<String>>(4)?),
+                    task_id: optional_id(row.get::<_, Option<String>>(5)?),
+                    agent_id: optional_id(row.get::<_, Option<String>>(6)?),
+                    session_id: optional_id(row.get::<_, Option<String>>(7)?),
+                    run_id: optional_id(row.get::<_, Option<String>>(8)?),
+                    turn_id: row.get(9)?,
+                    item_id: row.get(10)?,
+                    payload_json: row.get(11)?,
+                    idempotency_key: row.get(12)?,
+                    redaction_state: row.get(13)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     /// All events for a single turn within a session, in ascending sequence
     /// order, with NO recency cap.
     ///

@@ -5,13 +5,15 @@ use super::{
     TransportError, TransportResult,
     wire::{
         input_origin_name, optional_bool, optional_i64, optional_string, parse_input_origin,
-        required_bool, required_string, required_string_array, required_usize, required_value,
+        required_bool, required_i64, required_string, required_string_array, required_usize,
+        required_value,
     },
 };
 use crate::{
     AdapterReplaySummary, AgentSummary, DispatchGateSummary, DispatchPlanSummary,
     DispatchRunSummary, LiveProviderPreflightSummary, RecoverySummary, ServerClientOrigin,
-    ServerCommand, ServerResponse, ServerResponsePayload, SessionSummary, TaskRunSummary,
+    ServerCommand, ServerEvent, ServerResponse, ServerResponsePayload, SessionSummary,
+    SubscriptionBacklog, TaskRunSummary,
 };
 
 pub(super) fn encode_origin(origin: &ServerClientOrigin) -> Value {
@@ -227,6 +229,14 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             "unattended": unattended,
         }),
         ServerCommand::Recover => json!({ "type": "recover" }),
+        ServerCommand::Subscribe {
+            session_id,
+            from_sequence,
+        } => json!({
+            "type": "subscribe",
+            "session_id": session_id,
+            "from_sequence": from_sequence,
+        }),
     }
 }
 
@@ -324,6 +334,10 @@ pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
             unattended: optional_bool(value, "unattended")?.unwrap_or(true),
         }),
         "recover" => Ok(ServerCommand::Recover),
+        "subscribe" => Ok(ServerCommand::Subscribe {
+            session_id: optional_string(value, "session_id")?,
+            from_sequence: required_i64(value, "from_sequence")?,
+        }),
         other => Err(TransportError::Protocol(format!(
             "unknown command type: {other}"
         ))),
@@ -454,7 +468,54 @@ pub(super) fn encode_payload(payload: &ServerResponsePayload) -> Value {
             "recovered_run_count": recovery.recovered_run_count,
             "watermark": recovery.watermark,
         }),
+        ServerResponsePayload::Subscribed(backlog) => json!({
+            "type": "subscribed",
+            "session_id": backlog.session_id,
+            "from_sequence": backlog.from_sequence,
+            "next_sequence": backlog.next_sequence,
+            "events": backlog.events.iter().map(encode_event).collect::<Vec<_>>(),
+        }),
     }
+}
+
+/// Encode a single tail event (ST4). The same shape is used both inside a
+/// `subscribed` backlog and as the `params.event` of a live JSON-RPC
+/// notification, so a client decodes a backlog event and a live event with one
+/// code path.
+pub(crate) fn encode_event(event: &ServerEvent) -> Value {
+    json!({
+        "sequence": event.sequence,
+        "event_id": event.event_id,
+        "kind": event.kind,
+        "actor": event.actor,
+        "project_id": event.project_id,
+        "task_id": event.task_id,
+        "agent_id": event.agent_id,
+        "session_id": event.session_id,
+        "run_id": event.run_id,
+        "turn_id": event.turn_id,
+        "item_id": event.item_id,
+        "payload_json": event.payload_json,
+        "redaction_state": event.redaction_state,
+    })
+}
+
+pub(crate) fn decode_event(value: &Value) -> TransportResult<ServerEvent> {
+    Ok(ServerEvent {
+        sequence: required_i64(value, "sequence")?,
+        event_id: required_string(value, "event_id")?,
+        kind: required_string(value, "kind")?,
+        actor: required_string(value, "actor")?,
+        project_id: optional_string(value, "project_id")?,
+        task_id: optional_string(value, "task_id")?,
+        agent_id: optional_string(value, "agent_id")?,
+        session_id: optional_string(value, "session_id")?,
+        run_id: optional_string(value, "run_id")?,
+        turn_id: optional_string(value, "turn_id")?,
+        item_id: optional_string(value, "item_id")?,
+        payload_json: required_string(value, "payload_json")?,
+        redaction_state: required_string(value, "redaction_state")?,
+    })
 }
 
 pub(super) fn decode_payload(value: &Value) -> TransportResult<ServerResponsePayload> {
@@ -579,6 +640,17 @@ pub(super) fn decode_payload(value: &Value) -> TransportResult<ServerResponsePay
             recovery_attempt_id: required_string(value, "recovery_attempt_id")?,
             recovered_run_count: required_usize(value, "recovered_run_count")?,
             watermark: value.get("watermark").and_then(Value::as_i64),
+        })),
+        "subscribed" => Ok(ServerResponsePayload::Subscribed(SubscriptionBacklog {
+            session_id: optional_string(value, "session_id")?,
+            from_sequence: required_i64(value, "from_sequence")?,
+            next_sequence: required_i64(value, "next_sequence")?,
+            events: required_value(value, "events")?
+                .as_array()
+                .ok_or_else(|| TransportError::Protocol("events must be an array".to_string()))?
+                .iter()
+                .map(decode_event)
+                .collect::<TransportResult<Vec<_>>>()?,
         })),
         other => Err(TransportError::Protocol(format!(
             "unknown payload type: {other}"
