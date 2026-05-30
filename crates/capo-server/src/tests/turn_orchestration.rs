@@ -1,5 +1,9 @@
 use super::*;
 
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::time::Duration;
+
 use crate::{DispatchTurnMode, DispatchTurnRequest, LiveProviderTurn};
 use capo_controller::{
     CeilingBreach, FakeBoundaryController, RealBoundaryController, RunResourceCeiling,
@@ -663,4 +667,192 @@ fn live_turn_over_token_cost_aborts_on_the_loop_path_without_running_the_provide
         !events.iter().any(|event| event.kind == "run.exited"),
         "the provider must not run when the token ceiling is already tripped"
     );
+}
+
+/// Write an executable `/bin/sh` stub that stands in for the codex binary on the
+/// live SPAWN path. It (a) launches a background descendant which, only AFTER a
+/// long sleep, writes `marker_path`, then (b) sleeps `sleep_secs` itself -- far
+/// longer than the tiny wall-clock ceiling. So the whole process GROUP outlives
+/// the runtime timeout; when the timeout fires it hard-kills the group, the
+/// descendant is reaped before it can write, and `marker_path` never appears.
+/// That absence is the deterministic proof the process group was killed.
+///
+/// Uses only POSIX builtins + `/bin/sleep` (no `codex`, no env gates): the
+/// runtime spawns with `env_clear()` so the marker path and sleeps are baked in
+/// as literals rather than relying on `$PATH`/`$PWD`.
+fn wall_clock_timeout_stub(dir: &Path, tag: &str, marker_path: &Path, sleep_secs: u64) -> String {
+    let stub = dir.join(format!("codex-timeout-stub-{tag}.sh"));
+    let script = format!(
+        "#!/bin/sh\n\
+         ( /bin/sleep {sleep} ; printf survived > '{marker}' ) &\n\
+         /bin/sleep {sleep}\n",
+        sleep = sleep_secs,
+        marker = marker_path.display(),
+    );
+    std::fs::write(&stub, &script).expect("write timeout stub");
+    let mut perms = std::fs::metadata(&stub).expect("stub meta").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&stub, perms).expect("chmod stub");
+    stub.to_string_lossy().to_string()
+}
+
+#[test]
+fn live_turn_wall_clock_timeout_kills_the_process_group_and_aborts_the_run() {
+    // RTL7 (live path, post-spawn): wall-clock is the ONLY ceiling dimension that
+    // fires AFTER the provider spawns, and this is its end-to-end test. It drives a
+    // REAL local process (a `/bin/sh` codex stub -- NOT Codex, no live-provider env
+    // gates) that sleeps far longer than a sub-second wall-clock ceiling through
+    // the live dispatch arm (`run_dispatch_turn` -> `RunLiveProviderLocal` ->
+    // `live_provider::execute_codex_live_provider` -> `wait_running_with_timeout`).
+    //
+    // It asserts BOTH halves of the abort: (1) the process GROUP was hard-killed at
+    // the deadline -- proved deterministically because a background descendant that
+    // would write a marker only after a long sleep never gets to write it; and
+    // (2) a durable `run.aborted` event was recorded via `abort_run_for_ceiling`
+    // with the WallClock breach, flipping the run/session to `aborted` and freeing
+    // the agent. The stub sleeps generously (5s) against a clamped 1s ceiling, so
+    // the test is robust to scheduling jitter without depending on wall time.
+    let goal = "Run a long live process under a tiny wall-clock ceiling";
+    let root = temp_root();
+    std::fs::create_dir_all(&root).expect("root");
+    let workspace = root.join("workspace");
+    let artifacts = root.join("artifacts");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let workspace_str = workspace.to_string_lossy().to_string();
+    let artifacts_str = artifacts.to_string_lossy().to_string();
+
+    let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
+    register_and_start(
+        &server,
+        "codex-local",
+        goal,
+        "session-wall-clock",
+        "run-wall-clock",
+    );
+
+    // The descendant's marker lives OUTSIDE the confined workspace (under `root`)
+    // and its path is baked into the stub, so the assertion does not depend on the
+    // process's cwd. It must never be written: the group is killed first.
+    let descendant_marker = root.join("descendant-survived-the-timeout.txt");
+    let stub = wall_clock_timeout_stub(&root, "wall-clock", &descendant_marker, 5);
+
+    // A sub-second wall-clock ceiling: `wall_clock_timeout_seconds` clamps it up to
+    // a 1s runtime timeout, which still fires long before the 5s stub finishes.
+    let ceiling = RunResourceCeiling::for_live_provider(8, Duration::from_millis(1), 100_000);
+    let outcome = server
+        .run_dispatch_turn(DispatchTurnRequest {
+            agent_name: "codex-local".to_string(),
+            adapter: "codex".to_string(),
+            goal: goal.to_string(),
+            workspace: workspace_str,
+            artifacts: artifacts_str,
+            session_id: "session-wall-clock".to_string(),
+            run_id: "run-wall-clock".to_string(),
+            turn_id: "turn-wall-clock".to_string(),
+            mode: DispatchTurnMode::LiveProvider(Box::new(LiveProviderTurn {
+                capability_profile: "trusted-local".to_string(),
+                runtime_scope: "local_process_loopback".to_string(),
+                credential_scan_policy: "metadata_only_no_secret_read".to_string(),
+                raw_prompt_policy: "not_rendered".to_string(),
+                raw_output_policy: "artifacts_scanned_redacted".to_string(),
+                tool_wrapper_policy: "capo_wrapped_required".to_string(),
+                live_provider_opt_in: true,
+                // Take the SPAWN path (not the mock-ingest path): a real local
+                // process is launched and waited on with the runtime timeout.
+                live_execution_opt_in: true,
+                mock_runtime_opt_in: false,
+                mock_provider_output_name: None,
+                mock_provider_output_jsonl: None,
+                ceiling,
+                usage_before: RunResourceUsage::default(),
+                turn_token_cost: 0,
+                // The deterministic codex stub: a real process, not Codex.
+                codex_program_override: Some(stub),
+                // Unattended -> the RTL6 gate resolves the read-only DryRun profile,
+                // so the spawn needs no checkpoint and touches nothing.
+                unattended: true,
+            })),
+        })
+        .expect("run dispatch turn");
+
+    // The loop classified the post-spawn timeout as a wall-clock ceiling breach.
+    // `run_dispatch_turn` reports the configured `max_wall_clock` (1ms) as both the
+    // limit and the observed elapsed (the process ran at least to the deadline).
+    // The runtime timeout itself clamps 1ms up to a 1s wait, which is why the
+    // generous 5s stub is reliably caught.
+    assert_eq!(
+        outcome.ceiling_breach,
+        Some(CeilingBreach::WallClock {
+            limit: Duration::from_millis(1),
+            observed: Duration::from_millis(1),
+        }),
+        "a timed-out live spawn must abort with a WallClock breach"
+    );
+    assert_eq!(outcome.run.status, "aborted");
+    assert!(!outcome.run.provider_cli_executed);
+    // The aborting turn projected nothing.
+    assert!(outcome.usage_after.is_none());
+    assert!(outcome.finished.summary_refs.is_empty());
+    assert!(outcome.finished.observed_tool_refs.is_empty());
+
+    // (1) The process GROUP was killed at the deadline. The descendant that would
+    // write the marker only after a long sleep was reaped with the group before it
+    // could -- so the marker must be absent. Wait past the descendant's own sleep
+    // to make the absence meaningful (had the group survived, it would exist now).
+    std::thread::sleep(Duration::from_millis(6_000));
+    assert!(
+        !descendant_marker.exists(),
+        "the timeout must hard-kill the whole process group: a descendant survived \
+         the wall-clock kill and wrote {}",
+        descendant_marker.display()
+    );
+
+    // (2) A durable run.aborted event was recorded via abort_run_for_ceiling with
+    // the WallClock reason, keyed to the aborting turn.
+    let state = SqliteStateStore::open(&root).expect("state");
+    let events = state
+        .recent_events_for_session(&SessionId::new("session-wall-clock"), 128)
+        .expect("events");
+    let aborted = events
+        .iter()
+        .find(|event| event.kind == "run.aborted")
+        .expect("run.aborted recorded for the wall-clock timeout");
+    assert_eq!(aborted.turn_id.as_deref(), Some("turn-wall-clock"));
+    assert!(
+        aborted.payload_json.contains("max_wall_clock_exceeded"),
+        "the run.aborted payload must carry the wall-clock reason code, got: {}",
+        aborted.payload_json
+    );
+
+    // The runtime DID spawn and wait on a real process before the abort: the
+    // in-flight RTL10 start marker was persisted before the wait.
+    assert!(
+        events.iter().any(|event| event.kind == "run.started"),
+        "the live spawn must persist an in-flight run.started marker before waiting"
+    );
+
+    // Coordinated terminal projection set: the run and session are aborted and the
+    // agent is freed -- the same terminal shape as every other ceiling stop.
+    assert_eq!(
+        state
+            .run(&capo_core::RunId::new("run-wall-clock"))
+            .expect("run")
+            .expect("present")
+            .status,
+        "aborted"
+    );
+    assert_eq!(
+        state
+            .session(&SessionId::new("session-wall-clock"))
+            .expect("session")
+            .expect("present")
+            .status,
+        "aborted"
+    );
+    let agent = state
+        .agent_by_name("codex-local")
+        .expect("agent")
+        .expect("present");
+    assert_eq!(agent.status, "available");
+    assert!(agent.current_session_id.is_none());
 }
