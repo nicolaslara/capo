@@ -2533,6 +2533,28 @@ fn real_controller_turn_invokes_a_capo_tool_through_authorize_and_invoke() {
             && tool.status == "completed"
             && tool.turn_id.as_deref() == Some("turn-aci1-tool")
     }));
+
+    // ACI9: the observed tool result is ALSO normalized into a `ToolObservation`
+    // projection tagged `source=runtime_output` (observed evidence), so a query
+    // over the observation read model surfaces observed evidence, not only agent
+    // reports.
+    let observations = controller
+        .state()
+        .tool_observations_for_session(&refs.session_id)
+        .expect("tool observations");
+    let observed = observations
+        .iter()
+        .find(|observation| observation.tool_call_id.as_ref() == Some(&scope.tool_call_id))
+        .expect("observed runtime observation for the dispatched capo tool");
+    assert_eq!(observed.source, "runtime_output");
+    assert_eq!(observed.tool_name, "capo.agent_status");
+    assert_eq!(observed.observed_status, "completed");
+    assert_eq!(observed.instrumentation_level, "full");
+    assert_eq!(
+        observed.artifact_id.as_deref(),
+        outcome.output_artifact_id.as_deref(),
+        "the observed evidence row carries the output artifact id"
+    );
 }
 
 /// ACI7: a real dispatched tool call persists queryable per-call provenance
@@ -2733,6 +2755,132 @@ fn real_controller_dispatches_an_agent_report_persisted_as_agent_reported() {
         read_observation(),
         before,
         "the agent_reported observation must replay identically"
+    );
+}
+
+/// ACI9: in ONE session, a dispatched OBSERVED tool and a dispatched agent
+/// report normalize into the `ToolObservation` projection as TWO DISTINCT
+/// classes -- observed evidence tagged `source=runtime_output` vs the
+/// `source=agent_reported` claim -- and the distinction survives a
+/// restart/replay rebuild. This is the load-bearing ACI9 invariant: observed
+/// proof and an agent claim are co-queryable yet never indistinguishable, so
+/// completion can never be reached by an agent assertion masquerading as
+/// observed evidence.
+#[test]
+fn real_controller_dispatch_persists_observed_and_reported_distinctly_and_replays() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{AgentReportRequest, CapoToolContext, CapoToolRequest, ToolExposureRequest};
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci9-mixed-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open real controller");
+    let registration = controller.register_agent("aci9-worker").expect("agent");
+    let refs = controller
+        .send_task(&registration, "Observe state and report progress")
+        .expect("send task");
+
+    // 1) A dispatched OBSERVED Capo tool -> observed runtime evidence.
+    let observed_call = ToolCallId::new("tool-aci9-observed");
+    let observed_scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-aci9"),
+        tool_call_id: observed_call.clone(),
+    };
+    controller
+        .dispatch_tool_call(
+            &observed_scope,
+            ToolExposureRequest::Capo(CapoToolRequest {
+                tool_call_id: observed_call.clone(),
+                session_id: refs.session_id.clone(),
+                tool_id: "capo.agent_status".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                context: CapoToolContext {
+                    task_status: "task active".to_string(),
+                    agent_status: "agent running".to_string(),
+                    session_summary: "summary".to_string(),
+                    workpad_excerpt: "section".to_string(),
+                    evidence_note: "note".to_string(),
+                    capability_scope: "state:read:agent".to_string(),
+                },
+            }),
+        )
+        .expect("dispatch observed capo tool");
+
+    // 2) A dispatched GO2 agent report -> an `agent_reported` claim.
+    let report_call = ToolCallId::new("tool-aci9-reported");
+    let report_scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-aci9"),
+        tool_call_id: report_call.clone(),
+    };
+    controller
+        .dispatch_tool_call(
+            &report_scope,
+            ToolExposureRequest::AgentReport(AgentReportRequest {
+                tool_call_id: report_call.clone(),
+                session_id: refs.session_id.clone(),
+                tool_id: "capo.complete_requirement".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                confidence: 80,
+                body: serde_json::json!({"requirement_id": "REQ-1", "summary": "done"}),
+                submission_id: Some("sub-aci9".to_string()),
+            }),
+        )
+        .expect("dispatch agent report");
+
+    let read_observations = || {
+        controller
+            .state()
+            .tool_observations_for_session(&refs.session_id)
+            .expect("tool observations")
+    };
+    let before = read_observations();
+
+    let observed = before
+        .iter()
+        .find(|observation| observation.tool_call_id.as_ref() == Some(&observed_call))
+        .expect("observed runtime observation");
+    let reported = before
+        .iter()
+        .find(|observation| observation.tool_call_id.as_ref() == Some(&report_call))
+        .expect("agent-reported observation");
+
+    // The two are DISTINCT observation classes by source.
+    assert_eq!(observed.source, "runtime_output");
+    assert_eq!(reported.source, "agent_reported");
+    assert_ne!(observed.source, reported.source);
+    assert!(
+        capo_tools::source_is_observed_evidence(&observed.source),
+        "the runtime row is observed evidence"
+    );
+    assert!(
+        !capo_tools::source_is_observed_evidence(&reported.source),
+        "the agent report is NOT observed evidence -- a claim never masquerades as proof"
+    );
+    // The report carries the agent's self-declared confidence; observed evidence
+    // does not (it is observed, not self-attested).
+    assert_eq!(reported.confidence, "80");
+    assert_eq!(observed.confidence, "observed");
+
+    // The observed/reported separation survives a restart/replay rebuild.
+    controller
+        .state()
+        .rebuild_projections()
+        .expect("rebuild projections");
+    assert_eq!(
+        read_observations(),
+        before,
+        "observed vs reported classification must replay identically"
     );
 }
 

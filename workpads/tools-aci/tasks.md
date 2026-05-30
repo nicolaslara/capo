@@ -767,7 +767,60 @@ Verification:
 
 ## ACI9 - Tool-Result Normalization Into Events And Projections
 
-Status: pending.
+Status: done.
+
+Evidence:
+
+- Every dispatched tool result now normalizes into BOTH the `ToolInvocation`
+  (`ToolCall`) AND `ToolObservation` projections
+  (`crates/capo-controller/src/tool_dispatch.rs`). The prior code only emitted a
+  `ToolObservation` projection for the `agent_reported` reporting surface, so a
+  query over `tool_observations_for_session` surfaced agent CLAIMS but no
+  observed evidence for locally-dispatched Capo/runtime tools. `NormalizedToolResult`
+  gains an `observed_evidence: Option<ObservedEvidence>` (set by `from_capo` /
+  `from_runtime`, `None` for the report surface), and the dispatch's
+  `EventKind::ToolOutputObserved` branch now emits a `ToolObservation` row tagged
+  `source=runtime_output` (`EVIDENCE_SOURCE_RUNTIME_OUTPUT`), carrying the
+  observed terminal status (the wrapper's own `exited`/`failed`/
+  `precondition_failed`/`no_match`, or Capo's `completed`), `instrumentation_level=full`,
+  and the output `artifact_id`. The deny path emits no `tool.output_observed`
+  event, so no observation row is created for a denied call even though the field
+  is populated.
+- Observed evidence (`source=runtime_output`) stays a DISTINCT observation class
+  from agent-reported claims (`source=agent_reported`, ACI8) and adapter-native
+  observed evidence (`source=adapter_event:<adapter>`, `adapter_replay.rs`).
+  `source_is_observed_evidence` keeps the observed sources distinct from the
+  agent claim; the dispatched observed row carries `confidence="observed"` (it is
+  observed, not self-attested) vs the report's numeric self-declared confidence.
+- Adapter-native tool updates with stable external IDs already dedupe on replay
+  (`crates/capo-controller/src/adapter_replay.rs`: the `toolCallId`-derived
+  `adapter_tool_call_id` plus the idempotency key / fallback key), and the
+  ACI8 idempotency-keyed agent-report dedupe is unchanged.
+- Raw inputs/outputs that may contain secrets stay artifacts with a
+  `redaction_state` (ACI7 `write_redacted_artifact` / `record_input_artifact`),
+  never inline in event blobs; the observation row references the artifact id, not
+  the content.
+- Read models expose ordered tool calls (`tool_calls_for_session`) with
+  permission decision / grant / timing provenance, input+output artifacts, status,
+  and the observation read model (`tool_observations_for_session`) now exposes the
+  observed-vs-reported source classification and instrumentation level for BOTH
+  classes.
+- Tests added/strengthened: `cargo test -p capo-controller`
+  (`real_controller_turn_invokes_a_capo_tool_through_authorize_and_invoke` now
+  asserts the dispatched observed Capo tool persists a `runtime_output`
+  observation row with the output artifact; new
+  `real_controller_dispatch_persists_observed_and_reported_distinctly_and_replays`
+  dispatches an observed tool AND an agent report in one session, asserts the two
+  are DISTINCT observation classes -- `runtime_output` is observed evidence,
+  `agent_reported` is not -- and that the separation replays byte-identically
+  after `rebuild_projections`). The existing `cargo test -p capo-state`
+  `agent_reported_observations_are_distinct_from_observed_and_dedupe_on_replay`
+  covers the state-level normalization, idempotency-key dedupe, and
+  replay-identity of the observed-vs-reported classes.
+- Gate run from `/Users/nicolas/devel/capo-wt/tools-aci`: `cargo fmt --check`
+  clean; `cargo clippy --all-targets --all-features -- -D warnings` exit 0;
+  `cargo test --workspace` => all suites passed, 0 failed (capo-controller 38,
+  capo-state 38, capo-tools 93, capo-server 60).
 
 Acceptance:
 

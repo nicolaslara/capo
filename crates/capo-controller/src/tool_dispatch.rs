@@ -19,8 +19,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use capo_tools::{
-    AgentReportRecord, CapoToolResult, ToolAuditEvent, ToolExposure, ToolExposureRequest,
-    ToolExposureResult, WrapperToolResult,
+    AgentReportRecord, CapoToolResult, EVIDENCE_SOURCE_RUNTIME_OUTPUT, ToolAuditEvent,
+    ToolExposure, ToolExposureRequest, ToolExposureResult, WrapperToolResult,
 };
 
 use super::*;
@@ -230,6 +230,37 @@ impl FakeBoundaryController {
                     None => Vec::new(),
                 }
             }
+            EventKind::ToolOutputObserved => {
+                // ACI9: normalize an OBSERVED tool result (Capo registry / runtime
+                // wrappers) into the `ToolObservation` projection too, tagged
+                // `source=runtime_output` -- a DISTINCT class from the
+                // `agent_reported` claim above. Without this row a query over
+                // `tool_observations_for_session` would surface only agent reports
+                // for locally-dispatched tools, leaving observed evidence with no
+                // observation projection; the two must be co-queryable and
+                // distinguishable. The reporting surface carries no
+                // `observed_evidence` (it is a claim, not observed proof), so this
+                // projection is emitted ONLY for observed tools.
+                match &normalized.observed_evidence {
+                    Some(observed) => vec![ProjectionRecord::ToolObservation(
+                        capo_state::ToolObservationProjection {
+                            tool_observation_id: format!("runtime-obs-{}", scope.tool_call_id),
+                            session_id: scope.session_id.clone(),
+                            tool_call_id: Some(scope.tool_call_id.clone()),
+                            source: observed.source.clone(),
+                            external_tool_ref: None,
+                            tool_name: normalized.tool_name.clone(),
+                            observed_status: observed.observed_status.clone(),
+                            instrumentation_level: observed.instrumentation_level.clone(),
+                            confidence: "observed".to_string(),
+                            raw_event_hash: format!("runtime-observed:{}", scope.tool_call_id),
+                            artifact_id: normalized.output_artifact_id.clone(),
+                            updated_sequence: 0,
+                        },
+                    )],
+                    None => Vec::new(),
+                }
+            }
             EventKind::ToolCallCompleted => {
                 vec![terminal_tool_call_projection(scope, normalized, provenance)]
             }
@@ -301,6 +332,12 @@ struct NormalizedToolResult {
     /// `None` for observed tools (Capo registry / runtime wrappers), so a report
     /// is never persisted indistinguishably from observed evidence.
     agent_report: Option<AgentReportObservation>,
+    /// ACI9: the observed-evidence classification for an OBSERVED tool (Capo
+    /// registry / runtime wrappers), tagged `source=runtime_output` and carrying
+    /// the observed terminal status + instrumentation level. `None` for the
+    /// reporting surface (a claim, not observed proof), so observed evidence and
+    /// agent reports remain a distinct class in the `ToolObservation` projection.
+    observed_evidence: Option<ObservedEvidence>,
     events: Vec<ToolAuditEvent>,
 }
 
@@ -310,6 +347,16 @@ struct NormalizedToolResult {
 struct AgentReportObservation {
     source: String,
     confidence: i64,
+}
+
+/// ACI9: the distinct classification an OBSERVED tool result carries onto the
+/// persisted `tool.output_observed` -> `ToolObservation` projection:
+/// `source=runtime_output` (an observed-evidence source, never `agent_reported`)
+/// plus the observed terminal status and the instrumentation level.
+struct ObservedEvidence {
+    source: String,
+    observed_status: String,
+    instrumentation_level: String,
 }
 
 impl NormalizedToolResult {
@@ -351,12 +398,17 @@ impl NormalizedToolResult {
                 source: result.source.clone(),
                 confidence: result.confidence,
             }),
+            // ACI9: a report is a CLAIM, not observed proof, so it carries no
+            // observed-evidence classification -- it persists ONLY the
+            // `agent_reported` observation, never a `runtime_output` one.
+            observed_evidence: None,
             events: result.events.clone(),
         }
     }
 
     fn from_capo(result: &CapoToolResult) -> Self {
-        let status = if result.permission_decision.effect == "allow" {
+        let allowed = result.permission_decision.effect == "allow";
+        let status = if allowed {
             "completed".to_string()
         } else {
             "denied".to_string()
@@ -365,12 +417,21 @@ impl NormalizedToolResult {
         Self {
             tool_name: result.tool_id.clone(),
             tool_origin: "capo".to_string(),
-            status,
+            status: status.clone(),
             input_artifact_id: None,
             output_artifact_id: artifact_or_none(&result.output_artifact_id),
             permission_decision_id: Some(permission_decision_id(&grant_id)),
             capability_grant_id: Some(grant_id),
             agent_report: None,
+            // ACI9: an allowed Capo tool produces OBSERVED runtime evidence; the
+            // `tool.output_observed` event drives the `runtime_output` observation
+            // projection. A denied call emits no `tool.output_observed` event, so
+            // the observation row is never created even though the field is set.
+            observed_evidence: Some(ObservedEvidence {
+                source: EVIDENCE_SOURCE_RUNTIME_OUTPUT.to_string(),
+                observed_status: status,
+                instrumentation_level: "full".to_string(),
+            }),
             events: result.events.clone(),
         }
     }
@@ -399,6 +460,18 @@ impl NormalizedToolResult {
             permission_decision_id: Some(permission_decision_id(&grant_id)),
             capability_grant_id: Some(grant_id),
             agent_report: None,
+            // ACI9: a runtime wrapper that ran produces OBSERVED evidence; the
+            // `tool.output_observed` event drives the `runtime_output` observation
+            // projection, carrying the wrapper's OWN observed status (`exited` /
+            // `failed` / `precondition_failed` / `no_match`) rather than the folded
+            // dispatch terminal status, so the observation records what was
+            // actually observed. A denied call emits no `tool.output_observed`
+            // event, so no observation row is created even though the field is set.
+            observed_evidence: Some(ObservedEvidence {
+                source: EVIDENCE_SOURCE_RUNTIME_OUTPUT.to_string(),
+                observed_status: result.status.clone(),
+                instrumentation_level: "full".to_string(),
+            }),
             events: result.events.clone(),
         }
     }
