@@ -415,7 +415,8 @@ Verification:
 
 ## ACI5 - Search/Grep And Bounded Locator
 
-Status: done.
+Status: done (gate green after `clip_preview` tuple / `preview_clipped`
+initializer fix and dropping ripgrep `--max-count` so `total_matches` is honest).
 
 Evidence:
 
@@ -463,6 +464,25 @@ Evidence:
   clean; `cargo clippy --all-targets --all-features -- -D warnings` exit 0;
   `cargo test --workspace` => 378 passed, 0 failed (capo-tools: 72 passed);
   `git diff --check` clean.
+- Gate remediation: the working tree carried an unfinished `preview_clipped`
+  change that broke compilation -- `clip_preview` was destructured as a
+  `(String, bool)` tuple in `apply_caps` but still returned a plain `String`
+  (`search.rs:110`), and two `SearchMatch` initializers (the `parse_ripgrep_json`
+  push and the `sample_match` test helper) omitted the new `preview_clipped`
+  field. Fixed by making `clip_preview` return `(String, bool)` (clipped text +
+  whether a clip occurred) and setting `preview_clipped: false` on the
+  raw-parse and test initializers (raw matches are unclipped; `apply_caps` sets
+  the flag when it clips). Separately, the `search` handler was passing
+  `--max-count = max_matches` (a PER-FILE ripgrep cap) which made the reported
+  `total_matches` a capped undercount (6 instead of 21 in the cap fixture),
+  failing `search_per_call_match_cap_truncates_with_explicit_marker`; removed it
+  so ripgrep reports the true pre-cap total while `apply_caps` still enforces the
+  per-call match cap and the total byte cap in-process and the runner's
+  `artifact_limit_bytes` ceiling stays the hard backstop for a pathological hot
+  query. Re-ran the gate from `/Users/nicolas/devel/capo-wt/tools-aci`:
+  `cargo fmt --check` clean; `cargo clippy --all-targets --all-features -- -D
+  warnings` exit 0; `cargo test --workspace` => 0 failed (capo-tools: 72 passed,
+  including the previously-failing match-cap test).
 
 Acceptance:
 

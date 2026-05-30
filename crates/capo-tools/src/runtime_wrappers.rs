@@ -761,10 +761,34 @@ impl RuntimeToolWrappers {
         }
         // The search root is the workspace, optionally narrowed to a confined
         // subpath. Confinement reuses the shared resolver so a `..`/absolute
-        // escape is rejected before ripgrep runs.
+        // escape is rejected before ripgrep runs. `resolve_workspace_path`
+        // returns a CANONICAL absolute path; we canonicalize the workspace root
+        // the same way so the two can be relativized below.
+        let canonical_root = self
+            .config
+            .workspace_root
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
         let search_root = match request.input.get("path").and_then(Value::as_str) {
             Some(path) if !path.is_empty() => self.resolve_workspace_path(path, false)?,
-            _ => self.config.workspace_root.clone(),
+            _ => canonical_root.clone(),
+        };
+        // Run ripgrep RELATIVE to the workspace root (cwd is the canonical root)
+        // and pass the workspace-relative subpath -- `.` for the whole workspace
+        // -- as the search argument. ripgrep echoes the argument form back in
+        // `path.text`, so a relative argument yields `./`-relative paths that
+        // `normalize_match_path` folds into clean workspace-relative paths. This
+        // is what keeps `capo.search` consistent with every other wrapper
+        // (which feed/return workspace-relative paths) instead of leaking the
+        // host's absolute filesystem layout, and it produces paths the agent can
+        // hand straight back to `capo.file_read`/`capo.apply_patch`.
+        let search_arg = match search_root.strip_prefix(&canonical_root) {
+            Ok(relative) if relative.as_os_str().is_empty() => ".".to_string(),
+            Ok(relative) => relative.display().to_string(),
+            // The resolver already confined `search_root` under the workspace, so
+            // a failed strip would be a logic error; fall back to `.` (the whole
+            // workspace) rather than leaking the absolute path to ripgrep.
+            Err(_) => ".".to_string(),
         };
         let caps = self.search_caps(request)?;
 
@@ -779,11 +803,20 @@ impl RuntimeToolWrappers {
                     "--json".to_string(),
                     "--sort".to_string(),
                     "path".to_string(),
+                    // Do NOT cap ripgrep itself at the per-call match cap: doing so
+                    // (`--max-count = max_matches`, a PER-FILE limit) would make the
+                    // reported `total_matches` a capped undercount instead of the
+                    // true pre-cap total, defeating the contract that lets the agent
+                    // see how much was elided. The per-call match cap and the total
+                    // byte cap are enforced in-process by `apply_caps`, and the
+                    // runner's artifact ceiling stays the hard backstop that rejects
+                    // a pathological hot query (megabytes of `--json`) with
+                    // OutputLimitExceeded rather than filling memory/disk.
                     "--".to_string(),
                     query.clone(),
-                    search_root.display().to_string(),
+                    search_arg,
                 ],
-                cwd: self.config.workspace_root.clone(),
+                cwd: canonical_root.clone(),
                 env: HashMap::new(),
             })
             .map_err(runtime_error)?;

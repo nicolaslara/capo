@@ -25,6 +25,11 @@ pub(crate) struct SearchMatch {
     pub path: String,
     pub line: i64,
     pub preview: String,
+    /// True when this preview line was itself clipped to the per-line byte cap
+    /// (its content was elided with a trailing marker). Surfaced per-match so the
+    /// agent knows THIS line is partial even when no match/byte cap fired -- the
+    /// elision is never silent.
+    pub preview_clipped: bool,
 }
 
 impl SearchMatch {
@@ -33,6 +38,7 @@ impl SearchMatch {
             "path": self.path,
             "line": self.line,
             "preview": self.preview,
+            "preview_clipped": self.preview_clipped,
         })
     }
 }
@@ -45,11 +51,14 @@ pub(crate) struct BoundedSearch {
     /// Total matches ripgrep reported before capping. Lets the agent see how
     /// much was elided rather than only that *something* was.
     pub total_matches: usize,
-    /// True when EITHER the per-call match cap or the total preview byte cap was
-    /// hit, so the agent knows the result is partial.
+    /// True when ANY cap elided content -- the per-call match cap, the total
+    /// preview byte cap, OR a per-line preview clip -- so the agent always knows
+    /// the result is partial rather than silently incomplete.
     pub truncated: bool,
-    /// Why truncation fired (`none`, `match_cap`, or `byte_cap`), so the agent
-    /// can widen the query or raise the cap deliberately.
+    /// Why truncation fired (`none`, `match_cap`, `byte_cap`, or `preview_clip`),
+    /// so the agent can widen the query or raise the cap deliberately. A match/
+    /// byte cap (which drops whole matches) takes precedence over a per-line clip
+    /// (which only elides within a kept match) when both occur.
     pub truncation_reason: &'static str,
 }
 
@@ -92,12 +101,17 @@ pub(crate) fn apply_caps(raw: Vec<SearchMatch>, caps: SearchCaps) -> BoundedSear
     let mut kept = Vec::new();
     let mut used_bytes = 0usize;
     let mut truncation_reason = "none";
+    let mut any_preview_clipped = false;
     for mut candidate in raw {
         if kept.len() >= caps.max_matches {
             truncation_reason = "match_cap";
             break;
         }
-        candidate.preview = clip_preview(&candidate.preview, caps.max_preview_line_bytes);
+        let (clipped_preview, was_clipped) =
+            clip_preview(&candidate.preview, caps.max_preview_line_bytes);
+        candidate.preview = clipped_preview;
+        candidate.preview_clipped = was_clipped;
+        any_preview_clipped |= was_clipped;
         let next_bytes = used_bytes.saturating_add(candidate.preview.len());
         if !kept.is_empty() && next_bytes > caps.max_preview_bytes {
             // The byte budget would be exceeded by this match. Stop here so the
@@ -110,6 +124,15 @@ pub(crate) fn apply_caps(raw: Vec<SearchMatch>, caps: SearchCaps) -> BoundedSear
         used_bytes = next_bytes;
         kept.push(candidate);
     }
+    // A per-line clip elides content within a KEPT match, so it must still flag
+    // the result as partial -- otherwise a clipped preview ships with
+    // truncated=false and the agent treats a silently-elided line as complete.
+    // A whole-match cap (match/byte) takes precedence in the REASON since it
+    // discards entire matches, but the per-line clip alone is enough to mark
+    // `truncated`.
+    if truncation_reason == "none" && any_preview_clipped {
+        truncation_reason = "preview_clip";
+    }
     BoundedSearch {
         truncated: truncation_reason != "none",
         truncation_reason,
@@ -120,17 +143,18 @@ pub(crate) fn apply_caps(raw: Vec<SearchMatch>, caps: SearchCaps) -> BoundedSear
 
 /// Clip a single preview line to `max_line_bytes`, appending a trailing marker
 /// when it was clipped. Clipping respects UTF-8 char boundaries so the preview
-/// stays valid text.
-fn clip_preview(preview: &str, max_line_bytes: usize) -> String {
+/// stays valid text. Returns the (possibly clipped) preview and whether a clip
+/// occurred, so the caller can flag the match as partial.
+fn clip_preview(preview: &str, max_line_bytes: usize) -> (String, bool) {
     if preview.len() <= max_line_bytes {
-        return preview.to_string();
+        return (preview.to_string(), false);
     }
     let budget = max_line_bytes.saturating_sub(PREVIEW_CLIP_MARKER.len());
     let mut end = budget.min(preview.len());
     while end > 0 && !preview.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}{PREVIEW_CLIP_MARKER}", &preview[..end])
+    (format!("{}{PREVIEW_CLIP_MARKER}", &preview[..end]), true)
 }
 
 /// Parse ripgrep's line-delimited `--json` output into ordered raw matches
@@ -177,6 +201,9 @@ pub(crate) fn parse_ripgrep_json(stdout: &str) -> Vec<SearchMatch> {
             path: normalize_match_path(path),
             line: line_number,
             preview,
+            // Raw parsed matches are not yet clipped; `apply_caps` sets this when
+            // it clips an over-long preview line.
+            preview_clipped: false,
         });
     }
     matches
@@ -197,6 +224,7 @@ mod tests {
             path: path.to_string(),
             line,
             preview: preview.to_string(),
+            preview_clipped: false,
         }
     }
 
