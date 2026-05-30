@@ -1166,6 +1166,72 @@ fn file_read_typed_output_carries_path_bytes_and_hash() {
 }
 
 #[test]
+fn input_artifact_write_failure_yields_failed_result_not_panic() {
+    // Followup FP2: `record_input_artifact` runs unconditionally before
+    // `execute`. A write failure there (e.g. an unwritable artifact root) must
+    // flow through the same failure arm the output path uses -- a failed
+    // `WrapperToolResult` -- rather than panicking the controller mid-dispatch.
+    let workspace = temp_root("fp2-input-artifact-fail-workspace");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::write(workspace.join("note.md"), "hello fp2").expect("seed");
+
+    // Make the artifact ROOT a regular FILE. `write_tool_artifact` then calls
+    // `create_dir_all(artifact_root/<tool_call_id>)`, which deterministically
+    // fails because a path component (the artifact root) is a file, not a
+    // directory -- forcing the input-artifact write to error before `execute`.
+    let artifacts = temp_root("fp2-input-artifact-fail-artifacts-file");
+    fs::write(&artifacts, b"not a directory").expect("seed artifact-root file");
+
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts.clone(),
+    ));
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    // `authorize_and_invoke` must RETURN a failed result (no panic). A clean
+    // read tool is chosen so the only failure source is the input artifact.
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-fp2-input-fail",
+            "run-fp2-input-fail",
+            "capo.file_read",
+            serde_json::json!({"path": "note.md"}),
+        ),
+        &policy,
+    );
+
+    assert_eq!(
+        result.status, "failed",
+        "an input-artifact write failure must yield a failed result, not a panic"
+    );
+    // The failed call records no artifacts: the input write never landed, and
+    // execution was never reached.
+    assert!(
+        result.input_artifact.is_none(),
+        "a failed input-artifact write records no input artifact"
+    );
+    assert!(
+        result.output_artifacts.is_empty(),
+        "a pre-execution failure produces no output artifacts"
+    );
+    // It flows through the non-completed audit shape (tool.call_failed), never
+    // the success sequence (tool.call_completed).
+    let event_names: Vec<&str> = result
+        .events
+        .iter()
+        .map(|event| event.kind.as_str())
+        .collect();
+    assert!(
+        event_names.contains(&"tool.call_failed"),
+        "a failed input-artifact write must emit tool.call_failed, got {event_names:?}"
+    );
+    assert!(
+        !event_names.contains(&"tool.call_completed"),
+        "a failed input-artifact write must NOT emit tool.call_completed, got {event_names:?}"
+    );
+}
+
+#[test]
 fn file_write_emits_a_unified_diff_artifact() {
     // ACI3: file_write emits a unified-diff artifact (before -> after), not a
     // before/after hash summary, and the typed result records mode + hashes.

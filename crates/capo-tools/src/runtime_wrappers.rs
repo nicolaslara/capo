@@ -236,7 +236,34 @@ impl RuntimeToolWrappers {
             ToolAuditEvent::new("capability.grant_used", "used"),
             ToolAuditEvent::new("tool.invocation_started", "running"),
         ]);
-        let input_artifact = self.record_input_artifact(&request);
+        // The input artifact is recorded BEFORE execution. A write failure here
+        // (e.g. an unwritable artifact root) must NOT panic the controller
+        // mid-dispatch: route it through the same failure arm the post-execution
+        // error path uses so it yields a failed `WrapperToolResult` (with no
+        // input/output artifacts) instead of aborting (symmetric with the output
+        // path, which already returns `Result`).
+        let input_artifact = match self.record_input_artifact(&request) {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                events.extend([
+                    ToolAuditEvent::new("tool.output_observed", "failed"),
+                    ToolAuditEvent::new("tool.call_failed", "failed"),
+                ]);
+                let typed_output =
+                    failed_typed_output(&authorization.definition.output_schema, &error);
+                return WrapperToolResult {
+                    tool_call_id: request.tool_call_id,
+                    tool_id: request.tool_id,
+                    status: "failed".to_string(),
+                    summary: error,
+                    typed_output,
+                    input_artifact: None,
+                    output_artifacts: Vec::new(),
+                    permission_decision: authorization.permission,
+                    events,
+                };
+            }
+        };
         let execution = self.execute(&request);
         match execution {
             Ok(execution) if execution.reached_completion => {
@@ -1149,7 +1176,18 @@ impl RuntimeToolWrappers {
         }
     }
 
-    fn record_input_artifact(&self, request: &WrapperToolRequest) -> WrapperArtifact {
+    /// Persist the redacted wrapper INPUT artifact (ACI7).
+    ///
+    /// Returns `Result` rather than panicking on an artifact-root write failure:
+    /// this runs unconditionally before [`Self::execute`], so an `.expect` here
+    /// would abort the controller mid-dispatch. Surfacing the error lets
+    /// [`Self::invoke_authorized`] route it through the same failure arm the
+    /// output path already uses, yielding a failed `WrapperToolResult` instead of
+    /// a panic (symmetric with the output-artifact write path).
+    fn record_input_artifact(
+        &self,
+        request: &WrapperToolRequest,
+    ) -> Result<WrapperArtifact, String> {
         let payload = format!(
             "{{\"tool_id\":\"{}\",\"input\":{}}}",
             request.tool_id, request.input
@@ -1164,7 +1202,6 @@ impl RuntimeToolWrappers {
             &redacted,
             &redaction_state,
         )
-        .expect("write wrapper input artifact")
     }
 
     /// Write a tool OUTPUT artifact, redacting its content through the wrapper
