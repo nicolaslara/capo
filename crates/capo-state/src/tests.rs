@@ -2827,3 +2827,102 @@ fn committed_events_fan_out_to_live_subscribers_after_append() {
         "a dropped subscriber is pruned from the fan-out on the next publish"
     );
 }
+
+/// Append a turn-keyed conversation event for the ST5 thread-projection tests.
+fn append_turn_event(
+    store: &SqliteStateStore,
+    session_id: &SessionId,
+    event_id: &str,
+    kind: EventKind,
+    turn_id: &str,
+    payload_json: &str,
+) -> i64 {
+    store
+        .append_event(
+            NewEvent {
+                event_id: event_id.to_string(),
+                kind,
+                actor: "thread-test".to_string(),
+                project_id: Some(ProjectId::new("project-capo")),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(session_id.clone()),
+                run_id: None,
+                turn_id: Some(turn_id.to_string()),
+                item_id: None,
+                payload_json: payload_json.to_string(),
+                idempotency_key: Some(format!("thread:{event_id}")),
+                redaction_state: RedactionState::Safe,
+            },
+            &[],
+        )
+        .expect("append turn event")
+}
+
+#[test]
+fn session_thread_rebuilds_identically_from_the_persisted_log_on_restart() {
+    let store = temp_store("session-thread");
+    let session_id = SessionId::new("session-thread");
+
+    // A scripted two-turn conversation persisted to the durable event log.
+    append_turn_event(
+        &store,
+        &session_id,
+        "te1",
+        EventKind::SessionSummaryUpdated,
+        "turn-a",
+        "{\"latest_summary\":\"first reply\"}",
+    );
+    append_turn_event(
+        &store,
+        &session_id,
+        "te2",
+        EventKind::ToolCallCompleted,
+        "turn-a",
+        "{\"tool_name\":\"shell\",\"status\":\"completed\"}",
+    );
+    append_turn_event(
+        &store,
+        &session_id,
+        "te3",
+        EventKind::EvidenceRecorded,
+        "turn-a",
+        "{\"detail\":\"turn done\"}",
+    );
+    append_turn_event(
+        &store,
+        &session_id,
+        "te4",
+        EventKind::SessionSummaryUpdated,
+        "turn-b",
+        "{\"latest_summary\":\"second reply\"}",
+    );
+
+    let thread = store
+        .session_thread(&session_id, 0, 1024)
+        .expect("session thread");
+    assert_eq!(thread.turns.len(), 2);
+    assert_eq!(thread.turns[0].turn_id, "turn-a");
+    assert_eq!(thread.turns[0].status, ThreadTurnStatus::Completed);
+    assert_eq!(thread.turns[1].turn_id, "turn-b");
+    assert_eq!(thread.turns[1].status, ThreadTurnStatus::InProgress);
+
+    // Restart/replay: a fresh store over the same root reconstructs the
+    // identical thread purely from the durable log (rebuildable read model).
+    let reopened = SqliteStateStore::open(store.db_path().parent().expect("db parent"))
+        .expect("reopen state store");
+    let rebuilt = reopened
+        .session_thread(&session_id, 0, 1024)
+        .expect("rebuilt session thread");
+    assert_eq!(thread, rebuilt);
+
+    // Incremental read composes with a tail: reading after turn-a's last
+    // sequence yields only turn-b, carrying the watermark through.
+    let watermark = thread.turns[0].last_sequence;
+    let tail = store
+        .session_thread(&session_id, watermark, 1024)
+        .expect("incremental thread");
+    assert_eq!(tail.since_sequence, watermark);
+    assert_eq!(tail.turns.len(), 1);
+    assert_eq!(tail.turns[0].turn_id, "turn-b");
+}

@@ -311,7 +311,7 @@ Evidence:
 
 ## ST5 - Multi-Turn Thread Read Model Projected From Events
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -335,6 +335,23 @@ Verification:
   to an identical thread.
 - Idempotency test for duplicate/replayed turn events.
 - `cargo fmt` and focused `cargo test -p capo-state -p capo-server`.
+
+Evidence:
+
+- Gate fix only (no behavior change): in
+  `crates/capo-state/src/thread.rs`, collapsed the `turns.last_mut().expect(...)`
+  method chain back onto one line so `cargo fmt --check` is clean, and collapsed
+  the nested `if let Some(text) = ... { if !text.is_empty() { ... } }` into a
+  single `if let ... && !text.is_empty()` let-chain to satisfy clippy's
+  `collapsible_if` under `-D warnings`. The projection logic, item/turn keying,
+  and `item_text` field-priority semantics are unchanged.
+- Objective gate run from `/Users/nicolas/devel/capo-wt/streaming-transport`:
+  `cargo fmt --check` ok (exit 0); `cargo clippy --all-targets --all-features --
+  -D warnings` ok (exit 0); `cargo test --workspace` ok (exit 0; 0 failures
+  workspace-wide -- capo-state 46 passed including the 4 `thread::tests`
+  projection/rebuild/idempotency/incremental-read cases, capo-server 72
+  passed/1 ignored, capo-cli `server_transport` 11 passed, all other crates
+  green).
 
 ## ST6 - Typed Mid-Turn Interrupt Wired To Ctrl-C
 

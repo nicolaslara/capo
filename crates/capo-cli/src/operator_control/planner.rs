@@ -15,6 +15,11 @@ pub(super) enum OperatorAction {
     ResultsAndEvidence {
         agent: Option<String>,
     },
+    /// Render the agent's multi-turn conversation thread (ST5), the read model
+    /// projected from the event log, instead of the single latest summary.
+    Thread {
+        agent: Option<String>,
+    },
     Details {
         agent: Option<String>,
     },
@@ -294,6 +299,9 @@ fn parse_action(line: &str) -> Result<OperatorAction, String> {
         "results" | "responses" => Ok(OperatorAction::ResultsAndEvidence {
             agent: parts.next().map(ToString::to_string),
         }),
+        "thread" | "conversation" | "convo" => Ok(OperatorAction::Thread {
+            agent: parts.next().map(ToString::to_string),
+        }),
         "send" => parse_send(line),
         "interrupt" => parse_reason_action(line, "interrupt", |agent, reason| {
             OperatorAction::Interrupt { agent, reason }
@@ -486,6 +494,7 @@ impl OperatorAction {
             Self::Status { .. } => "status",
             Self::RecentWork { .. } => "recent_work",
             Self::ResultsAndEvidence { .. } => "results_evidence",
+            Self::Thread { .. } => "thread",
             Self::Details { .. } => "details",
             Self::ToolActivity { .. } => "tool_activity",
             Self::Evidence { .. } => "evidence",
@@ -504,6 +513,7 @@ impl OperatorAction {
             Self::Status { agent }
             | Self::RecentWork { agent }
             | Self::ResultsAndEvidence { agent }
+            | Self::Thread { agent }
             | Self::Details { agent }
             | Self::ToolActivity { agent }
             | Self::Evidence { agent }

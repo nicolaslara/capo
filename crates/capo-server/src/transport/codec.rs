@@ -12,8 +12,8 @@ use super::{
 use crate::{
     AdapterReplaySummary, AgentSummary, DispatchGateSummary, DispatchPlanSummary,
     DispatchRunSummary, LiveProviderPreflightSummary, RecoverySummary, ServerClientOrigin,
-    ServerCommand, ServerEvent, ServerResponse, ServerResponsePayload, SessionSummary,
-    SubscriptionBacklog, TaskRunSummary,
+    ServerCommand, ServerEvent, ServerResponse, ServerResponsePayload, ServerThread,
+    ServerThreadItem, ServerThreadTurn, SessionSummary, SubscriptionBacklog, TaskRunSummary,
 };
 
 pub(super) fn encode_origin(origin: &ServerClientOrigin) -> Value {
@@ -237,6 +237,14 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             "session_id": session_id,
             "from_sequence": from_sequence,
         }),
+        ServerCommand::ReadThread {
+            session_id,
+            from_sequence,
+        } => json!({
+            "type": "read_thread",
+            "session_id": session_id,
+            "from_sequence": from_sequence,
+        }),
     }
 }
 
@@ -336,6 +344,10 @@ pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
         "recover" => Ok(ServerCommand::Recover),
         "subscribe" => Ok(ServerCommand::Subscribe {
             session_id: optional_string(value, "session_id")?,
+            from_sequence: required_i64(value, "from_sequence")?,
+        }),
+        "read_thread" => Ok(ServerCommand::ReadThread {
+            session_id: required_string(value, "session_id")?,
             from_sequence: required_i64(value, "from_sequence")?,
         }),
         other => Err(TransportError::Protocol(format!(
@@ -475,7 +487,36 @@ pub(super) fn encode_payload(payload: &ServerResponsePayload) -> Value {
             "next_sequence": backlog.next_sequence,
             "events": backlog.events.iter().map(encode_event).collect::<Vec<_>>(),
         }),
+        ServerResponsePayload::Thread(thread) => json!({
+            "type": "thread",
+            "session_id": thread.session_id,
+            "from_sequence": thread.from_sequence,
+            "next_sequence": thread.next_sequence,
+            "turns": thread.turns.iter().map(encode_thread_turn).collect::<Vec<_>>(),
+        }),
     }
+}
+
+fn encode_thread_turn(turn: &ServerThreadTurn) -> Value {
+    json!({
+        "turn_id": turn.turn_id,
+        "status": turn.status,
+        "first_sequence": turn.first_sequence,
+        "last_sequence": turn.last_sequence,
+        "items": turn.items.iter().map(encode_thread_item).collect::<Vec<_>>(),
+    })
+}
+
+fn encode_thread_item(item: &ServerThreadItem) -> Value {
+    json!({
+        "sequence": item.sequence,
+        "event_id": item.event_id,
+        "kind": item.kind,
+        "event_kind": item.event_kind,
+        "item_ref": item.item_ref,
+        "text": item.text,
+        "redaction_state": item.redaction_state,
+    })
 }
 
 /// Encode a single tail event (ST4). The same shape is used both inside a
@@ -514,6 +555,33 @@ pub(crate) fn decode_event(value: &Value) -> TransportResult<ServerEvent> {
         turn_id: optional_string(value, "turn_id")?,
         item_id: optional_string(value, "item_id")?,
         payload_json: required_string(value, "payload_json")?,
+        redaction_state: required_string(value, "redaction_state")?,
+    })
+}
+
+fn decode_thread_turn(value: &Value) -> TransportResult<ServerThreadTurn> {
+    Ok(ServerThreadTurn {
+        turn_id: required_string(value, "turn_id")?,
+        status: required_string(value, "status")?,
+        first_sequence: required_i64(value, "first_sequence")?,
+        last_sequence: required_i64(value, "last_sequence")?,
+        items: required_value(value, "items")?
+            .as_array()
+            .ok_or_else(|| TransportError::Protocol("items must be an array".to_string()))?
+            .iter()
+            .map(decode_thread_item)
+            .collect::<TransportResult<Vec<_>>>()?,
+    })
+}
+
+fn decode_thread_item(value: &Value) -> TransportResult<ServerThreadItem> {
+    Ok(ServerThreadItem {
+        sequence: required_i64(value, "sequence")?,
+        event_id: required_string(value, "event_id")?,
+        kind: required_string(value, "kind")?,
+        event_kind: required_string(value, "event_kind")?,
+        item_ref: optional_string(value, "item_ref")?,
+        text: optional_string(value, "text")?,
         redaction_state: required_string(value, "redaction_state")?,
     })
 }
@@ -650,6 +718,17 @@ pub(super) fn decode_payload(value: &Value) -> TransportResult<ServerResponsePay
                 .ok_or_else(|| TransportError::Protocol("events must be an array".to_string()))?
                 .iter()
                 .map(decode_event)
+                .collect::<TransportResult<Vec<_>>>()?,
+        })),
+        "thread" => Ok(ServerResponsePayload::Thread(ServerThread {
+            session_id: required_string(value, "session_id")?,
+            from_sequence: required_i64(value, "from_sequence")?,
+            next_sequence: required_i64(value, "next_sequence")?,
+            turns: required_value(value, "turns")?
+                .as_array()
+                .ok_or_else(|| TransportError::Protocol("turns must be an array".to_string()))?
+                .iter()
+                .map(decode_thread_turn)
                 .collect::<TransportResult<Vec<_>>>()?,
         })),
         other => Err(TransportError::Protocol(format!(

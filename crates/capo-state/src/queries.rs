@@ -1608,6 +1608,36 @@ impl SqliteStateStore {
             .optional()?;
         Ok(turn_id.flatten())
     }
+
+    /// Project the multi-turn conversation thread for a session, incrementally
+    /// by sequence (ST5).
+    ///
+    /// This reads the session's committed events strictly after `since_sequence`
+    /// (via the same [`Self::events_after_for_session`] forward read the ST4
+    /// `Subscribe` backlog uses) and folds them into a [`SessionThread`] through
+    /// the pure [`SessionThread::project`] projection. Because both the read and
+    /// the fold are deterministic over the durable log, the thread rebuilds
+    /// identically on restart/replay, and because the watermark semantics match
+    /// `events_after_for_session`, a thread read composes gap-free and
+    /// duplicate-free with a `Subscribe` resuming from the same `since_sequence`.
+    ///
+    /// `since_sequence` of `0` reads the full thread from the start of the log;
+    /// a caller pages forward by advancing it to the returned
+    /// [`SessionThread::next_sequence`]. `limit` bounds the catch-up read so a
+    /// session with a very long log reads a bounded page.
+    pub fn session_thread(
+        &self,
+        session_id: &SessionId,
+        since_sequence: i64,
+        limit: usize,
+    ) -> StateResult<crate::SessionThread> {
+        let events = self.events_after_for_session(session_id, since_sequence, limit)?;
+        Ok(crate::SessionThread::project(
+            session_id.clone(),
+            since_sequence,
+            &events,
+        ))
+    }
 }
 
 /// Extract `(external_pid, runtime_process_ref)` from a `run.started` payload

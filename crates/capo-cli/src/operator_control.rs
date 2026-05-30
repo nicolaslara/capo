@@ -24,7 +24,7 @@ use render::{
     AgentRenderer, AgentResultRenderer, ConciseResultRenderer, DetailsRenderer, EvidenceRenderer,
     RecentWorkRenderer, ResultsAndEvidenceRenderer, ReviewNeedsRenderer, ToolActivityRenderer,
     display_text, render_agent_result_body, render_dashboard, render_human_agent,
-    render_human_agent_with_marker, render_recent_work,
+    render_human_agent_with_marker, render_recent_work, render_thread,
 };
 use server_process::{AutoServer, ensure_server_running, require_loopback_address, server_address};
 
@@ -362,6 +362,7 @@ Operator input: {line}
             OperatorAction::Status { agent } => self.status(agent),
             OperatorAction::RecentWork { agent } => self.recent_work(agent),
             OperatorAction::ResultsAndEvidence { agent } => self.results_and_evidence(agent),
+            OperatorAction::Thread { agent } => self.thread(agent),
             OperatorAction::Details { agent } => self.details(agent),
             OperatorAction::ToolActivity { agent } => self.tool_activity(agent),
             OperatorAction::Evidence { agent } => self.evidence(agent),
@@ -416,6 +417,25 @@ Operator input: {line}
 
     fn results_and_evidence(&mut self, agent: Option<String>) -> Result<String, String> {
         self.read_agent_or_all(agent, ResultsAndEvidenceRenderer)
+    }
+
+    /// Render the agent's multi-turn conversation thread (ST5): the read model
+    /// projected from the event log, replacing the single `latest_summary`. The
+    /// thread is read incrementally from sequence 0 and rendered turn-by-turn;
+    /// the client never authors thread ordering.
+    fn thread(&mut self, agent: Option<String>) -> Result<String, String> {
+        let summary = self.resolved_agent_status(agent)?;
+        let Some(session) = summary.session.as_ref() else {
+            return Ok(format!("{} has no active session.\n", summary.name));
+        };
+        let response = self.send_request(ServerCommand::ReadThread {
+            session_id: session.session_id.to_string(),
+            from_sequence: 0,
+        })?;
+        let ServerResponsePayload::Thread(thread) = response else {
+            return Err("server returned unexpected response for thread".to_string());
+        };
+        Ok(render_thread(&summary.name, &thread))
     }
 
     fn details(&mut self, agent: Option<String>) -> Result<String, String> {
@@ -796,6 +816,7 @@ Commands:
   status [AGENT]
   state [AGENT] | result [AGENT]
   results [AGENT] | responses [AGENT]
+  thread [AGENT] | conversation [AGENT]
   recent [AGENT] | work [AGENT]
   details [AGENT]
   tools [AGENT]

@@ -1096,6 +1096,19 @@ impl CapoServer {
                     ServerResponsePayload::Subscribed(backlog),
                 )
             }
+            ServerCommand::ReadThread {
+                session_id,
+                from_sequence,
+            } => {
+                // ReadThread is read-only: it projects the multi-turn thread read
+                // model from the event log strictly after `from_sequence`, never
+                // appending an event. The projection rebuilds identically from
+                // the durable log, so a read after restart reconstructs the same
+                // thread, and its `next_sequence` watermark composes with a
+                // `Subscribe` tail over the same watermark.
+                let thread = self.read_thread(session_id, from_sequence)?;
+                self.response(request_id, origin, ServerResponsePayload::Thread(thread))
+            }
         }
     }
 
@@ -1159,6 +1172,26 @@ impl CapoServer {
             next_sequence,
             events,
         })
+    }
+
+    /// Read a session's multi-turn conversation thread (ST5) incrementally from
+    /// `from_sequence`.
+    ///
+    /// This delegates to the pure `capo_state::SqliteStateStore::session_thread`
+    /// projection over the durable event log (the same forward read the ST4
+    /// backlog uses), so the thread is a rebuildable read model and composes
+    /// gap-free with a `Subscribe` resuming from the returned `next_sequence`.
+    fn read_thread(&self, session_id: String, from_sequence: i64) -> ServerResult<ServerThread> {
+        let thread = self
+            .controller
+            .state()
+            .session_thread(
+                &SessionId::new(session_id),
+                from_sequence,
+                EVENT_TAIL_BACKLOG_LIMIT,
+            )
+            .map_err(ServerError::State)?;
+        Ok(ServerThread::from_thread(thread))
     }
 }
 

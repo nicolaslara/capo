@@ -212,6 +212,16 @@ pub enum ServerCommand {
         session_id: Option<String>,
         from_sequence: i64,
     },
+    /// Read a session's multi-turn conversation thread (ST5), a read model
+    /// projected from the event log, incrementally by sequence. The thread
+    /// reconstructs strictly after `from_sequence`, so it composes with
+    /// [`ServerCommand::Subscribe`] over the same watermark (read the thread
+    /// once, then tail the live events to extend it). `from_sequence` of `0`
+    /// reads the full thread.
+    ReadThread {
+        session_id: String,
+        from_sequence: i64,
+    },
 }
 
 /// A single committed event as it crosses the server transport boundary (ST4).
@@ -275,6 +285,73 @@ pub struct SubscriptionBacklog {
     pub events: Vec<ServerEvent>,
 }
 
+/// The wire shape of a session's multi-turn conversation thread (ST5).
+///
+/// This mirrors `capo_state::SessionThread` -- the read model projected from the
+/// event log -- so a client renders an ordered conversation without authoring
+/// turn ordering itself. `next_sequence` is the watermark a caller resumes a
+/// later read (or a `Subscribe` tail) from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServerThread {
+    pub session_id: String,
+    pub from_sequence: i64,
+    pub next_sequence: i64,
+    pub turns: Vec<ServerThreadTurn>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServerThreadTurn {
+    pub turn_id: String,
+    pub status: String,
+    pub first_sequence: i64,
+    pub last_sequence: i64,
+    pub items: Vec<ServerThreadItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServerThreadItem {
+    pub sequence: i64,
+    pub event_id: String,
+    pub kind: String,
+    pub event_kind: String,
+    pub item_ref: Option<String>,
+    pub text: Option<String>,
+    pub redaction_state: String,
+}
+
+impl ServerThread {
+    pub(crate) fn from_thread(thread: capo_state::SessionThread) -> Self {
+        Self {
+            session_id: thread.session_id.to_string(),
+            from_sequence: thread.since_sequence,
+            next_sequence: thread.next_sequence,
+            turns: thread
+                .turns
+                .into_iter()
+                .map(|turn| ServerThreadTurn {
+                    turn_id: turn.turn_id,
+                    status: turn.status.as_str().to_string(),
+                    first_sequence: turn.first_sequence,
+                    last_sequence: turn.last_sequence,
+                    items: turn
+                        .items
+                        .into_iter()
+                        .map(|item| ServerThreadItem {
+                            sequence: item.sequence,
+                            event_id: item.event_id,
+                            kind: item.kind.as_str().to_string(),
+                            event_kind: item.event_kind,
+                            item_ref: item.item_ref,
+                            text: item.text,
+                            redaction_state: item.redaction_state,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
 impl ServerCommand {
     /// Whether this command only reads the store (never appends an event or
     /// mutates a projection). Read-only commands need not be serialized behind
@@ -294,6 +371,10 @@ impl ServerCommand {
                 // mutates a projection, so it need not be serialized behind the
                 // single-writer lock.
                 | ServerCommand::Subscribe { .. }
+                // ReadThread projects a read model from the event log; it is a
+                // pure forward read and never appends an event or mutates a
+                // projection.
+                | ServerCommand::ReadThread { .. }
         )
     }
 }
@@ -325,6 +406,9 @@ pub enum ServerResponsePayload {
     /// events that follow are pushed as JSON-RPC notifications
     /// (`crate::EventNotification`), not as further responses to this request.
     Subscribed(SubscriptionBacklog),
+    /// A session's multi-turn conversation thread (ST5), projected from the
+    /// event log for [`ServerCommand::ReadThread`].
+    Thread(ServerThread),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -722,5 +806,9 @@ fn default_request_id(command: &ServerCommand) -> String {
                 .unwrap_or_else(|| "all".to_string()),
             from_sequence
         ),
+        ServerCommand::ReadThread {
+            session_id,
+            from_sequence,
+        } => format!("server-thread-{}-{}", slug(session_id), from_sequence),
     }
 }
