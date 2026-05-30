@@ -3162,3 +3162,481 @@ fn identical_keyless_reports_dedupe_but_different_bodies_stay_distinct() {
         "a different body must produce a distinct idempotency key"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ACI10: deterministic, scripted fake tool implementations for replayable tests
+// ---------------------------------------------------------------------------
+
+/// A fake-wrappers config pointing at a NON-EXISTENT workspace/artifact root.
+///
+/// The whole point of the fakes is that they never spawn a process or touch
+/// disk, so the config paths need not exist; using a fixed path keeps the test
+/// deterministic and proves nothing is read/written.
+fn fake_wrapper_config() -> RuntimeToolConfig {
+    RuntimeToolConfig::local_workspace(
+        PathBuf::from("/nonexistent/capo-fake-workspace"),
+        PathBuf::from("/nonexistent/capo-fake-artifacts"),
+    )
+}
+
+#[test]
+fn fake_wrappers_clean_path_covers_every_wrapper_tool_with_schema_valid_output() {
+    // ACI10: a deterministic fake produces a clean result for EVERY runtime
+    // wrapper tool, shaped exactly like the real path: the canonical observed
+    // audit sequence, an input + output artifact, and a typed output that
+    // validates against the tool's own declared `output_schema`.
+    let fake = FakeRuntimeToolWrappers::new(fake_wrapper_config());
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    for tool_id in CAPO_WRAPPER_TOOLS {
+        let definition = fake
+            .describe_tool(tool_id)
+            .expect("fake wrapper definition");
+        let result = fake.authorize_and_invoke(
+            wrapper_request(
+                &format!("call-{tool_id}"),
+                "run-fake-clean",
+                tool_id,
+                serde_json::json!({"path": "src/lib.rs"}),
+            ),
+            &policy,
+            ScriptedWrapperOutcome::ok(b"fake output bytes".to_vec()),
+        );
+
+        // The fake emits the SAME canonical completed audit sequence as the
+        // real path -- the dispatch/projection layer is shape-driven, so a fake
+        // must drive it identically.
+        let kinds: Vec<&str> = result.events.iter().map(|e| e.kind.as_str()).collect();
+        for expected in [
+            "tool.call_requested",
+            "permission.requested",
+            "permission.decided",
+            "capability.grant_used",
+            "tool.invocation_started",
+            "tool.output_artifact_recorded",
+            "tool.output_observed",
+            "tool.call_completed",
+            "tool.result_delivered",
+        ] {
+            assert!(
+                kinds.contains(&expected),
+                "fake {tool_id} clean result missing audit event {expected}; got {kinds:?}"
+            );
+        }
+
+        // Input + output artifacts exist, carry a redaction state, and are NOT
+        // written to disk (a `fake://` uri).
+        let input_artifact = result.input_artifact.as_ref().expect("fake input artifact");
+        assert!(input_artifact.uri.starts_with("fake://"));
+        let output_artifact = result
+            .output_artifacts
+            .first()
+            .expect("fake output artifact");
+        assert!(output_artifact.uri.starts_with("fake://"));
+        assert!(
+            !output_artifact.redaction_state.is_empty(),
+            "fake artifact must record a redaction_state"
+        );
+
+        // The typed output validates against the tool's own declared schema, so
+        // "narrow typed output" holds on the fake path too.
+        let errors = definition.validate_output(&result.narrow_output());
+        assert!(
+            errors.is_empty(),
+            "fake {tool_id} typed output must validate against its output_schema: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn fake_wrappers_results_are_deterministic_and_replay_identically() {
+    // ACI10: two fake invocations of the same scripted call produce a
+    // byte-identical result (no clock, no process, no disk), so a replay /
+    // projection-rebuild test over a fake is stable.
+    let fake = FakeRuntimeToolWrappers::new(fake_wrapper_config());
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    let first = fake.authorize_and_invoke(
+        wrapper_request(
+            "call-det",
+            "run-det",
+            "capo.shell_run",
+            serde_json::json!({}),
+        ),
+        &policy,
+        ScriptedWrapperOutcome::ok(b"deterministic output".to_vec()),
+    );
+    let second = fake.authorize_and_invoke(
+        wrapper_request(
+            "call-det",
+            "run-det",
+            "capo.shell_run",
+            serde_json::json!({}),
+        ),
+        &policy,
+        ScriptedWrapperOutcome::ok(b"deterministic output".to_vec()),
+    );
+    assert_eq!(first, second, "fake result must be deterministic on replay");
+    // Determinism includes the pinned timing -- never a wall clock.
+    assert_eq!(first.typed_output["duration_ms"], FAKE_DURATION_MS);
+}
+
+#[test]
+fn fake_shell_run_ran_but_failed_is_a_completed_call_carrying_evidence() {
+    // ACI10 (failure path): a scripted command that COMPLETED but did not pass
+    // (non-zero exit) is still a completed call -- it delivered a full evidence
+    // record. `passed:false` + `status=failed` is the decision-grade signal, not
+    // a tool error. Mirrors the real `capo.shell_run` semantics.
+    let fake = FakeRuntimeToolWrappers::new(fake_wrapper_config());
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    let result = fake.authorize_and_invoke(
+        wrapper_request(
+            "call-fail-cmd",
+            "run-fail",
+            "capo.shell_run",
+            serde_json::json!({}),
+        ),
+        &policy,
+        ScriptedWrapperOutcome::ran_but_failed(b"boom\n".to_vec()),
+    );
+    assert_eq!(result.status, "failed");
+    assert_eq!(result.typed_output["passed"], serde_json::json!(false));
+    assert_eq!(result.typed_output["exit_status"], serde_json::json!(1));
+    // It still completed: it produced an artifact and a completed call event.
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|e| e.kind == "tool.call_completed")
+    );
+    assert!(!result.output_artifacts.is_empty());
+}
+
+#[test]
+fn fake_wrapper_handler_failure_emits_the_failed_non_completed_shape() {
+    // ACI10 (failure path): a scripted handler ERROR emits the same
+    // non-completed `failed` shape as the real failure path -- no
+    // `tool.call_completed`, a `tool.call_failed`, and a schema-valid typed
+    // output carrying status `failed`.
+    let fake = FakeRuntimeToolWrappers::new(fake_wrapper_config());
+    let policy = PermissionPolicy::allow_trusted_local();
+    let definition = fake.describe_tool("capo.file_read").expect("definition");
+
+    let result = fake.authorize_and_invoke(
+        wrapper_request(
+            "call-err",
+            "run-err",
+            "capo.file_read",
+            serde_json::json!({}),
+        ),
+        &policy,
+        ScriptedWrapperOutcome::Failed {
+            error: "file_read input requires string field `path`".to_string(),
+        },
+    );
+    assert_eq!(result.status, "failed");
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|e| e.kind == "tool.call_completed"),
+        "a failed call must not emit tool.call_completed"
+    );
+    assert!(
+        result.events.iter().any(|e| e.kind == "tool.call_failed"),
+        "a failed call must emit tool.call_failed"
+    );
+    let errors = definition.validate_output(&result.narrow_output());
+    assert!(
+        errors.is_empty(),
+        "failed typed output must validate: {errors:?}"
+    );
+    assert_eq!(result.typed_output["status"], serde_json::json!("failed"));
+}
+
+#[test]
+fn fake_apply_patch_rejected_hunk_is_a_structured_retryable_no_match() {
+    // ACI10 (failure path): a scripted rejected `apply_patch` hunk is a
+    // STRUCTURED retryable no-match that wrote nothing, carrying the rejected
+    // hunk index and reason -- the same shape as the real `no_match_execution`.
+    let fake = FakeRuntimeToolWrappers::new(fake_wrapper_config());
+    let policy = PermissionPolicy::allow_trusted_local();
+    let definition = fake.describe_tool("capo.apply_patch").expect("definition");
+
+    let result = fake.authorize_and_invoke(
+        wrapper_request(
+            "call-nomatch",
+            "run-nomatch",
+            "capo.apply_patch",
+            serde_json::json!({"path": "src/lib.rs"}),
+        ),
+        &policy,
+        ScriptedWrapperOutcome::NoMatch {
+            rejected_hunk_index: 2,
+            reject_reason: "no strategy located the search block".to_string(),
+        },
+    );
+    assert_eq!(result.status, "no_match");
+    assert!(
+        result.output_artifacts.is_empty(),
+        "a no-match writes nothing"
+    );
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|e| e.kind == "tool.call_completed")
+    );
+    assert_eq!(
+        result.typed_output["rejected_hunk_index"],
+        serde_json::json!(2)
+    );
+    assert_eq!(result.typed_output["status"], serde_json::json!("no_match"));
+    let errors = definition.validate_output(&result.narrow_output());
+    assert!(
+        errors.is_empty(),
+        "no_match typed output must validate: {errors:?}"
+    );
+}
+
+#[test]
+fn fake_file_write_precondition_mismatch_writes_nothing() {
+    // ACI10 (failure path): a scripted `file_write` precondition mismatch is a
+    // typed `precondition_failed` that did NOT write, carrying expected/actual
+    // hashes, exactly like the real precondition guard.
+    let fake = FakeRuntimeToolWrappers::new(fake_wrapper_config());
+    let policy = PermissionPolicy::allow_trusted_local();
+    let definition = fake.describe_tool("capo.file_write").expect("definition");
+
+    let result = fake.authorize_and_invoke(
+        wrapper_request(
+            "call-precond",
+            "run-precond",
+            "capo.file_write",
+            serde_json::json!({"path": "src/lib.rs", "content": "new"}),
+        ),
+        &policy,
+        ScriptedWrapperOutcome::PreconditionFailed {
+            expected_hash: "fnv1a64:1111111111111111".to_string(),
+            actual_hash: "fnv1a64:2222222222222222".to_string(),
+        },
+    );
+    assert_eq!(result.status, "precondition_failed");
+    assert!(
+        result.output_artifacts.is_empty(),
+        "a precondition fail writes nothing"
+    );
+    assert_eq!(
+        result.typed_output["expected_hash"],
+        serde_json::json!("fnv1a64:1111111111111111")
+    );
+    assert_eq!(
+        result.typed_output["actual_hash"],
+        serde_json::json!("fnv1a64:2222222222222222")
+    );
+    let errors = definition.validate_output(&result.narrow_output());
+    assert!(
+        errors.is_empty(),
+        "precondition typed output must validate: {errors:?}"
+    );
+}
+
+#[test]
+fn fake_wrapper_permission_denial_runs_no_handler() {
+    // ACI10 (failure path): a permission DENIAL on the fake path behaves exactly
+    // like the real path -- the real authorization phase denies the call, no
+    // scripted outcome is applied, and the denied audit/typed-output shape is
+    // emitted. A read-only profile denies `capo.file_write`.
+    let fake = FakeRuntimeToolWrappers::new(fake_wrapper_config());
+    let read_only = PermissionPolicy::static_read_only_local();
+    let definition = fake.describe_tool("capo.file_write").expect("definition");
+
+    let result = fake.authorize_and_invoke(
+        wrapper_request(
+            "call-deny",
+            "run-deny",
+            "capo.file_write",
+            serde_json::json!({"path": "src/lib.rs", "content": "x"}),
+        ),
+        &read_only,
+        // The scripted "clean" outcome must be IGNORED because the policy denies.
+        ScriptedWrapperOutcome::ok(b"should-never-be-used".to_vec()),
+    );
+    assert_eq!(result.status, "denied");
+    assert_eq!(result.permission_decision.effect, "deny");
+    assert!(
+        result.output_artifacts.is_empty(),
+        "a denied call runs no handler"
+    );
+    assert!(
+        result.input_artifact.is_none(),
+        "a denied call records no input artifact"
+    );
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|e| e.kind == "tool.call_canceled" && e.status == "permission_denied")
+    );
+    let errors = definition.validate_output(&result.narrow_output());
+    assert!(
+        errors.is_empty(),
+        "denied typed output must validate: {errors:?}"
+    );
+}
+
+#[test]
+fn fake_wrapper_redacts_a_configured_secret_in_the_output_artifact() {
+    // ACI10 + ACI7: the fake reuses the REAL wrapper redaction policy, so a
+    // configured secret in scripted output is scrubbed in the artifact and the
+    // recorded `redaction_state` is honest -- the redaction contract holds on the
+    // fake path without a live process.
+    let mut config = fake_wrapper_config();
+    config.redaction_rules.push(RedactionRule {
+        pattern: "SECRET".to_string(),
+        replacement: "[REDACTED]".to_string(),
+    });
+    let fake = FakeRuntimeToolWrappers::new(config);
+    let policy = PermissionPolicy::allow_trusted_local();
+
+    let result = fake.authorize_and_invoke(
+        wrapper_request(
+            "call-redact",
+            "run-redact",
+            "capo.file_read",
+            serde_json::json!({"path": "src/secrets.txt"}),
+        ),
+        &policy,
+        ScriptedWrapperOutcome::ok(b"token=SECRET-value".to_vec()),
+    );
+    let artifact = result.output_artifacts.first().expect("output artifact");
+    assert_eq!(
+        artifact.redaction_state, "redacted",
+        "a configured secret in fake output must be recorded as redacted"
+    );
+    // The content hash is over the REDACTED bytes; the typed output references
+    // the redacted artifact, never the cleartext.
+    assert_eq!(result.typed_output["content_hash"], artifact.content_hash);
+}
+
+#[test]
+fn fake_runtime_wrappers_are_a_test_only_boundary() {
+    // ACI1 reconciliation: the fake is clearly TEST-ONLY (its binding is marked
+    // `fake`) and is a distinct boundary from the live wrappers, so it can never
+    // become the default for a real `Runtime` dispatch.
+    let fake = FakeRuntimeToolWrappers::new(fake_wrapper_config());
+    let binding = fake.binding();
+    assert_eq!(binding.kind, BoundaryKind::ToolExposure);
+    assert!(
+        binding.fake,
+        "the fake wrappers binding must be marked fake"
+    );
+
+    // The real wrappers are NOT fake.
+    let real = RuntimeToolWrappers::new(fake_wrapper_config());
+    assert!(!real.binding().fake);
+}
+
+#[test]
+fn fake_capo_registry_clean_and_denied_paths_match_the_real_shape() {
+    // ACI10: the scripted Capo-registry fake produces a stable `CapoToolResult`
+    // with the canonical completed audit sequence on the clean path, and the
+    // real denial shape when the policy denies -- without a controller-assembled
+    // live context.
+    let fake = FakeCapoToolRegistry;
+    let trusted = PermissionPolicy::allow_trusted_local();
+
+    let clean = fake.authorize_and_invoke(
+        CapoToolRequest {
+            tool_call_id: ToolCallId::new("call-capo-fake"),
+            session_id: SessionId::new("session-fake"),
+            tool_id: "capo.agent_status".to_string(),
+            capability_profile_id: "trusted-local-dev".to_string(),
+            context: tool_context(),
+        },
+        &trusted,
+        "scripted agent status output",
+    );
+    assert_eq!(clean.output, "scripted agent status output");
+    assert_ne!(clean.output_artifact_id, "none");
+    assert!(clean.events.iter().any(|e| e.kind == "tool.call_completed"));
+    // The narrow output validates against the Capo registry output schema.
+    let definition = CapoToolRegistry
+        .describe_tool("capo.agent_status")
+        .expect("definition");
+    assert!(
+        definition
+            .validate_output(&clean.narrow_output())
+            .is_empty()
+    );
+
+    // A read-only profile denies the mutating `capo.capability_request`.
+    let denied = fake.authorize_and_invoke(
+        CapoToolRequest {
+            tool_call_id: ToolCallId::new("call-capo-deny"),
+            session_id: SessionId::new("session-fake"),
+            tool_id: "capo.capability_request".to_string(),
+            capability_profile_id: "read-only-local".to_string(),
+            context: tool_context(),
+        },
+        &PermissionPolicy::static_read_only_local(),
+        "should-never-be-used",
+    );
+    assert_eq!(denied.permission_decision.effect, "deny");
+    assert_eq!(denied.output_artifact_id, "none");
+    assert!(denied.events.iter().any(|e| e.kind == "tool.call_canceled"));
+
+    assert!(
+        fake.binding().fake,
+        "the fake capo registry must be marked fake"
+    );
+}
+
+#[test]
+fn fake_agent_report_registry_emits_agent_reported_claims_and_dedupes() {
+    // ACI10 + ACI8: the agent-report fake delegates to the (already
+    // deterministic) real registry, so a report is persisted as a distinct
+    // `agent_reported` claim -- never observed evidence -- and a re-submitted
+    // identical report dedupes on its idempotency key in the replayable ledger.
+    let fake = FakeAgentReportRegistry::new();
+    let policy = PermissionPolicy::allow_trusted_local();
+    assert!(
+        fake.binding().fake,
+        "the fake report registry must be marked fake"
+    );
+
+    let record = fake.authorize_and_invoke(
+        report_request(
+            "call-fake-report",
+            "capo.complete_subtask",
+            serde_json::json!({"subtask_id": "ST1", "summary": "done"}),
+        ),
+        &policy,
+    );
+    assert_eq!(record.source, EVIDENCE_SOURCE_AGENT_REPORTED);
+    assert!(
+        !record.is_observed_evidence(),
+        "an agent report is never observed evidence"
+    );
+    assert!(record.is_completion_claim());
+
+    // A re-emitted identical report dedupes in the replayable ledger.
+    let again = fake.authorize_and_invoke(
+        report_request(
+            "call-fake-report-2",
+            "capo.complete_subtask",
+            serde_json::json!({"subtask_id": "ST1", "summary": "done"}),
+        ),
+        &policy,
+    );
+    assert_eq!(record.idempotency_key, again.idempotency_key);
+
+    let mut ledger = AgentReportLedger::new();
+    assert!(ledger.record(record));
+    assert!(
+        !ledger.record(again),
+        "an identical re-submission must dedupe on replay"
+    );
+    assert_eq!(ledger.len(), 1);
+}

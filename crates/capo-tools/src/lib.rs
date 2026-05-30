@@ -7,6 +7,7 @@
 use capo_core::{BoundaryBinding, BoundaryKind, RunId, SessionId, ToolCallId};
 mod agent_reports;
 mod apply_patch;
+mod fakes;
 mod lint;
 mod permission;
 mod runtime_wrapper_paths;
@@ -15,6 +16,7 @@ mod runtime_wrappers;
 mod search;
 mod test_run;
 pub use agent_reports::*;
+pub use fakes::*;
 pub use permission::*;
 pub use runtime_wrapper_paths::confine_write_path;
 pub use runtime_wrapper_types::*;

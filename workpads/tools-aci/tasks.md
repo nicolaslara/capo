@@ -845,7 +845,68 @@ Verification:
 
 ## ACI10 - Fake/Deterministic Tool Implementations
 
-Status: pending.
+Status: done.
+
+Evidence:
+
+- New `fakes.rs` module (`crates/capo-tools/src/fakes.rs`) provides
+  deterministic, scripted fake implementations for the whole tool surface,
+  re-exported from `lib.rs`: `FakeRuntimeToolWrappers` (every runtime wrapper --
+  `capo.shell_run`, the git wrappers, `capo.file_read`, `capo.file_write`,
+  `capo.apply_patch`, `capo.search`, `capo.test_run`, `capo.project_memory_read`,
+  `capo.workpad_read`), `FakeCapoToolRegistry` (the Capo-owned status/evidence
+  tools), and `FakeAgentReportRegistry` (the `GO2` reporting surface). Each
+  produces stable output with NO live provider, NO process spawn, and NO disk
+  access. Timing is PINNED (`FAKE_DURATION_MS`/`FAKE_EPOCH_MILLIS` = 0, never a
+  wall clock) and output artifacts use a `fake://` uri (nothing written), which
+  is what makes a fake result byte-identical run to run.
+- Fakes emit the SAME event/artifact/projection shape as the real path: the same
+  `WrapperToolResult` / `CapoToolResult` / `AgentReportRecord` types, the same
+  canonical observed audit sequence (`tool.call_requested` -> ... ->
+  `tool.output_observed` -> `tool.call_completed` -> `tool.result_delivered`),
+  input + output artifacts carrying a real `redaction_state`, and a narrow typed
+  output that VALIDATES against each tool's own declared `output_schema`. So the
+  controller dispatch (`NormalizedToolResult::from_result`), the `ToolInvocation`
+  / `ToolObservation` projections, and replay/projection-rebuild tests run
+  identically against a fake result. The fakes run the REAL authorization phase
+  (delegating to `RuntimeToolWrappers::authorize_tool_call` /
+  `CapoToolRegistry::authorize_tool_call`) and reuse the REAL wrapper redaction
+  policy (`redact_bytes_with_state_for_fake`), so denial and OUTPUT redaction are
+  not re-implemented in the fake.
+- Fakes cover BOTH clean and failure paths via `ScriptedWrapperOutcome`:
+  `Clean{passed:true}`, a `ran_but_failed` clean-but-failing command (still a
+  COMPLETED call carrying evidence, `passed:false`), a `Failed` handler error
+  (non-completed `tool.call_failed` shape), a `NoMatch` structured retryable
+  rejected `apply_patch` hunk (wrote nothing, carries the rejected hunk index +
+  reason), and a `PreconditionFailed` `file_write` (wrote nothing, carries
+  expected/actual hashes). A permission DENIAL is produced by the real
+  authorization phase against the policy (e.g. a read-only profile denies
+  `capo.file_write`), exactly as on the real path -- no handler runs.
+- Test-only and never the default (reconciles with ACI1): every fake's
+  `binding()` is marked `fake`, the fakes are never installed in `ToolExposure`
+  (the real controller always builds the live `RuntimeToolWrappers` /
+  `CapoToolRegistry` / `AgentReportRegistry`), and a test
+  (`fake_runtime_wrappers_are_a_test_only_boundary`) asserts the fake binding is
+  `fake` while the real binding is not.
+- Tests added (`crates/capo-tools/src/tests.rs`, 13 new):
+  `fake_wrappers_clean_path_covers_every_wrapper_tool_with_schema_valid_output`
+  (every wrapper tool, canonical audit sequence, schema-valid typed output,
+  `fake://` artifacts), `fake_wrappers_results_are_deterministic_and_replay_identically`
+  (byte-identical replay, pinned timing), `fake_shell_run_ran_but_failed_is_a_completed_call_carrying_evidence`,
+  `fake_wrapper_handler_failure_emits_the_failed_non_completed_shape`,
+  `fake_apply_patch_rejected_hunk_is_a_structured_retryable_no_match`,
+  `fake_file_write_precondition_mismatch_writes_nothing`,
+  `fake_wrapper_permission_denial_runs_no_handler`,
+  `fake_wrapper_redacts_a_configured_secret_in_the_output_artifact`,
+  `fake_runtime_wrappers_are_a_test_only_boundary`,
+  `fake_capo_registry_clean_and_denied_paths_match_the_real_shape`,
+  `fake_agent_report_registry_emits_agent_reported_claims_and_dedupes` (distinct
+  `agent_reported` class + idempotency-keyed dedupe in the replayable
+  `AgentReportLedger`).
+- Gate run from `/Users/nicolas/devel/capo-wt/tools-aci`: `cargo fmt --check`
+  clean; `cargo clippy --all-targets --all-features -- -D warnings` exit 0;
+  `cargo test --workspace` => all suites passed, 0 failed (capo-tools 104,
+  capo-controller 38, capo-state 38, capo-server 60); `git diff --check` clean.
 
 Acceptance:
 

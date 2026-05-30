@@ -1257,6 +1257,14 @@ impl RuntimeToolWrappers {
         self.redaction_policy().apply(bytes)
     }
 
+    /// ACI10: the scripted fake wrappers reuse the REAL wrapper-boundary
+    /// redaction policy so a secret in fake output is scrubbed identically to
+    /// the real path and the recorded `redaction_state` is honest. This is the
+    /// crate-visible accessor [`crate::FakeRuntimeToolWrappers`] delegates to.
+    pub(crate) fn redact_bytes_with_state_for_fake(&self, bytes: &[u8]) -> (Vec<u8>, String) {
+        self.redact_bytes_with_state(bytes)
+    }
+
     fn resolve_workspace_path(&self, path: &str, allow_missing: bool) -> Result<PathBuf, String> {
         // Build the candidate against the CANONICAL workspace root, then lexically
         // fold `.`/`..` so a not-yet-created target with interior `..` (e.g.
