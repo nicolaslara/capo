@@ -28,8 +28,9 @@
 //! - Read models are byte-compatible with the fake path wherever the scripted
 //!   adapter output is identical, because both handles persist through the
 //!   exact same `append_event`/projection path -- there is no second writer.
-//! - It coexists with [`FakeBoundaryController`]; RTL12 flips the default. This
-//!   task deletes nothing.
+//! - It coexists with [`FakeBoundaryController`]; the RTL12 cutover flipped the
+//!   default routing to this handle (the rollback is the one falsey
+//!   `CAPO_SERVER_REAL_CONTROLLER` value). Neither handle is deleted.
 //!
 //! The typed return values are re-exported under real-controller names
 //! ([`RealRunRefs`], [`RealReadModelObservation`], [`RealAgentRegistration`])
@@ -238,6 +239,67 @@ impl RealBoundaryController {
 
     pub fn observe_agent_name(&self, agent_name: &str) -> StateResult<RealReadModelObservation> {
         self.core.observe_agent_name(agent_name)
+    }
+
+    // --- The session-control convenience surface ---------------------------
+    //
+    // RTL12 parity criterion: the real handle exposes the SAME
+    // `redirect`/`interrupt`/`stop` surface the fake handle does, so the
+    // identical deterministic suite (`send`/`steer`/`interrupt`/`stop`,
+    // restart/replay) runs over both handles. Each delegates to the one core, so
+    // a sequence driven through the real handle persists byte-identically to the
+    // same sequence driven through the fake handle (proven by
+    // `real_controller_passes_the_identical_send_steer_interrupt_stop_suite`).
+
+    pub fn redirect(
+        &self,
+        registration: &RealAgentRegistration,
+        refs: &RealRunRefs,
+        goal: &str,
+    ) -> StateResult<RealReadModelObservation> {
+        self.core.redirect(registration, refs, goal)
+    }
+
+    pub fn redirect_agent_name(
+        &self,
+        agent_name: &str,
+        goal: &str,
+    ) -> StateResult<RealReadModelObservation> {
+        self.core.redirect_agent_name(agent_name, goal)
+    }
+
+    pub fn interrupt(
+        &self,
+        registration: &RealAgentRegistration,
+        refs: &RealRunRefs,
+        reason: &str,
+    ) -> StateResult<RealReadModelObservation> {
+        self.core.interrupt(registration, refs, reason)
+    }
+
+    pub fn interrupt_agent_name(
+        &self,
+        agent_name: &str,
+        reason: &str,
+    ) -> StateResult<RealReadModelObservation> {
+        self.core.interrupt_agent_name(agent_name, reason)
+    }
+
+    pub fn stop(
+        &self,
+        registration: &RealAgentRegistration,
+        refs: &RealRunRefs,
+        reason: &str,
+    ) -> StateResult<RealReadModelObservation> {
+        self.core.stop(registration, refs, reason)
+    }
+
+    pub fn stop_agent_name(
+        &self,
+        agent_name: &str,
+        reason: &str,
+    ) -> StateResult<RealReadModelObservation> {
+        self.core.stop_agent_name(agent_name, reason)
     }
 
     // --- The RTL3 loop entry, driven as the production consumer ------------

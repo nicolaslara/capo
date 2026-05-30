@@ -191,12 +191,15 @@ impl FakeBoundaryController {
     /// from the live batch. The `replay` field is left at its default because it
     /// is the volatile append-count diagnostic, not replay-stable state.
     ///
-    /// Test-only for now: it backs the restart/replay tests that enforce the
-    /// replay-stability invariant for both the fake handle and RTL5's
-    /// `RealBoundaryController` (the production consumer reconstructs a turn
-    /// outcome after a restart via `RealBoundaryController::core`).
-    #[cfg(test)]
-    pub(crate) fn reconstruct_turn_finished(
+    /// It backs the restart/replay tests that enforce the replay-stability
+    /// invariant for both the fake handle and RTL5's `RealBoundaryController`
+    /// (the production consumer reconstructs a turn outcome after a restart via
+    /// `RealBoundaryController::core`). It is also the production derivation the
+    /// server uses to annotate a live-SPAWN turn whose ingested stdout batch is
+    /// not threaded back in memory (RTL12): the annotation is reconstructed from
+    /// the persisted, turn-keyed event log instead, so the loop's `TurnFinished`
+    /// stays an honest annotation of what the dispatch run actually projected.
+    pub fn reconstruct_turn_finished(
         &self,
         refs: &FakeRunRefs,
         turn_id: &TurnId,
@@ -360,7 +363,6 @@ fn turn_ref_for(event: &NormalizedAdapterEvent) -> String {
 /// raw event hash fall-backs are recovered from the persisted `payload_json`
 /// (written by `adapter_event_payload_json`), so a row with no `external_item_ref`
 /// reconstructs the identical ref `finish_turn` would have produced.
-#[cfg(test)]
 fn persisted_turn_ref(event: &EventRecord) -> String {
     event
         .item_id
@@ -373,7 +375,6 @@ fn persisted_turn_ref(event: &EventRecord) -> String {
 /// Extract a flat `"name":"value"` string field from the controller's
 /// hand-built adapter-replay payload JSON. Returns `None` for the sentinel
 /// `"none"` value the payload writer uses for absent optionals.
-#[cfg(test)]
 fn payload_field(payload_json: &str, name: &str) -> Option<String> {
     let needle = format!("\"{name}\":\"");
     let start = payload_json.find(&needle)? + needle.len();

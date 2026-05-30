@@ -71,35 +71,52 @@ pub const REAL_CONTROLLER_OPT_IN_ENV: &str = "CAPO_SERVER_REAL_CONTROLLER";
 
 /// The single typed switch that selects the boundary controller.
 ///
-/// Phase 1 default is [`ControllerSelection::Fake`]. The RTL12 cutover flips
-/// the default to [`ControllerSelection::Real`] only after the parity suite
-/// passes; the documented rollback is to restore this default to `Fake`.
+/// The RTL12 cutover flipped the default to [`ControllerSelection::Real`], now
+/// that the parity suite passes (the deterministic `send`/`steer`/`interrupt`/
+/// `stop` + restart/replay suite and the parity-equivalence test in
+/// `crates/capo-controller/src/tests.rs` and the multi-turn-edit suite in
+/// `crates/capo-server/src/tests/multi_turn_edit.rs`). The documented rollback is
+/// a one-value revert: restore this default to `Fake` (or set the
+/// [`REAL_CONTROLLER_OPT_IN_ENV`] opt-in to a falsey value, e.g.
+/// `CAPO_SERVER_REAL_CONTROLLER=0`). No event schema, projection, or
+/// `ServerCommand` change is involved, so rollback needs no data migration.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ControllerSelection {
-    /// Route command handling through [`FakeBoundaryController`] (default until
-    /// the RTL12 cutover).
-    #[default]
+    /// Route command handling through [`FakeBoundaryController`]. No longer the
+    /// default after the RTL12 cutover; it remains the documented rollback target
+    /// and is still selectable explicitly or via a falsey opt-in env value.
     Fake,
     /// Route command handling through [`RealBoundaryController`] over the same
-    /// orchestration core.
+    /// orchestration core. Default since the RTL12 cutover.
+    #[default]
     Real,
 }
 
 impl ControllerSelection {
-    /// Resolve the selection from the [`REAL_CONTROLLER_OPT_IN_ENV`] opt-in
-    /// gate. Absent or falsey keeps the default fake routing.
+    /// Resolve the selection from the [`REAL_CONTROLLER_OPT_IN_ENV`] gate.
+    ///
+    /// After the RTL12 cutover the default is [`ControllerSelection::Real`], so
+    /// an absent env var resolves to the (real) default; the env var is now the
+    /// rollback knob: a falsey value (`0`/`false`/`no`/`off`) forces the fake
+    /// routing back on, a truthy value pins the real routing explicitly.
     pub fn from_env() -> Self {
         match std::env::var(REAL_CONTROLLER_OPT_IN_ENV) {
             Ok(value) => Self::from_opt_in(&value),
-            Err(_) => Self::Fake,
+            Err(_) => Self::default(),
         }
     }
 
-    /// Interpret an opt-in string: truthy selects the real controller, anything
-    /// else (including empty/`0`/`false`) keeps the fake default.
+    /// Interpret the [`REAL_CONTROLLER_OPT_IN_ENV`] value: a falsey string
+    /// (`0`/`false`/`no`/`off`, the documented rollback) forces the fake routing;
+    /// a truthy string pins the real routing; an empty string defers to the
+    /// post-cutover default ([`ControllerSelection::Real`]).
     pub fn from_opt_in(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => Self::Real,
+            "0" | "false" | "no" | "off" => Self::Fake,
+            "" => Self::default(),
+            // Any other unexpected value keeps the fake routing -- the
+            // conservative choice for an unparsable rollback knob.
             _ => Self::Fake,
         }
     }

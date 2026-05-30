@@ -51,12 +51,14 @@ pub struct CapoServer {
 }
 
 impl CapoServer {
-    /// Open the server with the default ([`ControllerSelection::Fake`]) routing.
+    /// Open the server with the default routing.
     ///
-    /// The opt-in [`REAL_CONTROLLER_OPT_IN_ENV`] env gate is honored here so a
-    /// host that constructs the server through `open` still picks up the real
-    /// path when the operator opts in, without scattering the decision across
-    /// call sites; the default remains fake until the RTL12 cutover.
+    /// After the RTL12 cutover the default is [`ControllerSelection::Real`]: the
+    /// real controller passes the parity suite, so default chat/steer now route
+    /// through it. The [`REAL_CONTROLLER_OPT_IN_ENV`] env gate is honored here as
+    /// the single rollback knob -- setting `CAPO_SERVER_REAL_CONTROLLER=0` forces
+    /// the fake routing back on without scattering the decision across call
+    /// sites.
     pub fn open(project_id: ProjectId, state_root: impl AsRef<Path>) -> ServerResult<Self> {
         Self::open_with_controller(project_id, state_root, ControllerSelection::from_env())
     }

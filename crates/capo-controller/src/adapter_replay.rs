@@ -57,10 +57,14 @@ impl FakeBoundaryController {
             event.turn_id = adapter_replay_turn_id(adapter_event, turn_id_override);
             event.item_id = adapter_event.external_item_ref.clone();
             event.payload_json = adapter_event_payload_json(adapter_event);
-            event.idempotency_key = adapter_event
-                .idempotency_key
-                .clone()
-                .or_else(|| Some(format!("adapter-replay:{}:{index}", refs.session_id)));
+            event.idempotency_key = adapter_event.idempotency_key.clone().or_else(|| {
+                Some(adapter_replay_fallback_key(
+                    &refs.session_id,
+                    turn_id_override,
+                    index,
+                    None,
+                ))
+            });
             event.redaction_state = RedactionState::Safe;
             let before = self.state.event_count()?;
             self.state.append_event(event, &[projection])?;
@@ -104,9 +108,11 @@ impl FakeBoundaryController {
                     .as_ref()
                     .map(|key| format!("{key}:tool-observation"))
                     .or_else(|| {
-                        Some(format!(
-                            "adapter-replay:{}:{index}:tool-observation",
-                            refs.session_id
+                        Some(adapter_replay_fallback_key(
+                            &refs.session_id,
+                            turn_id_override,
+                            index,
+                            Some("tool-observation"),
                         ))
                     });
                 observation_event.redaction_state = RedactionState::Safe;
@@ -424,6 +430,33 @@ fn adapter_tool_call_id(adapter_event: &NormalizedAdapterEvent) -> ToolCallId {
                 .unwrap_or(&adapter_event.raw_event_hash)
         )
     ))
+}
+
+/// The fallback idempotency key for an adapter-replay event that carries no
+/// provider-supplied key.
+///
+/// RTL8/RTL12: when a turn id is supplied (the loop drives a turn explicitly),
+/// the key is scoped by `(session, turn, index)` so DISTINCT turns in the same
+/// session/run no longer collide -- a second turn's terminal/summary/tool events
+/// would otherwise dedup against the first turn's at the same batch index and be
+/// silently dropped. Re-running the SAME turn keeps the same key, so per-turn
+/// replay stays idempotent. With no turn id (a single logical replay) the key
+/// stays `(session, index)`, preserving the prior single-turn behavior.
+fn adapter_replay_fallback_key(
+    session_id: &SessionId,
+    turn_id_override: Option<&str>,
+    index: usize,
+    suffix: Option<&str>,
+) -> String {
+    let mut key = match turn_id_override {
+        Some(turn) => format!("adapter-replay:{session_id}:{turn}:{index}"),
+        None => format!("adapter-replay:{session_id}:{index}"),
+    };
+    if let Some(suffix) = suffix {
+        key.push(':');
+        key.push_str(suffix);
+    }
+    key
 }
 
 fn adapter_replay_turn_id(

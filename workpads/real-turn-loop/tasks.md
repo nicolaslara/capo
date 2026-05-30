@@ -1181,7 +1181,84 @@ Verification:
 
 ## RTL12 - Deterministic Multi-Turn Edit Tests, Restart/Replay, And Parity-Equivalence
 
-Status: pending.
+Status: done (gate green). The deterministic multi-turn EDIT suite over the real
+loop lives in `crates/capo-server/src/tests/multi_turn_edit.rs`: a session opens
+and TWO turns each run through `CapoServer::run_dispatch_turn` (the RTL4
+reconciliation point -- `PlanDispatch` -> `PreflightLiveProvider` ->
+`RunLiveProviderLocal`), each producing a DISTINCT workspace edit via a per-turn
+`/bin/sh` codex stub (no live provider). It asserts distinct per-turn artifacts
+(the RTL8 `run_id/turns/<turn_id>` stdout/stderr keying) AND distinct projected
+items (two observed `apply_patch` results anchored to distinct content
+artifacts), plus a single completion model (one dispatch run-exit + execution per
+turn, zero forked turn-completion kinds). The multi-turn restart/replay test
+reopens + `rebuild_projections` and asserts the multi-turn thread, per-turn
+artifacts, dispatch executions, and run-exit events rebuild byte-identically. The
+parity criterion + parity-equivalence tests live in
+`crates/capo-controller/src/tests.rs`:
+`RealBoundaryController` passes the IDENTICAL `send`/`steer`/`interrupt`/`stop` +
+restart/replay suite the fake handle passes
+(`real_controller_passes_the_identical_send_steer_interrupt_stop_suite`), and for
+a scripted turn the fake and real paths produce equivalent event sequences modulo
+adapter-identity fields
+(`fake_and_real_paths_produce_equivalent_event_sequences_for_a_scripted_turn`).
+With the parity suite green the RTL11 single switch was FLIPPED: the
+`ControllerSelection` default is now `Real` (the `#[default]` moved from `Fake`),
+`from_env()` resolves an absent `CAPO_SERVER_REAL_CONTROLLER` to that default, and
+the documented rollback is a single falsey env value
+(`CAPO_SERVER_REAL_CONTROLLER=0`). Two correctness fixes landed alongside the
+suite: the adapter-replay fallback idempotency key is now `(session, turn, index)`
+scoped so a second turn in the same run no longer dedups against the first turn's
+events (same-turn replay stays idempotent), and the loop's live-SPAWN
+`TurnFinished` is reconstructed from the persisted turn-keyed event log when the
+ingested stdout batch is not threaded back in memory (so the annotation honestly
+reflects what the dispatch run projected).
+
+Evidence:
+
+- Multi-turn EDIT + restart/replay suite (server crate, new module wired in
+  `crates/capo-server/src/tests.rs`):
+  `crates/capo-server/src/tests/multi_turn_edit.rs` --
+  `scripted_multi_turn_edit_over_the_real_loop_keeps_distinct_per_turn_artifacts_and_items`
+  and `multi_turn_edit_thread_rebuilds_identically_after_restart_replay`.
+- Parity criterion + parity-equivalence (controller crate):
+  `crates/capo-controller/src/tests.rs` --
+  `real_controller_passes_the_identical_send_steer_interrupt_stop_suite`
+  (drives `register -> send -> steer -> interrupt` and `-> stop` over BOTH handles
+  via the extended `SqliteStateStoreBundle`, asserts equal lifecycle fingerprints
+  + the real handle's restart/replay rebuild) and
+  `fake_and_real_paths_produce_equivalent_event_sequences_for_a_scripted_turn`.
+  The real handle gained the `redirect`/`interrupt`/`stop` (+ `*_agent_name`)
+  convenience delegations in `crates/capo-controller/src/real_controller.rs` so it
+  exposes the identical suite surface.
+- Single-switch cutover: `crates/capo-server/src/controller_routing.rs`
+  (`ControllerSelection` `#[default]` moved to `Real`; `from_env`/`from_opt_in`
+  reworked so an absent/empty env defers to the default and a falsey value is the
+  fake rollback knob); `crates/capo-server/src/lib.rs` (`open` doc updated). The
+  RTL11 default/opt-in tests were updated to the post-cutover invariants
+  (`post_cutover_default_selection_is_real_with_a_one_value_fake_rollback`,
+  `opt_in_env_is_the_single_switch_with_a_falsey_fake_rollback`).
+- Correctness fixes: `crates/capo-controller/src/adapter_replay.rs`
+  (`adapter_replay_fallback_key`, `(session, turn, index)`-scoped);
+  `crates/capo-controller/src/turn_loop.rs`
+  (`reconstruct_turn_finished` promoted from `#[cfg(test)]` to `pub`, used by the
+  server's live-spawn annotation); `crates/capo-server/src/turn_orchestration.rs`
+  (`turn_finished_for_run` reconstructs from the persisted log when the run
+  ingested but the in-memory batch jsonl is empty).
+- Cutover decision + gating evidence recorded in
+  `workpads/real-turn-loop/knowledge.md` ("The RTL12 Cutover (Done)").
+- Commands run from `/Users/nicolas/devel/capo-wt/real-turn-loop`:
+  `cargo test -p capo-server --lib -- multi_turn_edit` -> ok, 2 passed (run 3x, 0
+  failures); `cargo test -p capo-controller -- real_controller_passes
+  fake_and_real_paths` -> ok, 2 passed (run 3x, 0 failures). Objective gate
+  (`cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings
+  && cargo test --workspace`) -> exit 0: fmt clean, clippy clean (0 warnings),
+  `cargo test --workspace` 0 failed across all binaries (capo-server 57 incl. the
+  2 RTL12 multi-turn tests + the updated RTL11 routing tests, capo-controller 25
+  incl. the 2 RTL12 parity tests, capo-adapters 29 / 2 ignored, capo-state 36,
+  capo-runtime 18, capo-tools 21, capo-query 21, capo-voice 19, capo cli 63 +
+  server_transport 11, capo-core 4, capo-eval 3, capo-memory 4, capo-workpads 2).
+  No live Codex smoke is required for RTL12 (the live workspace-write smoke is
+  RTL13); all proofs are deterministic.
 
 Acceptance:
 

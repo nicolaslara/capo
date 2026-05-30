@@ -330,6 +330,53 @@ Rollback (documented for the RTL12 flip): the cutover changes exactly one value
 schema, projection, or `ServerCommand` change is involved, so rollback is a
 one-value revert with no data migration.
 
+### The RTL12 Cutover (Done)
+
+The RTL12 parity suite now passes, so the single switch has been flipped: the
+`ControllerSelection` default is `Real` (the `#[default]` moved from `Fake` to
+`Real`), and `ControllerSelection::from_env()` resolves an absent
+`CAPO_SERVER_REAL_CONTROLLER` to that default. Default chat/steer now route
+through `RealBoundaryController` (a zero-cost view over the one orchestration
+core), so a real adapter handle plugs into the production routing unchanged.
+Because the real handle persists through the same `append_event`/projection
+path, default-chat safety is preserved by construction -- the flip is the one
+visible `ControllerSelection` value, and the parity criterion below proves the
+real handle is observably equivalent to the fake handle for a scripted turn.
+
+What the cutover was gated on (the RTL12 parity criterion, all green):
+
+- The multi-turn EDIT suite over the real loop
+  (`crates/capo-server/src/tests/multi_turn_edit.rs`): two turns through
+  `CapoServer::run_dispatch_turn` (the RTL4 reconciliation point), each a
+  distinct workspace edit, asserting distinct per-turn artifacts (the RTL8
+  `run_id/turns/<turn_id>` keying) and distinct projected items (two observed
+  `apply_patch` results anchored to distinct content artifacts), plus the
+  multi-turn restart/replay rebuilding the thread, per-turn artifacts, dispatch
+  executions, and run-exit events identically.
+- The parity criterion + parity-equivalence tests
+  (`crates/capo-controller/src/tests.rs`): `RealBoundaryController` passes the
+  IDENTICAL `send`/`steer`/`interrupt`/`stop` + restart/replay suite the fake
+  handle passes (`real_controller_passes_the_identical_send_steer_interrupt_stop_suite`),
+  and for a scripted turn the fake and real paths produce equivalent event
+  sequences modulo adapter-identity fields
+  (`fake_and_real_paths_produce_equivalent_event_sequences_for_a_scripted_turn`).
+
+Rollback knob, post-cutover: `CAPO_SERVER_REAL_CONTROLLER=0` (or
+`false`/`no`/`off`) forces the fake routing back on -- a single falsey env value,
+no schema/projection/`ServerCommand` change.
+
+An RTL8/RTL12 correctness fix landed alongside the suite: the adapter-replay
+fallback idempotency key
+(`adapter_replay_fallback_key`, `crates/capo-controller/src/adapter_replay.rs`)
+is now scoped by `(session, turn, index)` when the loop drives an explicit turn,
+so a SECOND turn in the same session/run no longer dedups against the first
+turn's terminal/summary/tool events at the same batch index (re-running the same
+turn stays idempotent). The loop's live-SPAWN `TurnFinished` is now reconstructed
+from the persisted turn-keyed event log when the ingested stdout batch is not
+threaded back in memory (`FakeBoundaryController::reconstruct_turn_finished`,
+promoted from test-only), so the annotation honestly reflects what the dispatch
+run projected rather than collapsing to a no-ref `Completed`.
+
 ## Non-Goals
 
 - Do not create a second execution pipeline beside the dispatch state machine;

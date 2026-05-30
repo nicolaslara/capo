@@ -1431,6 +1431,262 @@ fn real_controller_projected_turn_rebuilds_identically_after_restart_replay() {
     );
 }
 
+// --- RTL12: parity criterion + parity-equivalence -------------------------
+
+/// A stable, adapter-identity-independent summary of where a lifecycle landed:
+/// the terminal `(task, agent, session, run)` statuses, the causal session
+/// event-kind sequence, and the event count. Two routings are "equivalent" when
+/// their fingerprints match exactly.
+type LifecycleFingerprint = (String, String, String, String, Vec<String>, i64);
+
+/// The causal session event-kind sequence (sequence order), dropping the
+/// per-request audit envelope whose idempotency key embeds the command id. This
+/// is the "event sequence modulo adapter-identity fields" the RTL12
+/// parity-equivalence criterion compares.
+fn session_event_kind_sequence(state: &SqliteStateStore, session_id: &SessionId) -> Vec<String> {
+    let mut events = state
+        .recent_events_for_session(session_id, 256)
+        .expect("session events");
+    events.sort_by_key(|event| event.sequence);
+    events
+        .into_iter()
+        .filter(|event| event.kind != "server.request_handled")
+        .map(|event| event.kind)
+        .collect()
+}
+
+/// A stable, adapter-identity-independent summary of where a lifecycle landed.
+fn lifecycle_fingerprint(
+    bundle: &SqliteStateStoreBundle,
+    refs: &FakeRunRefs,
+) -> LifecycleFingerprint {
+    let state = bundle.state();
+    let task = state
+        .task(&refs.task_id)
+        .expect("task")
+        .expect("task present");
+    let agent = state
+        .agent(&refs.agent_id)
+        .expect("agent")
+        .expect("agent present");
+    let session = state
+        .session(&refs.session_id)
+        .expect("session")
+        .expect("session present");
+    let run = state.run(&refs.run_id).expect("run").expect("run present");
+    (
+        task.capo_execution_status,
+        agent.status,
+        session.status,
+        run.status,
+        session_event_kind_sequence(state, &refs.session_id),
+        state.event_count().expect("event count"),
+    )
+}
+
+/// RTL12 parity criterion: `RealBoundaryController` passes the IDENTICAL
+/// deterministic suite (`send`/`steer`/`interrupt`/`stop`, restart/replay) that
+/// `FakeBoundaryController` passes.
+///
+/// The same `register -> send -> steer -> interrupt` and `-> stop` sequences are
+/// driven over BOTH handles, over the same scripted-mock adapter and the same
+/// session label, and the resulting lifecycles are asserted equal (terminal
+/// statuses + causal session event-kind sequence + event count). Then both
+/// rebuild identically from their persisted event logs, satisfying the
+/// restart/replay half of the suite.
+#[test]
+fn real_controller_passes_the_identical_send_steer_interrupt_stop_suite() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+
+    /// Drive `register -> send -> steer -> <terminal>` on one handle and return
+    /// its fingerprint, plus the refs and root for the restart/replay step.
+    fn run_suite(
+        open: impl FnOnce(AgentAdapterHandle) -> SqliteStateStoreBundle,
+        terminal: Terminal,
+    ) -> (LifecycleFingerprint, FakeRunRefs, SqliteStateStoreBundle) {
+        let adapter =
+            AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("rtl12-parity-session"));
+        let bundle = open(adapter);
+        let registration = bundle.register("rtl12-parity-worker");
+        let refs = bundle.send_task(&registration, "Run the RTL12 parity suite");
+        bundle.redirect(&registration, &refs, "Refocus on the highest-value subtask");
+        match terminal {
+            Terminal::Interrupt => {
+                bundle.interrupt(&registration, &refs, "operator pause");
+            }
+            Terminal::Stop => {
+                bundle.stop(&registration, &refs, "operator stop");
+            }
+        }
+        let fingerprint = lifecycle_fingerprint(&bundle, &refs);
+        (fingerprint, refs, bundle)
+    }
+
+    for terminal in [Terminal::Interrupt, Terminal::Stop] {
+        let fake_root = temp_root();
+        let (fake_fp, fake_refs, _fake) = run_suite(
+            |adapter| {
+                SqliteStateStoreBundle::Fake(
+                    FakeBoundaryController::open_with_adapter(
+                        ProjectId::new("project-capo"),
+                        &fake_root,
+                        adapter,
+                    )
+                    .expect("open fake controller"),
+                )
+            },
+            terminal,
+        );
+
+        let real_root = temp_root();
+        let (real_fp, real_refs, real) = run_suite(
+            |adapter| {
+                SqliteStateStoreBundle::Real(
+                    RealBoundaryController::open_with_adapter(
+                        ProjectId::new("project-capo"),
+                        &real_root,
+                        adapter,
+                    )
+                    .expect("open real controller"),
+                )
+            },
+            terminal,
+        );
+
+        // The real handle passes the same suite: identical terminal lifecycle.
+        assert_eq!(
+            real_fp, fake_fp,
+            "real controller diverged from fake on the {terminal:?} suite"
+        );
+        assert_eq!(real_refs.session_id, fake_refs.session_id);
+
+        // Restart/replay half: the real handle's projections rebuild identically
+        // from its persisted event log (the fake half is the established RTL3/RTL5
+        // restart/replay coverage; here we prove the real handle satisfies it on
+        // the same suite).
+        let reopened = SqliteStateStore::open(&real_root).expect("reopen real state");
+        reopened.rebuild_projections().expect("rebuild");
+        assert_eq!(
+            reopened
+                .session(&real_refs.session_id)
+                .expect("session")
+                .expect("session present"),
+            real.state()
+                .session(&real_refs.session_id)
+                .expect("session")
+                .expect("session present"),
+            "real controller session diverged after restart/replay on the {terminal:?} suite"
+        );
+        assert_eq!(
+            reopened
+                .run(&real_refs.run_id)
+                .expect("run")
+                .expect("run present"),
+            real.state()
+                .run(&real_refs.run_id)
+                .expect("run")
+                .expect("run present"),
+        );
+        assert_eq!(
+            reopened.event_count().expect("event count"),
+            real.state().event_count().expect("event count"),
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Terminal {
+    Interrupt,
+    Stop,
+}
+
+/// RTL12 parity-equivalence: for a scripted turn, the fake and real paths
+/// produce equivalent event sequences (modulo adapter-identity fields).
+///
+/// Both handles drive the SAME scripted multi-event turn through the RTL3 loop
+/// (`run_turn`) over the same adapter and session label. The persisted causal
+/// session event-kind sequence, the stable projections, and the `TurnFinished`
+/// outcome must match -- the equivalence the RTL12 cutover gates on. This is the
+/// turn-loop-level companion to the RTL11 command-surface equivalence test
+/// (`both_routings_handle_send_steer_and_interrupt_equivalently`).
+#[test]
+fn fake_and_real_paths_produce_equivalent_event_sequences_for_a_scripted_turn() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    fn run_scripted_turn(
+        open: impl FnOnce(AgentAdapterHandle) -> SqliteStateStoreBundle,
+    ) -> (Vec<String>, SessionProjection, TurnFinished, FakeRunRefs) {
+        let adapter =
+            AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("rtl12-equiv-session"));
+        let bundle = open(adapter);
+        let registration = bundle.register("rtl12-equiv-worker");
+        let refs = bundle.send_task(&registration, "Run an RTL12 equivalence turn");
+        let turn_id = TurnId::new("turn-rtl12-equiv-1");
+        let batch = ScriptedMockTurn::new("turn-rtl12-equiv-1")
+            .message_delta("msg-1", "inspecting state")
+            .tool_requested("tool-1", "capo.agent_status")
+            .tool_completed("tool-1", "capo.agent_status", "agent is running")
+            .message_completed("msg-2", "state inspected")
+            .turn_completed("done-1")
+            .normalized_events(&refs.external_session_ref);
+        let finished = bundle.run_turn(&refs, &turn_id, &batch);
+        let session = bundle
+            .state()
+            .session(&refs.session_id)
+            .expect("session")
+            .expect("session present");
+        let kinds = session_event_kind_sequence(bundle.state(), &refs.session_id);
+        (kinds, session, finished, refs)
+    }
+
+    let fake_root = temp_root();
+    let fake = run_scripted_turn(|adapter| {
+        SqliteStateStoreBundle::Fake(
+            FakeBoundaryController::open_with_adapter(
+                ProjectId::new("project-capo"),
+                &fake_root,
+                adapter,
+            )
+            .expect("open fake controller"),
+        )
+    });
+
+    let real_root = temp_root();
+    let real = run_scripted_turn(|adapter| {
+        SqliteStateStoreBundle::Real(
+            RealBoundaryController::open_with_adapter(
+                ProjectId::new("project-capo"),
+                &real_root,
+                adapter,
+            )
+            .expect("open real controller"),
+        )
+    });
+
+    // Equivalent event sequences (the causal session event-kind order), modulo
+    // adapter-identity fields (which are identical here because both drive the
+    // same scripted adapter and session label).
+    assert_eq!(
+        real.0, fake.0,
+        "fake and real scripted-turn event sequences diverged"
+    );
+    // The projected read model and the loop's TurnFinished outcome also match.
+    assert_eq!(real.1, fake.1, "session projection diverged");
+    assert_eq!(real.2, fake.2, "TurnFinished outcome diverged");
+    assert_eq!(real.3.session_id, fake.3.session_id);
+    // Sanity: the sequence actually carries the scripted turn's domain events.
+    assert!(
+        fake.0.iter().any(|kind| kind == "session.summary_updated"),
+        "scripted turn should record a summary update: {:?}",
+        fake.0
+    );
+    assert!(
+        fake.0.iter().any(|kind| kind == "evidence.recorded"),
+        "scripted turn should record evidence on completion: {:?}",
+        fake.0
+    );
+}
+
 #[test]
 fn resource_ceiling_classifies_the_first_breach_in_priority_order() {
     use std::time::Duration;
@@ -1836,6 +2092,42 @@ impl SqliteStateStoreBundle {
         match self {
             Self::Fake(c) => c.send_task(registration, goal).expect("send task"),
             Self::Real(c) => c.send_task(registration, goal).expect("send task"),
+        }
+    }
+
+    fn redirect(
+        &self,
+        registration: &FakeAgentRegistration,
+        refs: &FakeRunRefs,
+        goal: &str,
+    ) -> FakeReadModelObservation {
+        match self {
+            Self::Fake(c) => c.redirect(registration, refs, goal).expect("redirect"),
+            Self::Real(c) => c.redirect(registration, refs, goal).expect("redirect"),
+        }
+    }
+
+    fn interrupt(
+        &self,
+        registration: &FakeAgentRegistration,
+        refs: &FakeRunRefs,
+        reason: &str,
+    ) -> FakeReadModelObservation {
+        match self {
+            Self::Fake(c) => c.interrupt(registration, refs, reason).expect("interrupt"),
+            Self::Real(c) => c.interrupt(registration, refs, reason).expect("interrupt"),
+        }
+    }
+
+    fn stop(
+        &self,
+        registration: &FakeAgentRegistration,
+        refs: &FakeRunRefs,
+        reason: &str,
+    ) -> FakeReadModelObservation {
+        match self {
+            Self::Fake(c) => c.stop(registration, refs, reason).expect("stop"),
+            Self::Real(c) => c.stop(registration, refs, reason).expect("stop"),
         }
     }
 

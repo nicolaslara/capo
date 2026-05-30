@@ -484,12 +484,27 @@ impl CapoServer {
         // The dispatch run reports input_event_count > 0 only when it parsed and
         // projected the batch. If it was blocked before ingestion, there is no
         // batch to classify and the outcome carries no refs.
-        if run.input_event_count == 0 || batch_jsonl.trim().is_empty() {
+        if run.input_event_count == 0 {
             return Ok(FakeBoundaryController::derive_turn_finished(
                 &turn,
                 &[],
                 Default::default(),
             ));
+        }
+        // The live-SPAWN substrate ingests the provider's stdout but does not
+        // thread that batch back to the loop in memory (only the mock path
+        // carries the jsonl). When the run ingested but the in-memory batch is
+        // empty, reconstruct the outcome from the PERSISTED, turn-keyed event
+        // log -- the same replay-stable derivation the restart/replay tests use
+        // -- so the loop's TurnFinished honestly annotates what the dispatch run
+        // projected rather than collapsing to a no-ref Completed.
+        if batch_jsonl.trim().is_empty() {
+            let (_session, _run, _agent, refs) =
+                self.run_refs_for_session_run(&run.session_id, &run.run_id)?;
+            return self
+                .controller
+                .reconstruct_turn_finished(&refs, &turn)
+                .map_err(ServerError::State);
         }
         let adapter_events =
             parse_adapter_events(adapter, batch_jsonl).map_err(ServerError::AdapterFixture)?;

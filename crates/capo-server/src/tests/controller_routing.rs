@@ -5,7 +5,8 @@
 //! [`ControllerSelection::Real`]) both handle `send`/`steer`/`interrupt`/`stop`
 //! through the UNCHANGED `ServerCommand` surface, and produce equivalent
 //! observable results -- the controller swap is invisible above the boundary.
-//! They also pin the phase-1 default to `Fake` and the opt-in env switch.
+//! They also pin the post-RTL12-cutover default to `Real` and the single-switch
+//! env knob (now a falsey-value rollback to `Fake`).
 //!
 //! Scope: these are boundary-wiring / smoke tests for the RTL11 single switch,
 //! not the parity authority. With the default (fake-adapter) core, both
@@ -202,15 +203,15 @@ fn both_routings_handle_send_steer_and_stop_equivalently() {
 }
 
 #[test]
-fn default_selection_is_fake_and_chat_does_not_silently_route_real() {
-    // Phase-1 invariant: the default selection is fake, so default chat keeps
-    // routing through the fake controller until the RTL12 cutover. We assert the
-    // default value directly rather than mutating process-global env in a
-    // parallel test (the env wiring is covered by the `from_opt_in` unit test).
-    assert_eq!(ControllerSelection::default(), ControllerSelection::Fake);
-    assert!(!ControllerSelection::default().is_real());
+fn post_cutover_default_selection_is_real_with_a_one_value_fake_rollback() {
+    // RTL12 cutover: the default selection is now `Real`, because the parity
+    // suite passes. We assert the default value directly rather than mutating
+    // process-global env in a parallel test (the env wiring is covered by the
+    // `from_opt_in` unit test).
+    assert_eq!(ControllerSelection::default(), ControllerSelection::Real);
+    assert!(ControllerSelection::default().is_real());
 
-    // A server constructed with the default selection routes through the fake
+    // A server constructed with the default selection routes through the real
     // controller, with the unchanged `ServerCommand` surface still working.
     let root = temp_root();
     let server = CapoServer::open_with_controller(
@@ -219,7 +220,7 @@ fn default_selection_is_fake_and_chat_does_not_silently_route_real() {
         ControllerSelection::default(),
     )
     .expect("server");
-    assert_eq!(server.controller_selection(), ControllerSelection::Fake);
+    assert_eq!(server.controller_selection(), ControllerSelection::Real);
     let registered = handle(
         &server,
         ServerCommand::RegisterAgent {
@@ -227,6 +228,23 @@ fn default_selection_is_fake_and_chat_does_not_silently_route_real() {
         },
     );
     assert_eq!(payload_variant(&registered.payload), "AgentRegistered");
+
+    // The documented rollback is a single value: the falsey env knob restores
+    // the fake routing, with no schema/projection/`ServerCommand` change.
+    assert_eq!(
+        ControllerSelection::from_opt_in("0"),
+        ControllerSelection::Fake
+    );
+    let fake_server = CapoServer::open_with_controller(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        ControllerSelection::Fake,
+    )
+    .expect("server");
+    assert_eq!(
+        fake_server.controller_selection(),
+        ControllerSelection::Fake
+    );
 }
 
 #[test]
@@ -321,7 +339,8 @@ fn real_routing_over_injected_scripted_mock_drives_that_adapter() {
 }
 
 #[test]
-fn opt_in_env_selects_the_real_controller_as_a_single_switch() {
+fn opt_in_env_is_the_single_switch_with_a_falsey_fake_rollback() {
+    // Truthy values pin the real routing explicitly.
     assert_eq!(
         ControllerSelection::from_opt_in("1"),
         ControllerSelection::Real
@@ -334,15 +353,26 @@ fn opt_in_env_selects_the_real_controller_as_a_single_switch() {
         ControllerSelection::from_opt_in("on"),
         ControllerSelection::Real
     );
-    // Anything falsey keeps the default.
+    // Falsey values are the documented rollback knob: they force the fake
+    // routing back on after the RTL12 cutover.
     assert_eq!(
         ControllerSelection::from_opt_in("0"),
         ControllerSelection::Fake
     );
     assert_eq!(
-        ControllerSelection::from_opt_in(""),
+        ControllerSelection::from_opt_in("false"),
         ControllerSelection::Fake
     );
+    assert_eq!(
+        ControllerSelection::from_opt_in("off"),
+        ControllerSelection::Fake
+    );
+    // An empty value defers to the post-cutover default (`Real`).
+    assert_eq!(
+        ControllerSelection::from_opt_in(""),
+        ControllerSelection::Real
+    );
+    // An unparsable value conservatively keeps the fake routing.
     assert_eq!(
         ControllerSelection::from_opt_in("disabled"),
         ControllerSelection::Fake
