@@ -111,7 +111,7 @@ Must not do:
 
 ## ST2 - JSON-RPC 2.0 Framing With A Notification Variant
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -135,6 +135,23 @@ Verification:
 - Deterministic codec round-trip tests for request, response, and notification
   framing against checked-in wire fixtures.
 - `cargo fmt` and focused `cargo test -p capo-server`.
+
+Evidence:
+
+- The JSON-RPC 2.0 codec (`crates/capo-server/src/transport.rs`,
+  `transport/jsonrpc.rs`, `transport/codec.rs`) replaced the legacy
+  `{"ok":true/false,...}` newline-JSON envelope. The bounded-frame test
+  `tcp_transport_rejects_oversized_frames_before_json_decode`
+  (`crates/capo-server/src/tests/transport.rs`) still asserted the removed
+  `"ok":false` shape; it now asserts the JSON-RPC error frame
+  (`jsonrpc:2.0`, `id:null`, `error.data.kind=protocol`, message
+  `"request frame is too large"`) so it verifies the same pre-JSON-decode
+  rejection against the new wire contract.
+- Objective gate run from `/Users/nicolas/devel/capo-wt/streaming-transport`:
+  `cargo fmt --check` ok; `cargo clippy --all-targets --all-features -- -D warnings`
+  ok; `cargo test --workspace` ok (no failures; the previously failing
+  `tests::transport::tcp_transport_rejects_oversized_frames_before_json_decode`
+  now passes: 1 passed, 0 failed, 60 filtered out in the focused run).
 
 ## ST3 - Concurrent Accept Loop With Timeouts And In-Band Cancel
 

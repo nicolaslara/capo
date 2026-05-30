@@ -31,7 +31,7 @@ pub use safety_floor::{
     LIVE_WRITE_OPT_IN_ENV, RunTurnRef, WorkspaceCheckpoint, WorkspaceWriteOutcome,
     WorkspaceWriteRequest, WriteMode, resolve_write_mode, resolve_write_mode_with_env,
 };
-pub use transport::{TransportError, send_tcp, serve_tcp};
+pub use transport::{EventNotification, TransportError, send_tcp, serve_tcp};
 pub use turn_orchestration::{
     DispatchTurnMode, DispatchTurnOutcome, DispatchTurnRequest, LiveProviderTurn,
 };

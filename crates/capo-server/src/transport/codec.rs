@@ -5,104 +5,66 @@ use super::{
     TransportError, TransportResult,
     wire::{
         input_origin_name, optional_bool, optional_i64, optional_string, parse_input_origin,
-        parse_value, required_bool, required_string, required_string_array, required_usize,
-        required_value, transport_error_wire,
+        required_bool, required_string, required_string_array, required_usize, required_value,
     },
 };
 use crate::{
     AdapterReplaySummary, AgentSummary, DispatchGateSummary, DispatchPlanSummary,
     DispatchRunSummary, LiveProviderPreflightSummary, RecoverySummary, ServerClientOrigin,
-    ServerCommand, ServerRequest, ServerResponse, ServerResponsePayload, SessionSummary,
-    TaskRunSummary,
+    ServerCommand, ServerResponse, ServerResponsePayload, SessionSummary, TaskRunSummary,
 };
 
-pub(super) fn encode_request(request: &ServerRequest) -> String {
+pub(super) fn encode_origin(origin: &ServerClientOrigin) -> Value {
     json!({
-        "request_id": request.request_id,
-        "origin": {
-            "client_id": request.origin.client_id,
-            "actor_id": request.origin.actor_id,
-            "input_origin": input_origin_name(request.origin.input_origin),
-        },
-        "command": encode_command(&request.command),
-    })
-    .to_string()
-}
-
-pub(super) fn decode_request(line: &str) -> TransportResult<ServerRequest> {
-    let value = parse_value(line)?;
-    let command = value
-        .get("command")
-        .ok_or_else(|| TransportError::Protocol("missing command".to_string()))
-        .and_then(decode_command)?;
-    let origin = value
-        .get("origin")
-        .ok_or_else(|| TransportError::Protocol("missing origin".to_string()))?;
-    Ok(ServerRequest {
-        request_id: required_string(&value, "request_id")?,
-        origin: ServerClientOrigin {
-            client_id: required_string(origin, "client_id")?,
-            actor_id: required_string(origin, "actor_id")?,
-            input_origin: parse_input_origin(&required_string(origin, "input_origin")?)?,
-        },
-        command,
+        "client_id": origin.client_id,
+        "actor_id": origin.actor_id,
+        "input_origin": input_origin_name(origin.input_origin),
     })
 }
 
-pub(super) fn encode_success_response(response: &ServerResponse) -> String {
+pub(super) fn decode_origin(origin: &Value) -> TransportResult<ServerClientOrigin> {
+    Ok(ServerClientOrigin {
+        client_id: required_string(origin, "client_id")?,
+        actor_id: required_string(origin, "actor_id")?,
+        input_origin: parse_input_origin(&required_string(origin, "input_origin")?)?,
+    })
+}
+
+/// Encode the body of a JSON-RPC `result` object for a successful response.
+///
+/// This carries the same `client_id`/`actor_id`/`input_origin` origin
+/// propagation and typed `payload` the previous codec used; the JSON-RPC `id`
+/// (which mirrors `request_id`) is owned by the envelope in [`super::jsonrpc`],
+/// so the result body itself does not repeat it.
+pub(super) fn encode_response_result(response: &ServerResponse) -> Value {
     json!({
-        "ok": true,
-        "response": {
-            "request_id": response.request_id,
-            "client_id": response.client_id,
-            "actor_id": response.actor_id,
-            "input_origin": input_origin_name(response.input_origin),
-            "payload": encode_payload(&response.payload),
-        }
+        "client_id": response.client_id,
+        "actor_id": response.actor_id,
+        "input_origin": input_origin_name(response.input_origin),
+        "payload": encode_payload(&response.payload),
     })
-    .to_string()
 }
 
-pub(super) fn encode_error_response(error: &TransportError) -> String {
-    let (kind, message) = transport_error_wire(error);
-    json!({
-        "ok": false,
-        "error": {
-            "kind": kind,
-            "message": message,
-        }
-    })
-    .to_string()
-}
-
-pub(super) fn decode_transport_response(line: &str) -> TransportResult<ServerResponse> {
-    let value = parse_value(line)?;
-    if value.get("ok").and_then(Value::as_bool) == Some(false) {
-        let error = value
-            .get("error")
-            .ok_or_else(|| TransportError::Protocol("missing error".to_string()))?;
-        return Err(TransportError::Remote {
-            kind: required_string(error, "kind")?,
-            message: required_string(error, "message")?,
-        });
-    }
-    let response = value
-        .get("response")
-        .ok_or_else(|| TransportError::Protocol("missing response".to_string()))?;
-    let payload = response
+/// Decode a JSON-RPC `result` body back into a [`ServerResponse`]. The
+/// `request_id` is supplied by the envelope (the JSON-RPC `id`).
+pub(super) fn decode_response_result(
+    request_id: String,
+    result: &Value,
+) -> TransportResult<ServerResponse> {
+    let payload = result
         .get("payload")
         .ok_or_else(|| TransportError::Protocol("missing payload".to_string()))
         .and_then(decode_payload)?;
     Ok(ServerResponse {
-        request_id: required_string(response, "request_id")?,
-        client_id: required_string(response, "client_id")?,
-        actor_id: required_string(response, "actor_id")?,
-        input_origin: parse_input_origin(&required_string(response, "input_origin")?)?,
+        request_id,
+        client_id: required_string(result, "client_id")?,
+        actor_id: required_string(result, "actor_id")?,
+        input_origin: parse_input_origin(&required_string(result, "input_origin")?)?,
         payload,
     })
 }
 
-fn encode_command(command: &ServerCommand) -> Value {
+pub(super) fn encode_command(command: &ServerCommand) -> Value {
     match command {
         ServerCommand::RegisterAgent { name } => json!({
             "type": "register_agent",
@@ -268,7 +230,7 @@ fn encode_command(command: &ServerCommand) -> Value {
     }
 }
 
-fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
+pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
     match required_string(value, "type")?.as_str() {
         "register_agent" => Ok(ServerCommand::RegisterAgent {
             name: required_string(value, "name")?,
@@ -368,7 +330,7 @@ fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
     }
 }
 
-fn encode_payload(payload: &ServerResponsePayload) -> Value {
+pub(super) fn encode_payload(payload: &ServerResponsePayload) -> Value {
     match payload {
         ServerResponsePayload::AgentRegistered(agent) => json!({
             "type": "agent_registered",
@@ -495,7 +457,7 @@ fn encode_payload(payload: &ServerResponsePayload) -> Value {
     }
 }
 
-fn decode_payload(value: &Value) -> TransportResult<ServerResponsePayload> {
+pub(super) fn decode_payload(value: &Value) -> TransportResult<ServerResponsePayload> {
     match required_string(value, "type")?.as_str() {
         "agent_registered" => Ok(ServerResponsePayload::AgentRegistered(decode_agent(
             required_value(value, "agent")?,

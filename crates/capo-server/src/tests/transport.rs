@@ -24,8 +24,35 @@ fn tcp_transport_rejects_oversized_frames_before_json_decode() {
     stream.shutdown(Shutdown::Write).expect("shutdown write");
     let mut response = String::new();
     stream.read_to_string(&mut response).expect("read response");
-    assert!(response.contains("\"ok\":false"));
-    assert!(response.contains("request frame is too large"));
+    // The oversized frame is rejected before JSON decode, so the server
+    // replies with a JSON-RPC 2.0 error frame (no recoverable id) carrying the
+    // bounded-frame protocol failure, not a success `result`.
+    let frame: serde_json::Value =
+        serde_json::from_str(response.trim_end()).expect("oversized-frame response is JSON-RPC");
+    assert_eq!(
+        frame.get("jsonrpc").and_then(serde_json::Value::as_str),
+        Some("2.0")
+    );
+    assert!(
+        frame.get("result").is_none(),
+        "expected an error frame, got: {response}"
+    );
+    assert_eq!(frame.get("id"), Some(&serde_json::Value::Null));
+    let error = frame.get("error").expect("error member");
+    assert_eq!(
+        error
+            .get("data")
+            .and_then(|data| data.get("kind"))
+            .and_then(serde_json::Value::as_str),
+        Some("protocol"),
+    );
+    assert!(
+        error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| message.contains("request frame is too large")),
+        "unexpected error message: {response}"
+    );
     assert_eq!(server_thread.join().expect("server thread"), 1);
 }
 
