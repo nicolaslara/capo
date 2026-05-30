@@ -373,7 +373,16 @@ Verification:
 
 ## RTL5 - Implement RealBoundaryController Behind The Server Boundary
 
-Status: pending.
+Status: implemented. `RealBoundaryController`
+(`crates/capo-controller/src/real_controller.rs`) is the production consumer of
+the RTL3 loop and the RTL1 trait. It mirrors the `FakeBoundaryController`
+constructor surface and the server-called methods, persists through the same
+`append_event`/projection path (read models byte-compatible with the fake path
+for identical scripted output), and coexists with the fake handle. Verified by
+the parity + restart/replay tests in `crates/capo-controller/src/tests.rs`
+(`real_controller_*`) and the server-crate parity test in
+`crates/capo-server/src/tests/turn_orchestration.rs`
+(`real_controller_matches_fake_path_over_a_scripted_adapter_from_the_server_crate`).
 
 Acceptance:
 

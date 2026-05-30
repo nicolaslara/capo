@@ -27,8 +27,9 @@
 //! goes through [`CapoServer::preflight_live_provider`] via
 //! `PreflightLiveProvider`. Both reuse the existing checks unchanged -- the
 //! orchestrator only forwards `ServerCommand`s, it owns no provider-spawn or
-//! gate-bypass path of its own. RTL5's `RealBoundaryController` is the
-//! production consumer and inherits this contract.
+//! gate-bypass path of its own. RTL5's `RealBoundaryController`
+//! (`capo_controller::RealBoundaryController`) is the production consumer and
+//! inherits this contract.
 
 use capo_controller::{FakeBoundaryController, TurnFinished};
 use capo_core::TurnId;

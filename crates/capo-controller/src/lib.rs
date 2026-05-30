@@ -32,10 +32,14 @@ use capo_tools::{
 mod adapter_replay;
 mod fake_session;
 mod local_dispatch;
+mod real_controller;
 mod session_control;
 mod turn_loop;
 
 pub use local_dispatch::LocalAdapterDispatchRunStart;
+pub use real_controller::{
+    RealAgentRegistration, RealBoundaryController, RealReadModelObservation, RealRunRefs,
+};
 pub use turn_loop::{TurnFinished, TurnStopReason};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

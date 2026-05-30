@@ -1,7 +1,9 @@
 use super::*;
 
 use crate::{DispatchTurnMode, DispatchTurnRequest};
-use capo_controller::TurnStopReason;
+use capo_controller::{
+    FakeBoundaryController, RealBoundaryController, TurnFinished, TurnStopReason,
+};
 
 const CODEX_FIXTURE: &str = include_str!("../../../capo-adapters/fixtures/codex-exec.jsonl");
 
@@ -176,6 +178,108 @@ fn loop_turn_drives_the_same_dispatch_sequence_as_the_direct_command_path() {
     assert_eq!(finished.summary_refs.len(), direct_run.summary_event_count);
     assert!(!finished.observed_tool_refs.is_empty());
     assert!(finished.observed_tool_refs.len() <= direct_run.tool_event_count);
+}
+
+#[test]
+fn real_controller_matches_fake_path_over_a_scripted_adapter_from_the_server_crate() {
+    // RTL5: the RealBoundaryController is the production consumer of the RTL3
+    // loop and the RTL1 trait. Driven from the server crate (the controller's
+    // client) over the SAME scripted adapter as the fake handle, it must
+    // produce byte-compatible read models and an identical TurnFinished -- the
+    // controller swap is invisible above the boundary, and the two handles
+    // coexist. The typed ServerCommand/ServerResponse boundary is untouched:
+    // this test exercises the controller methods the server calls, on both
+    // handles, with identical inputs.
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    type Projections = (
+        capo_state::SessionProjection,
+        Vec<capo_state::ToolCallProjection>,
+        Vec<capo_state::EvidenceProjection>,
+        i64,
+        TurnFinished,
+    );
+
+    fn capture(
+        state: &SqliteStateStore,
+        session: &SessionId,
+        finished: TurnFinished,
+    ) -> Projections {
+        (
+            state
+                .session(session)
+                .expect("session")
+                .expect("session present"),
+            state.tool_calls_for_session(session).expect("tool calls"),
+            state.evidence_for_session(session).expect("evidence"),
+            state.event_count().expect("event count"),
+            finished,
+        )
+    }
+
+    fn scripted_batch(
+        refs_external_session_ref: &str,
+    ) -> Vec<capo_adapters::NormalizedAdapterEvent> {
+        ScriptedMockTurn::new("turn-rtl5-server-1")
+            .message_delta("msg-1", "inspecting state")
+            .tool_requested("tool-1", "capo.agent_status")
+            .tool_completed("tool-1", "capo.agent_status", "agent is running")
+            .message_completed("msg-2", "state inspected")
+            .turn_completed("done-1")
+            .normalized_events(refs_external_session_ref)
+    }
+
+    let turn_id = capo_core::TurnId::new("turn-rtl5-server-1");
+    let goal = "Run an RTL5 turn from the server crate";
+
+    // Fake handle.
+    let fake_root = temp_root();
+    let fake = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        &fake_root,
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("rtl5-server-session")),
+    )
+    .expect("open fake controller");
+    let fake_reg = fake.register_agent("rtl5-server-worker").expect("register");
+    let fake_refs = fake.send_task(&fake_reg, goal).expect("send task");
+    let fake_batch = scripted_batch(&fake_refs.external_session_ref);
+    let fake_finished = fake
+        .run_turn(&fake_refs, &turn_id, &fake_batch)
+        .expect("run turn");
+    let fake_result = capture(fake.state(), &fake_refs.session_id, fake_finished);
+
+    // Real handle: the production consumer of the same loop/trait.
+    let real_root = temp_root();
+    let real = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        &real_root,
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("rtl5-server-session")),
+    )
+    .expect("open real controller");
+    let real_reg = real.register_agent("rtl5-server-worker").expect("register");
+    let real_refs = real.send_task(&real_reg, goal).expect("send task");
+    let real_batch = scripted_batch(&real_refs.external_session_ref);
+    let real_finished = real
+        .run_turn(&real_refs, &turn_id, &real_batch)
+        .expect("run turn");
+    let real_result = capture(real.state(), &real_refs.session_id, real_finished);
+
+    assert_eq!(real_result.0, fake_result.0, "session projection diverged");
+    assert_eq!(
+        real_result.1, fake_result.1,
+        "tool-call projections diverged"
+    );
+    assert_eq!(
+        real_result.2, fake_result.2,
+        "evidence projections diverged"
+    );
+    assert_eq!(real_result.3, fake_result.3, "event count diverged");
+    assert_eq!(real_result.4, fake_result.4, "TurnFinished diverged");
+
+    // Sanity: the scripted turn actually exercised the loop.
+    assert_eq!(real_result.4.stop_reason, TurnStopReason::Completed);
+    assert!(real_result.4.observed_terminal_event());
+    assert!(!real_result.4.observed_tool_refs.is_empty());
 }
 
 #[test]

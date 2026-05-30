@@ -1206,6 +1206,275 @@ fn turn_loop_dispatch_derivation_matches_run_turn_for_the_same_batch() {
     assert_eq!(via_dispatch, via_loop);
 }
 
+// --- RTL5: RealBoundaryController -----------------------------------------
+
+/// Drive an identical scripted register -> send_task -> turn sequence on both
+/// the fake handle and the real handle over the SAME scripted adapter, and
+/// assert the persisted read models are byte-compatible.
+///
+/// This is the RTL5 parity proof: the real controller is the production
+/// consumer of the RTL3 loop and the RTL1 trait, but it persists through the
+/// one `append_event`/projection path, so identical scripted output yields
+/// identical projections (the only divergence allowed is the in-memory
+/// `external_session_ref`, which both handles derive from their own session
+/// label -- here we hand both the same label).
+#[test]
+fn real_controller_read_models_match_fake_path_for_identical_scripted_output() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    fn run_sequence_on<C>(
+        open: C,
+    ) -> (
+        SessionProjection,
+        Vec<capo_state::ToolCallProjection>,
+        Vec<capo_state::ToolObservationProjection>,
+        Vec<capo_state::EvidenceProjection>,
+        i64,
+        TurnFinished,
+    )
+    where
+        C: FnOnce(AgentAdapterHandle) -> SqliteStateStoreBundle,
+    {
+        let scripted =
+            AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("rtl5-parity-session"));
+        let bundle = open(scripted);
+        let registration = bundle.register("rtl5-worker");
+        let refs = bundle.send_task(&registration, "Run an RTL5 parity turn");
+        let turn_id = TurnId::new("turn-rtl5-parity-1");
+        let batch = ScriptedMockTurn::new("turn-rtl5-parity-1")
+            .message_delta("msg-1", "inspecting state")
+            .tool_requested("tool-1", "capo.agent_status")
+            .tool_completed("tool-1", "capo.agent_status", "agent is running")
+            .message_completed("msg-2", "state inspected")
+            .turn_completed("done-1")
+            .normalized_events(&refs.external_session_ref);
+        let finished = bundle.run_turn(&refs, &turn_id, &batch);
+        let state = bundle.state();
+        (
+            state
+                .session(&refs.session_id)
+                .expect("session")
+                .expect("session present"),
+            state
+                .tool_calls_for_session(&refs.session_id)
+                .expect("tool calls"),
+            state
+                .tool_observations_for_session(&refs.session_id)
+                .expect("tool observations"),
+            state
+                .evidence_for_session(&refs.session_id)
+                .expect("evidence"),
+            state.event_count().expect("event count"),
+            finished,
+        )
+    }
+
+    let fake_root = temp_root();
+    let fake = run_sequence_on(|adapter| {
+        SqliteStateStoreBundle::Fake(
+            FakeBoundaryController::open_with_adapter(
+                ProjectId::new("project-capo"),
+                &fake_root,
+                adapter,
+            )
+            .expect("open fake controller"),
+        )
+    });
+
+    let real_root = temp_root();
+    let real = run_sequence_on(|adapter| {
+        SqliteStateStoreBundle::Real(
+            RealBoundaryController::open_with_adapter(
+                ProjectId::new("project-capo"),
+                &real_root,
+                adapter,
+            )
+            .expect("open real controller"),
+        )
+    });
+
+    assert_eq!(real.0, fake.0, "session projection diverged");
+    assert_eq!(real.1, fake.1, "tool-call projections diverged");
+    assert_eq!(real.2, fake.2, "tool-observation projections diverged");
+    assert_eq!(real.3, fake.3, "evidence projections diverged");
+    assert_eq!(real.4, fake.4, "event count diverged");
+    assert_eq!(real.5, fake.5, "TurnFinished outcome diverged");
+}
+
+/// Restart/replay: a turn driven through the real controller rebuilds
+/// byte-identically from the persisted event log, and a re-run is idempotent
+/// (0 new events). Mirrors
+/// `turn_loop_projected_turn_rebuilds_identically_after_restart_replay` for the
+/// production handle, satisfying the RTL5 restart/replay verification.
+#[test]
+fn real_controller_projected_turn_rebuilds_identically_after_restart_replay() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    let state_root = temp_root();
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("rtl5-replay-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        &state_root,
+        scripted,
+    )
+    .expect("open real controller");
+    let registration = controller
+        .register_agent("rtl5-replay-worker")
+        .expect("agent");
+    let refs = controller
+        .send_task(&registration, "Run a real replay-stable turn")
+        .expect("send task");
+    let turn_id = TurnId::new("turn-rtl5-replay-1");
+    let batch = ScriptedMockTurn::new("turn-rtl5-replay-1")
+        .message_delta("msg-1", "inspecting state")
+        .tool_requested("tool-1", "capo.agent_status")
+        .tool_completed("tool-1", "capo.agent_status", "agent is running")
+        .message_completed("msg-2", "state inspected")
+        .turn_completed("done-1")
+        .normalized_events(&refs.external_session_ref);
+
+    let finished = controller
+        .run_turn(&refs, &turn_id, &batch)
+        .expect("run turn");
+
+    let session_before = controller
+        .state()
+        .session(&refs.session_id)
+        .expect("session")
+        .expect("session present");
+    let tools_before = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    let observations_before = controller
+        .state()
+        .tool_observations_for_session(&refs.session_id)
+        .expect("tool observations");
+    let evidence_before = controller
+        .state()
+        .evidence_for_session(&refs.session_id)
+        .expect("evidence");
+    let event_count_before = controller.state().event_count().expect("event count");
+
+    // Restart: reopen the state store and rebuild projections from the log.
+    let reopened = SqliteStateStore::open(&state_root).expect("reopen state");
+    reopened.rebuild_projections().expect("rebuild projections");
+
+    assert_eq!(
+        reopened
+            .session(&refs.session_id)
+            .expect("session")
+            .expect("session present"),
+        session_before
+    );
+    assert_eq!(
+        reopened
+            .tool_calls_for_session(&refs.session_id)
+            .expect("tool calls"),
+        tools_before
+    );
+    assert_eq!(
+        reopened
+            .tool_observations_for_session(&refs.session_id)
+            .expect("tool observations"),
+        observations_before
+    );
+    assert_eq!(
+        reopened
+            .evidence_for_session(&refs.session_id)
+            .expect("evidence"),
+        evidence_before
+    );
+    assert_eq!(
+        reopened.event_count().expect("event count"),
+        event_count_before
+    );
+
+    // Reconstruct the outcome from PERSISTED STATE on a fresh real controller
+    // that never saw the in-memory batch.
+    let reconstructed_controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        &state_root,
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("rtl5-replay-session")),
+    )
+    .expect("reopen real controller");
+    let reconstructed = reconstructed_controller
+        .core()
+        .reconstruct_turn_finished(&refs, &turn_id)
+        .expect("reconstruct outcome");
+    assert_eq!(reconstructed.turn_id, finished.turn_id);
+    assert_eq!(reconstructed.stop_reason, finished.stop_reason);
+    assert_eq!(
+        reconstructed.observed_terminal_event(),
+        finished.observed_terminal_event()
+    );
+    assert_eq!(reconstructed.summary_refs, finished.summary_refs);
+    assert_eq!(
+        reconstructed.observed_tool_refs,
+        finished.observed_tool_refs
+    );
+    let mut expected_stable = finished.clone();
+    expected_stable.replay = AdapterReplayReport::default();
+    assert_eq!(reconstructed, expected_stable);
+
+    // Idempotent re-run: no new events, only the volatile replay counts change.
+    let replayed = controller
+        .run_turn(&refs, &turn_id, &batch)
+        .expect("replay turn");
+    assert_eq!(replayed.replay.appended_event_count, 0);
+    let mut replayed_stable = replayed.clone();
+    replayed_stable.replay = AdapterReplayReport::default();
+    assert_eq!(replayed_stable, expected_stable);
+    assert_eq!(
+        controller.state().event_count().expect("event count"),
+        event_count_before
+    );
+}
+
+/// Tiny test-only adapter over the two coexisting controllers so the parity
+/// test can drive an identical scripted sequence on each without duplicating
+/// the body. Both arms call the SAME public method names; the point of the test
+/// is that the resulting persisted state is identical.
+enum SqliteStateStoreBundle {
+    Fake(FakeBoundaryController),
+    Real(RealBoundaryController),
+}
+
+impl SqliteStateStoreBundle {
+    fn register(&self, agent_name: &str) -> FakeAgentRegistration {
+        match self {
+            Self::Fake(c) => c.register_agent(agent_name).expect("register agent"),
+            Self::Real(c) => c.register_agent(agent_name).expect("register agent"),
+        }
+    }
+
+    fn send_task(&self, registration: &FakeAgentRegistration, goal: &str) -> FakeRunRefs {
+        match self {
+            Self::Fake(c) => c.send_task(registration, goal).expect("send task"),
+            Self::Real(c) => c.send_task(registration, goal).expect("send task"),
+        }
+    }
+
+    fn run_turn(
+        &self,
+        refs: &FakeRunRefs,
+        turn_id: &TurnId,
+        batch: &[capo_adapters::NormalizedAdapterEvent],
+    ) -> TurnFinished {
+        match self {
+            Self::Fake(c) => c.run_turn(refs, turn_id, batch).expect("run turn"),
+            Self::Real(c) => c.run_turn(refs, turn_id, batch).expect("run turn"),
+        }
+    }
+
+    fn state(&self) -> &SqliteStateStore {
+        match self {
+            Self::Fake(c) => c.state(),
+            Self::Real(c) => c.state(),
+        }
+    }
+}
+
 fn temp_root() -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

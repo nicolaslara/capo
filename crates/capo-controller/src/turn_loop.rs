@@ -191,9 +191,10 @@ impl FakeBoundaryController {
     /// from the live batch. The `replay` field is left at its default because it
     /// is the volatile append-count diagnostic, not replay-stable state.
     ///
-    /// Test-only for now: it backs the restart/replay test that enforces the
-    /// replay-stability invariant. RTL5's `RealBoundaryController` is the
-    /// production consumer (reconstructing a turn outcome after a restart).
+    /// Test-only for now: it backs the restart/replay tests that enforce the
+    /// replay-stability invariant for both the fake handle and RTL5's
+    /// `RealBoundaryController` (the production consumer reconstructs a turn
+    /// outcome after a restart via `RealBoundaryController::core`).
     #[cfg(test)]
     pub(crate) fn reconstruct_turn_finished(
         &self,
