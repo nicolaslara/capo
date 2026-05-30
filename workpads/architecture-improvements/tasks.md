@@ -85,3 +85,56 @@ Verification:
 - Simple gated live Codex smoke: `SendTask`/`SteerAgent` with the Codex profile
   produces real Codex output through the `AgentAdapter` trait.
 - `cargo fmt` / `cargo clippy ...` / focused `cargo test -p capo-controller -p capo-server`.
+
+## AI3 - Wire `dispatch_tool_call` into the production turn loop
+
+Status: pending. Priority: high. Source: tools-aci `ACI1` boundary review.
+
+Problem:
+
+- `RealBoundaryController::dispatch_tool_call`
+  (`crates/capo-controller/src/real_controller.rs`, driving
+  `crates/capo-controller/src/tool_dispatch.rs`) is the real tool-dispatch seam
+  landed by `ACI1`: it runs the real `CapoToolRegistry`/`RuntimeToolWrappers`
+  through `authorize_and_invoke` and persists the canonical observed audit
+  sequence + `ToolInvocation`/`ToolObservation` projections. But it has NO
+  production caller — it is exercised only by tests
+  (`crates/capo-controller/src/tests.rs`). The live chat/steer path
+  (`SendTask` -> `send_task` -> `FakeAgentSession::send_turn` in
+  `crates/capo-controller/src/fake_session.rs:77`) still routes tool calls
+  through the fake `ToolExposure` shim: the controller is constructed with
+  `tools: ToolExposure::fake()` (`crates/capo-controller/src/lib.rs:119`) and the
+  per-turn memory-packet summary calls `self.tools.invoke(FakeToolRequest {...})`,
+  which produces a canned fake summary, not a real dispatched tool call. So the
+  REAL tool dispatch (`authorize_and_invoke`) is wired as a method but the
+  production turn loop does not call it yet — the loop's decision step neither
+  auto-selects nor auto-invokes a tool through the real seam.
+- This is the same "real-but-unwired" theme as AI1 (`run_dispatch_turn` is the
+  documented one orchestration path with no production caller) and AI2 (the chat
+  backend is a real controller wired to the fake adapter handle): a real
+  capability exists and is test-driveable, but every production entry point
+  bypasses it. AI3 closes the loop on tool dispatch specifically; it is gated
+  together with AI1/AI2 before `goal-autonomy` (autonomous continuation must
+  drive real tool dispatch, not the fake summary shim).
+
+Acceptance:
+
+- The production turn loop invokes the real dispatch seam: a model's tool
+  selection in the live `send_task`/`send_turn` path flows THROUGH
+  `RealBoundaryController::dispatch_tool_call` (real
+  `authorize_and_invoke` -> persisted canonical events + projection), not through
+  `ToolExposure::fake()` / `self.tools.invoke`.
+- The per-turn memory-packet summary no longer uses the fake summary shim as the
+  tool surface for a real run, OR a documented, justified exception that does not
+  masquerade fake output as a real dispatched tool result.
+- A real production turn that invokes a tool produces the same observed audit
+  sequence + `ToolInvocation`/`ToolObservation` projections that the `ACI1`
+  dispatch tests assert (one dispatch path, one event shape), keyed to the turn.
+
+Verification:
+
+- A test that drives the PRODUCTION turn path (not a bespoke `dispatch_tool_call`
+  harness) and asserts a tool invocation flows through `authorize_and_invoke`,
+  persisting the canonical observed sequence + projection keyed to the turn.
+- `cargo fmt` / `cargo clippy --all-targets --all-features -- -D warnings` /
+  `cargo test --workspace`.
