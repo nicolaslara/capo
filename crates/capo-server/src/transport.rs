@@ -13,38 +13,58 @@
 //! ## Concurrency model (ST3)
 //!
 //! `serve_tcp` accepts connections and hands each one to its own OS thread, so
-//! many persistent connections are served at once instead of one-at-a-time.
-//! Each connection runs a persistent read loop: it reads framed JSON-RPC
-//! requests until EOF or the per-connection idle timeout, replying to each on
-//! the same socket.
+//! many persistent connections are served at once instead of one-at-a-time. The
+//! accept loop is bounded by a configurable concurrency ceiling
+//! ([`ServeConfig::max_concurrent_connections`]): a counting gate blocks the
+//! accept loop once that many connections are live, so a loopback
+//! connection-flood (or a buggy reconnect loop) cannot spawn unbounded threads
+//! and file descriptors. Each connection runs a persistent read loop: it reads
+//! framed JSON-RPC requests until EOF or the per-connection idle timeout,
+//! replying to each on the same socket.
 //!
-//! ### Single-writer constraint (documented, not silently interleaved)
+//! ### Single-writer constraint (enforced, not just documented)
 //!
 //! Concurrency here is about serving many *connections*, not about admitting
 //! concurrent *writers* to the event log. The append path is not yet guarded by
-//! the `safety-gates` single-writer workspace lock, so concurrent writers are
-//! **unsupported**: each request runs through the same [`CapoServer::handle`]
-//! handler, and the handler is the serialization point. ST3 does not add a
-//! second write path; the in-band `Cancel` aborts the *transport's* view of an
-//! in-flight request (it stops waiting and frees the connection) rather than
-//! racing a second writer into the store.
+//! the `safety-gates` single-writer workspace lock, so until that lands the
+//! transport enforces single-writer semantics itself: every *write-bearing*
+//! command (anything other than the read-only `ListAgents` / `AgentStatus` /
+//! `Dashboard`, see [`crate::ServerCommand::is_read_only`]) runs through
+//! [`RequestHandler::handle`] while holding a process-wide write lock
+//! ([`WriteSerializer`]), so at most one writer into the store executes at any
+//! instant across all connections. That makes the handler a *real* serialization
+//! point for writes rather than an aspirational one. Read-only commands skip the
+//! lock, so the concurrency ST3 advertises is genuine for them while writes
+//! never interleave. As defense in depth the SQLite store also runs in WAL mode
+//! with a `busy_timeout`, so a reader overlapping a write (or any future second
+//! writer) blocks-and-retries rather than racing to a `SQLITE_BUSY` error. ST3
+//! does not add a second logical write path.
 //!
 //! ### In-band `Cancel`
 //!
 //! A client can abort an in-flight request *without closing the socket* by
 //! sending a JSON-RPC `cancel` notification (no `id`) naming the `request_id`
 //! to abort. The connection emits a `cancelled` error frame for that request
-//! and stays open for subsequent requests. The handler is handed a
-//! [`CancellationToken`] it can observe so cooperative work can stop early; the
-//! transport never blocks the connection on a cancelled request's eventual
-//! completion.
+//! and immediately resumes serving subsequent requests. The handler is handed a
+//! [`CancellationToken`] it can observe so cooperative work stops early; a
+//! production handler that observes it (via [`CancellationToken::is_cancelled`],
+//! available in all builds) returns promptly.
+//!
+//! The request worker runs on a *detached* thread, not a scoped one, so the
+//! connection's read loop never blocks waiting for a cancelled (or
+//! idle-timed-out) request's worker to finish. A genuinely long, *non*-
+//! cooperative handler call keeps running to natural completion on its detached
+//! thread -- but it no longer pins the connection thread, the accept loop, or
+//! server drain. While that orphaned worker runs it still holds the write lock,
+//! so the single-writer guarantee above is never violated; the only residual is
+//! that a stuck non-cooperative handler delays the *next* write until it
+//! returns, which is exactly the serialization the write lock promises.
 
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -86,12 +106,99 @@ impl CancellationToken {
     }
 
     /// Whether an in-band `Cancel` has been observed for the in-flight request.
-    /// Handlers observe this to stop cooperative work early; the production
-    /// [`CapoServerHandler`] does not yet (its calls are short), so today this
-    /// is exercised by the deterministic in-band-cancel test's scripted handler.
-    #[cfg(test)]
+    /// Handlers observe this to stop cooperative work early. It is available in
+    /// all builds so a production handler can poll it during long work; the
+    /// current production [`CapoServerHandler`] does not need to (its calls are
+    /// short), so it is exercised today by the deterministic in-band-cancel
+    /// test's scripted handler, but the cooperative path is real, not test-only.
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// A process-wide write-serialization point. Holding this around a handler call
+/// guarantees at most one *write-bearing* handler call -- and therefore at most
+/// one writer into the event log -- runs at any instant across every
+/// connection, which is the single-writer guarantee ST3 documents. The
+/// connection loop wraps only write-bearing commands in it (read-only commands
+/// skip it and run concurrently). It is a placeholder for the `safety-gates`
+/// workspace write lock: when that lands it can subsume this.
+///
+/// It is intentionally a plain `Mutex<()>` (not a `RwLock`): readers are handled
+/// by *not taking the lock at all* (gated by the command kind plus SQLite WAL),
+/// so there is no in-lock read/write split to model, and serializing writes is
+/// the simplest thing that makes the documented guarantee true.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WriteSerializer(Arc<Mutex<()>>);
+
+impl WriteSerializer {
+    /// Run `f` while holding the write lock, so it is serialized against every
+    /// other write-bearing handler call. A poisoned lock (a previous handler
+    /// panicked) is recovered: the lock guards no data, so the next writer
+    /// proceeds.
+    fn run<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _guard = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f()
+    }
+}
+
+/// A counting gate that bounds how many connections are served concurrently.
+/// The accept loop acquires a permit before spawning a connection thread and
+/// blocks once `capacity` permits are out, so a connection flood cannot spawn
+/// unbounded threads/file descriptors. Each connection releases its permit on
+/// teardown (including detached-worker teardown), so capacity is reclaimed as
+/// connections finish without retaining their `JoinHandle`s.
+#[derive(Debug)]
+pub(crate) struct ConnectionGate {
+    capacity: usize,
+    state: Mutex<usize>,
+    released: Condvar,
+}
+
+impl ConnectionGate {
+    pub(crate) fn new(capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            capacity: capacity.max(1),
+            state: Mutex::new(0),
+            released: Condvar::new(),
+        })
+    }
+
+    /// Block until a permit is free, then claim it. Returned guard releases the
+    /// permit on drop, so a panicking connection thread still frees its slot.
+    pub(crate) fn acquire(self: &Arc<Self>) -> ConnectionPermit {
+        let mut live = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        while *live >= self.capacity {
+            live = self.released.wait(live).unwrap_or_else(|p| p.into_inner());
+        }
+        *live += 1;
+        ConnectionPermit {
+            gate: Arc::clone(self),
+        }
+    }
+
+    /// The number of permits currently out (live connections). Used by the
+    /// deterministic connection-cap test to assert the gate enforces its bound.
+    #[cfg(test)]
+    pub(crate) fn live_count(&self) -> usize {
+        *self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+/// RAII permit: releasing it (on drop) decrements the live-connection count and
+/// wakes the accept loop if it was blocked at the ceiling.
+pub(crate) struct ConnectionPermit {
+    gate: Arc<ConnectionGate>,
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        let mut live = self.gate.state.lock().unwrap_or_else(|p| p.into_inner());
+        *live = live.saturating_sub(1);
+        self.gate.released.notify_one();
     }
 }
 
@@ -108,9 +215,12 @@ pub(crate) trait RequestHandler: Send + Sync + 'static {
 }
 
 /// The production handler: each request runs through the shared
-/// [`CapoServer::handle`], the single serialization point for writes. It does
-/// not currently observe the cancellation token (handler calls are short), but
-/// the seam is in place for cooperative cancellation of longer work.
+/// [`CapoServer::handle`]. The connection loop wraps this call in the transport's
+/// [`WriteSerializer`] for write-bearing commands, so writes are a real
+/// single-writer point rather than an assumed one (reads run unlocked). Beyond
+/// the queued-cancel short-circuit below it does not poll the token mid-call
+/// (handler calls are short), but the seam is in place for cooperative
+/// cancellation of longer work.
 struct CapoServerHandler {
     server: CapoServer,
 }
@@ -119,17 +229,38 @@ impl RequestHandler for CapoServerHandler {
     fn handle(
         &self,
         request: ServerRequest,
-        _cancel: &CancellationToken,
+        cancel: &CancellationToken,
     ) -> TransportResult<ServerResponse> {
+        // Cooperative cancellation, the production path the ST3 review asked for.
+        // A request can sit queued behind the write lock while the client
+        // cancels it in-band; observing the token here means a request cancelled
+        // before its write begins short-circuits instead of writing into the
+        // store. The connection loop still discards this result by generation,
+        // so the client only ever sees the `cancelled` frame.
+        if cancel.is_cancelled() {
+            return Err(TransportError::Cancelled {
+                request_id: request.request_id,
+            });
+        }
         self.server.handle(request).map_err(TransportError::Server)
     }
 }
+
+/// Default ceiling on concurrently-served connections. The accept loop blocks
+/// (rather than spawning) once this many connections are live, bounding thread
+/// and file-descriptor use against a loopback connection-flood. It is generous
+/// for interactive use yet finite, so a misbehaving local client cannot exhaust
+/// the daemon's resources.
+const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 256;
 
 /// Per-connection serving configuration.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ServeConfig {
     /// Idle timeout: a connection idle (no bytes) for this long is closed.
     idle_timeout: Duration,
+    /// Ceiling on connections served at once. The accept loop blocks once this
+    /// many are live so a connection flood cannot spawn unbounded threads.
+    max_concurrent_connections: usize,
 }
 
 impl ServeConfig {
@@ -137,7 +268,20 @@ impl ServeConfig {
     /// idle-timeout test to keep the assertion fast).
     #[cfg(test)]
     pub(crate) fn with_idle_timeout(idle_timeout: Duration) -> Self {
-        Self { idle_timeout }
+        Self {
+            idle_timeout,
+            ..Self::default()
+        }
+    }
+
+    /// Build a config with an explicit concurrent-connection ceiling (used by
+    /// the deterministic connection-cap test).
+    #[cfg(test)]
+    pub(crate) fn with_max_concurrent_connections(max_concurrent_connections: usize) -> Self {
+        Self {
+            max_concurrent_connections,
+            ..Self::default()
+        }
     }
 }
 
@@ -145,6 +289,7 @@ impl Default for ServeConfig {
     fn default() -> Self {
         Self {
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
+            max_concurrent_connections: DEFAULT_MAX_CONCURRENT_CONNECTIONS,
         }
     }
 }
@@ -208,10 +353,20 @@ pub fn serve_tcp(
 /// connections (or unbounded when `None`), serving each on its own thread.
 ///
 /// `max_connections` keeps the historical meaning of the old `max_requests`
-/// argument: it bounds how many connections are accepted before the loop
+/// argument: it bounds how many connections are *accepted* before the loop
 /// returns, which is how the deterministic round-trip tests size the server.
-/// Returns the number of connections accepted once all connection threads have
-/// finished, so callers (and tests) observe a fully-drained server.
+/// That is orthogonal to [`ServeConfig::max_concurrent_connections`], which
+/// bounds how many connections are *live at once* (the accept loop blocks at
+/// that ceiling so a flood cannot spawn unbounded threads).
+///
+/// In the bounded mode (`Some(n)`, the tests' sizing) the connection threads
+/// are joined before returning, so callers observe a fully-drained server and
+/// the returned count is exact. In the production unbounded mode (`None`) the
+/// connection threads are detached: their `JoinHandle`s are *not* retained, so
+/// a long-running daemon servicing churned connections does not accumulate
+/// handles for the process lifetime. Liveness is tracked by the connection gate
+/// (via [`ConnectionPermit`]) instead, so resource use stays bounded without a
+/// growing handle vector.
 pub(crate) fn serve_tcp_with_handler<H: RequestHandler>(
     listener: TcpListener,
     handler: Arc<H>,
@@ -224,18 +379,38 @@ pub(crate) fn serve_tcp_with_handler<H: RequestHandler>(
             "server listener must be loopback, got {bound_address}"
         )));
     }
+    // One process-wide write lock shared by every connection: it makes the
+    // handler the real single-writer serialization point the module doc claims.
+    let write_serializer = WriteSerializer::default();
+    let gate = ConnectionGate::new(config.max_concurrent_connections);
     let mut accepted = 0;
     let mut connection_threads = Vec::new();
     while max_connections.map(|max| accepted < max).unwrap_or(true) {
+        // Block here once the live-connection ceiling is reached, so the accept
+        // loop never spawns more than `max_concurrent_connections` threads.
+        let permit = gate.acquire();
         let (stream, _) = listener.accept().map_err(TransportError::Io)?;
         accepted += 1;
         let handler = Arc::clone(&handler);
-        connection_threads.push(thread::spawn(move || {
+        let write_serializer = write_serializer.clone();
+        let connection_thread = thread::spawn(move || {
+            // The permit is moved in and dropped when this thread returns, so it
+            // releases its slot back to the gate (even on a panic), reclaiming
+            // capacity without the accept loop retaining the handle.
+            let _permit = permit;
             // A per-connection error (a peer that dropped, a malformed frame
             // mid-stream, an idle timeout) tears down only that connection; it
             // never poisons the accept loop or sibling connections.
-            let _ = handle_connection(handler.as_ref(), stream, config);
-        }));
+            let _ = handle_connection(handler, stream, &write_serializer, config);
+        });
+        if max_connections.is_some() {
+            // Bounded mode: retain handles so we can drain and return an exact
+            // count. The bound is small (test sizing), so no unbounded growth.
+            connection_threads.push(connection_thread);
+        }
+        // Unbounded (production) mode: `connection_thread` is dropped here,
+        // detaching it. We never retain its handle, so no per-connection
+        // memory accrues for the process lifetime.
     }
     for connection_thread in connection_threads {
         connection_thread
@@ -331,13 +506,24 @@ enum ConnEvent {
 
 /// Persistent per-connection read loop (ST3): read framed JSON-RPC requests
 /// until EOF or the idle timeout, replying to each on the same socket. The read
-/// side runs on its own thread and feeds [`ConnEvent`]s to the main loop, so an
-/// in-band `cancel` notification can abort the matching in-flight request
-/// without dropping the connection, and a stalled peer is reaped by the idle
-/// timeout.
+/// side runs on its own (detached) thread and feeds [`ConnEvent`]s to the main
+/// loop, so an in-band `cancel` notification can abort the matching in-flight
+/// request without dropping the connection, and a stalled peer is reaped by the
+/// idle timeout.
+///
+/// Both the read side and each request worker run on *detached* threads rather
+/// than scoped ones: that is deliberate. A scoped worker would pin this
+/// function (and thus the connection thread and server drain) until a slow,
+/// non-cooperative handler returned, defeating the resource bound -- the read
+/// loop could mark a request cancelled or the connection closed, yet still be
+/// stuck joining the worker. Detaching lets the read loop return the instant the
+/// connection closes or a request is cancelled; an orphaned worker drains on its
+/// own. It still holds the [`WriteSerializer`] while it runs, so it cannot race
+/// a second writer into the store; it just delays the next write until it ends.
 fn handle_connection<H: RequestHandler>(
-    handler: &H,
+    handler: Arc<H>,
     stream: TcpStream,
+    write_serializer: &WriteSerializer,
     config: ServeConfig,
 ) -> TransportResult<()> {
     // The idle timeout is enforced as a read timeout: a read that blocks longer
@@ -351,117 +537,135 @@ fn handle_connection<H: RequestHandler>(
 
     let (event_tx, event_rx) = mpsc::channel::<ConnEvent>();
 
-    thread::scope(|scope| {
-        // Read side: classify frames and forward them; a clean EOF, idle
-        // timeout, or hard error all terminate the connection via `Closed`.
-        let reader_tx = event_tx.clone();
-        scope.spawn(move || {
-            let mut reader = BufReader::new(read_half);
-            loop {
-                match read_frame(&mut reader) {
-                    Ok(Some(frame)) => {
-                        if reader_tx.send(ConnEvent::Incoming(frame)).is_err() {
-                            return;
-                        }
-                    }
-                    Ok(None) | Err(_) => {
-                        let _ = reader_tx.send(ConnEvent::Closed);
+    // Read side: classify frames and forward them; a clean EOF, idle timeout, or
+    // hard error all terminate the connection via `Closed`. Detached: when this
+    // function returns and drops `event_rx`, the reader's next `send` fails and
+    // it exits on its own, so we never block the connection on it.
+    let reader_tx = event_tx.clone();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(read_half);
+        loop {
+            match read_frame(&mut reader) {
+                Ok(Some(frame)) => {
+                    if reader_tx.send(ConnEvent::Incoming(frame)).is_err() {
                         return;
                     }
                 }
-            }
-        });
-
-        // Main loop: at most one request in flight. `in_flight` carries the
-        // current request id, its cancellation token, and a generation so a
-        // late handler result for an already-cancelled request is dropped.
-        let mut in_flight: Option<(String, CancellationToken, u64)> = None;
-        let mut generation: u64 = 0;
-        while let Ok(event) = event_rx.recv() {
-            match event {
-                ConnEvent::Closed => {
-                    if let Some((_, cancel, _)) = &in_flight {
-                        cancel.cancel();
-                    }
-                    return Ok(());
-                }
-                ConnEvent::Incoming(Frame::Request(request)) => {
-                    if in_flight.is_some() {
-                        // One request at a time per connection: admitting a
-                        // second concurrently would risk a second writer into
-                        // the store before the safety-gates write lock lands.
-                        let error = TransportError::Protocol(
-                            "a request is already in flight on this connection".to_string(),
-                        );
-                        write_frame(
-                            &mut write_half,
-                            &jsonrpc::encode_error_response(Some(&request.request_id), &error),
-                        )?;
-                        continue;
-                    }
-                    generation += 1;
-                    let this_generation = generation;
-                    let request_id = request.request_id.clone();
-                    let cancel = CancellationToken::new();
-                    let worker_cancel = cancel.clone();
-                    let worker_tx = event_tx.clone();
-                    scope.spawn(move || {
-                        let result = handler.handle(*request, &worker_cancel);
-                        let _ = worker_tx.send(ConnEvent::Result {
-                            generation: this_generation,
-                            result: Box::new(result),
-                        });
-                    });
-                    in_flight = Some((request_id, cancel, this_generation));
-                }
-                ConnEvent::Incoming(Frame::Cancel { request_id: target }) => {
-                    if let Some((request_id, cancel, _)) = &in_flight {
-                        let matches = target.as_deref().map(|id| id == request_id).unwrap_or(true);
-                        if matches {
-                            // Abort: signal the worker, emit a `cancelled`
-                            // frame, and keep the connection open. The worker's
-                            // eventual `Result` is discarded by the generation
-                            // check below.
-                            cancel.cancel();
-                            let error = TransportError::Cancelled {
-                                request_id: request_id.clone(),
-                            };
-                            let frame = jsonrpc::encode_error_response(Some(request_id), &error);
-                            write_frame(&mut write_half, &frame)?;
-                            in_flight = None;
-                        }
-                    }
-                    // A cancel with nothing matching in flight is a no-op
-                    // notification (no response frame is owed).
-                }
-                ConnEvent::Incoming(Frame::Invalid { id, error }) => {
-                    write_frame(
-                        &mut write_half,
-                        &jsonrpc::encode_error_response(id.as_deref(), &error),
-                    )?;
-                }
-                ConnEvent::Result { generation, result } => {
-                    // Drop a result whose request was already cancelled (or
-                    // superseded): only the current in-flight generation owes a
-                    // response.
-                    let owed = in_flight
-                        .as_ref()
-                        .map(|(_, _, current)| *current == generation)
-                        .unwrap_or(false);
-                    if !owed {
-                        continue;
-                    }
-                    let (request_id, _, _) = in_flight.take().expect("owed implies in flight");
-                    let frame = match *result {
-                        Ok(response) => jsonrpc::encode_success_response(&response),
-                        Err(error) => jsonrpc::encode_error_response(Some(&request_id), &error),
-                    };
-                    write_frame(&mut write_half, &frame)?;
+                Ok(None) | Err(_) => {
+                    let _ = reader_tx.send(ConnEvent::Closed);
+                    return;
                 }
             }
         }
-        Ok(())
-    })
+    });
+
+    // Main loop: at most one request in flight. `in_flight` carries the
+    // current request id, its cancellation token, and a generation so a
+    // late handler result for an already-cancelled request is dropped.
+    let mut in_flight: Option<(String, CancellationToken, u64)> = None;
+    let mut generation: u64 = 0;
+    while let Ok(event) = event_rx.recv() {
+        match event {
+            ConnEvent::Closed => {
+                if let Some((_, cancel, _)) = &in_flight {
+                    cancel.cancel();
+                }
+                return Ok(());
+            }
+            ConnEvent::Incoming(Frame::Request(request)) => {
+                if in_flight.is_some() {
+                    // One request at a time per connection: admitting a
+                    // second concurrently would risk a second writer into
+                    // the store before the safety-gates write lock lands.
+                    let error = TransportError::Protocol(
+                        "a request is already in flight on this connection".to_string(),
+                    );
+                    write_frame(
+                        &mut write_half,
+                        &jsonrpc::encode_error_response(Some(&request.request_id), &error),
+                    )?;
+                    continue;
+                }
+                generation += 1;
+                let this_generation = generation;
+                let request_id = request.request_id.clone();
+                let cancel = CancellationToken::new();
+                let worker_cancel = cancel.clone();
+                let worker_tx = event_tx.clone();
+                let worker_handler = Arc::clone(&handler);
+                let worker_serializer = write_serializer.clone();
+                // Serialize write-bearing commands behind the process-wide write
+                // lock so only one writer runs at a time across every connection
+                // (the documented single-writer point). Read-only commands skip
+                // the lock so they can be served concurrently -- the concurrency
+                // ST3 promises is real for reads, while writes never interleave.
+                let serialize_writes = !request.command.is_read_only();
+                // Detached worker: if the request is cancelled or the connection
+                // closes first, this worker is orphaned and drains on its own;
+                // its `Result` send below fails harmlessly once `event_rx` is
+                // gone. A write-bearing worker holds the write lock while it
+                // runs, so even orphaned it cannot race a second writer.
+                thread::spawn(move || {
+                    let dispatch = || worker_handler.handle(*request, &worker_cancel);
+                    let result = if serialize_writes {
+                        worker_serializer.run(dispatch)
+                    } else {
+                        dispatch()
+                    };
+                    let _ = worker_tx.send(ConnEvent::Result {
+                        generation: this_generation,
+                        result: Box::new(result),
+                    });
+                });
+                in_flight = Some((request_id, cancel, this_generation));
+            }
+            ConnEvent::Incoming(Frame::Cancel { request_id: target }) => {
+                if let Some((request_id, cancel, _)) = &in_flight {
+                    let matches = target.as_deref().map(|id| id == request_id).unwrap_or(true);
+                    if matches {
+                        // Abort: signal the worker, emit a `cancelled`
+                        // frame, and keep the connection open. The worker's
+                        // eventual `Result` is discarded by the generation
+                        // check below.
+                        cancel.cancel();
+                        let error = TransportError::Cancelled {
+                            request_id: request_id.clone(),
+                        };
+                        let frame = jsonrpc::encode_error_response(Some(request_id), &error);
+                        write_frame(&mut write_half, &frame)?;
+                        in_flight = None;
+                    }
+                }
+                // A cancel with nothing matching in flight is a no-op
+                // notification (no response frame is owed).
+            }
+            ConnEvent::Incoming(Frame::Invalid { id, error }) => {
+                write_frame(
+                    &mut write_half,
+                    &jsonrpc::encode_error_response(id.as_deref(), &error),
+                )?;
+            }
+            ConnEvent::Result { generation, result } => {
+                // Drop a result whose request was already cancelled (or
+                // superseded): only the current in-flight generation owes a
+                // response.
+                let owed = in_flight
+                    .as_ref()
+                    .map(|(_, _, current)| *current == generation)
+                    .unwrap_or(false);
+                if !owed {
+                    continue;
+                }
+                let (request_id, _, _) = in_flight.take().expect("owed implies in flight");
+                let frame = match *result {
+                    Ok(response) => jsonrpc::encode_success_response(&response),
+                    Err(error) => jsonrpc::encode_error_response(Some(&request_id), &error),
+                };
+                write_frame(&mut write_half, &frame)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Read and classify one framed line from the connection. Returns `Ok(None)` on

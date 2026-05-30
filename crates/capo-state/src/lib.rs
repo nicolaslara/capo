@@ -77,8 +77,33 @@ impl SqliteStateStore {
         fs::create_dir_all(root.join("artifacts"))?;
         let db_path = root.join("capo.sqlite");
         let mut connection = Connection::open(&db_path)?;
+        // WAL is a persistent, database-level mode: setting it once here applies
+        // to every later connection opened against this file. It lets a reader
+        // proceed concurrently with an open write, which (together with the
+        // per-connection `busy_timeout` in `connect`) hardens the store against
+        // the concurrent-writer race the ST3 review flagged.
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&mut connection)?;
         Ok(Self { root, db_path })
+    }
+
+    /// Open a fresh connection to the store with the concurrency pragmas every
+    /// write path relies on. The transport serializes writers in-process (one
+    /// handler call at a time), but this is the defense-in-depth layer the ST3
+    /// review asked for: if two connections ever do contend (e.g. a future
+    /// second writer, or a reader overlapping a writer), `busy_timeout` makes the
+    /// loser *block* and retry up to the timeout instead of failing immediately
+    /// with `SQLITE_BUSY`, and WAL lets readers proceed while a write is open.
+    /// Every per-call `Connection::open` goes through here so no write path can
+    /// silently skip these.
+    fn connect(&self) -> StateResult<Connection> {
+        let connection = Connection::open(self.db_path.as_path())?;
+        // 5s is generous for the in-process-serialized writes this store sees;
+        // it bounds the wait so a genuinely stuck lock still surfaces an error
+        // rather than hanging forever.
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(connection)
     }
 
     pub fn binding(&self) -> BoundaryBinding {
@@ -102,7 +127,7 @@ impl SqliteStateStore {
         event: NewEvent,
         projection_records: &[ProjectionRecord],
     ) -> StateResult<i64> {
-        let mut connection = Connection::open(&self.db_path)?;
+        let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         if let (Some(project_id), Some(idempotency_key)) =
             (&event.project_id, &event.idempotency_key)
@@ -160,7 +185,7 @@ impl SqliteStateStore {
         decided_approval: PermissionApprovalProjection,
         grant: Option<CapabilityGrantProjection>,
     ) -> StateResult<i64> {
-        let mut connection = Connection::open(&self.db_path)?;
+        let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         let guarded = transaction.execute(
             "UPDATE permission_approvals
@@ -459,7 +484,7 @@ impl SqliteStateStore {
             ));
         }
 
-        let connection = Connection::open(&self.db_path)?;
+        let connection = self.connect()?;
         connection.execute(
             "INSERT OR REPLACE INTO artifacts (
                 artifact_id, project_id, session_id, run_id, kind, uri, content_hash,
@@ -481,7 +506,7 @@ impl SqliteStateStore {
     }
 
     pub fn rebuild_projections(&self) -> StateResult<()> {
-        let mut connection = Connection::open(&self.db_path)?;
+        let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         clear_projection_tables(&transaction)?;
 
@@ -524,7 +549,7 @@ impl SqliteStateStore {
     }
 
     pub fn begin_recovery(&self, recovery_attempt_id: &str) -> StateResult<RecoveryAttempt> {
-        let connection = Connection::open(&self.db_path)?;
+        let connection = self.connect()?;
         let last_sequence = self.last_sequence()?;
         connection.execute(
             "INSERT INTO recovery_attempts (
@@ -541,7 +566,7 @@ impl SqliteStateStore {
     }
 
     pub fn complete_recovery(&self, recovery_attempt_id: &str) -> StateResult<RecoveryAttempt> {
-        let mut connection = Connection::open(&self.db_path)?;
+        let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         let started_sequence = transaction
             .query_row(
@@ -570,13 +595,13 @@ impl SqliteStateStore {
     }
 
     pub fn event_count(&self) -> StateResult<i64> {
-        let connection = Connection::open(&self.db_path)?;
+        let connection = self.connect()?;
         let count = connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
         Ok(count)
     }
 
     pub fn last_sequence(&self) -> StateResult<i64> {
-        let connection = Connection::open(&self.db_path)?;
+        let connection = self.connect()?;
         self.last_sequence_with_connection(&connection)
     }
 

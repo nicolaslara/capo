@@ -206,6 +206,24 @@ pub enum ServerCommand {
     Recover,
 }
 
+impl ServerCommand {
+    /// Whether this command only reads the store (never appends an event or
+    /// mutates a projection). Read-only commands need not be serialized behind
+    /// the transport's single-writer lock, so they can run concurrently with
+    /// each other and (under WAL) alongside an in-flight write. Every other
+    /// command is treated as write-bearing and serialized; defaulting unknown or
+    /// future variants to write-bearing keeps the single-writer guarantee safe
+    /// by construction.
+    pub fn is_read_only(&self) -> bool {
+        matches!(
+            self,
+            ServerCommand::ListAgents
+                | ServerCommand::AgentStatus { .. }
+                | ServerCommand::Dashboard { .. }
+        )
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerResponse {
     pub request_id: String,

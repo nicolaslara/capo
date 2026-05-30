@@ -191,13 +191,39 @@ fn tcp_transport_round_trips_server_requests_and_recovers_state() {
 // --- ST3: concurrent accept loop, idle timeout, in-band Cancel ---------------
 
 use std::io::{BufRead, BufReader};
-use std::sync::{Arc, Barrier};
-use std::time::Duration;
+use std::sync::{Arc, Barrier, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::AgentSummary;
 use crate::transport::{
-    CancellationToken, RequestHandler, ServeConfig, TransportError, serve_tcp_with_handler,
+    CancellationToken, ConnectionGate, RequestHandler, ServeConfig, TransportError,
+    serve_tcp_with_handler,
 };
+
+/// A releasable latch a `noncoop-` request waits on while *ignoring* the cancel
+/// token, modeling a genuinely non-cooperative (production-shaped) handler. The
+/// test releases it at the end so the orphaned detached worker exits cleanly
+/// instead of leaking a thread that runs until process exit.
+#[derive(Clone, Default)]
+struct ReleaseLatch {
+    inner: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl ReleaseLatch {
+    fn wait(&self) {
+        let (lock, cvar) = &*self.inner;
+        let mut released = lock.lock().expect("release latch lock");
+        while !*released {
+            released = cvar.wait(released).expect("release latch wait");
+        }
+    }
+
+    fn release(&self) {
+        let (lock, cvar) = &*self.inner;
+        *lock.lock().expect("release latch lock") = true;
+        cvar.notify_all();
+    }
+}
 
 /// A scripted handler driving the ST3 transport tests deterministically (no
 /// live provider, no real turn). Behavior is selected by the request id:
@@ -206,13 +232,32 @@ use crate::transport::{
 ///   loop were serial, two such requests on two connections could never both
 ///   reach the barrier, so reaching it proves genuine concurrency.
 /// - `block-*`: spin until the in-band cancel token fires, then return. This
-///   holds a request in flight so the test can cancel it.
+///   holds a request in flight (cooperatively) so the test can cancel it.
+/// - `noncoop-*`: block on the [`ReleaseLatch`] *ignoring* the cancel token,
+///   modeling a non-cooperative handler. The connection must still be reclaimed
+///   (its worker is detached) even though this worker keeps running.
 /// - anything else: reply immediately.
 ///
 /// Every reply echoes the request id back as a single-agent `Agents` payload so
 /// the client can assert each connection received *its own* response.
 struct ScriptedHandler {
     barrier: Arc<Barrier>,
+    noncoop_latch: ReleaseLatch,
+}
+
+impl ScriptedHandler {
+    fn new(barrier: Arc<Barrier>) -> Self {
+        Self {
+            barrier,
+            noncoop_latch: ReleaseLatch::default(),
+        }
+    }
+
+    /// A clone of the latch a `noncoop-` request blocks on, so a test can
+    /// release the orphaned worker after asserting the connection was reclaimed.
+    fn noncoop_latch_for_test(&self) -> ReleaseLatch {
+        self.noncoop_latch.clone()
+    }
 }
 
 impl RequestHandler for ScriptedHandler {
@@ -223,6 +268,11 @@ impl RequestHandler for ScriptedHandler {
     ) -> Result<ServerResponse, TransportError> {
         if request.request_id.starts_with("barrier-") {
             self.barrier.wait();
+        } else if request.request_id.starts_with("noncoop-") {
+            // Non-cooperative: block until explicitly released, never consulting
+            // the cancel token. A cancel/disconnect must reclaim the connection
+            // regardless, because the worker runs detached from it.
+            self.noncoop_latch.wait();
         } else if request.request_id.starts_with("block-") {
             // Cooperative cancellation: hold the request in flight until the
             // in-band cancel fires. A short sleep keeps the spin cheap.
@@ -324,9 +374,7 @@ fn two_concurrent_connections_receive_independent_responses() {
     let barrier = Arc::new(Barrier::new(2));
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let address = listener.local_addr().expect("address");
-    let handler = Arc::new(ScriptedHandler {
-        barrier: Arc::clone(&barrier),
-    });
+    let handler = Arc::new(ScriptedHandler::new(Arc::clone(&barrier)));
     let server_thread = thread::spawn(move || {
         serve_tcp_with_handler(listener, handler, Some(2), ServeConfig::default())
             .expect("serve tcp with scripted handler")
@@ -355,9 +403,7 @@ fn idle_connection_is_closed_after_the_read_timeout() {
     // connection thread forever; the per-connection idle timeout reaps it.
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let address = listener.local_addr().expect("address");
-    let handler = Arc::new(ScriptedHandler {
-        barrier: Arc::new(Barrier::new(1)),
-    });
+    let handler = Arc::new(ScriptedHandler::new(Arc::new(Barrier::new(1))));
     let server_thread = thread::spawn(move || {
         serve_tcp_with_handler(
             listener,
@@ -391,9 +437,7 @@ fn idle_connection_is_closed_after_the_read_timeout() {
 fn in_band_cancel_aborts_in_flight_request_without_dropping_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let address = listener.local_addr().expect("address");
-    let handler = Arc::new(ScriptedHandler {
-        barrier: Arc::new(Barrier::new(1)),
-    });
+    let handler = Arc::new(ScriptedHandler::new(Arc::new(Barrier::new(1))));
     let server_thread = thread::spawn(move || {
         serve_tcp_with_handler(listener, handler, Some(1), ServeConfig::default())
             .expect("serve tcp with scripted handler")
@@ -438,4 +482,224 @@ fn in_band_cancel_aborts_in_flight_request_without_dropping_connection() {
     // Close the connection so the accept loop drains and returns.
     stream.shutdown(Shutdown::Both).expect("shutdown");
     assert_eq!(server_thread.join().expect("server thread"), 1);
+}
+
+#[test]
+fn second_request_while_one_is_in_flight_is_rejected_and_connection_recovers() {
+    // ST3 admits one request at a time per connection: a second request sent
+    // while the first is still in flight is rejected with a `protocol` error and
+    // the connection keeps serving. This is the load-bearing single-writer
+    // safety branch, exercised here end to end.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let handler = Arc::new(ScriptedHandler::new(Arc::new(Barrier::new(1))));
+    let server_thread = thread::spawn(move || {
+        serve_tcp_with_handler(listener, handler, Some(1), ServeConfig::default())
+            .expect("serve tcp with scripted handler")
+    });
+
+    let mut stream = TcpStream::connect(address).expect("connect");
+
+    // First request blocks in the handler (cooperatively) until cancelled.
+    write_frame_line(&mut stream, &jsonrpc_list_agents_frame("block-first"));
+    // A second request arrives while the first is still in flight: it must be
+    // rejected, not admitted as a concurrent second writer.
+    write_frame_line(&mut stream, &jsonrpc_list_agents_frame("second-while-busy"));
+
+    let rejected = read_frame_line(&stream);
+    let rejected_value: serde_json::Value =
+        serde_json::from_str(rejected.trim_end()).expect("rejection is JSON-RPC");
+    assert_eq!(
+        rejected_value.get("id").and_then(serde_json::Value::as_str),
+        Some("second-while-busy"),
+        "the rejection must name the second request, not the in-flight one: {rejected}"
+    );
+    assert!(
+        rejected_value.get("result").is_none(),
+        "the second request must get an error frame, not a result: {rejected}"
+    );
+    let error = rejected_value.get("error").expect("error member");
+    assert_eq!(
+        error
+            .get("data")
+            .and_then(|data| data.get("kind"))
+            .and_then(serde_json::Value::as_str),
+        Some("protocol"),
+        "already-in-flight rejection must be a protocol error: {rejected}"
+    );
+    assert!(
+        error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| message.contains("already in flight")),
+        "unexpected rejection message: {rejected}"
+    );
+
+    // The first request is unaffected: cancel it in-band and observe its typed
+    // `cancelled` frame.
+    write_frame_line(&mut stream, &jsonrpc_cancel_frame("block-first"));
+    let cancelled = read_frame_line(&stream);
+    let cancelled_value: serde_json::Value =
+        serde_json::from_str(cancelled.trim_end()).expect("cancel response is JSON-RPC");
+    assert_eq!(
+        cancelled_value
+            .get("error")
+            .and_then(|error| error.get("data"))
+            .and_then(|data| data.get("kind"))
+            .and_then(serde_json::Value::as_str),
+        Some("cancelled"),
+        "the in-flight request should still cancel cleanly: {cancelled}"
+    );
+
+    // After clearing the in-flight slot the connection serves a third request.
+    write_frame_line(&mut stream, &jsonrpc_list_agents_frame("after-rejection"));
+    let third = read_frame_line(&stream);
+    assert_eq!(response_agent_name(&third), "after-rejection");
+
+    stream.shutdown(Shutdown::Both).expect("shutdown");
+    assert_eq!(server_thread.join().expect("server thread"), 1);
+}
+
+#[test]
+fn stalled_connection_with_noncooperative_in_flight_work_is_reclaimed() {
+    // The strong claim is that a stalled/disconnected connection is reclaimed
+    // even when its in-flight handler is non-cooperative (ignores the cancel
+    // token), because the worker runs detached from the connection thread. If
+    // the worker were scoped, the accept loop's drain would block here until the
+    // handler returned -- which it never would on its own.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let handler = Arc::new(ScriptedHandler::new(Arc::new(Barrier::new(1))));
+    // Keep a handle to the latch so we can release the orphaned worker at the
+    // end (so it does not leak a thread running until process exit).
+    let latch = handler.noncoop_latch_for_test();
+    let server_thread = thread::spawn(move || {
+        serve_tcp_with_handler(listener, handler, Some(1), ServeConfig::default())
+            .expect("serve tcp with scripted handler")
+    });
+
+    let mut stream = TcpStream::connect(address).expect("connect");
+    // Send a non-cooperative request that blocks ignoring the cancel token.
+    write_frame_line(&mut stream, &jsonrpc_list_agents_frame("noncoop-stuck"));
+    // Give the worker a moment to actually enter the handler and block.
+    thread::sleep(Duration::from_millis(50));
+    // Abruptly disconnect, simulating a stalled/abandoned client.
+    stream.shutdown(Shutdown::Both).expect("shutdown");
+    drop(stream);
+
+    // The connection thread (and thus the bounded accept loop's drain) must
+    // return promptly despite the still-running non-cooperative worker. We join
+    // on a helper thread with a deadline so a regression (scoped worker pinning
+    // the connection) fails the test rather than hanging the suite forever.
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let served = server_thread.join().expect("server thread");
+        let _ = done_tx.send(served);
+    });
+    let served = done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("accept loop must drain a stalled connection with non-cooperative in-flight work");
+    assert_eq!(served, 1);
+
+    // Release the orphaned worker so its detached thread exits cleanly.
+    latch.release();
+}
+
+#[test]
+fn accept_loop_honors_the_concurrent_connection_ceiling() {
+    // End-to-end DoS bound: with a ceiling of one, a second connection cannot be
+    // served until the first is torn down, so a flood cannot spawn unbounded
+    // connection threads. We hold the first connection in flight, prove the
+    // second gets no response meanwhile, then free the first and watch the
+    // second complete.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let handler = Arc::new(ScriptedHandler::new(Arc::new(Barrier::new(1))));
+    let server_thread = thread::spawn(move || {
+        serve_tcp_with_handler(
+            listener,
+            handler,
+            Some(2),
+            ServeConfig::with_max_concurrent_connections(1),
+        )
+        .expect("serve tcp with scripted handler")
+    });
+
+    // Connection one holds a cooperatively-blocking request in flight, keeping
+    // its connection thread (and thus the single permit) alive.
+    let mut first = TcpStream::connect(address).expect("connect first");
+    write_frame_line(&mut first, &jsonrpc_list_agents_frame("block-hold"));
+
+    // Connection two connects and sends a request, but must NOT be served while
+    // the ceiling is saturated by connection one.
+    let mut second = TcpStream::connect(address).expect("connect second");
+    write_frame_line(&mut second, &jsonrpc_list_agents_frame("waiting-for-slot"));
+    second
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .expect("set read timeout");
+    let mut probe = [0_u8; 1];
+    let blocked = second.read(&mut probe);
+    assert!(
+        matches!(&blocked, Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)),
+        "second connection must not be served while the ceiling is saturated, got: {blocked:?}"
+    );
+
+    // Free connection one: cancel its in-flight request and close it, releasing
+    // the permit so the accept loop can finally serve connection two.
+    write_frame_line(&mut first, &jsonrpc_cancel_frame("block-hold"));
+    let _ = read_frame_line(&first); // drain the `cancelled` frame
+    first.shutdown(Shutdown::Both).expect("shutdown first");
+    drop(first);
+
+    // Connection two is now served and gets its own response.
+    let response = read_frame_line(&second);
+    assert_eq!(response_agent_name(&response), "waiting-for-slot");
+    second.shutdown(Shutdown::Both).expect("shutdown second");
+    assert_eq!(server_thread.join().expect("server thread"), 2);
+}
+
+#[test]
+fn connection_gate_blocks_at_capacity_and_reclaims_on_release() {
+    // The accept loop's DoS bound: the gate must never let more than `capacity`
+    // permits out, and must hand out a fresh permit the instant one is released.
+    let gate = ConnectionGate::new(2);
+    let first = gate.acquire();
+    let second = gate.acquire();
+    assert_eq!(gate.live_count(), 2, "two permits are out at capacity");
+
+    // A third acquire must block until a permit is released. Prove it blocks by
+    // checking it has NOT completed after a grace period, then release one and
+    // confirm it completes.
+    let gate_for_third = Arc::clone(&gate);
+    let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+    let third = thread::spawn(move || {
+        let permit = gate_for_third.acquire();
+        let _ = acquired_tx.send(());
+        // Hold the permit until the test drops the channel sender side.
+        permit
+    });
+
+    assert!(
+        acquired_rx
+            .recv_timeout(Duration::from_millis(150))
+            .is_err(),
+        "the gate must block a third acquire while at capacity"
+    );
+
+    // Releasing one permit lets the blocked acquire proceed promptly.
+    let release_at = Instant::now();
+    drop(first);
+    acquired_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("releasing a permit must unblock the waiting acquire");
+    assert!(
+        release_at.elapsed() < Duration::from_secs(2),
+        "the waiting acquire should be woken by the release, not by polling"
+    );
+    assert_eq!(gate.live_count(), 2, "still two permits out after the swap");
+
+    drop(second);
+    let third_permit = third.join().expect("third acquire thread");
+    drop(third_permit);
+    assert_eq!(gate.live_count(), 0, "all permits released");
 }
