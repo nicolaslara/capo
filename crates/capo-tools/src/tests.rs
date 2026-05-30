@@ -73,7 +73,7 @@ fn runtime_wrappers_define_shell_git_file_and_project_memory_tools() {
     ));
     let tools = wrappers.list_tools();
 
-    assert_eq!(tools.len(), 9);
+    assert_eq!(tools.len(), 10);
     for tool_id in CAPO_WRAPPER_TOOLS {
         let definition = wrappers.describe_tool(tool_id).expect("wrapper definition");
         assert_eq!(definition.origin, "runtime");
@@ -2144,5 +2144,236 @@ fn output_schema_validation_rejects_a_wrong_shaped_result() {
             .iter()
             .any(|error| error.contains("field `output` expected `string`")),
         "wrong-typed output must be reported, got {wrong_type:?}"
+    );
+}
+
+/// Seed a fixture repo with `n` lines each containing the needle, plus a second
+/// file in a subdirectory, so search caps/truncation can be exercised
+/// deterministically. Returns the workspace path.
+fn seed_search_fixture(name: &str, needle: &str, lines: usize) -> PathBuf {
+    let workspace = temp_root(name);
+    fs::create_dir_all(workspace.join("sub")).expect("workspace sub");
+    let mut body = String::new();
+    for n in 1..=lines {
+        body.push_str(&format!("line {n} has {needle} here\n"));
+    }
+    fs::write(workspace.join("a.txt"), body).expect("seed a.txt");
+    fs::write(
+        workspace.join("sub/b.txt"),
+        format!("{needle} in a subdir\n"),
+    )
+    .expect("seed sub/b.txt");
+    workspace
+}
+
+#[test]
+fn search_returns_typed_bounded_path_line_preview_matches() {
+    // ACI5: a clean search returns decision-grade `path:line:preview` matches,
+    // not whole files, and validates against its declared output_schema.
+    let workspace = seed_search_fixture("aci5-search-clean", "needle", 3);
+    let artifacts = temp_root("aci5-search-clean-artifacts");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci5-clean",
+            "run-aci5-clean",
+            "capo.search",
+            serde_json::json!({"query": "needle"}),
+        ),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+    assert_eq!(result.status, "completed", "summary: {}", result.summary);
+
+    let definition = wrappers.describe_tool("capo.search").expect("definition");
+    let errors = definition.validate_output(&result.narrow_output());
+    assert!(errors.is_empty(), "search typed output: {errors:?}");
+
+    let typed = result.narrow_output();
+    // 3 matches in a.txt + 1 in sub/b.txt.
+    assert_eq!(typed["total_matches"], serde_json::json!(4));
+    assert_eq!(typed["returned_matches"], serde_json::json!(4));
+    assert_eq!(typed["truncated"], serde_json::json!(false));
+    assert_eq!(typed["truncation_reason"], serde_json::json!("none"));
+    let matches = typed["matches"].as_array().expect("matches");
+    assert_eq!(matches.len(), 4);
+    // Each match is a decision-grade path:line:preview triple, never a whole file.
+    for one in matches {
+        assert!(one["path"].as_str().is_some(), "match carries a path");
+        assert!(one["line"].as_i64().is_some(), "match carries a line");
+        let preview = one["preview"].as_str().expect("preview");
+        assert!(preview.contains("needle"), "preview shows the matched line");
+        assert!(!preview.contains('\n'), "preview is a single line");
+    }
+    // The full file content is never inlined as a single blob: there is no
+    // output artifact for a bounded search.
+    assert!(result.output_artifacts.is_empty());
+}
+
+#[test]
+fn search_per_call_match_cap_truncates_with_explicit_marker() {
+    // ACI5: the per-call match cap bounds the number of returned matches and the
+    // result carries an explicit truncation marker so the agent knows it is
+    // partial rather than silently incomplete.
+    let workspace = seed_search_fixture("aci5-search-matchcap", "needle", 20);
+    let artifacts = temp_root("aci5-search-matchcap-artifacts");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci5-matchcap",
+            "run-aci5-matchcap",
+            "capo.search",
+            serde_json::json!({"query": "needle", "max_matches": 5}),
+        ),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+    assert_eq!(result.status, "completed", "summary: {}", result.summary);
+    let typed = result.narrow_output();
+    assert_eq!(typed["returned_matches"], serde_json::json!(5));
+    // 20 in a.txt + 1 in sub/b.txt were found before capping.
+    assert_eq!(typed["total_matches"], serde_json::json!(21));
+    assert_eq!(typed["truncated"], serde_json::json!(true));
+    assert_eq!(typed["truncation_reason"], serde_json::json!("match_cap"));
+    assert_eq!(typed["matches"].as_array().expect("matches").len(), 5);
+}
+
+#[test]
+fn search_total_byte_cap_truncates_with_explicit_marker() {
+    // ACI5: even under the match cap, the total preview BYTE cap bounds the
+    // payload so the tool cannot dump large amounts of content, and the result
+    // is explicitly marked truncated via the byte cap.
+    let workspace = seed_search_fixture("aci5-search-bytecap", "needle", 20);
+    let artifacts = temp_root("aci5-search-bytecap-artifacts");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci5-bytecap",
+            "run-aci5-bytecap",
+            "capo.search",
+            // A high match cap but a tiny byte budget: the byte cap fires first.
+            serde_json::json!({"query": "needle", "max_matches": 100, "max_preview_bytes": 40}),
+        ),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+    assert_eq!(result.status, "completed", "summary: {}", result.summary);
+    let typed = result.narrow_output();
+    assert_eq!(typed["truncated"], serde_json::json!(true));
+    assert_eq!(typed["truncation_reason"], serde_json::json!("byte_cap"));
+    // The total preview bytes returned stay within the budget.
+    let total_preview_bytes: usize = typed["matches"]
+        .as_array()
+        .expect("matches")
+        .iter()
+        .map(|one| one["preview"].as_str().unwrap_or("").len())
+        .sum();
+    assert!(
+        total_preview_bytes <= 40,
+        "total preview bytes {total_preview_bytes} must stay within the 40-byte cap"
+    );
+    // The byte cap fired strictly before the match cap, so fewer than the 21
+    // available matches were returned.
+    assert!(
+        typed["returned_matches"].as_i64().expect("returned") < 21,
+        "byte cap must return fewer than all matches"
+    );
+}
+
+#[test]
+fn search_empty_result_is_a_successful_not_failed_call() {
+    // ACI5: ripgrep exits 1 on no matches; that is a normal empty search, not a
+    // tool failure.
+    let workspace = seed_search_fixture("aci5-search-empty", "needle", 3);
+    let artifacts = temp_root("aci5-search-empty-artifacts");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci5-empty",
+            "run-aci5-empty",
+            "capo.search",
+            serde_json::json!({"query": "zzz_no_such_token_zzz"}),
+        ),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+    assert_eq!(result.status, "completed", "summary: {}", result.summary);
+    let typed = result.narrow_output();
+    assert_eq!(typed["total_matches"], serde_json::json!(0));
+    assert_eq!(typed["returned_matches"], serde_json::json!(0));
+    assert_eq!(typed["truncated"], serde_json::json!(false));
+}
+
+#[test]
+fn search_redacts_secrets_in_previews() {
+    // ACI5: a configured secret on a matched line must be scrubbed in the preview
+    // before it reaches the agent.
+    let workspace = temp_root("aci5-search-redact");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::write(
+        workspace.join("config.txt"),
+        "api_key = SECRET_TOKEN_abc123\nother line\n",
+    )
+    .expect("seed");
+    let mut config =
+        RuntimeToolConfig::local_workspace(workspace.clone(), temp_root("aci5-redact-art"));
+    config.redaction_rules.push(RedactionRule {
+        pattern: "SECRET_TOKEN_abc123".to_string(),
+        replacement: "[REDACTED]".to_string(),
+    });
+    let wrappers = RuntimeToolWrappers::new(config);
+    let result = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci5-redact",
+            "run-aci5-redact",
+            "capo.search",
+            serde_json::json!({"query": "api_key"}),
+        ),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+    assert_eq!(result.status, "completed", "summary: {}", result.summary);
+    let typed = result.narrow_output();
+    assert!(
+        !typed.to_string().contains("SECRET_TOKEN_abc123"),
+        "secret leaked into search previews: {typed}"
+    );
+    let preview = typed["matches"][0]["preview"].as_str().expect("preview");
+    assert!(
+        preview.contains("[REDACTED]"),
+        "the redacted placeholder must replace the secret in the preview: {preview}"
+    );
+}
+
+#[test]
+fn search_cannot_read_outside_the_workspace() {
+    // ACI5: search reads stay inside the workspace via the shared path
+    // confinement -- a `..`/absolute path root escape is rejected.
+    let workspace = seed_search_fixture("aci5-search-escape", "needle", 2);
+    let artifacts = temp_root("aci5-search-escape-artifacts");
+    let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
+        workspace.clone(),
+        artifacts,
+    ));
+    let escaped = wrappers.authorize_and_invoke(
+        wrapper_request(
+            "call-aci5-escape",
+            "run-aci5-escape",
+            "capo.search",
+            serde_json::json!({"query": "needle", "path": "../../../etc"}),
+        ),
+        &PermissionPolicy::allow_trusted_local(),
+    );
+    assert_eq!(
+        escaped.status, "failed",
+        "a workspace-escaping search root must be rejected, got: {}",
+        escaped.summary
     );
 }

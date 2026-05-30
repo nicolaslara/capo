@@ -415,7 +415,54 @@ Verification:
 
 ## ACI5 - Search/Grep And Bounded Locator
 
-Status: pending.
+Status: done.
+
+Evidence:
+
+- New `capo.search` runtime-wrapper tool (added to `CAPO_WRAPPER_TOOLS`,
+  `crates/capo-tools/src/lib.rs`) is ripgrep-backed through the bounded runtime
+  runner (`runtime_wrappers.rs::search`): it runs `rg --json --sort path` (the
+  `--sort path` forces deterministic, single-threaded ordering) confined to the
+  workspace and parses ripgrep's line-delimited JSON into typed, capped
+  `{path, line, preview}` matches. ripgrep is resolved to an ABSOLUTE path
+  against the current `PATH` (the runner clears the env), like the ACI4 linter.
+  An `rg` exit of 1 (no matches) is a normal empty search, not a failure; an exit
+  of 2+ (bad regex) is surfaced as a typed handler error.
+- Bounded/decision-grade result model (`crates/capo-tools/src/search.rs`):
+  `apply_caps` enforces TWO caps -- a per-call match cap (`max_matches`, default
+  50) AND a total preview byte cap (`max_preview_bytes`, default 8 KiB), plus a
+  per-line clip (256 bytes) so one pathological long line cannot blow the budget.
+  The typed output (`SEARCH_OUTPUT_SCHEMA`) carries `matches`, `returned_matches`,
+  `total_matches`, an explicit `truncated` boolean, and a `truncation_reason`
+  (`none`/`match_cap`/`byte_cap`) so the agent knows the result is partial rather
+  than silently incomplete. Whole files are never inlined: a bounded search emits
+  no output artifact, only the capped `path:line:preview` triples. The first
+  match is always kept (clipped) so an oversized line still yields one usable
+  result. Callers may tighten/widen the caps via `max_matches`/`max_preview_bytes`
+  (non-positive values are rejected so a cap can never be disabled into a
+  whole-repo dump).
+- Path confinement + redaction: the search root defaults to the workspace and may
+  be narrowed to a confined subpath via the shared `resolve_workspace_path`
+  (`ensure_under_workspace`), so a `..`/absolute escape is rejected with a typed
+  `failed` result before ripgrep runs. Every preview line is scrubbed through the
+  configured `redact_bytes` BEFORE capping/returning, and the per-tool redaction
+  policy declares the `preview` field (`wrapper_redaction_policy`).
+- Tests added: unit tests in `search.rs` (rg-JSON parse, skip-unparseable,
+  match-cap, byte-cap-before-match-cap, under-both-caps, first-match-always-kept,
+  per-line clip) plus integration tests in `tests.rs` exercising the real wrapper
+  `authorize_and_invoke` over a fixture repo:
+  `search_returns_typed_bounded_path_line_preview_matches`,
+  `search_per_call_match_cap_truncates_with_explicit_marker`,
+  `search_total_byte_cap_truncates_with_explicit_marker`,
+  `search_empty_result_is_a_successful_not_failed_call`,
+  `search_redacts_secrets_in_previews`,
+  `search_cannot_read_outside_the_workspace`. The wrapper-count assertion was
+  updated 9 -> 10; ACI2's "every tool declares output_schema/risk/scope/redaction"
+  test covers `capo.search` automatically.
+- Gate run from `/Users/nicolas/devel/capo-wt/tools-aci`: `cargo fmt --check`
+  clean; `cargo clippy --all-targets --all-features -- -D warnings` exit 0;
+  `cargo test --workspace` => 378 passed, 0 failed (capo-tools: 72 passed);
+  `git diff --check` clean.
 
 Acceptance:
 

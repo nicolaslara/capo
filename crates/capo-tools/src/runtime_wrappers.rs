@@ -18,6 +18,7 @@ use crate::runtime_wrapper_paths::{
     sanitize_path_component, sanitized_run_id, workspace_path, workspace_relative_path,
 };
 use crate::runtime_wrapper_types::{denied_typed_output, failed_typed_output};
+use crate::search::{SearchCaps, SearchMatch, apply_caps, parse_ripgrep_json};
 use crate::{
     CAPO_WRAPPER_TOOLS, PermissionPolicy, PermissionRequest, ToolAuditEvent, ToolAuthorization,
     ToolDefinition, content_hash, json_array, unknown_tool_definition,
@@ -99,6 +100,13 @@ impl RuntimeToolWrappers {
                 "medium",
                 vec!["tool:invoke:capo.apply_patch", "filesystem:write:workspace"],
                 "{\"input\":{\"path\":\"string\",\"hunks\":\"array\",\"auto_lint\":\"boolean?\"}}",
+            ),
+            "capo.search" => (
+                "Search",
+                false,
+                "low",
+                vec!["tool:invoke:capo.search", "filesystem:read:workspace"],
+                "{\"input\":{\"query\":\"string\",\"path\":\"string?\",\"max_matches\":\"integer?\",\"max_preview_bytes\":\"integer?\"}}",
             ),
             "capo.workpad_read" => (
                 "Workpad Read",
@@ -304,6 +312,7 @@ impl RuntimeToolWrappers {
             "capo.file_read" => self.file_read(request, "file_read"),
             "capo.file_write" => self.file_write(request),
             "capo.apply_patch" => self.apply_patch(request),
+            "capo.search" => self.search(request),
             "capo.project_memory_read" => self.project_memory_read(request),
             "capo.workpad_read" => self.workpad_read(request),
             other => Err(format!("unsupported wrapper tool: {other}")),
@@ -730,6 +739,138 @@ impl RuntimeToolWrappers {
         ))
     }
 
+    /// `capo.search`: ripgrep-backed search returning typed, bounded
+    /// `path:line:preview` matches with an explicit truncation marker (ACI5).
+    ///
+    /// The search root defaults to the workspace and may be narrowed to a
+    /// workspace-relative subpath; it is confined with the same
+    /// [`Self::resolve_workspace_path`] every read/write wrapper uses, so a query
+    /// cannot read outside the workspace. ripgrep runs through the bounded runtime
+    /// runner with deterministic ordering (`--sort path`), and its line-delimited
+    /// JSON is parsed and CAPPED by a per-call match cap AND a total preview byte
+    /// cap. When either cap is hit the typed result is marked `truncated` (with a
+    /// `truncation_reason`) so the agent knows the result is partial rather than
+    /// silently incomplete. Each preview line is scrubbed through the configured
+    /// redaction before it reaches the agent, and full output is never inlined --
+    /// only the bounded `path:line:preview` matches are returned, so the agent
+    /// finds edit targets without the tool dumping whole files.
+    fn search(&self, request: &WrapperToolRequest) -> Result<WrapperExecution, String> {
+        let query = required_input(request, "query")?;
+        if query.is_empty() {
+            return Err("capo.search requires a non-empty `query`".to_string());
+        }
+        // The search root is the workspace, optionally narrowed to a confined
+        // subpath. Confinement reuses the shared resolver so a `..`/absolute
+        // escape is rejected before ripgrep runs.
+        let search_root = match request.input.get("path").and_then(Value::as_str) {
+            Some(path) if !path.is_empty() => self.resolve_workspace_path(path, false)?,
+            _ => self.config.workspace_root.clone(),
+        };
+        let caps = self.search_caps(request)?;
+
+        let started = Instant::now();
+        let outcome = self
+            .bounded_runtime_runner()
+            .start_process(LocalProcessRequest {
+                run_id: sanitized_run_id(&request.run_id),
+                turn_id: None,
+                program: resolve_search_program(),
+                argv: vec![
+                    "--json".to_string(),
+                    "--sort".to_string(),
+                    "path".to_string(),
+                    "--".to_string(),
+                    query.clone(),
+                    search_root.display().to_string(),
+                ],
+                cwd: self.config.workspace_root.clone(),
+                env: HashMap::new(),
+            })
+            .map_err(runtime_error)?;
+        let duration_ms = started.elapsed().as_millis() as i64;
+
+        // ripgrep exits 1 when there are simply no matches; that is a normal,
+        // successful empty search, NOT a failure. A genuinely abnormal exit
+        // (2+, e.g. a bad regex) is surfaced as a handler error.
+        if let Some(code) = outcome.exit_code
+            && code > 1
+        {
+            let stderr = fs::read_to_string(&outcome.stderr.path).unwrap_or_default();
+            return Err(format!("search failed (rg exit {code}): {}", stderr.trim()));
+        }
+
+        let stdout = fs::read_to_string(&outcome.stdout.path).unwrap_or_default();
+        let raw = parse_ripgrep_json(&stdout);
+        // Redact every preview line BEFORE capping/returning so a configured
+        // secret on a matched line never reaches the agent in the clear.
+        let redacted: Vec<SearchMatch> = raw
+            .into_iter()
+            .map(|item| SearchMatch {
+                preview: String::from_utf8_lossy(&self.redact_bytes(item.preview.as_bytes()))
+                    .into_owned(),
+                ..item
+            })
+            .collect();
+        let bounded = apply_caps(redacted, caps);
+
+        let matches_json: Vec<Value> = bounded.matches.iter().map(SearchMatch::to_json).collect();
+        let typed_output = serde_json::json!({
+            "status": "completed",
+            "query": query,
+            "matches": matches_json,
+            "returned_matches": bounded.matches.len() as i64,
+            "total_matches": bounded.total_matches as i64,
+            "truncated": bounded.truncated,
+            "truncation_reason": bounded.truncation_reason,
+            "duration_ms": duration_ms,
+        });
+        Ok(WrapperExecution::completed(
+            "completed".to_string(),
+            format!(
+                "search matched {} line(s){}",
+                bounded.total_matches,
+                if bounded.truncated {
+                    format!(
+                        " (truncated to {} via {})",
+                        bounded.matches.len(),
+                        bounded.truncation_reason
+                    )
+                } else {
+                    String::new()
+                }
+            ),
+            typed_output,
+            Vec::new(),
+        ))
+    }
+
+    /// Resolve the per-call search caps from the request, falling back to the
+    /// bounded defaults (ACI5). A caller may TIGHTEN or widen the match/byte caps;
+    /// non-positive values are rejected so a cap can never be disabled into a
+    /// whole-repo dump.
+    fn search_caps(&self, request: &WrapperToolRequest) -> Result<SearchCaps, String> {
+        let mut caps = SearchCaps::default();
+        if let Some(max_matches) = request.input.get("max_matches") {
+            let value = max_matches
+                .as_i64()
+                .ok_or_else(|| "search `max_matches` must be an integer".to_string())?;
+            if value <= 0 {
+                return Err("search `max_matches` must be a positive integer".to_string());
+            }
+            caps.max_matches = value as usize;
+        }
+        if let Some(max_preview_bytes) = request.input.get("max_preview_bytes") {
+            let value = max_preview_bytes
+                .as_i64()
+                .ok_or_else(|| "search `max_preview_bytes` must be an integer".to_string())?;
+            if value <= 0 {
+                return Err("search `max_preview_bytes` must be a positive integer".to_string());
+            }
+            caps.max_preview_bytes = value as usize;
+        }
+        Ok(caps)
+    }
+
     /// Run the language-pluggable lint check for an edited file and return
     /// `(lint_status, findings)` (ACI4).
     ///
@@ -974,6 +1115,13 @@ pub(crate) const FILE_WRITE_OUTPUT_SCHEMA: &str = "{\"output\":{\"status\":\"str
 /// the structured no-match fields surfaced on a rejected hunk (ACI4).
 pub(crate) const APPLY_PATCH_OUTPUT_SCHEMA: &str = "{\"output\":{\"status\":\"string\",\"path\":\"string\",\"hunks_total\":\"integer\",\"hunks_applied\":\"integer\",\"hunks_rejected\":\"integer\",\"changed_line_ranges\":\"string[]\",\"output_artifact_id\":\"string\",\"lint_status\":\"string\",\"lint_findings\":\"array\",\"rejected_hunk_index\":\"integer?\",\"reject_reason\":\"string?\",\"nearest_line\":\"integer?\",\"nearest_preview\":\"string?\"}}";
 
+/// Narrow typed output shape for `capo.search` (ACI5): the bounded, decision-grade
+/// `matches` array (each `{path, line, preview}`), the `returned_matches` /
+/// `total_matches` counts, an explicit `truncated` marker with a
+/// `truncation_reason`, and the wall-clock `duration_ms`. Full file content is
+/// never inlined -- only the capped `path:line:preview` matches are returned.
+pub(crate) const SEARCH_OUTPUT_SCHEMA: &str = "{\"output\":{\"status\":\"string\",\"query\":\"string\",\"matches\":\"array\",\"returned_matches\":\"integer\",\"total_matches\":\"integer\",\"truncated\":\"boolean\",\"truncation_reason\":\"string\",\"duration_ms\":\"integer\"}}";
+
 /// The declared `output_schema` descriptor for a runtime wrapper tool (ACI3).
 pub(crate) fn wrapper_output_schema(tool_id: &str) -> &'static str {
     match tool_id {
@@ -982,6 +1130,7 @@ pub(crate) fn wrapper_output_schema(tool_id: &str) -> &'static str {
         }
         "capo.file_write" => FILE_WRITE_OUTPUT_SCHEMA,
         "capo.apply_patch" => APPLY_PATCH_OUTPUT_SCHEMA,
+        "capo.search" => SEARCH_OUTPUT_SCHEMA,
         // file_read and the read-only workpad/project-memory aliases.
         _ => FILE_READ_OUTPUT_SCHEMA,
     }
@@ -1007,6 +1156,7 @@ pub(crate) fn wrapper_redaction_policy(tool_id: &str) -> String {
         "capo.apply_patch" => {
             "{\"strategy\":\"credential_scan\",\"fields\":[\"output_artifact_id\"]}".to_string()
         }
+        "capo.search" => "{\"strategy\":\"credential_scan\",\"fields\":[\"preview\"]}".to_string(),
         _ => "{\"strategy\":\"credential_scan\",\"fields\":[\"content\"]}".to_string(),
     }
 }
@@ -1151,6 +1301,25 @@ fn wrapper_artifact(kind: &str, artifact: RuntimeOutputArtifact) -> WrapperArtif
 
 fn runtime_error(error: RuntimeError) -> String {
     format!("{error:?}")
+}
+
+/// Resolve the ripgrep program for `capo.search` to an ABSOLUTE path (ACI5).
+///
+/// The bounded runtime runner clears the environment (no inherited `PATH`), so a
+/// bare `rg` would only resolve against the OS default path and miss a
+/// Homebrew/cargo install. Resolve against the current process `PATH` up front,
+/// like the linter does, so ripgrep is found deterministically; fall back to the
+/// bare name (the runner then reports the spawn failure) if nothing resolves.
+fn resolve_search_program() -> String {
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join("rg");
+            if candidate.is_file() {
+                return candidate.display().to_string();
+            }
+        }
+    }
+    "rg".to_string()
 }
 
 /// Build the narrow typed output object for an execution wrapper (ACI3).
