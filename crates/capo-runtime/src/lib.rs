@@ -280,11 +280,14 @@ impl RedactionPolicy {
 /// A token is credential-shaped when it carries a known secret prefix
 /// (`AKIA`/`ASIA`, `sk-`, `ghp_`/`gho_`/`github_pat_`, `xox[bap]-`, `AIza`,
 /// `glpat-`), or when it is a long, high-entropy run of credential characters
-/// (>= 20 chars of `[A-Za-z0-9_\-+/=.]` with high distinct-character diversity --
-/// the shape of base64/hex API keys and tokens). A `Bearer <token>` header has
-/// its token component scrubbed even if the token itself is short. Ordinary
-/// prose words, file paths, and identifiers stay below the entropy/length bar so
-/// the scan does not blank out useful output.
+/// (>= 20 chars of `[A-Za-z0-9_\-+/=.]` that mixes upper-case, lower-case and
+/// digits -- the shape of an opaque base64/random API key). The shape check
+/// runs against the token AND the candidate substrings extracted from quoting,
+/// `key=value`, JSON, and URL-query wrappers (see [`is_credential_shaped`]), so a
+/// secret leaks through none of those. A `Bearer <token>` header has its token
+/// component scrubbed even if the token itself is short. Ordinary prose words,
+/// file paths, hex digests / git SHAs, and dashed UUIDs are excluded so the scan
+/// does not blank out useful command output.
 fn scan_credential_shapes(text: &str) -> (String, bool) {
     let mut out = String::with_capacity(text.len());
     let mut redacted = false;
@@ -328,31 +331,109 @@ fn scan_credential_shapes(text: &str) -> (String, bool) {
 
 /// Whether `raw` looks like a credential token. `after_bearer` lowers the bar
 /// for a token that directly follows a `Bearer` header.
+///
+/// A whitespace-delimited token rarely arrives as a bare secret: it may be
+/// quoted (`"sk-..."`), part of a `key=value` assignment (`AWS_SECRET=AKIA...`),
+/// embedded in JSON (`{"k":"AKIA..."}`), or a URL query (`?token=AKIA...&x=1`).
+/// We therefore derive a set of CANDIDATE substrings from `raw` -- the trimmed
+/// whole token, the value after a `key=` split, and the pieces between interior
+/// quote/JSON/URL delimiters -- and treat the token as credential-shaped if ANY
+/// candidate matches. This means a secret that the operator did not name still
+/// gets scrubbed regardless of the punctuation it is wrapped in.
 fn is_credential_shaped(raw: &str, after_bearer: bool) -> bool {
-    // Strip surrounding punctuation/quotes so `"sk-..."` or `(token),` is judged
-    // on the token itself, and strip a `key=value` prefix so `AWS_SECRET=AKIA...`
-    // scans the value.
-    let trimmed = raw.trim_matches(|c: char| {
-        matches!(
-            c,
-            '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':'
-        )
-    });
-    // Strip a `key=` assignment prefix so `AWS_SECRET=AKIA...` scans the value,
-    // but keep the value's own `=` (e.g. base64 padding): split on the FIRST `=`
-    // only when the key looks like an env-var/identifier name.
-    let value = match trimmed.split_once('=') {
-        Some((key, rest))
-            if !key.is_empty()
-                && key
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-                && key.chars().any(|c| c.is_ascii_alphabetic()) =>
-        {
-            rest
+    credential_candidates(raw)
+        .iter()
+        .any(|candidate| candidate_is_credential(candidate, after_bearer))
+}
+
+/// Characters that delimit a credential from surrounding quoting/structure.
+/// Trimmed at candidate ENDS and split on in the interior so quoted, JSON, and
+/// URL-embedded secrets are isolated from their wrapper.
+fn is_credential_boundary(c: char) -> bool {
+    matches!(
+        c,
+        '"' | '\''
+            | '`'
+            | '('
+            | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | ','
+            | ';'
+            | ':'
+            | '?'
+            | '&'
+            | '<'
+            | '>'
+            | '|'
+    )
+}
+
+/// Derive candidate credential substrings from a whitespace-delimited token.
+///
+/// Yields (in addition to the trimmed whole token): the value after a `key=`
+/// assignment prefix, and every interior piece split on quote/JSON/URL
+/// boundaries -- each re-trimmed of surrounding boundary punctuation. The
+/// `key=` value is kept WHOLE (its own `=`, e.g. base64 padding, is preserved)
+/// AND the whole trimmed token is also scanned, so neither a real `key=secret`
+/// nor a bare base64 token whose only `=` is padding can slip past.
+fn credential_candidates(raw: &str) -> Vec<String> {
+    let trim = |s: &str| s.trim_matches(is_credential_boundary).to_string();
+    let mut candidates: Vec<String> = Vec::new();
+    let push = |s: String, candidates: &mut Vec<String>| {
+        if !s.is_empty() && !candidates.contains(&s) {
+            candidates.push(s);
         }
-        _ => trimmed,
     };
+
+    let trimmed = trim(raw);
+
+    // The whole trimmed token: catches a bare secret AND a base64 token whose
+    // only `=` is trailing padding (no real key/value structure).
+    push(trimmed.clone(), &mut candidates);
+
+    // A `key=value` assignment: scan the value after the FIRST `=` when the key
+    // segment is a plausible env-var/identifier name. Keep the value whole so
+    // its own `=` (base64 padding) survives, then re-trim wrapping quotes so
+    // `token="AKIA..."` exposes the bare secret.
+    if let Some(value) = assignment_value(&trimmed) {
+        push(trim(value), &mut candidates);
+    }
+
+    // Interior pieces split on quote/JSON/URL boundaries so a secret embedded in
+    // `{"aws_key":"AKIA..."}` or `https://x/y?token=AKIA...&z=1` is isolated.
+    for piece in raw.split(is_credential_boundary) {
+        // Each piece may still be a `k=v` pair (URL query, env line): take both
+        // the trimmed piece and the post-`=` value.
+        let piece_trimmed = trim(piece);
+        if let Some(value) = assignment_value(&piece_trimmed) {
+            push(trim(value), &mut candidates);
+        }
+        push(piece_trimmed, &mut candidates);
+    }
+
+    candidates
+}
+
+/// If `token` is a `key=value` assignment whose key segment is a plausible
+/// env-var / identifier name, return the value after the FIRST `=` (kept whole,
+/// so the value's own `=`, e.g. base64 padding, is preserved). Returns `None`
+/// when there is no `=` or the key segment is not identifier-shaped, so a bare
+/// base64 token whose only `=` is padding is NOT mistaken for an assignment.
+fn assignment_value(token: &str) -> Option<&str> {
+    let (key, rest) = token.split_once('=')?;
+    let identifier_key = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && key.chars().any(|c| c.is_ascii_alphabetic());
+    identifier_key.then_some(rest)
+}
+
+/// Whether a single, already-isolated candidate string is credential-shaped.
+fn candidate_is_credential(value: &str, after_bearer: bool) -> bool {
     if value.is_empty() {
         return false;
     }
@@ -380,13 +461,29 @@ fn is_credential_shaped(raw: &str, after_bearer: bool) -> bool {
     if after_bearer && value.len() >= 8 && value.chars().all(is_credential_char) {
         return true;
     }
-    // Long, high-entropy run of credential characters: the shape of a base64/hex
-    // API key. Require a minimum length, all credential characters, a mix of
-    // letters and digits, and enough distinct characters that an obvious
-    // repeated/structured string (a path, a hash-like word) does not trip it.
+    // Long, high-entropy run of credential characters: the shape of a base64/
+    // random API key. Require a minimum length, all credential characters, a mix
+    // of letters and digits, and enough distinct characters that an obvious
+    // structured string does not trip it.
+    //
+    // To keep ordinary command output intact we additionally EXCLUDE the two
+    // structured shapes that pollute git/test output and would otherwise clear
+    // this bar: a hex digest (e.g. a 40-char git commit SHA) and a dashed UUID.
+    // Both are single-case hex; real opaque secrets that reach this fallback
+    // (un-prefixed base64 / random tokens) mix upper-case, lower-case AND
+    // digits, so we require that character-class diversity (or a base64 symbol
+    // `+`/`/`/`=`) and reject pure hex / UUID shapes.
     if value.len() >= 20 && value.chars().all(is_credential_char) {
+        if is_hex_digest(value) || is_uuid_shaped(value) {
+            return false;
+        }
         let has_digit = value.chars().any(|c| c.is_ascii_digit());
-        let has_alpha = value.chars().any(|c| c.is_ascii_alphabetic());
+        let has_upper = value.chars().any(|c| c.is_ascii_uppercase());
+        let has_lower = value.chars().any(|c| c.is_ascii_lowercase());
+        // `+`/`=` are base64 fingerprints that filesystem paths never carry; `/`
+        // is deliberately EXCLUDED here because it dominates paths and would
+        // otherwise flag `/usr/local/lib/...` as a credential.
+        let has_base64_symbol = value.chars().any(|c| matches!(c, '+' | '='));
         let distinct = {
             let mut seen = [false; 128];
             let mut count = 0usize;
@@ -399,11 +496,35 @@ fn is_credential_shaped(raw: &str, after_bearer: bool) -> bool {
             }
             count
         };
-        if has_digit && has_alpha && distinct >= 12 {
+        // Mixed-case + digit is the random/base64 fingerprint; a base64 symbol
+        // is an equally strong signal (e.g. `+`/`/` in a padded key).
+        let diverse = has_digit && ((has_upper && has_lower) || has_base64_symbol);
+        if diverse && distinct >= 12 {
             return true;
         }
     }
     false
+}
+
+/// Whether `value` is a pure hexadecimal digest (e.g. a git commit SHA or a
+/// sha256 hex digest), ignoring interior `-` grouping. These are single-case
+/// hex strings that show up constantly in `git_diff`/`git_status` output and
+/// must NOT be mistaken for credentials.
+fn is_hex_digest(value: &str) -> bool {
+    let core: String = value.chars().filter(|&c| c != '-').collect();
+    core.len() >= 12 && core.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Whether `value` has the canonical 8-4-4-4-12 dashed UUID shape (hex digits
+/// in five dash-separated groups). UUIDs appear in logs and test output.
+fn is_uuid_shaped(value: &str) -> bool {
+    let groups: Vec<&str> = value.split('-').collect();
+    let lens = [8usize, 4, 4, 4, 12];
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip(lens.iter())
+            .all(|(group, &len)| group.len() == len && group.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 fn is_credential_char(c: char) -> bool {
@@ -2114,6 +2235,104 @@ mod tests {
     }
 
     #[test]
+    fn local_process_runner_credential_scan_redacts_unnamed_secret_in_output() {
+        // ACI7 regression: the credential scan must run through the REAL runner
+        // boundary (`start_process` -> `redact_output`), not only at the unit
+        // level. Here the process prints an UNNAMED secret (no operator rule),
+        // and the artifact on disk must be scrubbed with redaction_state=redacted.
+        let workspace = temp_root("workspace-credscan");
+        let artifacts = temp_root("artifacts-credscan");
+        fs::create_dir_all(&workspace).unwrap();
+        // No redaction_rules configured: this proves the default credential scan.
+        let runner = LocalProcessRunner::new(LocalProcessConfig::for_test(
+            workspace.clone(),
+            artifacts.clone(),
+        ));
+
+        let outcome = runner
+            .start_process(LocalProcessRequest {
+                run_id: RunId::new("run-credscan"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    "printf 'key AKIAIOSFODNN7EXAMPLE'; \
+                     printf 'tok ghp_abcdEFGH1234ijklMNOP5678qrst' >&2"
+                        .to_string(),
+                ],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("run local process");
+
+        assert_eq!(outcome.process.status, "exited");
+        assert_eq!(outcome.stdout.redaction_state, "redacted");
+        assert_eq!(outcome.stderr.redaction_state, "redacted");
+        let stdout = fs::read_to_string(&outcome.stdout.path).unwrap();
+        let stderr = fs::read_to_string(&outcome.stderr.path).unwrap();
+        assert!(
+            !stdout.contains("AKIAIOSFODNN7EXAMPLE"),
+            "unnamed secret leaked to stdout artifact: {stdout}"
+        );
+        assert!(
+            !stderr.contains("ghp_abcdEFGH1234ijklMNOP5678qrst"),
+            "unnamed secret leaked to stderr artifact: {stderr}"
+        );
+        assert!(stdout.contains(CREDENTIAL_REDACTION_PLACEHOLDER));
+        // The benign words around the secret survive.
+        assert!(stdout.contains("key"));
+
+        runner.cleanup(&outcome.process).expect("cleanup");
+    }
+
+    #[test]
+    fn local_process_runner_credential_scan_keeps_benign_git_output_intact() {
+        // ACI7 regression / false-positive guard at the runner boundary: a
+        // benign command emitting a git SHA and a filesystem path must NOT be
+        // corrupted by the credential scan (redaction_state stays "safe").
+        let workspace = temp_root("workspace-benign");
+        let artifacts = temp_root("artifacts-benign");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner = LocalProcessRunner::new(LocalProcessConfig::for_test(
+            workspace.clone(),
+            artifacts.clone(),
+        ));
+
+        let outcome = runner
+            .start_process(LocalProcessRequest {
+                run_id: RunId::new("run-benign"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    "printf 'commit 9fceb02d0ae598e95dc970b74767f19372d61af8 \
+                     /usr/local/lib/python3.11/site-packages/numpy'"
+                        .to_string(),
+                ],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("run local process");
+
+        assert_eq!(outcome.process.status, "exited");
+        assert_eq!(
+            outcome.stdout.redaction_state, "safe",
+            "benign git output wrongly marked redacted"
+        );
+        let stdout = fs::read_to_string(&outcome.stdout.path).unwrap();
+        assert!(
+            stdout.contains("9fceb02d0ae598e95dc970b74767f19372d61af8"),
+            "git SHA was corrupted by the credential scan: {stdout}"
+        );
+        assert!(
+            stdout.contains("/usr/local/lib/python3.11/site-packages/numpy"),
+            "path was corrupted by the credential scan: {stdout}"
+        );
+
+        runner.cleanup(&outcome.process).expect("cleanup");
+    }
+
+    #[test]
     fn local_process_runner_can_kill_a_live_child_and_collect_artifacts() {
         let workspace = temp_root("workspace-live");
         let artifacts = temp_root("artifacts-live");
@@ -2696,6 +2915,106 @@ mod tests {
             assert!(
                 !text.contains(secret),
                 "credential {secret} should be scrubbed: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_scan_recognizes_bare_tokens_without_a_key_wrapper() {
+        // ACI7 regression: the scan must fire on a BARE token (no `value=`
+        // wrapper), including a base64 token whose only `=` is trailing padding.
+        // Previously the unconditional `key=` strip turned such a token into an
+        // empty value and the function early-returned `false`, leaking it.
+        let policy = RedactionPolicy::new(Vec::new());
+        for secret in [
+            "AKIAIOSFODNN7EXAMPLE",
+            "ghp_abcdEFGH1234ijklMNOP5678qrst",
+            "Zm9vYmFyMTIzNDU2Nzg5MGFiY2RlZmdoaQ=",
+            "dGhpcyBpcyBhIGxvbmcgYmFzZTY0IDEyMzQ1Njc4OTA=",
+            "QUJDZGVmMTIzNDU2Nzg5MGdoaWprbG1ub3A==",
+        ] {
+            let (bytes, state) = policy.apply(format!("leaked {secret} here").as_bytes());
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(state, "redacted", "expected redaction for bare {secret}");
+            assert!(
+                !text.contains(secret),
+                "bare credential {secret} should be scrubbed: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_scan_redacts_known_prefix_tokens_containing_an_equals() {
+        // ACI7 regression: a known-prefix token with an embedded `=` must still
+        // be redacted. Previously the `key=` strip removed the `github_pat_` /
+        // `AKIA`-bearing prefix before the KNOWN_PREFIXES check ran.
+        let policy = RedactionPolicy::new(Vec::new());
+        for secret in [
+            "github_pat_11ABCDEF=DEF456ghi789jkl",
+            "AKIA1234567890ABCDEF=",
+            "ghp_abcdEFGH1234ijklMNOP=5678qrst",
+        ] {
+            let (bytes, state) = policy.apply(format!("token {secret} end").as_bytes());
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(
+                state, "redacted",
+                "expected redaction for prefix-with-= {secret}"
+            );
+            assert!(
+                !text.contains(secret),
+                "known-prefix credential {secret} should be scrubbed: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_scan_redacts_quoted_json_and_url_embedded_secrets() {
+        // ACI7 regression: secrets do not arrive bare in real OUTPUT. They are
+        // quoted, packed into JSON, or sit in a URL query. Each is exactly a
+        // read-file / shell-stdout / diff shape the policy claims to scrub.
+        let policy = RedactionPolicy::new(Vec::new());
+        let secret = "AKIAIOSFODNN7EXAMPLE";
+        for line in [
+            format!("{{\"aws_key\":\"{secret}\"}}"),
+            format!("token=\"{secret}\""),
+            format!("https://example.com/path?token={secret}&page=1"),
+            format!("export AWS_SECRET='{secret}'"),
+            format!("Authorization: Bearer {secret}"),
+        ] {
+            let (bytes, state) = policy.apply(line.as_bytes());
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(state, "redacted", "expected redaction for: {line}");
+            assert!(
+                !text.contains(secret),
+                "embedded credential should be scrubbed in {line}, got: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_scan_does_not_corrupt_shas_uuids_and_paths() {
+        // ACI7 regression: the high-volume false-positive surface. git SHAs, hex
+        // digests, dashed UUIDs, and long filesystem paths fill git/test output
+        // and must NOT be replaced with the credential placeholder.
+        let policy = RedactionPolicy::new(Vec::new());
+        for benign in [
+            // 40-char git commit SHA.
+            "9fceb02d0ae598e95dc970b74767f19372d61af8",
+            // 64-char sha256 hex digest.
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            // canonical dashed UUID.
+            "550e8400-e29b-41d4-a716-446655440000",
+            // un-dashed UUID (pure hex).
+            "550e8400e29b41d4a716446655440000",
+            // long filesystem path as a single token.
+            "/usr/local/lib/python3.11/site-packages/numpy/core/_multiarray_umath",
+        ] {
+            let (bytes, state) = policy.apply(format!("ref {benign} ok").as_bytes());
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(state, "safe", "benign token wrongly redacted: {benign}");
+            assert!(
+                text.contains(benign),
+                "benign token {benign} must survive untouched: {text}"
             );
         }
     }
