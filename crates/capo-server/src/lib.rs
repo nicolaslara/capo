@@ -4,6 +4,7 @@
 //! before choosing a concrete transport such as a local socket or remote API.
 use std::path::Path;
 
+use capo_adapters::AgentAdapterHandle;
 use capo_controller::{FakeBoundaryController, LocalAdapterDispatchRunStart};
 use capo_core::{AgentId, CommandIntent, CommandTarget, ProjectId, RunId, SessionId, TaskId};
 use capo_state::{
@@ -72,6 +73,37 @@ impl CapoServer {
     ) -> ServerResult<Self> {
         let controller = FakeBoundaryController::open(project_id.clone(), state_root)
             .map_err(ServerError::State)?;
+        Ok(Self {
+            project_id,
+            controller,
+            controller_selection,
+        })
+    }
+
+    /// Open the server with an explicit [`ControllerSelection`] and an injected
+    /// [`AgentAdapterHandle`].
+    ///
+    /// This is the adapter-injection seam for RTL12/RTL13: the default
+    /// `open`/`open_with_controller` build the core with the default
+    /// ([`AgentAdapterHandle::fake`]) adapter, so with that core the `Real`
+    /// selection cannot observably differ from `Fake` -- both views drive the
+    /// same fake-backed core. This constructor instead builds the one shared
+    /// orchestration core over `adapter`, so a scripted-mock handle backs the
+    /// deterministic parity suites and a real Codex/Claude/ACP handle plugs in
+    /// unchanged. Because the core is the real control flow and the `Real`
+    /// routing is a view over it, the injected adapter backs BOTH the routed
+    /// command surface and the (shared-core) loop ingestion, giving RTL12's
+    /// parity suite and RTL13's live smoke a server-level seam to drive a
+    /// genuinely-real controller through the switch.
+    pub fn open_with_controller_and_adapter(
+        project_id: ProjectId,
+        state_root: impl AsRef<Path>,
+        controller_selection: ControllerSelection,
+        adapter: AgentAdapterHandle,
+    ) -> ServerResult<Self> {
+        let controller =
+            FakeBoundaryController::open_with_adapter(project_id.clone(), state_root, adapter)
+                .map_err(ServerError::State)?;
         Ok(Self {
             project_id,
             controller,

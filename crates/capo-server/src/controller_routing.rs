@@ -7,15 +7,41 @@
 //! [`RealBoundaryController`]. There are no scattered booleans: the whole
 //! routing decision is this one enum, chosen once at server construction.
 //!
-//! Why this is the right shape for phase 1:
+//! ## Scope: what this switch routes (and what it does NOT, yet)
+//!
+//! RTL11 routes the **command-envelope surface** -- the lightweight
+//! `register`/`send`/`steer`/`interrupt`/`stop`/`recover` methods listed on
+//! [`ControllerRoute`] below. That is exactly the set the RTL11 acceptance
+//! criteria name, and the set whose handle choice clients could otherwise
+//! observe through the typed `ServerCommand` boundary.
+//!
+//! It deliberately does NOT yet route the RTL3 turn-loop *ingestion* entry
+//! points -- `apply_normalized_adapter_events_with_turn` (fixture replay and
+//! live-provider ingest), `prepare_local_adapter_dispatch_run` (session start),
+//! and `abort_run_for_ceiling`. Those still drive the server's one shared
+//! orchestration core directly (`self.controller.<method>` in `lib.rs`,
+//! `live_provider.rs`, and `turn_orchestration.rs`). Routing the loop is the
+//! RTL12 cutover's job: the loop is where a genuinely-real adapter's output
+//! would diverge from the fake adapter's, and RTL12 owns the parity criterion
+//! and the parity-equivalence suite that must pass *before* a real adapter is
+//! allowed to drive that loop in production. Until then, with the phase-1
+//! `Fake` default, the shared core is fake-backed, so loop ingestion staying on
+//! it is correct and not a divergence. The injection seam that lets RTL12/RTL13
+//! back the loop with a real/scripted adapter is
+//! [`crate::CapoServer::open_with_controller_and_adapter`].
+//!
+//! Why routing only the command surface is the right shape for phase 1:
 //!
 //! - [`RealBoundaryController`] is a zero-cost view over the SAME orchestration
 //!   core ([`FakeBoundaryController`], whose control flow is the real one --
 //!   see `real_controller.rs`). Routing a command through the real handle wraps
 //!   the server's existing core via [`RealBoundaryController::from_core`] and
-//!   persists through the exact same `append_event`/projection path, so the
-//!   parity invariant (RTL12) holds by construction: both routings drive the
-//!   one store, the one event log, the one projection set.
+//!   persists through the exact same `append_event`/projection path. For the
+//!   command surface this makes the swap invisible by construction; RTL5 owns
+//!   the byte-level parity proof over a scripted-mock adapter
+//!   (`crates/capo-controller/src/tests.rs`), and RTL12 owns the loop-level
+//!   parity criterion. These RTL11 server tests are boundary-wiring/smoke
+//!   tests, not the parity authority.
 //! - The `ServerCommand`/`ServerResponse` boundary is untouched. Only the
 //!   controller selection changes; clients cannot tell which handle served a
 //!   command.

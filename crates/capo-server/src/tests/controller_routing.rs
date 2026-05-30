@@ -6,7 +6,22 @@
 //! through the UNCHANGED `ServerCommand` surface, and produce equivalent
 //! observable results -- the controller swap is invisible above the boundary.
 //! They also pin the phase-1 default to `Fake` and the opt-in env switch.
+//!
+//! Scope: these are boundary-wiring / smoke tests for the RTL11 single switch,
+//! not the parity authority. With the default (fake-adapter) core, both
+//! routings drive the SAME `FakeBoundaryController` method bodies, so the
+//! fake-vs-real `assert_eq!` cannot itself catch a divergent real ORCHESTRATION
+//! path -- by construction at this seam there is none. The byte-level parity
+//! invariant is owned by RTL5
+//! (`crates/capo-controller/src/tests.rs::real_controller_read_models_match_fake_path_for_identical_scripted_output`,
+//! over a scripted-mock adapter, plus the restart/replay sibling) and the
+//! loop-level parity criterion by RTL12. To give the RTL11 server seam real
+//! signal beyond "the swap compiles", `real_routing_over_injected_scripted_mock_drives_that_adapter`
+//! drives the `Real` routing over an explicitly injected scripted-mock adapter
+//! (the RTL12/RTL13 seam) and asserts the persisted projection payloads reflect
+//! that injected adapter's output, not the default fake echo.
 
+use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
 use capo_core::SessionId;
 
 use super::*;
@@ -87,10 +102,24 @@ fn run_lifecycle(selection: ControllerSelection, terminal: ServerCommand) -> Obs
         .find(|agent| agent.name == "routing-agent")
         .expect("agent present");
     let final_agent_status = agent.status.clone();
-    let final_session_status = agent.session.as_ref().map(|s| s.status.clone());
-    let final_run_status = agent.session.as_ref().and_then(|s| s.run_status.clone());
 
+    // Read the terminal session/run status from the projections directly, keyed
+    // by the session id captured at send. The dashboard surfaces a session only
+    // through the agent's *current* session, which a terminal stop/interrupt
+    // detaches (`current_session_id = None`), so reading via `agent.session`
+    // yields `None` after a terminal command -- which is why the prior
+    // `assert_ne!` against the nonexistent "active_running" was vacuous. Reading
+    // the projection directly captures the real post-terminal status.
     let state = SqliteStateStore::open(&root).expect("state");
+    let final_session_status = state
+        .session(&session_id)
+        .expect("session lookup")
+        .map(|session| session.status);
+    let final_run_status = state
+        .run_for_session(&session_id)
+        .expect("run lookup")
+        .map(|run| run.status);
+
     let session_event_kinds = session_event_kinds(&state, &session_id);
 
     ObservableLifecycle {
@@ -159,8 +188,17 @@ fn both_routings_handle_send_steer_and_stop_equivalently() {
         fake, real,
         "fake and real routings diverged for send/steer/stop"
     );
-    // The terminal stop leaves a non-running session under both routings.
-    assert_ne!(fake.final_session_status.as_deref(), Some("active_running"));
+    // Positive terminal check (the equality above already proves real == fake,
+    // so asserting on `fake` covers both routings): a stop drives the session to
+    // the concrete `completed` status and the run to `exited` -- the values the
+    // stop path actually writes (`stop_with_turn` /
+    // `FakeRuntimeRunner::stop` in capo-controller/capo-runtime). The run is no
+    // longer `running`. (The prior `assert_ne!` compared against the literal
+    // "active_running", which exists nowhere in the codebase and so was always
+    // true and proved nothing.)
+    assert_eq!(fake.final_session_status.as_deref(), Some("completed"));
+    assert_eq!(fake.final_run_status.as_deref(), Some("exited"));
+    assert_ne!(fake.final_run_status.as_deref(), Some("running"));
 }
 
 #[test]
@@ -189,6 +227,97 @@ fn default_selection_is_fake_and_chat_does_not_silently_route_real() {
         },
     );
     assert_eq!(payload_variant(&registered.payload), "AgentRegistered");
+}
+
+#[test]
+fn real_routing_over_injected_scripted_mock_drives_that_adapter() {
+    // RTL12/RTL13 seam check: the `Real` routing over an INJECTED scripted-mock
+    // adapter must actually drive that adapter (not the default fake echo). A
+    // bare scripted-mock with no scripted turns produces deterministic,
+    // adapter-specific summaries -- `Scripted mock accepted goal: {goal}` on
+    // send/steer and `Scripted mock stopped session: {reason}` on stop (see
+    // `capo-adapters/src/scripted_mock_agent.rs`). Asserting the persisted
+    // session projection carries those payloads proves the routed command
+    // surface reached the injected adapter through the single switch, which the
+    // near-tautological fake-vs-fake equality tests cannot show.
+    let root = temp_root();
+    let adapter = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new(
+        "rtl11-injected-scripted-session",
+    ));
+    let server = CapoServer::open_with_controller_and_adapter(
+        ProjectId::new("project-capo"),
+        &root,
+        ControllerSelection::Real,
+        adapter,
+    )
+    .expect("server with injected adapter");
+    assert_eq!(server.controller_selection(), ControllerSelection::Real);
+
+    handle(
+        &server,
+        ServerCommand::RegisterAgent {
+            name: "injected-agent".to_string(),
+        },
+    );
+    let sent = handle(
+        &server,
+        ServerCommand::SendTask {
+            agent_name: "injected-agent".to_string(),
+            goal: "Drive the injected scripted-mock adapter".to_string(),
+            scenario: "default".to_string(),
+        },
+    );
+    let ServerResponsePayload::TaskSent(run) = &sent.payload else {
+        panic!("expected task sent response");
+    };
+    let session_id = run.session_id.clone();
+    handle(
+        &server,
+        ServerCommand::SteerAgent {
+            agent_name: "injected-agent".to_string(),
+            goal: "Refocus through the injected adapter".to_string(),
+        },
+    );
+
+    // Read the persisted session projection directly (keyed by session id) so a
+    // terminal stop, which detaches the agent's current session, does not hide
+    // the projection. After send+steer the session summary is the injected
+    // adapter's send_turn output, keyed to the steer goal -- not a
+    // fake-controller echo.
+    let state = SqliteStateStore::open(&root).expect("state");
+    let session = state
+        .session(&session_id)
+        .expect("session lookup")
+        .expect("session present");
+    assert_eq!(
+        session.latest_summary.as_deref(),
+        Some("Scripted mock accepted goal: Refocus through the injected adapter"),
+        "steer did not flow through the injected scripted-mock adapter",
+    );
+
+    handle(
+        &server,
+        ServerCommand::StopAgent {
+            agent_name: "injected-agent".to_string(),
+            reason: "operator stop".to_string(),
+        },
+    );
+
+    let session = state
+        .session(&session_id)
+        .expect("session lookup")
+        .expect("session present");
+    let run = state
+        .run_for_session(&session_id)
+        .expect("run lookup")
+        .expect("run present");
+    assert_eq!(session.status, "completed");
+    assert_eq!(run.status, "exited");
+    assert_eq!(
+        session.latest_summary.as_deref(),
+        Some("Stopped: operator stop"),
+        "stop summary should reflect the stop path over the injected adapter",
+    );
 }
 
 #[test]

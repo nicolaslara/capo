@@ -287,6 +287,36 @@ which handle served a command (`crates/capo-server/src/tests/controller_routing.
 asserts the two routings produce equivalent observable lifecycles for
 `send`/`steer`/`interrupt` and `send`/`steer`/`stop`).
 
+Scope -- what the switch routes (and what RTL12 still owns): RTL11 routes the
+**command-envelope surface** only -- the `register`/`send`/`steer`/`interrupt`/
+`stop`/`recover` methods on `ControllerRoute`, exactly the set the RTL11
+acceptance criteria name. It does NOT yet route the RTL3 turn-loop *ingestion*
+entry points: `apply_normalized_adapter_events_with_turn` (fixture replay and
+live-provider ingest), `prepare_local_adapter_dispatch_run` (session start), and
+`abort_run_for_ceiling` still drive the one shared orchestration core directly
+(`self.controller.<method>` in `lib.rs`/`live_provider.rs`/
+`turn_orchestration.rs`). That is deliberate: the loop is where a genuinely-real
+adapter's output would diverge from the fake adapter's, and RTL12 owns the parity
+criterion and the parity-equivalence suite that must pass before a real adapter
+drives the loop in production. With the phase-1 `Fake` default the shared core is
+fake-backed, so loop ingestion staying on it is correct, not a divergence. The
+RTL11 server tests in `tests/controller_routing.rs` are boundary-wiring/smoke
+tests; the byte-level parity invariant is owned by RTL5
+(`crates/capo-controller/src/tests.rs::real_controller_read_models_match_fake_path_for_identical_scripted_output`)
+and the loop-level criterion by RTL12.
+
+Adapter-injection seam (for RTL12/RTL13): the default `open`/`open_with_controller`
+build the core with the default `AgentAdapterHandle::fake` adapter, so with that
+core a `Real` selection cannot observably differ from `Fake` -- both views drive
+the same fake-backed core. `CapoServer::open_with_controller_and_adapter` builds
+the one shared core over an injected `AgentAdapterHandle`, so a scripted-mock
+handle backs the deterministic parity suites and a real Codex/Claude/ACP handle
+plugs in unchanged; the injected adapter then backs both the routed command
+surface and the shared-core loop ingestion.
+`real_routing_over_injected_scripted_mock_drives_that_adapter` exercises this seam
+and asserts the persisted projection payloads reflect the injected adapter's
+output, not the default fake echo.
+
 Default-chat safety: the phase-1 default is `ControllerSelection::Fake`, so until
 the RTL12 cutover default chat keeps routing through the fake controller and the
 real path is strictly opt-in (env or explicit construction). Default chat never
