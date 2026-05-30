@@ -51,6 +51,8 @@ pub enum EventKind {
     RecoveryCompleted,
     SessionInterrupted,
     SessionStopped,
+    CheckpointCreated,
+    RunHardKilled,
 }
 
 impl EventKind {
@@ -105,6 +107,8 @@ impl EventKind {
             Self::RecoveryCompleted => "recovery.completed",
             Self::SessionInterrupted => "session.interrupted",
             Self::SessionStopped => "session.stopped",
+            Self::CheckpointCreated => "checkpoint.created",
+            Self::RunHardKilled => "run.hard_killed",
         }
     }
 }

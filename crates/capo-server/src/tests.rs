@@ -18,6 +18,7 @@ mod dispatch;
 mod foundation;
 mod live_provider;
 mod replay;
+mod safety_floor;
 mod sessions;
 mod transport;
 mod turn_orchestration;

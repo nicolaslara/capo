@@ -363,6 +363,54 @@ fn codex_launch_plan_builds_subscription_safe_runtime_request() {
 }
 
 #[test]
+fn codex_workspace_write_launch_plan_uses_workspace_write_sandbox_without_ephemeral() {
+    // RTL6: the workspace-write profile can apply edits inside the confined
+    // workspace. It moves Codex off `--sandbox read-only --ephemeral` to
+    // `--sandbox workspace-write` (no `--ephemeral`) while staying
+    // subscription-safe and confined via `--cd`.
+    let workspace = temp_root("codex-write-workspace");
+    let artifacts = temp_root("codex-write-artifacts");
+    let plan = CodexExecAdapter::local_workspace_write_launch_plan(
+        workspace.clone(),
+        artifacts.clone(),
+        "Apply the requested edit.",
+    );
+
+    plan.assert_subscription_safe().unwrap();
+    assert_eq!(plan.provider_kind, "codex_subscription");
+    assert_eq!(plan.credential_scope, "user_local_subscription");
+    let request = plan.runtime_request(RunId::new("run-codex-write"));
+    assert_eq!(request.program, "codex");
+    assert_eq!(request.cwd, workspace);
+    assert!(
+        request
+            .argv
+            .windows(2)
+            .any(|args| args == ["--sandbox", "workspace-write"]),
+        "workspace-write profile must request the workspace-write sandbox"
+    );
+    assert!(
+        request.argv.iter().all(|arg| arg != "--ephemeral"),
+        "workspace-write profile must not be ephemeral so edits persist"
+    );
+    assert!(
+        request.argv.iter().all(|arg| arg != "read-only"),
+        "workspace-write profile must not be read-only"
+    );
+    assert!(
+        request
+            .argv
+            .windows(2)
+            .any(|args| args == ["--cd", workspace.to_string_lossy().as_ref()]),
+        "writes stay confined to the workspace via --cd"
+    );
+    assert_eq!(
+        request.argv.last().map(String::as_str),
+        Some("Apply the requested edit.")
+    );
+}
+
+#[test]
 fn claude_launch_plan_builds_subscription_safe_runtime_request() {
     let workspace = temp_root("claude-launch-workspace");
     let artifacts = temp_root("claude-launch-artifacts");

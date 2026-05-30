@@ -202,6 +202,47 @@ impl CodexExecAdapter {
         }
     }
 
+    /// The RTL6 workspace-write profile.
+    ///
+    /// Unlike [`Self::local_launch_plan`] (the read-only one-shot used by the
+    /// dry-run/diff-preview default), this profile runs Codex with
+    /// `--sandbox workspace-write` so it can apply edits, and drops
+    /// `--ephemeral` so the edits land in the confined workspace. It stays
+    /// subscription-safe (same env allowlist and redaction rules) and confines
+    /// Codex's own writes to the workspace via `--cd`; the caller is responsible
+    /// for confining `workspace_root` (RTL6 [`capo_tools::confine_write_path`])
+    /// and for the pre-write checkpoint before this plan is executed.
+    pub fn local_workspace_write_launch_plan(
+        workspace_root: PathBuf,
+        artifact_root: PathBuf,
+        prompt: impl Into<String>,
+    ) -> LocalAdapterLaunchPlan {
+        LocalAdapterLaunchPlan {
+            adapter_kind: NormalizedAdapterKind::CodexExec,
+            provider_kind: "codex_subscription".to_string(),
+            credential_scope: "user_local_subscription".to_string(),
+            program: "codex".to_string(),
+            argv: vec![
+                "exec".to_string(),
+                "--json".to_string(),
+                "--sandbox".to_string(),
+                "workspace-write".to_string(),
+                "--ignore-user-config".to_string(),
+                "--ignore-rules".to_string(),
+                "--cd".to_string(),
+                workspace_root.to_string_lossy().to_string(),
+                prompt.into(),
+            ],
+            workspace_root,
+            artifact_root,
+            env_allowlist: local_subscription_cli_env_allowlist(),
+            redaction_rules: local_adapter_redaction_rules(),
+            output_limit_bytes: 1024 * 1024,
+            stdout_format: "jsonl".to_string(),
+            stderr_policy: "logs_redacted".to_string(),
+        }
+    }
+
     pub fn local_smoke_plan(
         workspace_root: PathBuf,
         artifact_root: PathBuf,

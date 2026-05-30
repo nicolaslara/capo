@@ -14,6 +14,7 @@ use capo_state::{
 mod dashboard;
 mod dispatch;
 mod live_provider;
+mod safety_floor;
 mod server_core;
 mod transport;
 mod turn_orchestration;
@@ -22,6 +23,10 @@ mod util;
 
 use dispatch::DispatchExecutionOutcome;
 use live_provider::{LiveProviderLocalRunRequest, LiveProviderPreflightRequest};
+pub use safety_floor::{
+    LIVE_WRITE_OPT_IN_ENV, RunTurnRef, WorkspaceCheckpoint, WorkspaceWriteOutcome,
+    WorkspaceWriteRequest, WriteMode, resolve_write_mode,
+};
 pub use transport::{TransportError, send_tcp, serve_tcp};
 pub use turn_orchestration::{DispatchTurnMode, DispatchTurnOutcome, DispatchTurnRequest};
 pub use types::*;

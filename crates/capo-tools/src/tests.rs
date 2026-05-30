@@ -3,7 +3,7 @@ use capo_core::RunId;
 use capo_runtime::RedactionRule;
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -927,4 +927,58 @@ fn temp_root(name: &str) -> PathBuf {
         .expect("clock")
         .as_nanos();
     std::env::temp_dir().join(format!("capo-tools-{name}-{nanos}"))
+}
+
+#[test]
+fn confine_write_path_accepts_targets_under_the_workspace_and_rejects_escapes() {
+    // RTL6: the shared path-containment engine. A write target under the
+    // confined workspace is accepted (existing or not-yet-created); a target
+    // escaping the workspace via `..` or an unrelated absolute path is rejected.
+    let workspace = temp_root("confine-workspace");
+    fs::create_dir_all(workspace.join("src")).expect("workspace src");
+    fs::write(workspace.join("src/lib.rs"), b"contents").expect("seed file");
+    let canonical_workspace = workspace.canonicalize().expect("canonical workspace");
+
+    // Existing file under the workspace -> confined to its canonical path.
+    let existing =
+        confine_write_path(Path::new("src/lib.rs"), &workspace).expect("existing confined file");
+    assert!(existing.starts_with(&canonical_workspace));
+
+    // Not-yet-created file under the workspace -> accepted (allow-missing).
+    let new_file =
+        confine_write_path(Path::new("src/new_module.rs"), &workspace).expect("new confined file");
+    assert!(new_file.starts_with(&canonical_workspace));
+
+    // A `..`-escape is rejected.
+    assert!(
+        confine_write_path(Path::new("../outside.txt"), &workspace).is_err(),
+        "parent-traversal escape must be rejected"
+    );
+
+    // An unrelated absolute path outside the workspace is rejected.
+    let outside = temp_root("confine-outside");
+    fs::create_dir_all(&outside).expect("outside dir");
+    assert!(
+        confine_write_path(&outside.join("file.txt"), &workspace).is_err(),
+        "an absolute path outside the workspace must be rejected"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn confine_write_path_rejects_symlinked_prefix_escaping_the_workspace() {
+    // A symlinked directory under the workspace that points outside must not let
+    // a write escape confinement.
+    use std::os::unix::fs::symlink;
+
+    let workspace = temp_root("confine-symlink-workspace");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let outside = temp_root("confine-symlink-outside");
+    fs::create_dir_all(&outside).expect("outside");
+    symlink(&outside, workspace.join("escape")).expect("symlink into outside");
+
+    assert!(
+        confine_write_path(Path::new("escape/file.txt"), &workspace).is_err(),
+        "a write through a symlink that escapes the workspace must be rejected"
+    );
 }

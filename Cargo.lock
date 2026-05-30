@@ -102,6 +102,7 @@ dependencies = [
  "capo-query",
  "capo-runtime",
  "capo-state",
+ "capo-tools",
  "serde_json",
 ]
 

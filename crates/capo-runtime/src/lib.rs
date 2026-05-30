@@ -420,6 +420,33 @@ impl LocalProcessRunner {
         })
     }
 
+    /// Hard-kill a live run by terminating its entire process group.
+    ///
+    /// This reuses the same `SIGTERM` then `SIGKILL` process-group teardown the
+    /// timeout path uses ([`Self::terminate_process_group`]), so a hard kill
+    /// reaps the spawned child and all of its descendants rather than only the
+    /// direct child. It is the runtime primitive the RTL6 controller-owned hard
+    /// kill drives mid-run.
+    pub fn kill_running_process_group(
+        &self,
+        process: &mut LocalRunningProcess,
+    ) -> RuntimeResult<RuntimeControlResult> {
+        self.terminate_process_group(process);
+        let _ = process.child.kill();
+        process.process.status = "killed".to_string();
+        Ok(RuntimeControlResult {
+            process: process.process.clone(),
+            events: vec![RuntimeEvent {
+                kind: "runtime.kill_requested".to_string(),
+                status: "killed".to_string(),
+                detail: format!(
+                    "process-group hard-kill: {}",
+                    process.process.runtime_process_ref
+                ),
+            }],
+        })
+    }
+
     pub fn wait_running(
         &self,
         process: &mut LocalRunningProcess,

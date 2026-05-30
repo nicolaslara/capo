@@ -411,7 +411,87 @@ Verification:
 
 ## RTL6 - Safety Floor: Confinement, Hard-Kill, Pre-Write Checkpoint, Dry-Run Default
 
-Status: pending.
+Status: done (gate green). The RTL safety floor lives in
+`crates/capo-server/src/safety_floor.rs` and wires the four floor requirements
+onto the write path. Confinement reuses the existing path-containment engine:
+the new public `capo_tools::confine_write_path`
+(`crates/capo-tools/src/runtime_wrapper_paths.rs`) wraps the same
+`ensure_under_workspace` + nearest-existing-ancestor logic the runtime tool
+wrappers use, so a write that escapes the confined workspace (via `..`, an
+unrelated absolute path, or a symlinked prefix) is rejected BEFORE any process
+is spawned (`CapoServer::confine_workspace_write` /
+`run_workspace_write_turn`). Dry-run/diff-preview is the DEFAULT
+(`WriteMode::DryRun`); a live write requires the caller opt-in AND the
+`CAPO_SERVER_RUN_CODEX_LIVE` env gate AND an attended run (`resolve_write_mode`),
+and is the only branch that touches the workspace and therefore the only branch
+that takes a checkpoint. The single-snapshot pre-write checkpoint
+(`WorkspaceCheckpoint`, a directory-copy snapshot under the artifact root;
+full shadow-git stays in `safety-gates`) is recorded via a new
+`checkpoint.created` `EventKind` and is reversible by one documented command
+(`restore_command()` / `restore()`). The controller-owned hard kill
+(`CapoServer::hard_kill_run`) terminates the run's process group mid-run via the
+new runtime `LocalProcessRunner::kill_running_process_group` (reusing the
+existing `SIGTERM`/`SIGKILL` process-group teardown) and records the abort as a
+new `run.hard_killed` `EventKind` (distinct from RTL7 `run.aborted` and RTL10
+`run.orphaned`/`run.recovered`). The Codex workspace-write profile
+(`CodexExecAdapter::local_workspace_write_launch_plan`) moves off
+`--sandbox read-only --ephemeral` to `--sandbox workspace-write` (no
+`--ephemeral`) while staying subscription-safe and confined via `--cd`.
+
+Evidence:
+
+- Floor module + types: `crates/capo-server/src/safety_floor.rs`
+  (`WriteMode`/`resolve_write_mode`, `WorkspaceCheckpoint`,
+  `WorkspaceWriteRequest`/`WorkspaceWriteOutcome`, `RunTurnRef`,
+  `confine_workspace_write`, `create_pre_write_checkpoint`, `hard_kill_run`,
+  `run_workspace_write_turn`); module wired and types re-exported in
+  `crates/capo-server/src/lib.rs`; `capo-tools` added as a dependency in
+  `crates/capo-server/Cargo.toml`.
+- Reused containment engine made public: `confine_write_path` in
+  `crates/capo-tools/src/runtime_wrapper_paths.rs` (exported in
+  `crates/capo-tools/src/lib.rs`).
+- New runtime process-group hard-kill: `kill_running_process_group` in
+  `crates/capo-runtime/src/lib.rs` (reuses `terminate_process_group`).
+- New event kinds: `EventKind::CheckpointCreated` (`checkpoint.created`) and
+  `EventKind::RunHardKilled` (`run.hard_killed`) in
+  `crates/capo-state/src/event.rs`; both append through
+  `SqliteStateStore::append_event` with idempotency keys so they survive
+  restart/replay.
+- Codex workspace-write profile:
+  `CodexExecAdapter::local_workspace_write_launch_plan` in
+  `crates/capo-adapters/src/local_subscription.rs`.
+- Deterministic tests (no live provider):
+  `crates/capo-server/src/tests/safety_floor.rs` --
+  `out_of_confinement_write_is_rejected_before_any_process_runs` (an out-of-
+  workspace `..`-escape and an unrelated absolute path are rejected, no
+  checkpoint snapshot dir or `checkpoint.created` event is produced, and a
+  confined target is accepted),
+  `write_adapter_defaults_to_dry_run_and_takes_no_checkpoint` (dry-run default;
+  unattended never reaches a live write),
+  `pre_write_checkpoint_is_created_and_one_command_restores_the_workspace`
+  (checkpoint is taken before the write; after the write mutates/adds/deletes
+  files the recorded one-command restore returns the workspace to its pre-write
+  state),
+  `create_pre_write_checkpoint_is_idempotent_on_unchanged_state`,
+  `checkpoint_event_survives_restart_and_replay` (reopen + `rebuild_projections`
+  preserves the `checkpoint.created` event and event count), and
+  `controller_hard_kill_terminates_the_process_group_mid_run_and_records_the_abort`
+  (a live child with a backgrounded descendant is hard-killed mid-run, the
+  descendant marker never appears, and a `run.hard_killed` event is recorded).
+  `crates/capo-tools/src/tests.rs` --
+  `confine_write_path_accepts_targets_under_the_workspace_and_rejects_escapes`
+  and `confine_write_path_rejects_symlinked_prefix_escaping_the_workspace`.
+  `crates/capo-adapters/src/tests.rs` --
+  `codex_workspace_write_launch_plan_uses_workspace_write_sandbox_without_ephemeral`.
+- Commands run from `/Users/nicolas/devel/capo-wt/real-turn-loop`:
+  `cargo test -p capo-server safety_floor` -> ok, 6 passed;
+  `cargo test -p capo-tools confine` -> ok, 2 passed. Objective gate:
+  `cargo fmt --check` -> clean; `cargo clippy --all-targets --all-features -- -D
+  warnings` -> clean (exit 0); `cargo test --workspace` -> 276 passed, 0 failed
+  across all binaries (capo-server 39, capo-adapters 28, capo-tools 20,
+  capo-state 31, capo-runtime 19, capo cli 63 + server_transport 11, etc.).
+  `git diff --check` -> clean (exit 0). No live Codex smoke is required for RTL6
+  (the live workspace-write smoke is RTL13); all proofs are deterministic.
 
 Acceptance:
 
