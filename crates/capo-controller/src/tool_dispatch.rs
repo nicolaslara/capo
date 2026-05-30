@@ -567,45 +567,65 @@ fn dispatch_event_suffix(kind: EventKind, index: usize) -> String {
     format!("{}-{index}", kind.as_str().replace('.', "-"))
 }
 
+/// Serialize one string field to a complete JSON string literal (surrounding
+/// quotes included) via `serde_json`, so EVERY interpolated value is escaped for
+/// the full JSON grammar -- control chars, newlines, quotes, backslashes -- not
+/// just the `\`/`"` subset the legacy `escape_json` handled. Serializing a `str`
+/// is infallible, so the `unwrap_or_default` fallback is never taken in practice
+/// (a degenerate empty fragment is still safe inside the assembled object).
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_default()
+}
+
+/// Build the persisted event payload as JSON. The values are serialized through
+/// `serde_json` (`json_string`) rather than interpolated raw, so the payload is
+/// ALWAYS valid JSON regardless of what a tool name / status / artifact id
+/// contains. The key order is preserved verbatim (matching the prior `format!`
+/// layout) so the output stays byte-identical for the current well-formed inputs.
 fn dispatch_event_payload(
     kind: EventKind,
     scope: &ToolDispatchScope,
     normalized: &NormalizedToolResult,
     audit_event: &ToolAuditEvent,
 ) -> String {
+    let tool_call_id = json_string(scope.tool_call_id.as_str());
+    let output_artifact_id =
+        || json_string(normalized.output_artifact_id.as_deref().unwrap_or("none"));
+    let tool = || json_string(&normalized.tool_name);
+    let status = || json_string(&audit_event.status);
     match kind {
         EventKind::ToolOutputArtifactRecorded => format!(
-            "{{\"tool_call_id\":\"{}\",\"output_artifact_id\":\"{}\",\"redaction_state\":\"{}\"}}",
-            scope.tool_call_id,
-            normalized.output_artifact_id.as_deref().unwrap_or("none"),
-            escape_json(&audit_event.status)
+            "{{\"tool_call_id\":{},\"output_artifact_id\":{},\"redaction_state\":{}}}",
+            tool_call_id,
+            output_artifact_id(),
+            status()
         ),
         EventKind::ToolOutputObserved => format!(
-            "{{\"tool_call_id\":\"{}\",\"tool\":\"{}\",\"status\":\"{}\"}}",
-            scope.tool_call_id,
-            escape_json(&normalized.tool_name),
-            escape_json(&audit_event.status)
+            "{{\"tool_call_id\":{},\"tool\":{},\"status\":{}}}",
+            tool_call_id,
+            tool(),
+            status()
         ),
         // ACI8: the agent-report observation payload records its distinct
         // `source` (the audit event's status carries `agent_reported`) so the
         // persisted event is classifiable without re-deriving from the tool name.
         EventKind::ToolObservationRecorded => format!(
-            "{{\"tool_call_id\":\"{}\",\"tool\":\"{}\",\"source\":\"{}\"}}",
-            scope.tool_call_id,
-            escape_json(&normalized.tool_name),
-            escape_json(&audit_event.status)
+            "{{\"tool_call_id\":{},\"tool\":{},\"source\":{}}}",
+            tool_call_id,
+            tool(),
+            status()
         ),
         EventKind::ToolCallCompleted => format!(
-            "{{\"tool_call_id\":\"{}\",\"tool\":\"{}\",\"output_artifact_id\":\"{}\"}}",
-            scope.tool_call_id,
-            escape_json(&normalized.tool_name),
-            normalized.output_artifact_id.as_deref().unwrap_or("none")
+            "{{\"tool_call_id\":{},\"tool\":{},\"output_artifact_id\":{}}}",
+            tool_call_id,
+            tool(),
+            output_artifact_id()
         ),
         _ => format!(
-            "{{\"tool_call_id\":\"{}\",\"tool\":\"{}\",\"status\":\"{}\"}}",
-            scope.tool_call_id,
-            escape_json(&normalized.tool_name),
-            escape_json(&audit_event.status)
+            "{{\"tool_call_id\":{},\"tool\":{},\"status\":{}}}",
+            tool_call_id,
+            tool(),
+            status()
         ),
     }
 }
