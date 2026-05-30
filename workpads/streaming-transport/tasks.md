@@ -155,7 +155,7 @@ Evidence:
 
 ## ST3 - Concurrent Accept Loop With Timeouts And In-Band Cancel
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -180,6 +180,46 @@ Verification:
 - In-band `Cancel` test asserting an in-flight request aborts without dropping
   the connection.
 - `cargo fmt` and focused `cargo test -p capo-server`.
+
+Evidence:
+
+- `crates/capo-server/src/transport.rs` replaced the serial accept loop
+  (accept-one / `handle_stream` / loop) with a concurrent, task-per-connection
+  accept loop (`serve_tcp_with_handler`, thread-per-connection) over a
+  persistent per-connection read loop (`handle_connection`). The read side runs
+  on its own thread feeding a single `ConnEvent` channel (`Incoming` /
+  `Closed` / `Result`), so the loop blocks on one `recv` yet reacts the instant
+  either an in-band `Cancel` arrives or the handler completes (no polling). The
+  public `serve_tcp`/`send_tcp` signatures are unchanged; `max_requests` keeps
+  its meaning (connections accepted) so the ST2 round-trip/recovery test is
+  untouched.
+- Per-connection idle timeout via `TcpStream::set_read_timeout`
+  (`ServeConfig`, default 300s) folds a `WouldBlock`/`TimedOut` read into a
+  clean connection close so a stalled/abandoned client cannot hold a connection
+  thread. The bounded-frame `MAX_TRANSPORT_FRAME_BYTES` protection and
+  loopback-only listener enforcement are preserved (oversized frame still
+  yields the ST2 `error.data.kind=protocol` "request frame is too large" frame).
+- In-band typed `Cancel`: a JSON-RPC `cancel` notification (no `id`,
+  `params.request_id`) aborts the matching in-flight request and emits a typed
+  `error.data.kind=cancelled` frame while keeping the connection open; a
+  generation tag discards the worker's later result. A `RequestHandler` seam
+  hands each request a `CancellationToken` for cooperative stop (the production
+  `CapoServerHandler` routes through the single `CapoServer::handle`
+  serialization point and does not add a second writer; the module doc records
+  that concurrent writers stay unsupported until the `safety-gates` write lock).
+- Tests added in `crates/capo-server/src/tests/transport.rs` (scripted handler,
+  no live provider): `two_concurrent_connections_receive_independent_responses`
+  (a `Barrier(2)` that only completes if the accept loop is truly concurrent),
+  `idle_connection_is_closed_after_the_read_timeout`, and
+  `in_band_cancel_aborts_in_flight_request_without_dropping_connection` (asserts
+  the typed `cancelled` frame, then a follow-up request on the same connection
+  still succeeds).
+- Objective gate run from `/Users/nicolas/devel/capo-wt/streaming-transport`:
+  `cargo fmt --check` ok; `cargo clippy --all-targets --all-features -- -D
+  warnings` ok (exit 0); `cargo test --workspace` ok (capo-server: 63 passed, 0
+  failed, 1 ignored; capo-cli integration `server_transport`: 11 passed; all
+  other crates green; 0 failures workspace-wide). Focused
+  `cargo test -p capo-server --lib transport`: 7 passed, 0 failed.
 
 ## ST4 - events_after, Broadcast Channel, And Typed Subscribe
 

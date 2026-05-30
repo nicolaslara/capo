@@ -114,6 +114,10 @@ pub(super) fn transport_error_wire(error: &TransportError) -> (&'static str, Str
         TransportError::Protocol(message) => ("protocol", message.clone()),
         TransportError::Server(error) => server_error_wire(error),
         TransportError::Remote { kind, message } => ("remote", format!("{kind}: {message}")),
+        TransportError::Cancelled { request_id } => (
+            "cancelled",
+            format!("request {request_id} cancelled by in-band cancel"),
+        ),
     }
 }
 
