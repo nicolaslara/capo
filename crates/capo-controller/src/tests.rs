@@ -2963,6 +2963,181 @@ fn real_controller_turn_invokes_a_runtime_wrapper_through_authorize_and_invoke()
     }));
 }
 
+/// ACI7 (event-payload leak guard): redaction is enforced not only on the
+/// artifacts on disk but on the PERSISTED EVENT payloads. A dispatched tool whose
+/// INPUT and OUTPUT both carry a known secret must reference REDACTED artifacts
+/// from its events -- the secret cleartext must NEVER appear inline in any
+/// persisted event's `payload_json`.
+///
+/// `capo.file_write` is the strongest probe: the secret rides in the `content`
+/// input (-> input artifact) AND is echoed into the unified-diff output (-> output
+/// artifact), so a single dispatch exercises both redaction seams. We dispatch it,
+/// then scan EVERY persisted event for the session (not just this turn) for the
+/// secret cleartext. Both an operator-named pattern and an UNNAMED
+/// credential-shaped token (caught only by the default scan) are planted, so the
+/// guard fires whether or not the operator declared the secret. We also rebuild
+/// projections and re-scan, so a replay can never reintroduce a leak.
+#[test]
+fn real_controller_dispatch_never_leaks_a_secret_into_event_payloads() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_runtime::RedactionRule;
+    use capo_tools::{
+        RuntimeToolConfig, ToolExposureRequest, ToolExposureResult, WrapperToolRequest,
+    };
+
+    // A secret the operator named as a redaction pattern AND an unnamed
+    // credential-shaped token the default scan must catch on its own.
+    let named_secret = "SUPERSECRET-DB-PASSWORD";
+    let aws_key = "AKIAIOSFODNN7EXAMPLE";
+
+    let workspace = temp_root();
+    let artifacts = temp_root();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    // Seed an existing file so the write produces a non-trivial before->after diff
+    // (the OUTPUT artifact) that echoes the new secret-bearing content.
+    std::fs::write(workspace.join("config.env"), "name=ok\n").expect("seed file");
+
+    let mut config = RuntimeToolConfig::local_workspace(workspace, artifacts);
+    config.redaction_rules.push(RedactionRule {
+        pattern: named_secret.to_string(),
+        replacement: "[REDACTED]".to_string(),
+    });
+
+    let scripted =
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci7-leak-scan-session"));
+    let controller = RealBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        scripted,
+    )
+    .expect("open real controller")
+    .with_runtime_tools(config);
+    let registration = controller
+        .register_agent("aci7-leak-scan-worker")
+        .expect("agent");
+    let refs = controller
+        .send_task(
+            &registration,
+            "Write a secret-bearing file through a real tool call",
+        )
+        .expect("send task");
+
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-aci7-leak-scan"),
+        tool_call_id: ToolCallId::new("tool-aci7-secret-write"),
+    };
+    // The secret rides in BOTH the input `content` and (via the diff) the output.
+    let secret_content = format!("DB_PASSWORD={named_secret}\nAWS_KEY={aws_key}\nname=ok\n");
+    let outcome = controller
+        .dispatch_tool_call(
+            &scope,
+            ToolExposureRequest::Runtime(WrapperToolRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: scope.session_id.clone(),
+                run_id: scope.run_id.clone(),
+                tool_id: "capo.file_write".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                input: serde_json::json!({
+                    "path": "config.env",
+                    "content": secret_content,
+                }),
+            }),
+        )
+        .expect("dispatch runtime tool");
+
+    let ToolExposureResult::Runtime(result) = &outcome.result else {
+        panic!("expected a real runtime-wrapper result");
+    };
+    assert_eq!(result.status, "completed");
+    assert_eq!(outcome.status, "completed");
+
+    // Sanity: the artifacts on disk ARE redacted (the input payload and the diff
+    // output), so the secret never reaches durable storage in cleartext. This is
+    // the ACI7 artifact contract; the event-payload scan below is the new guard.
+    let input_artifact = result.input_artifact.as_ref().expect("input artifact");
+    assert_eq!(input_artifact.redaction_state, "redacted");
+    let input_on_disk = std::fs::read_to_string(&input_artifact.uri).expect("input artifact");
+    assert!(
+        !input_on_disk.contains(named_secret) && !input_on_disk.contains(aws_key),
+        "secret leaked into the INPUT artifact: {input_on_disk}"
+    );
+    let output_artifact = result
+        .output_artifacts
+        .first()
+        .expect("output diff artifact");
+    assert_eq!(output_artifact.redaction_state, "redacted");
+    let output_on_disk = std::fs::read_to_string(&output_artifact.uri).expect("output artifact");
+    assert!(
+        !output_on_disk.contains(named_secret) && !output_on_disk.contains(aws_key),
+        "secret leaked into the OUTPUT artifact: {output_on_disk}"
+    );
+
+    // The MAIN assertion: scan EVERY persisted event for this session and assert
+    // the secret cleartext appears in NO event's payload. Events must reference
+    // the redacted artifacts by id, never inline the raw content.
+    let scan_events = || {
+        controller
+            .state()
+            // A limit far above any plausible event count for this session, so the
+            // scan covers the WHOLE persisted event store, not a recency window.
+            .recent_events_for_session(&refs.session_id, 100_000)
+            .expect("session events")
+    };
+    let assert_no_leak = |events: &[capo_state::EventRecord]| {
+        // The dispatch must actually have persisted tool events -- otherwise the
+        // scan would be vacuously green.
+        assert!(
+            events.iter().any(|event| event.kind.starts_with("tool.")),
+            "expected persisted tool events for the dispatched call"
+        );
+        for event in events {
+            assert!(
+                !event.payload_json.contains(named_secret),
+                "named secret leaked into event payload (kind={}, id={}): {}",
+                event.kind,
+                event.event_id,
+                event.payload_json
+            );
+            assert!(
+                !event.payload_json.contains(aws_key),
+                "credential-shaped secret leaked into event payload (kind={}, id={}): {}",
+                event.kind,
+                event.event_id,
+                event.payload_json
+            );
+        }
+        // The output-artifact-recorded event must carry the redacted artifact REF,
+        // proving the events point AT the redacted artifact rather than inlining
+        // the content.
+        let artifact_id = outcome
+            .output_artifact_id
+            .as_deref()
+            .expect("output artifact id");
+        assert!(
+            events.iter().any(|event| {
+                event.kind == "tool.output_artifact_recorded"
+                    && event.payload_json.contains(artifact_id)
+            }),
+            "expected an output-artifact event referencing the redacted artifact id"
+        );
+    };
+
+    assert_no_leak(&scan_events());
+
+    // A restart/replay must not reintroduce a leak: rebuild projections from the
+    // event log and re-scan. (The event payloads are immutable, but this pins the
+    // invariant against any future replay-side normalization.)
+    controller
+        .state()
+        .rebuild_projections()
+        .expect("rebuild projections");
+    assert_no_leak(&scan_events());
+}
+
 /// ACI1 deny path: a denied Capo dispatch (read-only policy + a write tool)
 /// returns `outcome.status == "denied"` AND drives the persisted projection to
 /// "denied" -- it must NOT stick at "requested" (the bug: the deny audit kind

@@ -1188,13 +1188,32 @@ impl RuntimeToolWrappers {
         &self,
         request: &WrapperToolRequest,
     ) -> Result<WrapperArtifact, String> {
+        // ACI7: redact the input's RAW string leaves (e.g. a `file_write`
+        // `content` carrying a secret) BEFORE JSON-serializing them, then build
+        // the payload from the scrubbed value. Redacting the already-serialized
+        // JSON would be unsound: serialization escapes a content string's real
+        // newlines to `\n` LITERALS, collapsing it into one whitespace-delimited
+        // token the credential-shape scan cannot tokenize, so an embedded unnamed
+        // credential (`...\nAWS_KEY=AKIA...\n...`) would survive into the input
+        // artifact AND the persisted `tool.*` event payloads that reference it.
+        // Scrubbing the raw leaves keeps redaction symmetric with the OUTPUT path
+        // (which scrubs raw bytes), so a secret in tool INPUT is scrubbed with the
+        // same fidelity as one in tool OUTPUT.
+        let policy = self.redaction_policy();
+        let (redacted_input, input_redacted) = redact_json_value(&request.input, &policy);
         let payload = format!(
             "{{\"tool_id\":\"{}\",\"input\":{}}}",
-            request.tool_id, request.input
+            request.tool_id, redacted_input
         );
-        // ACI7: input is redacted through the same policy as output (operator
-        // patterns PLUS the credential-shape scan), recording the real state.
-        let (redacted, redaction_state) = self.redact_bytes_with_state(payload.as_bytes());
+        // A final pass over the assembled payload catches any secret riding in a
+        // non-string position (and re-confirms the state); combined with the
+        // leaf-level pass above, the recorded state is "redacted" if EITHER fired.
+        let (redacted, payload_redacted) = self.redact_bytes_with_state(payload.as_bytes());
+        let redaction_state = if input_redacted || payload_redacted == "redacted" {
+            "redacted".to_string()
+        } else {
+            payload_redacted
+        };
         self.write_tool_artifact(
             request,
             "input",
@@ -1500,6 +1519,54 @@ fn verify_authorization_matches_request(
 
 fn wrapper_input_hash(input: &Value) -> String {
     content_hash(input.to_string().as_bytes())
+}
+
+/// Redact every STRING leaf of a JSON value through the redaction `policy`,
+/// returning the rewritten value and whether anything was scrubbed (ACI7).
+///
+/// This redacts the raw string content (e.g. a `file_write` `content` field)
+/// BEFORE it is JSON-serialized, so the credential-shape scan sees intact
+/// newline/whitespace structure rather than the `\n` LITERALS serialization
+/// would produce. Redacting post-serialization collapses a multi-line content
+/// string into a single token the scan cannot break apart, letting an embedded
+/// unnamed credential survive; redacting the leaves keeps input redaction
+/// symmetric with the raw-bytes OUTPUT path. Object keys are left untouched (a
+/// secret rides in values, not field names) and structure is preserved.
+fn redact_json_value(value: &Value, policy: &RedactionPolicy) -> (Value, bool) {
+    match value {
+        Value::String(text) => {
+            let (redacted, state) = policy.apply(text.as_bytes());
+            let redacted = String::from_utf8_lossy(&redacted).to_string();
+            (Value::String(redacted), state == "redacted")
+        }
+        Value::Array(items) => {
+            let mut any = false;
+            let mapped = items
+                .iter()
+                .map(|item| {
+                    let (item, redacted) = redact_json_value(item, policy);
+                    any |= redacted;
+                    item
+                })
+                .collect();
+            (Value::Array(mapped), any)
+        }
+        Value::Object(fields) => {
+            let mut any = false;
+            let mapped = fields
+                .iter()
+                .map(|(key, field)| {
+                    let (field, redacted) = redact_json_value(field, policy);
+                    any |= redacted;
+                    (key.clone(), field)
+                })
+                .collect();
+            (Value::Object(mapped), any)
+        }
+        // Numbers/bools/null carry no free text to scrub; the payload-level pass
+        // in `record_input_artifact` is the backstop for any stringified leftover.
+        other => (other.clone(), false),
+    }
 }
 
 /// Parse the `hunks` input of a `capo.apply_patch` request into typed
