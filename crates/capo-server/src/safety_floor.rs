@@ -178,12 +178,12 @@ pub struct WorkspaceWriteOutcome {
 impl CapoServer {
     /// Drive one workspace-write turn through the RTL6 safety floor.
     ///
-    /// Order is load-bearing: CONFINE first (a write that escapes the workspace
-    /// is rejected here, before any process is spawned), THEN resolve the write
-    /// mode (dry-run/diff-preview by default), and ONLY on a real live write
-    /// capture the pre-write checkpoint that makes the write reversible. The
-    /// actual provider spawn is RTL9; this method is the floor every write turn
-    /// passes through, dry-run or live.
+    /// Resolves the write mode (dry-run/diff-preview by default) and then hands
+    /// off to [`Self::confine_and_checkpoint_for_write`], the single confine ->
+    /// checkpoint-on-live sequence the live spawn path
+    /// (`run_live_provider_local`) also drives. The actual provider spawn is
+    /// RTL9; the safety-floor ordering lives in that one shared method so the
+    /// two paths cannot drift.
     pub fn run_workspace_write_turn(
         &self,
         origin: &ServerClientOrigin,
@@ -204,31 +204,62 @@ impl CapoServer {
         request: WorkspaceWriteRequest<'_>,
         env_opt_in: bool,
     ) -> ServerResult<WorkspaceWriteOutcome> {
-        // 1. Confinement, before anything runs.
-        let confined_write_target =
-            self.confine_workspace_write(request.workspace_root, request.write_target)?;
-
-        // 2. Dry-run/diff-preview is the default. A live write needs the opt-in,
-        //    the env gate, AND an attended run.
+        // Dry-run/diff-preview is the default. A live write needs the opt-in,
+        // the env gate, AND an attended run.
         let write_mode = resolve_write_mode_with_env(
             request.live_execution_opt_in,
             env_opt_in,
             request.unattended,
         );
+        // Hand off to the ONE confine -> checkpoint-on-live sequence that the
+        // live spawn path (`run_live_provider_local`) also drives, so the
+        // safety-floor ordering lives in exactly one place.
+        self.confine_and_checkpoint_for_write(
+            origin,
+            RunTurnRef {
+                session_id: request.session_id,
+                run_id: request.run_id,
+                turn_id: request.turn_id,
+            },
+            request.workspace_root,
+            request.artifact_root,
+            request.write_target,
+            write_mode,
+        )
+    }
 
-        // 3. Only a live write touches the workspace, so only a live write needs
+    /// The single confine -> checkpoint-on-live sequence every workspace-write
+    /// turn passes through, whatever resolved the [`WriteMode`].
+    ///
+    /// Order is load-bearing: CONFINE first (a write that escapes the workspace
+    /// is rejected here, before any process is spawned), THEN -- only on a real
+    /// live write -- capture the pre-write checkpoint that makes the write
+    /// reversible. A dry run touches nothing, so it takes no checkpoint. Both
+    /// [`Self::run_workspace_write_turn_with_env_gate`] (which resolves the write
+    /// mode itself) and the live spawn arm (which receives an already-resolved
+    /// write mode) call THIS method, so the sequencing exists in exactly one
+    /// place and cannot drift between the two paths.
+    pub fn confine_and_checkpoint_for_write(
+        &self,
+        origin: &ServerClientOrigin,
+        run_turn: RunTurnRef<'_>,
+        workspace_root: &str,
+        artifact_root: &str,
+        write_target: &str,
+        write_mode: WriteMode,
+    ) -> ServerResult<WorkspaceWriteOutcome> {
+        // 1. Confinement, before anything runs.
+        let confined_write_target = self.confine_workspace_write(workspace_root, write_target)?;
+
+        // 2. Only a live write touches the workspace, so only a live write needs
         //    the reversibility checkpoint -- taken BEFORE the write.
         let checkpoint = match write_mode {
             WriteMode::DryRun => None,
             WriteMode::LiveWrite => Some(self.create_pre_write_checkpoint(
                 origin,
-                RunTurnRef {
-                    session_id: request.session_id,
-                    run_id: request.run_id,
-                    turn_id: request.turn_id,
-                },
-                request.workspace_root,
-                request.artifact_root,
+                run_turn,
+                workspace_root,
+                artifact_root,
             )?),
         };
 

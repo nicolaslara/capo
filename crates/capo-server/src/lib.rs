@@ -762,6 +762,7 @@ impl CapoServer {
                         timeout_seconds,
                         codex_program_override: codex_program_override.as_deref().map(str::trim),
                         write_mode,
+                        record_selected_argv: None,
                     },
                 )?;
                 let command_hash = command_identity_hash(format!(

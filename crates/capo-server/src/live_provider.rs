@@ -62,6 +62,13 @@ pub(crate) struct LiveProviderLocalRunRequest<'a> {
     /// `CAPO_SERVER_RUN_CODEX_LIVE` env AND attended), so the live spawn arm only
     /// ever applies edits when all three hold.
     pub(crate) write_mode: WriteMode,
+    /// Test-only seam: when set, the run path records the argv of the launch
+    /// plan it actually selected for the spawn (after the write-mode profile
+    /// choice and any program override). This is what lets a test assert that
+    /// `WriteMode::LiveWrite` truly drives the `--sandbox workspace-write`
+    /// profile -- proving the selection, not just the plan's content elsewhere.
+    /// Production callers leave this `None`.
+    pub(crate) record_selected_argv: Option<&'a std::cell::RefCell<Vec<String>>>,
 }
 
 struct LiveExecutionContext<'a> {
@@ -480,24 +487,33 @@ impl CapoServer {
         {
             launch_plan.program = codex_bin.to_string();
         }
+        // Test-only seam: surface the argv of the plan we actually selected so a
+        // test can assert the write-mode->profile link (e.g. `LiveWrite` selects
+        // `--sandbox workspace-write`). No-op in production (`None`).
+        if let Some(sink) = request.record_selected_argv {
+            *sink.borrow_mut() = launch_plan.argv.clone();
+        }
 
-        // RTL6/RTL9: a live write is confined and reversible. Confine the
-        // workspace and capture the single pre-write checkpoint BEFORE the
-        // provider spawns, so the first real edit is recoverable by one
-        // documented restore command. A dry run touches nothing, so it needs
-        // neither.
+        // RTL6/RTL9: a live write is confined and reversible. Drive the SAME
+        // safety-floor sequence the RTL6 floor (`run_workspace_write_turn`) uses
+        // -- confine the write target under the workspace, then capture the
+        // single pre-write checkpoint BEFORE the provider spawns -- through the
+        // one shared `confine_and_checkpoint_for_write` method, so the live arm
+        // and the floor cannot drift. A dry run touches nothing (read-only
+        // `--cd` confines it and `execute_codex_live_provider` creates the
+        // workspace just-in-time), so it skips this entirely.
         if request.write_mode == WriteMode::LiveWrite {
-            // The confined workspace must exist before it can be snapshotted;
-            // creating it here (rather than only in `execute_codex_live_provider`)
-            // keeps confinement+checkpoint strictly before any spawn.
+            // The confined workspace must exist before it can be confined and
+            // snapshotted; creating it here (rather than only in
+            // `execute_codex_live_provider`) keeps confinement+checkpoint
+            // strictly before any spawn.
             fs::create_dir_all(&launch_plan.workspace_root).map_err(|error| {
                 ServerError::AdapterFixture(format!(
                     "failed to create dispatch workspace before checkpoint: {error}"
                 ))
             })?;
             let workspace_str = launch_plan.workspace_root.to_string_lossy().to_string();
-            self.confine_workspace_write(&workspace_str, &workspace_str)?;
-            self.create_pre_write_checkpoint(
+            self.confine_and_checkpoint_for_write(
                 origin,
                 RunTurnRef {
                     session_id: plan.session_id.as_str(),
@@ -506,6 +522,11 @@ impl CapoServer {
                 },
                 &workspace_str,
                 &launch_plan.artifact_root.to_string_lossy(),
+                // Codex confines its own edits to the workspace via `--cd`; the
+                // floor's per-target containment here confines the workspace
+                // root itself before any spawn.
+                &workspace_str,
+                request.write_mode,
             )?;
         }
 

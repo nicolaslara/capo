@@ -311,7 +311,11 @@ fn live_write_uses_workspace_write_profile_and_checkpoints_before_spawn() {
     // LiveWrite: drives the workspace-write profile + checkpoint + spawn. We call
     // the crate-internal run path directly with `WriteMode::LiveWrite` so the
     // live-write decision is exercised without mutating the process-global
-    // `CAPO_SERVER_RUN_CODEX_LIVE` env.
+    // `CAPO_SERVER_RUN_CODEX_LIVE` env. The `record_selected_argv` seam captures
+    // the argv of the launch plan the run path ACTUALLY selected, so we can prove
+    // the write mode drove the workspace-write profile (not just that some plan
+    // with that content exists at the adapter layer).
+    let selected_argv = std::cell::RefCell::new(Vec::new());
     let run = server
         .run_live_provider_local(
             &origin,
@@ -325,9 +329,26 @@ fn live_write_uses_workspace_write_profile_and_checkpoints_before_spawn() {
                 timeout_seconds: 10,
                 codex_program_override: Some(stub.to_string_lossy().as_ref()),
                 write_mode: WriteMode::LiveWrite,
+                record_selected_argv: Some(&selected_argv),
             },
         )
         .expect("live write run");
+
+    // CORE ACCEPTANCE: the LiveWrite arm selected the workspace-write profile,
+    // i.e. it spawns Codex with `--sandbox workspace-write` and NOT
+    // `--sandbox read-only`. Asserting the selected argv (not just the adapter
+    // plan's content) is what makes swapping this arm to the read-only profile a
+    // test failure.
+    let argv = selected_argv.borrow();
+    assert!(
+        argv.windows(2)
+            .any(|pair| pair == ["--sandbox", "workspace-write"]),
+        "LiveWrite must select the workspace-write profile, got argv: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|arg| arg == "read-only"),
+        "LiveWrite must not select the read-only profile, got argv: {argv:?}"
+    );
 
     // The provider actually executed (the stub ran) and the round-trip ingested.
     assert!(
@@ -408,6 +429,7 @@ fn default_run_stays_read_only_and_takes_no_checkpoint() {
     let stub = write_codex_stub(&root, "NOTES.md");
     let origin = system_origin();
 
+    let selected_argv = std::cell::RefCell::new(Vec::new());
     let run = server
         .run_live_provider_local(
             &origin,
@@ -424,9 +446,27 @@ fn default_run_stays_read_only_and_takes_no_checkpoint() {
                 // because the env gate / attended conditions did not resolve to a
                 // live write upstream.
                 write_mode: WriteMode::DryRun,
+                record_selected_argv: Some(&selected_argv),
             },
         )
         .expect("dry-run run");
+
+    // The DryRun default selected the read-only profile (the mirror of the
+    // LiveWrite assertion): it spawns with `--sandbox read-only` and never
+    // `--sandbox workspace-write`.
+    let argv = selected_argv.borrow();
+    assert!(
+        argv.windows(2)
+            .any(|pair| pair == ["--sandbox", "read-only"]),
+        "DryRun must select the read-only profile, got argv: {argv:?}"
+    );
+    assert!(
+        !argv
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "workspace-write"]),
+        "DryRun must not select the workspace-write profile, got argv: {argv:?}"
+    );
+    drop(argv);
 
     // It still ran the (read-only) provider, but took NO checkpoint.
     assert!(run.provider_cli_executed);
