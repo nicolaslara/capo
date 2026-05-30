@@ -239,6 +239,14 @@ impl CodexExecAdapter {
                 "--json".to_string(),
                 "--sandbox".to_string(),
                 "workspace-write".to_string(),
+                // The RTL6-confined workspace is a fresh, non-git directory (the
+                // pre-write checkpoint is a directory snapshot, not a git stash),
+                // so Codex's trusted-directory/git-repo guard must be skipped or
+                // `codex exec` refuses to run ("Not inside a trusted directory
+                // and --skip-git-repo-check was not specified"). The read-only
+                // smoke plan already passes this for the same reason; the
+                // workspace stays confined by `--cd` + `capo_tools::confine_write_path`.
+                "--skip-git-repo-check".to_string(),
                 "--ignore-user-config".to_string(),
                 "--ignore-rules".to_string(),
                 "--cd".to_string(),

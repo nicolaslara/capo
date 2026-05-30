@@ -1285,7 +1285,88 @@ Verification:
 
 ## RTL13 - Live Opt-In Codex Workspace-Write Smoke Paired With Deterministic Assertions
 
-Status: pending.
+Status: done (gate green; live Codex smoke verified). The RTL13 smoke lives in
+`crates/capo-server/src/tests/live_smoke.rs` as TWO tests sharing one
+shape-assertion helper (`assert_workspace_write_turn_shape`), so completion is
+never operator-attested: (1)
+`deterministic_workspace_write_smoke_matches_the_paired_shape` ALWAYS runs (no
+live provider) -- it drives one confined workspace-WRITE turn through the real
+loop substrate (`run_live_provider_local` with `WriteMode::LiveWrite`, a `/bin/sh`
+codex stub via `codex_program_override`) and asserts the full normalized-event +
+artifact shape; (2) `live_codex_workspace_write_smoke` is `#[ignore]`d and behind
+the explicit env gates `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1` +
+`CAPO_SERVER_RUN_CODEX_LIVE=1` (and attended), performing ONE real confined Codex
+edit through the SAME `run_dispatch_turn` substrate (no override, so production
+`codex`/`CAPO_CODEX_BIN` resolution) and asserting the IDENTICAL shape via the
+shared helper. The smoke confirms the RTL6 confinement (`..`-escape rejected
+before any process runs) + pre-write checkpoint (`checkpoint.created`,
+reversible), the RTL7 ceiling (active wall-clock-bounded), and RTL10 crash-safety
+(in-flight `run.started` marker persisted) all engage on the live path; secrets
+are stripped by scanning EVERY persisted artifact through
+`scan_artifacts_for_sensitive_markers` fail-closed (the live spawn arm already
+deletes a sensitive stdout/stderr artifact and records
+`blocked_sensitive_artifact`, so a clean `exited` run + this scan proves
+secrets-stripped evidence). Two production fixes were needed to make the live
+path actually produce the RTL13 shape: (a) the Codex workspace-write launch plan
+(`CodexExecAdapter::local_workspace_write_launch_plan`) now passes
+`--skip-git-repo-check` because the RTL6-confined workspace is a fresh non-git dir
+and `codex exec` otherwise refuses to run; (b) the Codex parser
+(`provider_parsers.rs`) now recognizes the live `codex exec --json` 0.134
+`item.completed`/`item.started` shapes whose `item.type` is `file_change`
+(-> observed `apply_patch`) or `command_execution` (-> observed `exec_command`),
+since live codex represents an applied edit as a `file_change`/`command_execution`
+item rather than the `patch_apply.*` tool family the RTL9 fixture used. The live
+model applies the edit through whichever tool it picks per run, so the live
+assertion accepts either observed write tool while the deterministic test pins
+`apply_patch`.
+
+Evidence:
+
+- New RTL13 smoke module:
+  `crates/capo-server/src/tests/live_smoke.rs` (wired in
+  `crates/capo-server/src/tests.rs`) --
+  `deterministic_workspace_write_smoke_matches_the_paired_shape` (always-on; the
+  paired deterministic assertion) and `live_codex_workspace_write_smoke`
+  (`#[ignore]`d; gated live smoke that skips cleanly when the gates are unset).
+  Both share `assert_workspace_write_turn_shape`, which asserts: loop turn
+  Completed + terminal event; the confined edit landed; `checkpoint.created`
+  (RTL6) + `run.started` in-flight marker (RTL10) recorded; a completed observed
+  write-tool result anchored to a content artifact, DISTINCT from the agent's
+  `session.summary_updated` claim; per-turn artifacts under
+  `run_id/turns/<turn_id>` (RTL8); and every persisted artifact passes the
+  credential scan.
+- Codex workspace-write profile fix:
+  `crates/capo-adapters/src/local_subscription.rs`
+  (`local_workspace_write_launch_plan` adds `--skip-git-repo-check`); locked in by
+  `codex_workspace_write_launch_plan_uses_workspace_write_sandbox_without_ephemeral`
+  (asserts the flag is present) in `crates/capo-adapters/src/tests.rs`.
+- Codex parser fix + live-shape fixture:
+  `crates/capo-adapters/src/provider_parsers.rs` (the
+  `item.started`/`item.completed` arm routes `file_change` -> `apply_patch` and
+  `command_execution` -> `exec_command` observed tool results via the new
+  `codex_item_tool_result_content`, distinct from the agent message claim). New
+  fixture `crates/capo-adapters/fixtures/codex-exec-workspace-write-file-change.jsonl`
+  (captured from the real codex 0.134 stream) and parse test
+  `codex_live_file_change_item_maps_to_an_observed_apply_patch_tool_result` in
+  `crates/capo-adapters/src/tests.rs`.
+- Commands run from `/Users/nicolas/devel/capo-wt/real-turn-loop`:
+  deterministic: `cargo test -p capo-server --lib live_smoke` -> ok, 1 passed / 1
+  ignored (the live smoke stays gated). Live Codex smoke (verified, run 3x, all
+  ok, ~5-7s each as a real model call):
+  `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 CAPO_SERVER_RUN_CODEX_LIVE=1
+  CAPO_CODEX_BIN="$(which codex)" cargo test -p capo-server --lib --
+  --ignored live_codex_workspace_write_smoke` -> ok, 1 passed each run (the real
+  confined edit landed, the file_change/command_execution round-trip ingested as
+  an observed tool result distinct from the agent claim, and all artifacts passed
+  the credential scan). Objective gate: `cargo fmt --check` -> clean (exit 0);
+  `cargo clippy --all-targets --all-features -- -D warnings` -> clean (exit 0);
+  `cargo test --workspace` -> exit 0, 0 failed across all binaries (capo-server 58
+  + 1 ignored RTL13 live smoke, capo-adapters 30 + 2 ignored, capo-cli 63 +
+  server_transport 11, capo-controller 25, capo-state 36, capo-runtime 18,
+  capo-tools 21, capo-query 21, capo-voice 19, capo-core 4, capo-eval 3,
+  capo-memory 4, capo-workpads 2). `git diff --check` -> clean. The Claude live
+  path stays blocked (only the simple, already-verified Codex path runs behind the
+  gates).
 
 Acceptance:
 

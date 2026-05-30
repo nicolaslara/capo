@@ -52,9 +52,54 @@ fn parse_codex_record(raw: &Value) -> Vec<NormalizedAdapterEvent> {
             event.timeline_confidence = AdapterTimelineConfidence::Stable;
             event.timeline_key = session_ref.map(|session| format!("codex:{session}:session"));
         }
-        "item.completed" | "item.updated" => {
+        "item.started" | "item.completed" | "item.updated" => {
             let item_ref = string_at(raw, &["item", "id"]).or_else(|| string_at(raw, &["id"]));
             let item_type = string_at(raw, &["item", "type"]);
+            // The live `codex exec --json` workspace-write stream reports an
+            // applied edit as an `item.completed` whose `item.type` is
+            // `file_change` (not a `patch_apply.*` tool event), carrying the
+            // applied `changes`. Route that to the SAME observed tool-result event
+            // (`apply_patch`) the `patch_apply.*` family produces, so the live
+            // round-trip records a `tool.observation_recorded` distinct from the
+            // agent's `agent_message`/`message` claim -- the RTL9/RTL13 contract.
+            // A read-only `command_execution` item maps to the `exec_command`
+            // observed result for the same reason.
+            if matches!(
+                item_type.as_deref(),
+                Some("file_change") | Some("command_execution")
+            ) {
+                let operation = if provider_kind == "item.started" {
+                    "started"
+                } else {
+                    "completed"
+                };
+                let timeline_key = item_ref
+                    .clone()
+                    .map(|item| format!("codex:tool:{item}"))
+                    .unwrap_or_else(|| format!("codex:tool:{}", json_hash(raw)));
+                event = event.with_timeline(
+                    session_ref,
+                    item_ref,
+                    timeline_key,
+                    AdapterTimelineConfidence::Stable,
+                    operation,
+                );
+                event.kind = if operation == "started" {
+                    "adapter.tool_call_started".to_string()
+                } else {
+                    "adapter.tool_call_completed".to_string()
+                };
+                event.tool_name = Some(if item_type.as_deref() == Some("file_change") {
+                    "apply_patch".to_string()
+                } else {
+                    "exec_command".to_string()
+                });
+                event.status = Some(operation.to_string());
+                // The OBSERVED applied result: the file `changes` array (or an
+                // `aggregated_output`/`output` for an exec), reduced to one string.
+                event.content = codex_item_tool_result_content(raw);
+                return vec![event];
+            }
             let role = string_at(raw, &["item", "role"]).or_else(|| {
                 (item_type.as_deref() == Some("agent_message")).then(|| "assistant".to_string())
             });
@@ -157,6 +202,33 @@ fn codex_tool_result_content(raw: &Value) -> Option<String> {
                 .filter(|changes| !changes.is_null())
                 .map(Value::to_string)
         })
+}
+
+/// Extract the OBSERVED result of a Codex `item.*` tool item (`file_change` /
+/// `command_execution`) into a single string.
+///
+/// The live `codex exec --json` stream nests the applied changes under `item`
+/// (e.g. `item.changes` for a `file_change`, `item.aggregated_output` for a
+/// `command_execution`), so the result lives one level deeper than the
+/// `patch_apply.*` shapes [`codex_tool_result_content`] handles.
+fn codex_item_tool_result_content(raw: &Value) -> Option<String> {
+    // Prefer a NON-EMPTY captured output/diff/changes; a `command_execution`
+    // often reports an empty `aggregated_output` while still carrying the
+    // `command` it ran, which is the meaningful observed result in that case.
+    non_empty(string_at(raw, &["item", "aggregated_output"]))
+        .or_else(|| non_empty(string_at(raw, &["item", "formatted_output"])))
+        .or_else(|| non_empty(string_at(raw, &["item", "output"])))
+        .or_else(|| non_empty(string_at(raw, &["item", "unified_diff"])))
+        .or_else(|| {
+            raw.pointer("/item/changes")
+                .filter(|changes| !changes.is_null())
+                .map(Value::to_string)
+        })
+        .or_else(|| non_empty(string_at(raw, &["item", "command"])))
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|text| !text.is_empty())
 }
 
 fn parse_claude_record(raw: &Value) -> Vec<NormalizedAdapterEvent> {
