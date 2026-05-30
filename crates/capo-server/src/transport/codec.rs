@@ -476,6 +476,7 @@ fn encode_payload(payload: &ServerResponsePayload) -> Value {
             "tool_event_count": run.tool_event_count,
             "summary_event_count": run.summary_event_count,
             "completed_turn_count": run.completed_turn_count,
+            "observed_token_cost": run.observed_token_cost,
         }),
         ServerResponsePayload::Recovery(recovery) => json!({
             "type": "recovery",
@@ -602,6 +603,7 @@ fn decode_payload(value: &Value) -> TransportResult<ServerResponsePayload> {
             tool_event_count: required_usize(value, "tool_event_count")?,
             summary_event_count: required_usize(value, "summary_event_count")?,
             completed_turn_count: required_usize(value, "completed_turn_count")?,
+            observed_token_cost: value.get("observed_token_cost").and_then(Value::as_u64),
         })),
         "recovery" => Ok(ServerResponsePayload::Recovery(RecoverySummary {
             recovery_attempt_id: required_string(value, "recovery_attempt_id")?,

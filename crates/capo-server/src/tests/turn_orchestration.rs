@@ -1,9 +1,9 @@
 use super::*;
 
-use crate::{DispatchTurnMode, DispatchTurnRequest};
+use crate::{DispatchTurnMode, DispatchTurnRequest, LiveProviderTurn};
 use capo_controller::{
-    FakeBoundaryController, RealBoundaryController, RunResourceCeiling, TurnFinished,
-    TurnStopReason,
+    CeilingBreach, FakeBoundaryController, RealBoundaryController, RunResourceCeiling,
+    RunResourceUsage, TurnFinished, TurnStopReason,
 };
 
 const CODEX_FIXTURE: &str = include_str!("../../../capo-adapters/fixtures/codex-exec.jsonl");
@@ -372,24 +372,15 @@ fn loop_turn_drives_the_live_substrate_through_preflight_and_run() {
             session_id: "session-live-loop".to_string(),
             run_id: "run-live-loop".to_string(),
             turn_id: "turn-live-loop".to_string(),
-            mode: DispatchTurnMode::LiveProvider {
-                capability_profile: "trusted-local".to_string(),
-                runtime_scope: "local_process_loopback".to_string(),
-                credential_scan_policy: "metadata_only_no_secret_read".to_string(),
-                raw_prompt_policy: "not_rendered".to_string(),
-                raw_output_policy: "artifacts_scanned_redacted".to_string(),
-                tool_wrapper_policy: "capo_wrapped_required".to_string(),
-                live_provider_opt_in: true,
-                live_execution_opt_in: false,
-                mock_runtime_opt_in: true,
-                mock_provider_output_name: Some("codex-exec.jsonl".to_string()),
-                mock_provider_output_jsonl: Some(CODEX_FIXTURE.to_string()),
-                ceiling: RunResourceCeiling::for_live_provider(
+            mode: live_mode_under_ceiling(
+                RunResourceCeiling::for_live_provider(
                     8,
                     std::time::Duration::from_secs(1),
                     100_000,
                 ),
-            },
+                RunResourceUsage::default(),
+                0,
+            ),
         })
         .expect("run dispatch turn");
 
@@ -397,6 +388,18 @@ fn loop_turn_drives_the_live_substrate_through_preflight_and_run() {
     assert_eq!(outcome.run.status, "mocked_live_provider_output_ingested");
     assert!(!outcome.run.provider_cli_executed);
     assert!(outcome.run.input_event_count > 0);
+
+    // RTL7: a within-ceiling live turn did not abort, and the per-run usage
+    // accumulator advanced so the loop can carry it into the next turn.
+    assert!(outcome.ceiling_breach.is_none());
+    assert_eq!(
+        outcome.usage_after,
+        Some(RunResourceUsage {
+            turns_taken: 1,
+            wall_clock_elapsed: std::time::Duration::ZERO,
+            token_cost: 0,
+        })
+    );
 
     // The loop emitted a TurnFinished derived from the same ingested batch.
     assert_eq!(outcome.finished.turn_id.as_str(), "turn-live-loop");
@@ -421,4 +424,241 @@ fn loop_turn_drives_the_live_substrate_through_preflight_and_run() {
                 .payload_json
                 .contains("mock_live_provider_output_ingested_without_provider_cli")
     }));
+}
+
+/// Build a LiveProvider mode for the ceiling-enforcement tests: a mock-runtime
+/// codex turn that ingests `CODEX_FIXTURE`, parameterized only by the ceiling
+/// and the pre-turn usage/estimate the loop carries in.
+fn live_mode_under_ceiling(
+    ceiling: RunResourceCeiling,
+    usage_before: RunResourceUsage,
+    turn_token_cost: u64,
+) -> DispatchTurnMode {
+    DispatchTurnMode::LiveProvider(Box::new(LiveProviderTurn {
+        capability_profile: "trusted-local".to_string(),
+        runtime_scope: "local_process_loopback".to_string(),
+        credential_scan_policy: "metadata_only_no_secret_read".to_string(),
+        raw_prompt_policy: "not_rendered".to_string(),
+        raw_output_policy: "artifacts_scanned_redacted".to_string(),
+        tool_wrapper_policy: "capo_wrapped_required".to_string(),
+        live_provider_opt_in: true,
+        live_execution_opt_in: false,
+        mock_runtime_opt_in: true,
+        mock_provider_output_name: Some("codex-exec.jsonl".to_string()),
+        mock_provider_output_jsonl: Some(CODEX_FIXTURE.to_string()),
+        ceiling,
+        usage_before,
+        turn_token_cost,
+    }))
+}
+
+#[test]
+fn live_turn_without_a_wall_clock_bound_is_rejected_before_any_provider_runs() {
+    // RTL7: the active-ceiling prerequisite for the live path. A live-provider
+    // turn whose ceiling does not bound wall-clock is rejected before preflight
+    // or any provider run -- the live Codex path never runs without a ceiling.
+    let goal = "Reject a live turn with no wall-clock bound";
+    let root = temp_root();
+    let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
+    register_and_start(
+        &server,
+        "codex-local",
+        goal,
+        "session-no-clock",
+        "run-no-clock",
+    );
+
+    for ceiling in [
+        RunResourceCeiling::unbounded(),
+        RunResourceCeiling::max_turns(4),
+    ] {
+        let error = server
+            .run_dispatch_turn(DispatchTurnRequest {
+                agent_name: "codex-local".to_string(),
+                adapter: "codex".to_string(),
+                goal: goal.to_string(),
+                workspace: "/tmp/capo-workspace".to_string(),
+                artifacts: "/tmp/capo-artifacts".to_string(),
+                session_id: "session-no-clock".to_string(),
+                run_id: "run-no-clock".to_string(),
+                turn_id: "turn-no-clock".to_string(),
+                mode: live_mode_under_ceiling(ceiling, RunResourceUsage::default(), 0),
+            })
+            .expect_err("a live turn without a wall-clock bound must be rejected");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("wall-clock bound"),
+            "expected the wall-clock-bound rejection, got: {message}"
+        );
+    }
+
+    // No provider run reached the state: no run.exited and no run.aborted.
+    let state = SqliteStateStore::open(&root).expect("state");
+    let events = state
+        .recent_events_for_session(&SessionId::new("session-no-clock"), 64)
+        .expect("events");
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.kind == "run.exited" || event.kind == "run.aborted"),
+        "the rejected live turn must not run or abort a provider"
+    );
+}
+
+#[test]
+fn live_turn_over_max_turns_aborts_on_the_loop_path_without_running_the_provider() {
+    // RTL7 (live path): the turns ceiling is enforced IN run_dispatch_turn, on
+    // the same substrate the live provider runs through. A turn that would push
+    // the run over max_turns aborts BEFORE the provider spawns, emits a durable
+    // run.aborted event, and flips the run projection to aborted.
+    let goal = "Abort a live turn over max_turns";
+    let root = temp_root();
+    let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
+    register_and_start(
+        &server,
+        "codex-local",
+        goal,
+        "session-live-turns",
+        "run-live-turns",
+    );
+
+    // max_turns=1 with one turn already taken: the turn about to run is the 2nd,
+    // which trips the ceiling.
+    let ceiling =
+        RunResourceCeiling::for_live_provider(1, std::time::Duration::from_secs(30), 1_000);
+    let usage_before = RunResourceUsage {
+        turns_taken: 1,
+        ..RunResourceUsage::default()
+    };
+    let outcome = server
+        .run_dispatch_turn(DispatchTurnRequest {
+            agent_name: "codex-local".to_string(),
+            adapter: "codex".to_string(),
+            goal: goal.to_string(),
+            workspace: "/tmp/capo-workspace".to_string(),
+            artifacts: "/tmp/capo-artifacts".to_string(),
+            session_id: "session-live-turns".to_string(),
+            run_id: "run-live-turns".to_string(),
+            turn_id: "turn-live-turns-2".to_string(),
+            mode: live_mode_under_ceiling(ceiling, usage_before, 0),
+        })
+        .expect("run dispatch turn");
+
+    assert_eq!(
+        outcome.ceiling_breach,
+        Some(CeilingBreach::MaxTurns {
+            limit: 1,
+            observed: 2
+        })
+    );
+    assert_eq!(outcome.run.status, "aborted");
+    assert!(!outcome.run.provider_cli_executed);
+    assert!(outcome.usage_after.is_none());
+    // The over-ceiling turn projected nothing.
+    assert!(outcome.finished.summary_refs.is_empty());
+    assert!(outcome.finished.observed_tool_refs.is_empty());
+
+    // A durable run.aborted event was recorded keyed to the aborting turn, the
+    // provider never ran (no run.exited), and the run projection is aborted.
+    let state = SqliteStateStore::open(&root).expect("state");
+    let events = state
+        .recent_events_for_session(&SessionId::new("session-live-turns"), 64)
+        .expect("events");
+    let aborted = events
+        .iter()
+        .find(|event| event.kind == "run.aborted")
+        .expect("run.aborted recorded");
+    assert_eq!(aborted.turn_id.as_deref(), Some("turn-live-turns-2"));
+    assert!(aborted.payload_json.contains("max_turns_exceeded"));
+    assert!(
+        !events.iter().any(|event| event.kind == "run.exited"),
+        "the provider must not run when the turns ceiling is already tripped"
+    );
+    assert_eq!(
+        state
+            .run(&capo_core::RunId::new("run-live-turns"))
+            .expect("run")
+            .expect("present")
+            .status,
+        "aborted"
+    );
+    // Coordinated terminal projection set: the agent is freed and the session is
+    // terminal, exactly like every other terminal stop.
+    let agent = state
+        .agent_by_name("codex-local")
+        .expect("agent")
+        .expect("present");
+    assert_eq!(agent.status, "available");
+    assert!(agent.current_session_id.is_none());
+    assert_eq!(
+        state
+            .session(&SessionId::new("session-live-turns"))
+            .expect("session")
+            .expect("present")
+            .status,
+        "aborted"
+    );
+}
+
+#[test]
+fn live_turn_over_token_cost_aborts_on_the_loop_path_without_running_the_provider() {
+    // RTL7 (live path): the token/cost ceiling is enforced IN run_dispatch_turn.
+    // A turn whose pre-turn token estimate pushes the run over max_token_cost
+    // aborts before the provider spawns with a token-cost breach.
+    let goal = "Abort a live turn over max_token_cost";
+    let root = temp_root();
+    let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
+    register_and_start(
+        &server,
+        "codex-local",
+        goal,
+        "session-live-tokens",
+        "run-live-tokens",
+    );
+
+    // max_token_cost=1000 with 900 already spent; this turn estimates 200 ->
+    // projected 1100 > 1000.
+    let ceiling =
+        RunResourceCeiling::for_live_provider(8, std::time::Duration::from_secs(30), 1_000);
+    let usage_before = RunResourceUsage {
+        token_cost: 900,
+        ..RunResourceUsage::default()
+    };
+    let outcome = server
+        .run_dispatch_turn(DispatchTurnRequest {
+            agent_name: "codex-local".to_string(),
+            adapter: "codex".to_string(),
+            goal: goal.to_string(),
+            workspace: "/tmp/capo-workspace".to_string(),
+            artifacts: "/tmp/capo-artifacts".to_string(),
+            session_id: "session-live-tokens".to_string(),
+            run_id: "run-live-tokens".to_string(),
+            turn_id: "turn-live-tokens".to_string(),
+            mode: live_mode_under_ceiling(ceiling, usage_before, 200),
+        })
+        .expect("run dispatch turn");
+
+    assert_eq!(
+        outcome.ceiling_breach,
+        Some(CeilingBreach::TokenCost {
+            limit: 1_000,
+            observed: 1_100
+        })
+    );
+    assert_eq!(outcome.run.status, "aborted");
+    assert!(!outcome.run.provider_cli_executed);
+
+    let state = SqliteStateStore::open(&root).expect("state");
+    let events = state
+        .recent_events_for_session(&SessionId::new("session-live-tokens"), 64)
+        .expect("events");
+    assert!(
+        events.iter().any(|event| event.kind == "run.aborted"
+            && event.payload_json.contains("max_token_cost_exceeded")),
+        "a token/cost breach records a run.aborted with the token reason code"
+    );
+    assert!(
+        !events.iter().any(|event| event.kind == "run.exited"),
+        "the provider must not run when the token ceiling is already tripped"
+    );
 }

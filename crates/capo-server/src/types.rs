@@ -373,6 +373,12 @@ pub struct DispatchRunSummary {
     pub tool_event_count: usize,
     pub summary_event_count: usize,
     pub completed_turn_count: usize,
+    /// Observed post-turn provider token/cost, in provider cost units, when the
+    /// provider reports it. `None` when no token source is available (phase-1
+    /// mock/live has none), in which case the RTL7 ceiling accounting falls back
+    /// to the caller's pre-turn estimate. The real Codex token round-trip wires
+    /// this in RTL9.
+    pub observed_token_cost: Option<u64>,
 }
 
 impl DispatchRunSummary {
@@ -403,6 +409,9 @@ impl DispatchRunSummary {
             tool_event_count,
             summary_event_count,
             completed_turn_count,
+            // No provider token source on the deterministic/mock/live phase-1
+            // path; RTL9 wires the real Codex token round-trip here.
+            observed_token_cost: None,
         }
     }
 }

@@ -999,6 +999,7 @@ mod tests {
             tool_event_count: 0,
             summary_event_count: 1,
             completed_turn_count: 1,
+            observed_token_cost: None,
         };
 
         assert_eq!(

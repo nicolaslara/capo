@@ -28,7 +28,9 @@ pub use safety_floor::{
     WorkspaceWriteRequest, WriteMode, resolve_write_mode, resolve_write_mode_with_env,
 };
 pub use transport::{TransportError, send_tcp, serve_tcp};
-pub use turn_orchestration::{DispatchTurnMode, DispatchTurnOutcome, DispatchTurnRequest};
+pub use turn_orchestration::{
+    DispatchTurnMode, DispatchTurnOutcome, DispatchTurnRequest, LiveProviderTurn,
+};
 pub use types::*;
 use util::{
     adapter_label, command_identity_hash, parse_adapter_events, provider_kind_for_adapter, slug,

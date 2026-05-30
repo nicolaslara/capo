@@ -574,21 +574,36 @@ Status: done (gate green). The per-run resource ceiling lives in
 accounting. `RunResourceCeiling::breach(usage)` is the single pure classifier the
 loop and the live arm both consult, returning the FIRST breach in a fixed
 priority order (turns -> wall-clock -> token/cost) so the abort reason is
-deterministic. The controller enforces the ceiling IN THE LOOP:
+deterministic. The controller enforces the ceiling IN THE LOOP ON EVERY PATH -- the deterministic
+loop and the live server arm both consult the single `RunResourceCeiling::breach`
+classifier:
 `FakeBoundaryController::run_turn_within_ceiling` accounts the turn about to run
 (one more turn + its token cost) BEFORE projecting, and if that trips the ceiling
 it aborts via `abort_run_for_ceiling` and returns `CeilingTurnOutcome::Aborted`
-WITHOUT projecting the turn. Exceeding any ceiling appends a durable
+WITHOUT projecting the turn. The live-provider arm of
+`CapoServer::run_dispatch_turn` (`crates/capo-server/src/turn_orchestration.rs`)
+carries a per-run `RunResourceUsage` accumulator (`usage_before` +
+`turn_token_cost`) alongside the `RunResourceCeiling`: it accounts the turn about
+to run and aborts BEFORE spawning the provider if the turns or token/cost ceiling
+trips, returns `usage_after` so the loop carries usage across turns, and on a
+wall-clock timeout (`run.status == "timed_out"`, after the runtime's
+process-group hard-kill in `wait_running_with_timeout`) pairs the kill with a
+`run.aborted` event via `abort_run_for_ceiling`. All three dimensions are
+therefore enforced on the same substrate the live Codex provider runs through.
+Exceeding any ceiling appends a durable
 `run.aborted` event (new `EventKind::RunAborted` -> `run.aborted` in
 `crates/capo-state/src/event.rs`, idempotent on `(project, run_id, breach.code)`)
-carrying a `Run` projection of status `aborted`, so the run is durable and
-rebuilds identically on replay. The wall-clock ceiling is wired to the existing
-timeout path: the live-provider arm of `CapoServer::run_dispatch_turn`
-(`crates/capo-server/src/turn_orchestration.rs`) now carries a
-`RunResourceCeiling` instead of a raw `timeout_seconds`, derives the runtime
-`wait_running_with_timeout` timeout from `ceiling.wall_clock_timeout_seconds()`,
-and REJECTS a live-provider turn whose ceiling does not bound wall-clock -- so the
-live Codex path always runs inside an active ceiling, never without one. The
+and writes the SAME COORDINATED terminal projection set every other terminal stop
+writes (run + session `aborted`, agent freed to `available`/no session, task
+`aborted`), so a ceiling abort leaves the read model in the same shape as
+interrupt/stop and the run rebuilds identically on replay. Token/cost on the
+live path is a pre-turn BOUND (a live provider's real cost is only known after
+the turn): `DispatchRunSummary` carries an `observed_token_cost` the loop folds
+into usage when present (`None` until RTL9 wires the real Codex token
+round-trip), so the hard token ceiling fires on the next turn boundary once
+observed cost is available. The live-provider turn REJECTS a ceiling that does
+not bound wall-clock -- so the live Codex path always runs inside an active
+ceiling, never without one. The
 ceiling is documented as a strict SUBSET of `goal-autonomy`'s `GoalBudget` (which
 extends this enforcement floor rather than replacing it), per `knowledge.md`'s
 "The RTL Safety Floor" section.
@@ -604,10 +619,21 @@ Evidence:
   `SqliteStateStore::append_event` with an idempotency key and a `Run` projection
   so it survives restart/replay (no exhaustive `EventKind` match elsewhere needed
   updating -- all consumers match on `kind.as_str()`).
-- Wall-clock-to-timeout wiring + active-ceiling prerequisite:
-  `crates/capo-server/src/turn_orchestration.rs` (`DispatchTurnMode::LiveProvider`
-  now carries `ceiling: RunResourceCeiling`; `run_dispatch_turn` derives
-  `timeout_seconds` from it and rejects a live turn with no wall-clock bound).
+- Whole-path ceiling enforcement + wall-clock-to-timeout wiring + active-ceiling
+  prerequisite: `crates/capo-server/src/turn_orchestration.rs`
+  (`DispatchTurnMode::LiveProvider` carries a boxed `LiveProviderTurn` with
+  `ceiling: RunResourceCeiling`, `usage_before: RunResourceUsage`, and
+  `turn_token_cost`; `run_dispatch_turn` accounts the turn, breach-checks
+  turns/token BEFORE preflight, derives `timeout_seconds` from the ceiling,
+  rejects a live turn with no wall-clock bound, and on a `timed_out` run routes
+  to `abort_live_turn_for_ceiling` -> `FakeBoundaryController::abort_run_for_ceiling`;
+  returns `DispatchTurnOutcome { usage_after, ceiling_breach, .. }`).
+  `crates/capo-server/src/types.rs` adds `DispatchRunSummary.observed_token_cost`
+  (codec round-trip updated in `crates/capo-server/src/transport/codec.rs`).
+- Coordinated terminal projection set on abort:
+  `crates/capo-controller/src/resource_ceiling.rs`
+  (`abort_run_for_ceiling` now writes Task + Agent + Session + Run projections,
+  matching interrupt/stop -- agent freed, session/run `aborted`).
 - Deterministic tests (no live provider):
   `crates/capo-controller/src/tests.rs` --
   `resource_ceiling_classifies_the_first_breach_in_priority_order` (the pure
@@ -617,10 +643,26 @@ Evidence:
   (RTL7 acceptance: turn 1 within `max_turns=1` projects and completes; turn 2
   aborts BEFORE projecting -- a `run.aborted` event keyed to the aborting turn is
   recorded, the run projection is `aborted`, none of turn 2's batch reaches the
-  read models, and exactly one event is appended for the over-ceiling turn), and
+  read models, and exactly one event is appended for the over-ceiling turn),
+  `wall_clock_and_token_cost_breaches_abort_with_their_reason_code_and_terminal_projections`
+  (the two dimensions max_turns does not cover: WallClock and TokenCost breaches
+  each record a `run.aborted` with the right reason code AND the coordinated
+  terminal projection set -- run/session `aborted`, agent freed), and
   `aborted_run_stays_aborted_after_restart_replay_and_abort_is_idempotent`
   (restart/replay: reopen + `rebuild_projections` leaves the run `aborted` with no
   new events; re-recording the same breach is idempotent).
+  `crates/capo-server/src/tests/turn_orchestration.rs` --
+  `live_turn_without_a_wall_clock_bound_is_rejected_before_any_provider_runs`
+  (the negative active-ceiling prerequisite: an unbounded and a max-turns-only
+  ceiling are both rejected before any provider runs or aborts),
+  `live_turn_over_max_turns_aborts_on_the_loop_path_without_running_the_provider`
+  (the turns ceiling is enforced in `run_dispatch_turn`: the over-ceiling turn
+  aborts before the provider spawns, emits `run.aborted`, projects nothing, and
+  frees the agent / marks the session aborted -- no `run.exited`), and
+  `live_turn_over_token_cost_aborts_on_the_loop_path_without_running_the_provider`
+  (the token/cost ceiling is enforced from the pre-turn estimate on the live
+  path), plus a `usage_after`/`ceiling_breach` assertion on the existing
+  `loop_turn_drives_the_live_substrate_through_preflight_and_run`.
   `crates/capo-state/src/tests.rs` --
   `run_aborted_event_projects_aborted_status_and_rebuilds_identically` (the
   `run.aborted` event projects an `aborted` Run, an aborted run is not

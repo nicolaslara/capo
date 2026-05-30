@@ -1721,6 +1721,100 @@ fn aborted_run_stays_aborted_after_restart_replay_and_abort_is_idempotent() {
     );
 }
 
+#[test]
+fn wall_clock_and_token_cost_breaches_abort_with_their_reason_code_and_terminal_projections() {
+    use std::time::Duration;
+
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+
+    // RTL7: every ceiling dimension -- not just max_turns -- aborts with the
+    // right reason code AND the coordinated terminal projection set (run/session
+    // aborted, agent freed). Drives the two dimensions max_turns does not cover.
+    let controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("ceiling-dims-session")),
+    )
+    .expect("open controller");
+
+    for (agent_name, turn_label, breach, expected_code) in [
+        (
+            "wall-clock-worker",
+            "turn-wall-clock",
+            CeilingBreach::WallClock {
+                limit: Duration::from_secs(30),
+                observed: Duration::from_secs(31),
+            },
+            "max_wall_clock_exceeded",
+        ),
+        (
+            "token-cost-worker",
+            "turn-token-cost",
+            CeilingBreach::TokenCost {
+                limit: 1_000,
+                observed: 1_500,
+            },
+            "max_token_cost_exceeded",
+        ),
+    ] {
+        let registration = controller.register_agent(agent_name).expect("agent");
+        let refs = controller
+            .send_task(&registration, "Run under a resource ceiling")
+            .expect("send task");
+        let turn = TurnId::new(turn_label);
+
+        controller
+            .abort_run_for_ceiling(&refs, &turn, breach)
+            .expect("abort");
+
+        // The run.aborted event carries the dimension's reason code, keyed to the
+        // aborting turn.
+        let events = controller
+            .state()
+            .recent_events_for_session(&refs.session_id, 64)
+            .expect("events");
+        let aborted = events
+            .iter()
+            .find(|event| event.kind == "run.aborted")
+            .expect("run.aborted recorded");
+        assert_eq!(aborted.turn_id.as_deref(), Some(turn_label));
+        assert!(
+            aborted.payload_json.contains(expected_code),
+            "expected reason code {expected_code} in {}",
+            aborted.payload_json
+        );
+
+        // The coordinated terminal projection set: run + session aborted, the
+        // agent freed (available, no current session) -- the same shape every
+        // other terminal stop leaves behind.
+        assert_eq!(
+            controller
+                .state()
+                .run(&refs.run_id)
+                .expect("run")
+                .expect("present")
+                .status,
+            "aborted"
+        );
+        assert_eq!(
+            controller
+                .state()
+                .session(&refs.session_id)
+                .expect("session")
+                .expect("present")
+                .status,
+            "aborted"
+        );
+        let agent = controller
+            .state()
+            .agent(&refs.agent_id)
+            .expect("agent")
+            .expect("present");
+        assert_eq!(agent.status, "available");
+        assert!(agent.current_session_id.is_none());
+    }
+}
+
 /// Tiny test-only adapter over the two coexisting controllers so the parity
 /// test can drive an identical scripted sequence on each without duplicating
 /// the body. Both arms call the SAME public method names; the point of the test

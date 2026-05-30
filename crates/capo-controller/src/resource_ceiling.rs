@@ -9,21 +9,36 @@
 //!
 //! Three invariants keep this honest:
 //!
-//! - The ceiling is enforced by the CONTROLLER, in the loop. [`run_turn_within_ceiling`]
-//!   accounts each turn against the ceiling BEFORE it projects, so a run that
-//!   has already hit `max_turns` never projects another turn -- it aborts.
-//!   [`RunResourceCeiling::breach`] is the single pure classifier the loop and
-//!   the live arm (RTL9) both consult, so they cannot drift on what "over the
-//!   ceiling" means.
-//! - Exceeding any ceiling emits a durable `run.aborted` event (with a `Run`
-//!   projection of status `aborted`) and, on the live path, stops the run
-//!   through the RTL6 hard kill. The `run.aborted` event is idempotent on
-//!   `(run_id, breach)` and its projection rebuilds identically on replay, so an
-//!   aborted run stays aborted after a restart.
+//! - The ceiling is enforced by the CONTROLLER, in the loop, on EVERY path.
+//!   [`RunResourceCeiling::breach`] is the single pure classifier; both the
+//!   deterministic loop ([`run_turn_within_ceiling`]) and the live server arm
+//!   (`CapoServer::run_dispatch_turn`) consult it, accounting the turn about to
+//!   run (one more turn + its token cost) BEFORE the turn projects or the
+//!   provider spawns, so a run that has already hit `max_turns` or
+//!   `max_token_cost` never takes another turn -- it aborts. They cannot drift
+//!   on what "over the ceiling" means.
+//! - Exceeding any ceiling makes [`abort_run_for_ceiling`] emit a durable
+//!   `run.aborted` event with the SAME coordinated terminal projection set every
+//!   other terminal stop writes: run + session `aborted`, agent freed, task
+//!   updated. The event is idempotent on `(run_id, breach)` and its projections
+//!   rebuild identically on replay, so an aborted run stays aborted after a
+//!   restart.
 //! - The wall-clock ceiling wires to the EXISTING live-provider timeout path
 //!   (`wait_running_with_timeout`): a live-provider task derives its
 //!   `timeout_seconds` from the ceiling, so the live Codex path always runs
-//!   inside an active ceiling, never without one.
+//!   inside an active ceiling, never without one. When that timeout fires the
+//!   runtime hard-kills the process group and the live arm pairs the kill with
+//!   a `run.aborted` event (`CeilingBreach::WallClock`).
+//!
+//! Token/cost on the live path is a pre-turn BOUND, not a post-turn
+//! measurement: a live provider's real token cost is only known after the turn,
+//! so the loop accounts the caller's pre-turn estimate before spawning and
+//! folds the observed post-turn cost (when the provider reports one) into the
+//! next turn's accounting. RTL9 wires the real Codex token round-trip; until
+//! then the estimate stands and the hard token ceiling fires on the next turn
+//! boundary once observed cost is available.
+//!
+//! [`abort_run_for_ceiling`]: FakeBoundaryController::abort_run_for_ceiling
 //!
 //! Scope: this ceiling is a strict SUBSET of `goal-autonomy`'s `GoalBudget`.
 //! `goal-autonomy` extends this enforcement floor (durable goal budget,
@@ -256,7 +271,16 @@ impl FakeBoundaryController {
     }
 
     /// Record a controller-enforced abort: append a durable `run.aborted` event
-    /// and mark the run's projection `aborted`.
+    /// and write the same COORDINATED terminal projection set every other
+    /// terminal/cancel transition writes.
+    ///
+    /// Like [`Self::interrupt`]/[`Self::stop`], this frees the Agent
+    /// (`status = "available"`, `current_session_id = None`), marks the Session
+    /// terminal (`status = "aborted"`), and updates the Task
+    /// (`capo_execution_status = "aborted"`), in addition to flipping the Run
+    /// projection to `aborted`. A ceiling abort therefore leaves the read model
+    /// in the same shape as any other terminal stop -- the agent never keeps
+    /// owning an active session after its run was aborted.
     ///
     /// On the deterministic path this is the whole abort (there is no live
     /// process). On the live path the caller pairs this with the RTL6 hard kill
@@ -266,7 +290,7 @@ impl FakeBoundaryController {
     ///
     /// Idempotent on `(run_id, breach.code())`: re-recording the same breach
     /// appends nothing new, so a restart/replay leaves the run aborted exactly
-    /// once. The `Run` projection of status `aborted` rebuilds identically from
+    /// once. The projection set of status `aborted` rebuilds identically from
     /// the persisted event, so the run stays aborted after a rebuild.
     pub fn abort_run_for_ceiling(
         &self,
@@ -274,6 +298,19 @@ impl FakeBoundaryController {
         turn_id: &TurnId,
         breach: CeilingBreach,
     ) -> StateResult<()> {
+        let session = self
+            .state
+            .session(&refs.session_id)?
+            .ok_or_else(|| missing_read_model("session", &refs.session_id))?;
+        let task = self
+            .state
+            .task(&refs.task_id)?
+            .ok_or_else(|| missing_read_model("task", &refs.task_id))?;
+        let agent = self
+            .state
+            .agent(&refs.agent_id)?
+            .ok_or_else(|| missing_read_model("agent", &refs.agent_id))?;
+
         let mut event = scoped_event(
             &format!(
                 "event-run-aborted-{}-{}",
@@ -301,15 +338,50 @@ impl FakeBoundaryController {
             breach.limit_value(),
             breach.observed_value(),
         );
+        let summary = format!("Aborted by resource ceiling: {}", breach.code());
         self.state.append_event(
             event.with_payload(payload),
-            &[ProjectionRecord::Run(RunProjection {
-                run_id: refs.run_id.clone(),
-                session_id: refs.session_id.clone(),
-                status: "aborted".to_string(),
-                recovery_of_run_id: None,
-                updated_sequence: 0,
-            })],
+            &[
+                ProjectionRecord::Task(TaskProjection {
+                    task_id: refs.task_id.clone(),
+                    project_id: self.project_id.clone(),
+                    title: session.title.clone(),
+                    capo_execution_status: "aborted".to_string(),
+                    active_session_id: Some(refs.session_id.clone()),
+                    latest_summary: Some(summary.clone()),
+                    evidence_id: task.evidence_id,
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Agent(AgentProjection {
+                    agent_id: refs.agent_id.clone(),
+                    project_id: self.project_id.clone(),
+                    name: agent.name,
+                    status: "available".to_string(),
+                    current_session_id: None,
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Session(SessionProjection {
+                    session_id: refs.session_id.clone(),
+                    project_id: self.project_id.clone(),
+                    task_id: Some(refs.task_id.clone()),
+                    agent_id: refs.agent_id.clone(),
+                    title: session.title,
+                    status: "aborted".to_string(),
+                    current_goal: session.current_goal,
+                    latest_summary: Some(summary),
+                    latest_confidence: None,
+                    latest_blocker: None,
+                    external_session_ref: session.external_session_ref,
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Run(RunProjection {
+                    run_id: refs.run_id.clone(),
+                    session_id: refs.session_id.clone(),
+                    status: "aborted".to_string(),
+                    recovery_of_run_id: None,
+                    updated_sequence: 0,
+                }),
+            ],
         )?;
         Ok(())
     }
