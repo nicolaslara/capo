@@ -291,8 +291,15 @@ impl RealBoundaryController {
         self.core.register_agent(agent_name)
     }
 
+    /// AI3: the default chat/send-task command path dispatches the per-turn
+    /// summary tool through the REAL `dispatch_tool_call` seam
+    /// (`authorize_and_invoke` over this controller's live Capo exposure), so a
+    /// real production turn's tool call produces the canonical `ACI1` observed
+    /// audit sequence + `ToolCall`/`ToolObservation` projection keyed to the
+    /// turn -- never the fake `ToolExposure::fake()` / `self.tools.invoke` shim.
     pub fn send_task_command(&self, command: &CommandEnvelope) -> StateResult<RealRunRefs> {
-        self.core.send_task_command(command)
+        self.core
+            .send_task_command_with_real_tools(command, &self.tools.capo)
     }
 
     pub fn redirect_command(
@@ -324,7 +331,8 @@ impl RealBoundaryController {
         registration: &RealAgentRegistration,
         goal: &str,
     ) -> StateResult<RealRunRefs> {
-        self.core.send_task(registration, goal)
+        let task_id = TaskId::new(format!("task-{}", crate::slug(goal)));
+        self.send_task_with_task_id(registration, task_id, goal)
     }
 
     pub fn send_task_with_task_id(
@@ -333,8 +341,12 @@ impl RealBoundaryController {
         task_id: TaskId,
         goal: &str,
     ) -> StateResult<RealRunRefs> {
+        // AI3: route the convenience send-task surface through the real Capo
+        // exposure too, so the deterministic suites that drive `send_task`
+        // directly on the real handle exercise the same real dispatch seam the
+        // command path uses.
         self.core
-            .send_task_with_task_id(registration, task_id, goal)
+            .send_task_with_real_tools(registration, task_id, goal, &self.tools.capo)
     }
 
     pub fn registration_for_agent_name(

@@ -582,21 +582,24 @@ fn run_dispatch_turn_command_rejects_a_zero_wall_clock_timeout() {
 
 #[test]
 fn real_controller_matches_fake_path_over_a_scripted_adapter_from_the_server_crate() {
-    // RTL5: the RealBoundaryController is the production consumer of the RTL3
-    // loop and the RTL1 trait. Driven from the server crate (the controller's
-    // client) over the SAME scripted adapter as the fake handle, it must
-    // produce byte-compatible read models and an identical TurnFinished -- the
-    // controller swap is invisible above the boundary, and the two handles
-    // coexist. The typed ServerCommand/ServerResponse boundary is untouched:
-    // this test exercises the controller methods the server calls, on both
-    // handles, with identical inputs.
+    // RTL5 + AI3: the RealBoundaryController is the production consumer of the
+    // RTL3 loop and the RTL1 trait. Driven from the server crate (the
+    // controller's client) over the SAME scripted adapter as the fake handle,
+    // the LOOP-DRIVEN read models (the `run_turn` ingestion) and the
+    // `TurnFinished` outcome match -- the controller swap is invisible above the
+    // boundary for the shared loop path. AI3 INTENTIONALLY diverges the SEPARATE
+    // `send_task` per-turn summary tool surface: the real handle dispatches it
+    // through the real `authorize_and_invoke` seam (canonical dispatch sequence +
+    // dispatch provenance + observed-evidence row, one more event than the fake
+    // shim), so this test compares the session projection modulo the
+    // `updated_sequence` bookkeeping and asserts the loop tool call + outcome
+    // match, plus that the real summary tool ran through the real seam.
     use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
 
     type Projections = (
         capo_state::SessionProjection,
         Vec<capo_state::ToolCallProjection>,
         Vec<capo_state::EvidenceProjection>,
-        i64,
         TurnFinished,
     );
 
@@ -612,7 +615,6 @@ fn real_controller_matches_fake_path_over_a_scripted_adapter_from_the_server_cra
                 .expect("session present"),
             state.tool_calls_for_session(session).expect("tool calls"),
             state.evidence_for_session(session).expect("evidence"),
-            state.event_count().expect("event count"),
             finished,
         )
     }
@@ -664,22 +666,68 @@ fn real_controller_matches_fake_path_over_a_scripted_adapter_from_the_server_cra
         .expect("run turn");
     let real_result = capture(real.state(), &real_refs.session_id, real_finished);
 
-    assert_eq!(real_result.0, fake_result.0, "session projection diverged");
+    // The session projection matches modulo the `updated_sequence` bookkeeping
+    // (the AI3 real send_task dispatch emits one more event than the fake shim).
+    let mut real_session = real_result.0.clone();
+    let mut fake_session = fake_result.0.clone();
+    real_session.updated_sequence = 0;
+    fake_session.updated_sequence = 0;
+    assert_eq!(real_session, fake_session, "session projection diverged");
+    // The loop-ingested adapter tool call (`capo.agent_status`, driven by
+    // `run_turn`) is identical on both handles -- the shared loop tool path --
+    // modulo the `updated_sequence` bookkeeping (the AI3 real send_task dispatch
+    // emits one more earlier event, shifting every later projection's stamp by 1).
+    let mut real_loop_tool = real_result
+        .1
+        .iter()
+        .find(|call| call.tool_name == "capo.agent_status")
+        .expect("real loop tool call")
+        .clone();
+    let mut fake_loop_tool = fake_result
+        .1
+        .iter()
+        .find(|call| call.tool_name == "capo.agent_status")
+        .expect("fake loop tool call")
+        .clone();
+    real_loop_tool.updated_sequence = 0;
+    fake_loop_tool.updated_sequence = 0;
+    assert_eq!(real_loop_tool, fake_loop_tool, "loop tool call diverged");
+    // Evidence row count matches (the loop evidence is identical; the send_task
+    // evidence differs only by the dispatch-issued artifact id).
     assert_eq!(
-        real_result.1, fake_result.1,
-        "tool-call projections diverged"
+        real_result.2.len(),
+        fake_result.2.len(),
+        "evidence row count diverged"
     );
-    assert_eq!(
-        real_result.2, fake_result.2,
-        "evidence projections diverged"
+    assert_eq!(real_result.3, fake_result.3, "TurnFinished diverged");
+
+    // AI3: the real handle dispatched the send_task summary tool through the real
+    // seam -- the summary `ToolCall` carries dispatch provenance the fake shim
+    // never stamps.
+    let summary_call_id = format!("tool-{}", real_reg.agent_name);
+    let real_summary = real_result
+        .1
+        .iter()
+        .find(|call| call.tool_call_id.as_str() == summary_call_id)
+        .expect("real summary tool call");
+    assert!(
+        real_summary.provenance.correlation_id.is_some(),
+        "the real send_task summary call must carry dispatch provenance (real seam)",
     );
-    assert_eq!(real_result.3, fake_result.3, "event count diverged");
-    assert_eq!(real_result.4, fake_result.4, "TurnFinished diverged");
+    let fake_summary = fake_result
+        .1
+        .iter()
+        .find(|call| call.tool_call_id.as_str() == summary_call_id)
+        .expect("fake summary tool call");
+    assert!(
+        fake_summary.provenance.correlation_id.is_none(),
+        "the fake send_task summary call carries no dispatch provenance (shim path)",
+    );
 
     // Sanity: the scripted turn actually exercised the loop.
-    assert_eq!(real_result.4.stop_reason, TurnStopReason::Completed);
-    assert!(real_result.4.observed_terminal_event());
-    assert!(!real_result.4.observed_tool_refs.is_empty());
+    assert_eq!(real_result.3.stop_reason, TurnStopReason::Completed);
+    assert!(real_result.3.observed_terminal_event());
+    assert!(!real_result.3.observed_tool_refs.is_empty());
 }
 
 #[test]

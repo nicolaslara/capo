@@ -1,4 +1,37 @@
+use capo_tools::{CapoToolContext, CapoToolRequest, ToolExposureRequest, ToolExposureResult};
+
+use crate::tool_dispatch::ToolDispatchScope;
+
 use super::*;
+
+/// AI3: how the per-turn memory-packet summary tool is executed on a turn.
+///
+/// The fake/default path keeps the legacy summary shim (`ToolExposure::fake()`
+/// via [`FakeBoundaryController::tools`]) -- a canned observation used only by
+/// the deterministic fake-boundary e2e fixtures. The real production path
+/// (`RealBoundaryController`) dispatches the SAME `capo.session_summary` tool
+/// selection through the REAL [`FakeBoundaryController::dispatch_tool_call`]
+/// seam (`authorize_and_invoke` against the Capo registry), so a real turn's
+/// tool call produces the canonical `ACI1` observed audit sequence +
+/// `ToolInvocation`/`ToolObservation` projections keyed to the turn -- never a
+/// fabricated fake summary masquerading as a real dispatched result.
+pub(crate) enum ToolDispatchMode<'a> {
+    /// The legacy fake summary shim (`self.tools.invoke`). Test/fixture only.
+    Fake,
+    /// The real dispatch seam: route the per-turn summary tool through
+    /// `dispatch_tool_call` over the supplied REAL Capo exposure.
+    Real(&'a ToolExposure),
+}
+
+/// The narrow turn-tool result the rest of `send_task` consumes (memory packet
+/// candidate + tool-output artifact), produced by EITHER dispatch mode so the
+/// surrounding scaffolding is identical regardless of which tool surface ran.
+struct TurnToolResult {
+    tool_call_id: ToolCallId,
+    tool_name: String,
+    output_artifact_id: String,
+    summary: String,
+}
 
 impl FakeBoundaryController {
     pub fn send_task(
@@ -15,6 +48,35 @@ impl FakeBoundaryController {
         registration: &FakeAgentRegistration,
         task_id: TaskId,
         goal: &str,
+    ) -> StateResult<FakeRunRefs> {
+        self.send_task_with_dispatch_mode(registration, task_id, goal, ToolDispatchMode::Fake)
+    }
+
+    /// AI3: the production `send_task` entry that routes the per-turn summary
+    /// tool through the REAL dispatch seam (`exposure.authorize_and_invoke`)
+    /// instead of the fake summary shim. `RealBoundaryController::send_task`
+    /// calls this with its live Capo exposure.
+    pub(crate) fn send_task_with_real_tools(
+        &self,
+        registration: &FakeAgentRegistration,
+        task_id: TaskId,
+        goal: &str,
+        exposure: &ToolExposure,
+    ) -> StateResult<FakeRunRefs> {
+        self.send_task_with_dispatch_mode(
+            registration,
+            task_id,
+            goal,
+            ToolDispatchMode::Real(exposure),
+        )
+    }
+
+    fn send_task_with_dispatch_mode(
+        &self,
+        registration: &FakeAgentRegistration,
+        task_id: TaskId,
+        goal: &str,
+        dispatch_mode: ToolDispatchMode<'_>,
     ) -> StateResult<FakeRunRefs> {
         let session_id = SessionId::new(format!("session-{}", registration.agent_name));
         let run_id = RunId::new(format!("run-{}", registration.agent_name));
@@ -74,12 +136,44 @@ impl FakeBoundaryController {
                 external_session_ref: adapter_output.external_session_ref,
             });
         }
-        let tool_result = self.tools.invoke(FakeToolRequest {
-            tool_call_id: tool_call_id.clone(),
+        // AI3: execute the per-turn summary tool. In the FAKE mode the legacy
+        // summary shim runs here and the canonical tool-call events are
+        // hand-rolled later (preserving the fixture path byte-for-byte). In the
+        // REAL mode the SAME `capo.session_summary` selection is dispatched
+        // through `dispatch_tool_call` (`authorize_and_invoke`), which persists
+        // the canonical observed audit sequence + `ToolCall`/`ToolObservation`
+        // projections keyed to the turn -- so a real production turn's tool call
+        // is a real dispatched result, not a fabricated fake summary.
+        let dispatch_scope = ToolDispatchScope {
+            task_id: task_id.clone(),
+            agent_id: registration.agent_id.clone(),
             session_id: session_id.clone(),
-            tool_name: adapter_output.tool_name.clone(),
-            input_summary: adapter_output.summary.clone(),
-        });
+            run_id: run_id.clone(),
+            turn_id: turn_id.clone(),
+            tool_call_id: tool_call_id.clone(),
+        };
+        let tool_result = match &dispatch_mode {
+            ToolDispatchMode::Fake => {
+                let fake = self.tools.invoke(FakeToolRequest {
+                    tool_call_id: tool_call_id.clone(),
+                    session_id: session_id.clone(),
+                    tool_name: adapter_output.tool_name.clone(),
+                    input_summary: adapter_output.summary.clone(),
+                });
+                TurnToolResult {
+                    tool_call_id: fake.tool_call_id,
+                    tool_name: fake.tool_name,
+                    output_artifact_id: fake.output_artifact_id,
+                    summary: fake.summary,
+                }
+            }
+            ToolDispatchMode::Real(exposure) => self.dispatch_turn_summary_tool(
+                exposure,
+                &dispatch_scope,
+                &adapter_output.tool_name,
+                &adapter_output.summary,
+            )?,
+        };
         let memory_packet = self.memory.build_source_linked_packet(
             SourceLinkedMemoryPacketRequest {
                 memory_packet_id: memory_packet_id.clone(),
@@ -243,94 +337,100 @@ impl FakeBoundaryController {
             ],
         )?;
 
-        self.record_permission_decision(
-            registration,
-            &task_id,
-            &session_id,
-            &run_id,
-            &turn_id,
-            &tool_call_id,
-            &permission,
-            &permission_event_suffix,
-        )?;
-
-        self.state.append_event(
-            scoped_event(
-                &format!("event-tool-requested-{}", session_id),
-                EventKind::ToolCallRequested,
-                &self.project_id,
+        // AI3: the hand-rolled permission + canonical tool-call event sequence is
+        // the LEGACY fake summary-shim path. The REAL path already persisted the
+        // permission + canonical sequence + projection inside
+        // `dispatch_turn_summary_tool` above (through `authorize_and_invoke`), so
+        // it must NOT also hand-roll a second, duplicate tool-call sequence.
+        if let ToolDispatchMode::Fake = dispatch_mode {
+            self.record_permission_decision(
+                registration,
                 &task_id,
-                &registration.agent_id,
                 &session_id,
                 &run_id,
-            )
-            .with_turn(turn_id.to_string())
-            // Stamp the shared item ref (the tool_call_id) on every tool.* event of
-            // this one synthetic turn-context tool call so
-            // `persisted_turn_ref`/`reconstruct_turn_finished`'s dedup collapses
-            // tool.call_requested/invocation_started/call_completed into a SINGLE
-            // observed tool ref per call -- matching the replay-identity invariant
-            // the real dispatch path already honors. Without it the distinct
-            // per-kind payloads fall through to the raw_event_hash/payload_json
-            // fallback and over-count one call as three refs.
-            .with_item(tool_call_id.to_string())
-            .with_payload(format!("{{\"tool\":\"{}\"}}", tool_result.tool_name)),
-            &[ProjectionRecord::ToolCall(capo_state::ToolCallProjection {
-                tool_call_id: tool_call_id.clone(),
-                session_id: session_id.clone(),
-                turn_id: Some(turn_id.to_string()),
-                tool_name: tool_result.tool_name.clone(),
-                tool_origin: "capo".to_string(),
-                status: "requested".to_string(),
-                input_artifact_id: None,
-                output_artifact_id: None,
-                provenance: capo_state::ToolCallProvenance::default(),
-                updated_sequence: 0,
-            })],
-        )?;
+                &turn_id,
+                &tool_call_id,
+                &permission,
+                &permission_event_suffix,
+            )?;
 
-        self.state.append_event(
-            scoped_event(
-                &format!(
-                    "event-capability-grant-used-{}-{}",
-                    session_id, permission_event_suffix
-                ),
-                EventKind::CapabilityGrantUsed,
-                &self.project_id,
-                &task_id,
-                &registration.agent_id,
-                &session_id,
-                &run_id,
-            )
-            .with_turn(turn_id.to_string())
-            .with_item(tool_call_id.to_string())
-            .with_payload(format!(
-                "{{\"capability_grant_id\":\"{}\",\"tool_call_id\":\"{}\"}}",
-                permission.capability_grant_id, tool_result.tool_call_id
-            )),
-            &[],
-        )?;
+            self.state.append_event(
+                scoped_event(
+                    &format!("event-tool-requested-{}", session_id),
+                    EventKind::ToolCallRequested,
+                    &self.project_id,
+                    &task_id,
+                    &registration.agent_id,
+                    &session_id,
+                    &run_id,
+                )
+                .with_turn(turn_id.to_string())
+                // Stamp the shared item ref (the tool_call_id) on every tool.* event of
+                // this one synthetic turn-context tool call so
+                // `persisted_turn_ref`/`reconstruct_turn_finished`'s dedup collapses
+                // tool.call_requested/invocation_started/call_completed into a SINGLE
+                // observed tool ref per call -- matching the replay-identity invariant
+                // the real dispatch path already honors. Without it the distinct
+                // per-kind payloads fall through to the raw_event_hash/payload_json
+                // fallback and over-count one call as three refs.
+                .with_item(tool_call_id.to_string())
+                .with_payload(format!("{{\"tool\":\"{}\"}}", tool_result.tool_name)),
+                &[ProjectionRecord::ToolCall(capo_state::ToolCallProjection {
+                    tool_call_id: tool_call_id.clone(),
+                    session_id: session_id.clone(),
+                    turn_id: Some(turn_id.to_string()),
+                    tool_name: tool_result.tool_name.clone(),
+                    tool_origin: "capo".to_string(),
+                    status: "requested".to_string(),
+                    input_artifact_id: None,
+                    output_artifact_id: None,
+                    provenance: capo_state::ToolCallProvenance::default(),
+                    updated_sequence: 0,
+                })],
+            )?;
 
-        self.state.append_event(
-            scoped_event(
-                &format!("event-tool-invocation-started-{}", session_id),
-                EventKind::ToolInvocationStarted,
-                &self.project_id,
-                &task_id,
-                &registration.agent_id,
-                &session_id,
-                &run_id,
-            )
-            .with_turn(turn_id.to_string())
-            .with_item(tool_call_id.to_string())
-            .with_payload(format!(
-                "{{\"tool_call_id\":\"{}\",\"tool\":\"{}\",\"instrumentation\":\"full\"}}",
-                tool_result.tool_call_id, tool_result.tool_name
-            )),
-            &[],
-        )?;
+            self.state.append_event(
+                scoped_event(
+                    &format!(
+                        "event-capability-grant-used-{}-{}",
+                        session_id, permission_event_suffix
+                    ),
+                    EventKind::CapabilityGrantUsed,
+                    &self.project_id,
+                    &task_id,
+                    &registration.agent_id,
+                    &session_id,
+                    &run_id,
+                )
+                .with_turn(turn_id.to_string())
+                .with_item(tool_call_id.to_string())
+                .with_payload(format!(
+                    "{{\"capability_grant_id\":\"{}\",\"tool_call_id\":\"{}\"}}",
+                    permission.capability_grant_id, tool_result.tool_call_id
+                )),
+                &[],
+            )?;
 
-        self.state.append_event(
+            self.state.append_event(
+                scoped_event(
+                    &format!("event-tool-invocation-started-{}", session_id),
+                    EventKind::ToolInvocationStarted,
+                    &self.project_id,
+                    &task_id,
+                    &registration.agent_id,
+                    &session_id,
+                    &run_id,
+                )
+                .with_turn(turn_id.to_string())
+                .with_item(tool_call_id.to_string())
+                .with_payload(format!(
+                    "{{\"tool_call_id\":\"{}\",\"tool\":\"{}\",\"instrumentation\":\"full\"}}",
+                    tool_result.tool_call_id, tool_result.tool_name
+                )),
+                &[],
+            )?;
+
+            self.state.append_event(
             scoped_event(
                 &format!("event-tool-output-artifact-{}", session_id),
                 EventKind::ToolOutputArtifactRecorded,
@@ -349,57 +449,57 @@ impl FakeBoundaryController {
             &[],
         )?;
 
-        self.state.append_event(
-            scoped_event(
-                &format!("event-tool-output-observed-{}", session_id),
-                EventKind::ToolOutputObserved,
-                &self.project_id,
-                &task_id,
-                &registration.agent_id,
-                &session_id,
-                &run_id,
-            )
-            .with_turn(turn_id.to_string())
-            .with_item(tool_call_id.to_string())
-            .with_payload(format!(
-                "{{\"tool_call_id\":\"{}\",\"summary\":\"{}\"}}",
-                tool_result.tool_call_id,
-                escape_json(&tool_result.summary)
-            )),
-            &[],
-        )?;
+            self.state.append_event(
+                scoped_event(
+                    &format!("event-tool-output-observed-{}", session_id),
+                    EventKind::ToolOutputObserved,
+                    &self.project_id,
+                    &task_id,
+                    &registration.agent_id,
+                    &session_id,
+                    &run_id,
+                )
+                .with_turn(turn_id.to_string())
+                .with_item(tool_call_id.to_string())
+                .with_payload(format!(
+                    "{{\"tool_call_id\":\"{}\",\"summary\":\"{}\"}}",
+                    tool_result.tool_call_id,
+                    escape_json(&tool_result.summary)
+                )),
+                &[],
+            )?;
 
-        self.state.append_event(
-            scoped_event(
-                &format!("event-tool-completed-{}", session_id),
-                EventKind::ToolCallCompleted,
-                &self.project_id,
-                &task_id,
-                &registration.agent_id,
-                &session_id,
-                &run_id,
-            )
-            .with_turn(turn_id.to_string())
-            .with_item(tool_call_id.to_string())
-            .with_payload(format!(
-                "{{\"tool\":\"{}\",\"output_artifact_id\":\"{}\"}}",
-                tool_result.tool_name, tool_result.output_artifact_id
-            )),
-            &[ProjectionRecord::ToolCall(capo_state::ToolCallProjection {
-                tool_call_id,
-                session_id: session_id.clone(),
-                turn_id: Some(turn_id.to_string()),
-                tool_name: tool_result.tool_name,
-                tool_origin: "capo".to_string(),
-                status: "completed".to_string(),
-                input_artifact_id: None,
-                output_artifact_id: Some(tool_result.output_artifact_id.clone()),
-                provenance: capo_state::ToolCallProvenance::default(),
-                updated_sequence: 0,
-            })],
-        )?;
+            self.state.append_event(
+                scoped_event(
+                    &format!("event-tool-completed-{}", session_id),
+                    EventKind::ToolCallCompleted,
+                    &self.project_id,
+                    &task_id,
+                    &registration.agent_id,
+                    &session_id,
+                    &run_id,
+                )
+                .with_turn(turn_id.to_string())
+                .with_item(tool_call_id.to_string())
+                .with_payload(format!(
+                    "{{\"tool\":\"{}\",\"output_artifact_id\":\"{}\"}}",
+                    tool_result.tool_name, tool_result.output_artifact_id
+                )),
+                &[ProjectionRecord::ToolCall(capo_state::ToolCallProjection {
+                    tool_call_id: tool_call_id.clone(),
+                    session_id: session_id.clone(),
+                    turn_id: Some(turn_id.to_string()),
+                    tool_name: tool_result.tool_name.clone(),
+                    tool_origin: "capo".to_string(),
+                    status: "completed".to_string(),
+                    input_artifact_id: None,
+                    output_artifact_id: Some(tool_result.output_artifact_id.clone()),
+                    provenance: capo_state::ToolCallProvenance::default(),
+                    updated_sequence: 0,
+                })],
+            )?;
 
-        self.state.append_event(
+            self.state.append_event(
             scoped_event(
                 &format!("event-tool-result-delivered-{}", session_id),
                 EventKind::ToolResultDelivered,
@@ -417,6 +517,7 @@ impl FakeBoundaryController {
             )),
             &[],
         )?;
+        }
 
         self.state.append_event(
             scoped_event(
@@ -487,6 +588,63 @@ impl FakeBoundaryController {
             run_id,
             runtime_process_ref: runtime_process.runtime_process_ref,
             external_session_ref: adapter_session.external_session_ref,
+        })
+    }
+
+    /// AI3: dispatch the per-turn `capo.session_summary` tool through the REAL
+    /// `dispatch_tool_call` seam (`authorize_and_invoke` against the Capo
+    /// registry), persisting the canonical observed audit sequence +
+    /// `ToolCall`/`ToolObservation` projections keyed to the turn. Returns the
+    /// narrow [`TurnToolResult`] the surrounding `send_task` scaffolding consumes
+    /// (memory-packet candidate + tool-output artifact), derived from the REAL
+    /// result -- never a fabricated fake summary.
+    fn dispatch_turn_summary_tool(
+        &self,
+        exposure: &ToolExposure,
+        scope: &ToolDispatchScope,
+        tool_name: &str,
+        adapter_summary: &str,
+    ) -> StateResult<TurnToolResult> {
+        let outcome = self.dispatch_tool_call(
+            exposure,
+            scope,
+            ToolExposureRequest::Capo(CapoToolRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: scope.session_id.clone(),
+                tool_id: tool_name.to_string(),
+                capability_profile_id: self.permission_policy.default_profile_id().to_string(),
+                context: CapoToolContext {
+                    task_status: String::new(),
+                    agent_status: String::new(),
+                    // `capo.session_summary` renders its output from
+                    // `context.session_summary`, so feeding the adapter's
+                    // observed turn summary keeps the dispatched tool output the
+                    // turn's real summary rather than an empty string.
+                    session_summary: adapter_summary.to_string(),
+                    workpad_excerpt: String::new(),
+                    evidence_note: String::new(),
+                    capability_scope: "state:read:session".to_string(),
+                },
+            }),
+        )?;
+        // The narrow output the memory packet / artifacts consume comes from the
+        // REAL dispatched result (the Capo registry's rendered output + the
+        // dispatch-issued artifact id), not the fake shim.
+        let summary = match &outcome.result {
+            ToolExposureResult::Capo(result) => result.output.clone(),
+            // The real path always dispatches a Capo `capo.session_summary` call;
+            // any other variant here is a wiring bug.
+            other => panic!("dispatch_turn_summary_tool expected a Capo result, got {other:?}"),
+        };
+        let output_artifact_id = outcome
+            .output_artifact_id
+            .clone()
+            .unwrap_or_else(|| format!("artifact-tool-{}", scope.session_id));
+        Ok(TurnToolResult {
+            tool_call_id: outcome.tool_call_id,
+            tool_name: outcome.tool_name,
+            output_artifact_id,
+            summary,
         })
     }
 

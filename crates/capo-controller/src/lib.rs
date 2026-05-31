@@ -350,6 +350,30 @@ impl FakeBoundaryController {
         let registration = self.registration_for_agent_name(agent_name)?;
         self.send_task_with_task_id(&registration, task_id, goal)
     }
+
+    /// AI3: the production `send_task` command path that routes the per-turn
+    /// summary tool through the REAL dispatch seam (the supplied live Capo
+    /// `exposure`'s `authorize_and_invoke`) instead of the fake summary shim.
+    /// `RealBoundaryController::send_task_command` calls this with its own real
+    /// Capo exposure so a real chat turn's tool call is a real dispatched result.
+    pub(crate) fn send_task_command_with_real_tools(
+        &self,
+        command: &CommandEnvelope,
+        exposure: &ToolExposure,
+    ) -> StateResult<FakeRunRefs> {
+        require_intent(command, CommandIntent::SendTask);
+        let agent_name = required_structured_arg(command, "agent")?;
+        let goal = command
+            .text
+            .as_deref()
+            .ok_or_else(|| missing_read_model("command.text", &command.command_id))?;
+        let registration = self.registration_for_agent_name(agent_name)?;
+        let task_id = match optional_structured_arg(command, "task_id") {
+            Some(task_id) => TaskId::new(task_id),
+            None => TaskId::new(format!("task-{}", slug(goal))),
+        };
+        self.send_task_with_real_tools(&registration, task_id, goal, exposure)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

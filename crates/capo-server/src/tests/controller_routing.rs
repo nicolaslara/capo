@@ -146,6 +146,21 @@ fn session_event_kinds(state: &SqliteStateStore, session_id: &SessionId) -> Vec<
         // command id, which is the same across routings, but excluding it keeps
         // the comparison about the controller-emitted domain events.
         .filter(|event| event.kind != "server.request_handled")
+        // AI3: scope the cross-routing comparison to the session-LIFECYCLE
+        // markers (`session.*`/`run.*`/`memory.*`/`evidence.*`), excluding the
+        // per-turn tool-dispatch internals (`tool.*`/`permission.*`/
+        // `capability.*`). The real routing now dispatches the `send_task`
+        // summary tool through the real `authorize_and_invoke` seam (a different
+        // tool-dispatch event shape than the fake shim), so the tool-dispatch
+        // sub-sequence intentionally diverges across routings while the lifecycle
+        // these smoke tests gate on stays equivalent. The byte-level tool-dispatch
+        // divergence is proven directly in capo-controller's AI3 tests.
+        .filter(|event| {
+            event.kind.starts_with("session.")
+                || event.kind.starts_with("run.")
+                || event.kind.starts_with("memory.")
+                || event.kind.starts_with("evidence.")
+        })
         .map(|event| event.kind)
         .collect()
 }

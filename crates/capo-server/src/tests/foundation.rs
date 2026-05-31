@@ -107,7 +107,11 @@ fn client_tracks_mock_agent_through_server_boundary_and_recovers() {
     // terminal `run.recovered`, so the reconciled run status is `recovered`.
     assert_eq!(session.run_status.as_deref(), Some("recovered"));
     assert_eq!(session.tool_call_count, 1);
-    assert_eq!(session.tool_observation_count, 0);
+    // AI3: the production default routing now dispatches the per-turn
+    // `capo.session_summary` tool through the REAL `authorize_and_invoke` seam,
+    // which persists one `runtime_output` observed-evidence row for the call
+    // (the ACI9 observation) -- where the legacy fake summary shim recorded none.
+    assert_eq!(session.tool_observation_count, 1);
     assert_eq!(session.memory_packet_count, 1);
 
     let state = SqliteStateStore::open(&root).expect("state");

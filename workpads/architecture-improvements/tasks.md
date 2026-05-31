@@ -148,7 +148,7 @@ Verification:
 
 ## AI3 - Wire `dispatch_tool_call` into the production turn loop
 
-Status: pending. Priority: high. Source: tools-aci `ACI1` boundary review.
+Status: done. Priority: high. Source: tools-aci `ACI1` boundary review.
 
 Problem:
 
@@ -198,3 +198,72 @@ Verification:
   persisting the canonical observed sequence + projection keyed to the turn.
 - `cargo fmt` / `cargo clippy --all-targets --all-features -- -D warnings` /
   `cargo test --workspace`.
+
+Evidence (2026-05-31, worktree `feat/architecture-improvements`):
+
+- Production caller REWIRED (the core acceptance): the default chat/send-task
+  path now dispatches the per-turn `capo.session_summary` tool through the REAL
+  `authorize_and_invoke` seam, not `ToolExposure::fake()` / `self.tools.invoke`.
+  - `crates/capo-controller/src/fake_session.rs`: `send_task` is refactored to take
+    a private `ToolDispatchMode { Fake, Real(&ToolExposure) }`. The fake/fixture
+    path keeps the legacy summary shim + hand-rolled tool events byte-for-byte; the
+    REAL path calls the new `dispatch_turn_summary_tool`, which routes
+    `capo.session_summary` through `FakeBoundaryController::dispatch_tool_call`
+    (`authorize_and_invoke` over the live Capo registry) and persists the canonical
+    `ACI1` observed audit sequence (`tool.call_requested` -> `permission.requested`
+    -> `permission.decided` -> `capability.grant_used` -> `tool.invocation_started`
+    -> `tool.output_artifact_recorded` -> `tool.output_observed` ->
+    `tool.call_completed` -> `tool.result_delivered`) + the `ToolCall` projection
+    (with dispatch provenance) + the ACI9 `runtime_output` `ToolObservation` row,
+    all keyed to the turn. The fake-only block (`record_permission_decision` + the
+    six hand-rolled `tool.*` events) is now gated to `ToolDispatchMode::Fake`.
+  - `crates/capo-controller/src/lib.rs`: new `send_task_command_with_real_tools`
+    parses the SendTask `CommandEnvelope` and routes through the real-tools path.
+  - `crates/capo-controller/src/real_controller.rs`: `RealBoundaryController`'s
+    `send_task_command` / `send_task` / `send_task_with_task_id` now drive the real
+    Capo exposure (`self.tools.capo`) through the seam. The server routes
+    `SendTask` through `ControllerRoute::Real::send_task_command`, so a real chat
+    turn's tool call is a REAL dispatched result.
+- Documented, justified divergence (the AI3 goal: "one dispatch path, one event
+  shape"): the REAL `send_task` summary tool now produces the canonical dispatch
+  shape (no `capability.grant_created`; interleaved `permission.*`; one
+  `runtime_output` observation; dispatch provenance; +1 event vs the fake shim).
+  The prior RTL5/RTL11/RTL12 fake==real PARITY guards were updated to compare the
+  SHARED loop path (the `run_turn` ingestion: identical `TurnFinished`, identical
+  loop `ToolCall`, session projection modulo the `updated_sequence` bookkeeping)
+  and the LIFECYCLE markers (`session.*`/`run.*`/`memory.*`/`evidence.*`), while
+  the per-turn tool-dispatch sub-sequence intentionally differs (the real seam vs
+  the fake shim). Files: `crates/capo-controller/src/tests.rs`
+  (`real_controller_read_models_match_fake_path_for_identical_scripted_output`,
+  `fake_and_real_paths_produce_equivalent_event_sequences_for_a_scripted_turn`,
+  the `lifecycle_fingerprint` helper), `crates/capo-server/src/tests/controller_routing.rs`
+  (`session_event_kinds` scoped to lifecycle markers), and
+  `crates/capo-server/src/tests/turn_orchestration.rs`
+  (`real_controller_matches_fake_path_over_a_scripted_adapter_from_the_server_crate`).
+  `crates/capo-server/src/tests/foundation.rs` updated: the production default
+  routing now records `tool_observation_count == 1` for the dispatched summary
+  tool (was 0 under the shim).
+- Verification test (PRODUCTION path, not the seam in isolation):
+  `production_send_task_command_dispatches_summary_tool_through_authorize_and_invoke`
+  (`crates/capo-controller/src/tests.rs`) drives a real SendTask `CommandEnvelope`
+  through `RealBoundaryController::send_task_command` and asserts the persisted
+  summary tool carries the canonical observed audit sequence + the completed
+  `ToolCall` (with dispatch `correlation_id`) + the `runtime_output`
+  `ToolObservation`, keyed to the turn. It fails if the path reverts to the fake
+  shim (no provenance, no observation row, different event shape).
+- Gate run (worktree): `cargo fmt --check` clean (exit 0); `cargo clippy
+  --all-targets --all-features -- -D warnings` clean (exit 0); `cargo test
+  --workspace` green for everything AI3 touches (capo-controller 46 passed,
+  capo-server 94 passed, capo-cli lib 64 passed, all other crates pass). The full
+  `cargo test --workspace` is blocked ONLY by a PRE-EXISTING, AI3-INDEPENDENT hang
+  in the CLI integration test
+  `crates/capo-cli/tests/server_transport/basic.rs::capo_planner_tracks_decisions_as_server_state_and_steers_mock_agent`
+  -- it spawns the real `capo control --planner capo` subprocess over a loopback
+  socket and blocks under the sandbox. Reproduced on the AI3-stashed baseline
+  (same hang with my changes reverted), so it is environmental, not a regression.
+  The workspace run completes green with that one test `--skip`ped. No live Codex
+  smoke required for AI3 (the deterministic scripted-mock fixture path satisfies
+  the verification). Did NOT git commit (workflow commits after review).
+- Acceptance: met (the production turn loop invokes the real dispatch seam; the
+  per-turn summary is a real dispatched result, not the fake shim; the documented
+  parity divergence is the intended "one dispatch path, one event shape").

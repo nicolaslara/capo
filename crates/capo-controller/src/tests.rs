@@ -1657,15 +1657,18 @@ fn turn_loop_dispatch_derivation_matches_run_turn_for_the_same_batch() {
 // --- RTL5: RealBoundaryController -----------------------------------------
 
 /// Drive an identical scripted register -> send_task -> turn sequence on both
-/// the fake handle and the real handle over the SAME scripted adapter, and
-/// assert the persisted read models are byte-compatible.
+/// the fake handle and the real handle over the SAME scripted adapter.
 ///
-/// This is the RTL5 parity proof: the real controller is the production
-/// consumer of the RTL3 loop and the RTL1 trait, but it persists through the
-/// one `append_event`/projection path, so identical scripted output yields
-/// identical projections (the only divergence allowed is the in-memory
-/// `external_session_ref`, which both handles derive from their own session
-/// label -- here we hand both the same label).
+/// RTL5 + AI3: both handles persist through the one `append_event`/projection
+/// path, so the LOOP-DRIVEN portion (the `run_turn` ingestion) yields identical
+/// projections and an identical `TurnFinished`. What AI3 INTENTIONALLY diverges
+/// is the `send_task` per-turn summary tool surface: the fake handle keeps the
+/// legacy `ToolExposure::fake()` summary shim (a canned observation), while the
+/// real handle dispatches the SAME `capo.session_summary` selection through the
+/// REAL `dispatch_tool_call` seam (`authorize_and_invoke`). So this test asserts
+/// the loop-driven read models match, AND that the real path's summary tool went
+/// through the real seam (observed-evidence row + dispatch provenance) where the
+/// fake path did not -- the AI3 "real tool dispatch, not the fake shim" proof.
 #[test]
 fn real_controller_read_models_match_fake_path_for_identical_scripted_output() {
     use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
@@ -1677,8 +1680,8 @@ fn real_controller_read_models_match_fake_path_for_identical_scripted_output() {
         Vec<capo_state::ToolCallProjection>,
         Vec<capo_state::ToolObservationProjection>,
         Vec<capo_state::EvidenceProjection>,
-        i64,
         TurnFinished,
+        FakeRunRefs,
     )
     where
         C: FnOnce(AgentAdapterHandle) -> SqliteStateStoreBundle,
@@ -1712,8 +1715,8 @@ fn real_controller_read_models_match_fake_path_for_identical_scripted_output() {
             state
                 .evidence_for_session(&refs.session_id)
                 .expect("evidence"),
-            state.event_count().expect("event count"),
             finished,
+            refs,
         )
     }
 
@@ -1741,12 +1744,77 @@ fn real_controller_read_models_match_fake_path_for_identical_scripted_output() {
         ))
     });
 
-    assert_eq!(real.0, fake.0, "session projection diverged");
-    assert_eq!(real.1, fake.1, "tool-call projections diverged");
-    assert_eq!(real.2, fake.2, "tool-observation projections diverged");
-    assert_eq!(real.3, fake.3, "evidence projections diverged");
-    assert_eq!(real.4, fake.4, "event count diverged");
-    assert_eq!(real.5, fake.5, "TurnFinished outcome diverged");
+    // The loop-driven session projection and TurnFinished outcome are identical:
+    // both handles ingest the same scripted `run_turn` batch through the one
+    // shared loop/projection path -- modulo the `updated_sequence` bookkeeping
+    // (the AI3 real send_task dispatch emits one more event than the fake shim,
+    // shifting the global sequence the final projection was stamped at; every
+    // semantic field is identical).
+    let mut real_session = real.0.clone();
+    let mut fake_session = fake.0.clone();
+    real_session.updated_sequence = 0;
+    fake_session.updated_sequence = 0;
+    assert_eq!(real_session, fake_session, "session projection diverged");
+    assert_eq!(real.4, fake.4, "TurnFinished outcome diverged");
+
+    // AI3 divergence: the per-turn summary tool (`tool-rtl5-worker`) goes through
+    // the REAL dispatch seam on the real handle and the FAKE shim on the fake
+    // handle. The shared loop tool (`tool-1`, ingested by `run_turn`) is identical
+    // on both. So filter out the loop tool and assert the summary tool diverged
+    // exactly as designed: the real handle persisted a `runtime_output` observed
+    // evidence row + dispatch provenance for the summary call; the fake did not.
+    let summary_call_id = real.5.run_id.to_string().replace("run-", "tool-");
+    let real_summary_obs: Vec<_> = real
+        .2
+        .iter()
+        .filter(|obs| obs.tool_call_id.as_ref().map(|id| id.as_str()) == Some(&summary_call_id))
+        .collect();
+    let fake_summary_obs: Vec<_> = fake
+        .2
+        .iter()
+        .filter(|obs| obs.tool_call_id.as_ref().map(|id| id.as_str()) == Some(&summary_call_id))
+        .collect();
+    assert_eq!(
+        real_summary_obs.len(),
+        1,
+        "the real send_task summary tool must persist one observed-evidence row through the real seam: {real_summary_obs:?}",
+    );
+    assert_eq!(
+        real_summary_obs[0].source, "runtime_output",
+        "the real send_task summary observation is observed evidence (the real authorize+invoke), not the fake shim",
+    );
+    assert!(
+        fake_summary_obs.is_empty(),
+        "the fake send_task summary tool uses the legacy shim and persists no observed-evidence row: {fake_summary_obs:?}",
+    );
+    // The real summary `ToolCall` carries dispatch provenance (a correlation id);
+    // the fake one carries the default (empty) provenance -- the seam difference.
+    let real_summary_call = real
+        .1
+        .iter()
+        .find(|call| call.tool_call_id.as_str() == summary_call_id)
+        .expect("real summary tool call");
+    assert!(
+        real_summary_call.provenance.correlation_id.is_some(),
+        "the real send_task summary call carries dispatch provenance",
+    );
+    let fake_summary_call = fake
+        .1
+        .iter()
+        .find(|call| call.tool_call_id.as_str() == summary_call_id)
+        .expect("fake summary tool call");
+    assert!(
+        fake_summary_call.provenance.correlation_id.is_none(),
+        "the fake send_task summary call carries no dispatch provenance (the shim path)",
+    );
+    // Both reach a completed summary tool call (the lifecycle is equivalent even
+    // though the seam differs).
+    assert_eq!(real_summary_call.status, "completed");
+    assert_eq!(fake_summary_call.status, "completed");
+    // Evidence parity: the loop-driven evidence row is identical on both; the
+    // send_task evidence row differs only by the dispatch-issued artifact id, so
+    // assert both recorded the same NUMBER of evidence rows.
+    assert_eq!(real.3.len(), fake.3.len(), "evidence row count diverged",);
 }
 
 /// Restart/replay: a turn driven through the real controller rebuilds
@@ -1882,15 +1950,21 @@ fn real_controller_projected_turn_rebuilds_identically_after_restart_replay() {
 // --- RTL12: parity criterion + parity-equivalence -------------------------
 
 /// A stable, adapter-identity-independent summary of where a lifecycle landed:
-/// the terminal `(task, agent, session, run)` statuses, the causal session
-/// event-kind sequence, and the event count. Two routings are "equivalent" when
-/// their fingerprints match exactly.
-type LifecycleFingerprint = (String, String, String, String, Vec<String>, i64);
+/// the terminal `(task, agent, session, run)` statuses and the causal SESSION-
+/// LIFECYCLE event-kind sequence. Two routings are "equivalent" when their
+/// fingerprints match exactly.
+///
+/// AI3: the event component is scoped to the session-LIFECYCLE markers
+/// (`session.*`/`run.*`/`memory.*`/`evidence.*`), not the per-turn tool-dispatch
+/// internals. The real handle now dispatches the `send_task` summary tool through
+/// the real `authorize_and_invoke` seam (a different `tool.*`/`permission.*`
+/// shape than the fake shim, and one fewer `capability.grant_created`), so the
+/// raw event count and the tool-dispatch sub-sequence intentionally diverge; the
+/// lifecycle the suite gates on does not.
+type LifecycleFingerprint = (String, String, String, String, Vec<String>);
 
 /// The causal session event-kind sequence (sequence order), dropping the
-/// per-request audit envelope whose idempotency key embeds the command id. This
-/// is the "event sequence modulo adapter-identity fields" the RTL12
-/// parity-equivalence criterion compares.
+/// per-request audit envelope whose idempotency key embeds the command id.
 fn session_event_kind_sequence(state: &SqliteStateStore, session_id: &SessionId) -> Vec<String> {
     let mut events = state
         .recent_events_for_session(session_id, 256)
@@ -1900,6 +1974,23 @@ fn session_event_kind_sequence(state: &SqliteStateStore, session_id: &SessionId)
         .into_iter()
         .filter(|event| event.kind != "server.request_handled")
         .map(|event| event.kind)
+        .collect()
+}
+
+/// The session-LIFECYCLE event-kind sequence: the `session.*`/`run.*`/`memory.*`/
+/// `evidence.*` markers that define where the lifecycle landed, excluding the
+/// per-turn tool-dispatch internals (`tool.*`/`permission.*`/`capability.*`) that
+/// AI3 routes through the real seam on the real handle and the legacy shim on the
+/// fake handle.
+fn session_lifecycle_event_kinds(state: &SqliteStateStore, session_id: &SessionId) -> Vec<String> {
+    session_event_kind_sequence(state, session_id)
+        .into_iter()
+        .filter(|kind| {
+            kind.starts_with("session.")
+                || kind.starts_with("run.")
+                || kind.starts_with("memory.")
+                || kind.starts_with("evidence.")
+        })
         .collect()
 }
 
@@ -1927,8 +2018,7 @@ fn lifecycle_fingerprint(
         agent.status,
         session.status,
         run.status,
-        session_event_kind_sequence(state, &refs.session_id),
-        state.event_count().expect("event count"),
+        session_lifecycle_event_kinds(state, &refs.session_id),
     )
 }
 
@@ -2059,25 +2149,41 @@ enum Terminal {
     Stop,
 }
 
-/// RTL12 parity-equivalence: for a scripted turn, the fake and real paths
-/// produce equivalent event sequences.
+/// RTL12 + AI3 parity-equivalence: for a scripted LOOP turn, the fake and real
+/// paths produce equivalent event sequences.
 ///
 /// Both handles drive the SAME scripted multi-event turn through the RTL3 loop
-/// (`run_turn`) over the same adapter and session label. The persisted causal
-/// session event-kind sequence, the stable projections, and the `TurnFinished`
-/// outcome must match -- the equivalence the RTL12 cutover gates on. This is the
-/// turn-loop-level companion to the RTL11 command-surface equivalence test
-/// (`both_routings_handle_send_steer_and_interrupt_equivalently`).
-///
-/// As with the sibling suite above, the real path delegates to the same core as
-/// the fake path, so this equivalence holds by construction; the test is a
-/// regression guard against that core forking, not a cross-validation of two
-/// implementations. Both runs use the identical adapter and session label, so
-/// there are no adapter-identity fields to differ -- the comparison is over the
-/// full persisted sequence/projection/outcome, not "modulo" anything.
+/// (`run_turn`) over the same adapter and session label. The loop ingestion path
+/// is shared, so the causal event-kind sequence FOR THE LOOP TURN, the stable
+/// session projection, and the `TurnFinished` outcome must match. AI3 changed
+/// the SEPARATE `send_task` per-turn summary tool surface (the real handle now
+/// dispatches it through the real `authorize_and_invoke` seam, the fake keeps the
+/// shim), so this test scopes the event-sequence comparison to the loop turn
+/// (`turn-rtl12-equiv-1`) -- the portion that genuinely runs on the one shared
+/// loop path -- rather than the whole session (whose send_task prefix now
+/// intentionally diverges; the dedicated divergence proof is
+/// `real_controller_read_models_match_fake_path_for_identical_scripted_output`).
 #[test]
 fn fake_and_real_paths_produce_equivalent_event_sequences_for_a_scripted_turn() {
     use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
+
+    /// The causal event-kind sequence for ONE turn (the shared loop path),
+    /// dropping the per-request audit envelope, in sequence order.
+    fn turn_event_kind_sequence(
+        state: &SqliteStateStore,
+        session_id: &SessionId,
+        turn_id: &str,
+    ) -> Vec<String> {
+        let mut events = state
+            .events_for_session_turn(session_id, turn_id)
+            .expect("turn events");
+        events.sort_by_key(|event| event.sequence);
+        events
+            .into_iter()
+            .filter(|event| event.kind != "server.request_handled")
+            .map(|event| event.kind)
+            .collect()
+    }
 
     fn run_scripted_turn(
         open: impl FnOnce(AgentAdapterHandle) -> SqliteStateStoreBundle,
@@ -2101,7 +2207,8 @@ fn fake_and_real_paths_produce_equivalent_event_sequences_for_a_scripted_turn() 
             .session(&refs.session_id)
             .expect("session")
             .expect("session present");
-        let kinds = session_event_kind_sequence(bundle.state(), &refs.session_id);
+        let kinds =
+            turn_event_kind_sequence(bundle.state(), &refs.session_id, "turn-rtl12-equiv-1");
         (kinds, session, finished, refs)
     }
 
@@ -2129,20 +2236,25 @@ fn fake_and_real_paths_produce_equivalent_event_sequences_for_a_scripted_turn() 
         ))
     });
 
-    // Equal event sequences (the causal session event-kind order). There are no
-    // adapter-identity fields to factor out: both runs drive the identical
-    // scripted adapter and session label, so the comparison is over the full
-    // sequence. (The "modulo adapter-identity" framing only matters if the two
-    // sides ever ran distinct adapters; here, with the shared core, they cannot.)
+    // Equal event sequences for the shared LOOP turn (both runs drive the
+    // identical scripted adapter, session label, and turn id through the one
+    // shared loop ingestion path).
     assert_eq!(
         real.0, fake.0,
-        "fake and real scripted-turn event sequences diverged"
+        "fake and real scripted LOOP-turn event sequences diverged"
     );
-    // The projected read model and the loop's TurnFinished outcome also match.
-    assert_eq!(real.1, fake.1, "session projection diverged");
+    // The projected read model and the loop's TurnFinished outcome also match,
+    // modulo the `updated_sequence` bookkeeping: the AI3 real send_task dispatch
+    // emits one more event than the fake shim, shifting the global sequence the
+    // final projection was stamped at; every semantic field is identical.
+    let mut real_session = real.1.clone();
+    let mut fake_session = fake.1.clone();
+    real_session.updated_sequence = 0;
+    fake_session.updated_sequence = 0;
+    assert_eq!(real_session, fake_session, "session projection diverged");
     assert_eq!(real.2, fake.2, "TurnFinished outcome diverged");
     assert_eq!(real.3.session_id, fake.3.session_id);
-    // Sanity: the sequence actually carries the scripted turn's domain events.
+    // Sanity: the loop turn actually carries the scripted turn's domain events.
     assert!(
         fake.0.iter().any(|kind| kind == "session.summary_updated"),
         "scripted turn should record a summary update: {:?}",
@@ -2557,6 +2669,125 @@ fn real_controller_tool_exposures_are_real_not_the_fake_default() {
     let controller =
         controller.with_runtime_tools(RuntimeToolConfig::local_workspace(temp_root(), temp_root()));
     assert!(controller.runtime_tools_are_real());
+}
+
+// --- AI3: the production turn loop invokes the real dispatch seam ----------
+
+/// AI3 verification: a real production `send_task` command turn (the
+/// `RealBoundaryController::send_task_command` path the server routes
+/// `SendTask` through) invokes its per-turn `capo.session_summary` tool THROUGH
+/// the real `authorize_and_invoke` seam -- NOT the `ToolExposure::fake()` /
+/// `self.tools.invoke` shim. It drives the PRODUCTION command path (a real
+/// `CommandEnvelope`, not a bespoke `dispatch_tool_call` harness) and asserts
+/// the persisted tool call carries the canonical observed audit sequence + the
+/// `ToolCall`/`ToolObservation` projections the ACI1 dispatch tests assert,
+/// keyed to the turn.
+#[test]
+fn production_send_task_command_dispatches_summary_tool_through_authorize_and_invoke() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_core::{CommandEnvelope, CommandId, CommandIntent, CommandTarget, InputOrigin};
+
+    let project_id = ProjectId::new("project-capo");
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("ai3-prod-session"));
+    let controller =
+        RealBoundaryController::open_with_adapter(project_id.clone(), temp_root(), scripted)
+            .expect("open real controller");
+    let registration = controller.register_agent("ai3-prod-worker").expect("agent");
+
+    // Drive the PRODUCTION command path: a real SendTask `CommandEnvelope`, the
+    // exact shape the server hands `RealBoundaryController::send_task_command`.
+    let command = CommandEnvelope::new(
+        CommandId::new("cmd-ai3-send"),
+        InputOrigin::Cli,
+        "operator",
+        project_id,
+        CommandTarget::Agent(registration.agent_id.clone()),
+        CommandIntent::SendTask,
+    )
+    .with_text("Inspect the session and summarize it");
+    let command = CommandEnvelope {
+        structured_args: vec![("agent".to_string(), "ai3-prod-worker".to_string())],
+        ..command
+    };
+    let refs = controller
+        .send_task_command(&command)
+        .expect("production send_task command");
+
+    // The per-turn summary tool is `capo.session_summary`, keyed to the turn's
+    // synthetic refs (`turn-{agent}` / `tool-{agent}`) the send_task path stamps.
+    let turn_id = format!("turn-{}", registration.agent_name);
+    let summary_tool_call_id = format!("tool-{}", registration.agent_name);
+
+    // The canonical REAL audit sequence (the ACI1 dispatch shape) was persisted
+    // for the summary tool, keyed to this turn -- not the fake shim's hand-rolled
+    // shape (which has no interleaved `permission.*` and carries an extra
+    // `capability.grant_created`).
+    let turn_events = controller
+        .state()
+        .events_for_session_turn(&refs.session_id, &turn_id)
+        .expect("turn events");
+    let summary_event_kinds: Vec<String> = {
+        let mut events: Vec<_> = turn_events
+            .iter()
+            .filter(|event| event.item_id.as_deref() == Some(summary_tool_call_id.as_str()))
+            .collect();
+        events.sort_by_key(|event| event.sequence);
+        events.into_iter().map(|event| event.kind.clone()).collect()
+    };
+    assert_eq!(
+        summary_event_kinds,
+        vec![
+            "tool.call_requested",
+            "permission.requested",
+            "permission.decided",
+            "capability.grant_used",
+            "tool.invocation_started",
+            "tool.output_artifact_recorded",
+            "tool.output_observed",
+            "tool.call_completed",
+            "tool.result_delivered",
+        ],
+        "the production send_task summary tool must flow through authorize_and_invoke",
+    );
+
+    // The `ToolCall` projection is completed, real (`capo` origin), carries
+    // dispatch provenance (the fake shim leaves provenance default), and is keyed
+    // to the turn.
+    let tool_calls = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    let summary_call = tool_calls
+        .iter()
+        .find(|call| call.tool_call_id.as_str() == summary_tool_call_id)
+        .expect("summary tool call projection");
+    assert_eq!(summary_call.tool_name, "capo.session_summary");
+    assert_eq!(summary_call.tool_origin, "capo");
+    assert_eq!(summary_call.status, "completed");
+    assert_eq!(summary_call.turn_id.as_deref(), Some(turn_id.as_str()));
+    assert!(
+        summary_call.provenance.correlation_id.is_some(),
+        "the real dispatch seam stamps dispatch provenance the fake shim never does",
+    );
+
+    // The observed-evidence `ToolObservation` projection (the ACI9 row) is
+    // present and tagged `runtime_output` -- the proof the real authorize+invoke
+    // ran, not the fake summary shim (which records no observation row).
+    let observations = controller
+        .state()
+        .tool_observations_for_session(&refs.session_id)
+        .expect("tool observations");
+    let observed = observations
+        .iter()
+        .find(|obs| obs.tool_call_id.as_ref().map(|id| id.as_str()) == Some(&summary_tool_call_id))
+        .expect("observed-evidence row for the dispatched summary tool");
+    assert_eq!(observed.source, "runtime_output");
+    assert_eq!(observed.tool_name, "capo.session_summary");
+    assert_eq!(observed.observed_status, "completed");
+
+    // Fail-closed proof that the fake shim was NOT the tool surface: the
+    // controller's tool exposures are real by construction.
+    assert!(controller.capo_tools_are_real());
 }
 
 /// ACI1: a real loop turn invoking a Capo-governed tool flows through
