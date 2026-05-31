@@ -301,6 +301,33 @@ pub(crate) fn server_adapter_replay_fixture(
     ))
 }
 
+/// Send a typed mid-turn interrupt (ST6) for a session over the open
+/// connection. This is the non-interactive form of the operator REPL's Ctrl-C
+/// action: it emits the `interrupt` notification frame (distinct from a
+/// `cancel` request abort and from the coarse `stop`/`interrupt` domain
+/// commands) so the server aborts the live turn for `--session`, reaping its
+/// runtime process group, and records the turn-aborted event.
+pub(crate) fn server_session_interrupt(
+    _parsed: &ParsedArgs,
+    args: &[String],
+) -> Result<String, String> {
+    let session_id = required_arg(args, "--session")?;
+    let reason =
+        optional_value(args, "--reason")?.unwrap_or_else(|| "operator interrupt".to_string());
+    let address = match optional_value(args, "--connect")? {
+        Some(address) => {
+            require_loopback_address(&address)?;
+            address
+        }
+        None => default_running_server_address()
+            .ok_or_else(|| "no running server to interrupt".to_string())?,
+    };
+    capo_server::send_interrupt(&address, &session_id, &reason).map_err(debug_error)?;
+    Ok(format!(
+        "server_interrupt_sent=true\nsession_id={session_id}\nreason={reason}\n"
+    ))
+}
+
 pub(crate) fn server_recover(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let response = handle(
         parsed,

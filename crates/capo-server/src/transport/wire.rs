@@ -125,6 +125,10 @@ pub(super) fn transport_error_wire(error: &TransportError) -> (&'static str, Str
             "cancelled",
             format!("request {request_id} cancelled by in-band cancel"),
         ),
+        TransportError::Interrupted { session_id, reason } => (
+            "interrupted",
+            format!("turn for session {session_id} interrupted mid-turn: {reason}"),
+        ),
     }
 }
 

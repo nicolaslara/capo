@@ -200,6 +200,53 @@ use crate::transport::{
     serve_tcp_with_handler,
 };
 
+/// A thread-safe record of the typed mid-turn interrupts (ST6) a handler
+/// observed via [`RequestHandler::interrupt`], so a test can assert the typed
+/// turn-aborted hook fired with the right session/reason.
+#[derive(Clone, Default)]
+struct InterruptLog {
+    inner: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl InterruptLog {
+    fn record(&self, session_id: &str, reason: &str) {
+        self.inner
+            .lock()
+            .expect("interrupt log")
+            .push((session_id.to_string(), reason.to_string()));
+    }
+
+    fn entries(&self) -> Vec<(String, String)> {
+        self.inner.lock().expect("interrupt log").clone()
+    }
+}
+
+/// A thread-safe slot recording the `interrupt_reason` a cooperative live turn
+/// (`turn-*`) observed on its [`CancellationToken`] when it stopped (ST6). A
+/// real turn handler reads exactly this reason to drive the runtime
+/// process-group kill that reaps descendants; capturing it here lets the
+/// transport-level test prove the interrupt delivered the reason-carrying stop
+/// (the orphan-after-cancel reaping signal, paired with the ST1 runtime test
+/// `cancel_terminates_descendant_process_group`).
+#[derive(Clone, Default)]
+struct TurnStopObserver {
+    inner: Arc<Mutex<Option<Option<String>>>>,
+}
+
+impl TurnStopObserver {
+    /// Record how the in-flight turn stopped: the `interrupt_reason` it saw
+    /// (`Some(reason)` for a typed interrupt, `None` for a plain cancel).
+    fn record(&self, interrupt_reason: Option<String>) {
+        *self.inner.lock().expect("turn stop observer") = Some(interrupt_reason);
+    }
+
+    /// The observed stop, or `None` if the turn has not stopped yet. The outer
+    /// `Option` is "did the turn stop?"; the inner is the interrupt reason.
+    fn observed(&self) -> Option<Option<String>> {
+        self.inner.lock().expect("turn stop observer").clone()
+    }
+}
+
 /// A releasable latch a `noncoop-` request waits on while *ignoring* the cancel
 /// token, modeling a genuinely non-cooperative (production-shaped) handler. The
 /// test releases it at the end so the orphaned detached worker exits cleanly
@@ -243,6 +290,8 @@ impl ReleaseLatch {
 struct ScriptedHandler {
     barrier: Arc<Barrier>,
     noncoop_latch: ReleaseLatch,
+    interrupts: InterruptLog,
+    turn_stop: TurnStopObserver,
 }
 
 impl ScriptedHandler {
@@ -250,6 +299,8 @@ impl ScriptedHandler {
         Self {
             barrier,
             noncoop_latch: ReleaseLatch::default(),
+            interrupts: InterruptLog::default(),
+            turn_stop: TurnStopObserver::default(),
         }
     }
 
@@ -257,6 +308,20 @@ impl ScriptedHandler {
     /// release the orphaned worker after asserting the connection was reclaimed.
     fn noncoop_latch_for_test(&self) -> ReleaseLatch {
         self.noncoop_latch.clone()
+    }
+
+    /// A clone of the typed-interrupt log so a test can assert
+    /// [`RequestHandler::interrupt`] fired with the right session/reason.
+    fn interrupts_for_test(&self) -> InterruptLog {
+        self.interrupts.clone()
+    }
+
+    /// A clone of the live-turn stop observer so a test can assert a `turn-*`
+    /// request stopped because it saw the typed interrupt *reason* on its
+    /// cancellation token (the reaping signal a real turn drives the runtime
+    /// process-group kill with).
+    fn turn_stop_for_test(&self) -> TurnStopObserver {
+        self.turn_stop.clone()
     }
 }
 
@@ -273,14 +338,28 @@ impl RequestHandler for ScriptedHandler {
             // the cancel token. A cancel/disconnect must reclaim the connection
             // regardless, because the worker runs detached from it.
             self.noncoop_latch.wait();
-        } else if request.request_id.starts_with("block-") {
-            // Cooperative cancellation: hold the request in flight until the
-            // in-band cancel fires. A short sleep keeps the spin cheap.
+        } else if request.request_id.starts_with("block-")
+            || request.request_id.starts_with("turn-")
+        {
+            // Cooperative cancellation: hold the request in flight (a live turn)
+            // until the in-band cancel/interrupt fires. A short sleep keeps the
+            // spin cheap.
             while !cancel.is_cancelled() {
                 std::thread::sleep(Duration::from_millis(1));
             }
+            // A live turn (`turn-*`) records the interrupt reason it observed on
+            // its cancellation token. A real turn handler reads this reason to
+            // drive the runtime process-group kill that reaps descendants, so
+            // capturing it proves the interrupt delivered the reaping signal.
+            if request.request_id.starts_with("turn-") {
+                self.turn_stop.record(cancel.interrupt_reason());
+            }
         }
         Ok(echo_response(&request))
+    }
+
+    fn interrupt(&self, session_id: &str, reason: &str) {
+        self.interrupts.record(session_id, reason);
     }
 }
 
@@ -328,6 +407,18 @@ fn jsonrpc_cancel_frame(request_id: &str) -> String {
         "jsonrpc": "2.0",
         "method": "cancel",
         "params": { "request_id": request_id },
+    })
+    .to_string()
+}
+
+/// Build a typed mid-turn `interrupt` notification frame (no `id`) naming the
+/// session to abort and a reason. It is a JSON-RPC notification, distinct from
+/// `cancel` (request-id-scoped) and from the `stop_agent` domain command.
+fn jsonrpc_interrupt_frame(session_id: &str, reason: &str) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "interrupt",
+        "params": { "session_id": session_id, "reason": reason },
     })
     .to_string()
 }
@@ -702,4 +793,128 @@ fn connection_gate_blocks_at_capacity_and_reclaims_on_release() {
     let third_permit = third.join().expect("third acquire thread");
     drop(third_permit);
     assert_eq!(gate.live_count(), 0, "all permits released");
+}
+
+// --- ST6: typed mid-turn interrupt wired to Ctrl-C ---------------------------
+
+#[test]
+fn in_band_interrupt_aborts_in_flight_turn_and_emits_typed_abort_event() {
+    // ST6 deterministic verification (scripted handler, no live provider, no real
+    // turn): a typed mid-turn `interrupt` notification sent on the open connection
+    // aborts the in-flight live turn, emits the typed `interrupted` error frame
+    // (distinct from a plain `cancelled`), drives the handler's typed
+    // turn-aborted hook (`RequestHandler::interrupt`) so the thread projection can
+    // render the session as interrupted, and keeps the connection open. The
+    // orphan-after-cancel reaping pairing (ST1's
+    // `cancel_terminates_descendant_process_group`) shows here as the in-flight
+    // turn observing the interrupt *reason* on its cancellation token -- the
+    // reason a real turn handler drives the runtime process-group kill with.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let handler = Arc::new(ScriptedHandler::new(Arc::new(Barrier::new(1))));
+    let interrupts = handler.interrupts_for_test();
+    let turn_stop = handler.turn_stop_for_test();
+    let server_thread = thread::spawn(move || {
+        serve_tcp_with_handler(listener, handler, Some(1), ServeConfig::default())
+            .expect("serve tcp with scripted handler")
+    });
+
+    let mut stream = TcpStream::connect(address).expect("connect");
+
+    // A live turn holds the request in flight, cooperatively observing the
+    // cancellation token (modeling a real generation/run for the session).
+    write_frame_line(&mut stream, &jsonrpc_list_agents_frame("turn-in-flight"));
+    // Then send the typed mid-turn interrupt on the SAME open connection. It is a
+    // notification (no `id`) naming the session and reason -- the frame the CLI
+    // Ctrl-C path emits instead of killing the client process.
+    write_frame_line(
+        &mut stream,
+        &jsonrpc_interrupt_frame("session-turn", "operator ctrl-c"),
+    );
+
+    // The interrupted turn gets a typed `interrupted` error frame, NOT a result
+    // and NOT a `cancelled` frame: the kind distinguishes a mid-turn interrupt
+    // from a request-id cancel.
+    let interrupted = read_frame_line(&stream);
+    let interrupted_value: serde_json::Value =
+        serde_json::from_str(interrupted.trim_end()).expect("interrupt response is JSON-RPC");
+    assert_eq!(
+        interrupted_value
+            .get("id")
+            .and_then(serde_json::Value::as_str),
+        Some("turn-in-flight"),
+        "the interrupted frame must name the in-flight turn's request: {interrupted}"
+    );
+    assert!(
+        interrupted_value.get("result").is_none(),
+        "expected an error frame for the interrupted turn, got: {interrupted}"
+    );
+    assert_eq!(
+        interrupted_value
+            .get("error")
+            .and_then(|error| error.get("data"))
+            .and_then(|data| data.get("kind"))
+            .and_then(serde_json::Value::as_str),
+        Some("interrupted"),
+        "an interrupted turn must carry the typed `interrupted` error kind \
+         (distinct from `cancelled`): {interrupted}"
+    );
+    assert!(
+        interrupted_value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(
+                |message| message.contains("session-turn") && message.contains("operator ctrl-c")
+            ),
+        "the interrupted frame must name the session and reason: {interrupted}"
+    );
+
+    // The typed turn-aborted hook fired with the session and reason, so the
+    // server records the `session.interrupted` event the thread projection
+    // renders. (Production routes this through `CapoServer::interrupt_session`.)
+    assert_eq!(
+        interrupts.entries(),
+        vec![("session-turn".to_string(), "operator ctrl-c".to_string())],
+        "the typed interrupt must drive RequestHandler::interrupt once with the \
+         session and reason"
+    );
+
+    // Orphan-after-cancel reaping pairing (ST1): the in-flight turn stopped
+    // because it observed the interrupt *reason* on its cancellation token -- the
+    // signal a real turn handler uses to reap its runtime process group, leaving
+    // no surviving group. We poll briefly because the turn worker records this
+    // just after it sees the stop flag.
+    let observed = poll_until(Duration::from_secs(5), || turn_stop.observed());
+    assert_eq!(
+        observed,
+        Some(Some("operator ctrl-c".to_string())),
+        "the interrupted turn must observe the typed interrupt reason on its \
+         cancellation token (the runtime process-group kill / reaping signal)"
+    );
+
+    // The connection is NOT dropped: a follow-up request on it still succeeds.
+    write_frame_line(&mut stream, &jsonrpc_list_agents_frame("after-interrupt"));
+    let follow_up = read_frame_line(&stream);
+    assert_eq!(response_agent_name(&follow_up), "after-interrupt");
+
+    stream.shutdown(Shutdown::Both).expect("shutdown");
+    assert_eq!(server_thread.join().expect("server thread"), 1);
+}
+
+/// Poll `probe` until it returns `Some`, or the deadline elapses. Returns the
+/// probe's value (`None` only on timeout). Used to wait on a value a detached
+/// worker thread publishes shortly after it observes a stop signal, without a
+/// fixed sleep that would be flaky or slow.
+fn poll_until<T>(deadline: Duration, probe: impl Fn() -> Option<T>) -> Option<T> {
+    let start = Instant::now();
+    loop {
+        if let Some(value) = probe() {
+            return Some(value);
+        }
+        if start.elapsed() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
 }

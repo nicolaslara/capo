@@ -33,7 +33,10 @@ pub use safety_floor::{
     LIVE_WRITE_OPT_IN_ENV, RunTurnRef, WorkspaceCheckpoint, WorkspaceWriteOutcome,
     WorkspaceWriteRequest, WriteMode, resolve_write_mode, resolve_write_mode_with_env,
 };
-pub use transport::{EVENT_TAIL_METHOD, EventNotification, TransportError, send_tcp, serve_tcp};
+pub use transport::{
+    CancellationToken, EVENT_TAIL_METHOD, EventNotification, TransportError, interrupt_frame,
+    send_interrupt, send_tcp, serve_tcp,
+};
 #[cfg(test)]
 pub(crate) use transport::{jsonrpc_request_roundtrip, jsonrpc_response_roundtrip};
 pub use turn_orchestration::{
@@ -1192,6 +1195,84 @@ impl CapoServer {
             )
             .map_err(ServerError::State)?;
         Ok(ServerThread::from_thread(thread))
+    }
+
+    /// Abort the live turn for a session by a typed mid-turn interrupt (ST6).
+    ///
+    /// This is the server handler the transport's in-band `interrupt` frame
+    /// drives (via [`transport::RequestHandler::interrupt`]). It is distinct from
+    /// the coarse `StopAgent` command: it records the turn-keyed
+    /// `session.interrupted` event through the existing
+    /// `FakeBoundaryController::interrupt_command` (the SAME mechanism
+    /// `ServerCommand::InterruptAgent` uses), so the event is keyed to the
+    /// session's active turn and the thread read model renders that turn as
+    /// `Interrupted` -- on the SAME serialization point as every other write, so
+    /// the interrupt never opens a second writer.
+    ///
+    /// The runtime process-group kill that reaps descendants is driven by the
+    /// transport signaling the in-flight request's [`transport::CancellationToken`]
+    /// as interrupted; this method records the durable abort truth that pairs
+    /// with that kill.
+    pub fn interrupt_session(&self, session_id: &str, reason: &str) -> ServerResult<()> {
+        let session_id = SessionId::new(session_id.to_string());
+        let session = self
+            .controller
+            .state()
+            .session(&session_id)
+            .map_err(ServerError::State)?
+            .ok_or_else(|| ServerError::UnknownSession {
+                session_id: session_id.to_string(),
+            })?;
+        let agent = self
+            .controller
+            .state()
+            .agent(&session.agent_id)
+            .map_err(ServerError::State)?
+            .ok_or_else(|| {
+                ServerError::AdapterFixture(format!(
+                    "missing agent for session: {}",
+                    session.agent_id
+                ))
+            })?;
+        let reason_hash = stable_hash(reason.as_bytes());
+        let command_hash =
+            command_identity_hash(format!("interrupt_session:{}:{reason_hash}", session_id));
+        let origin = ServerClientOrigin {
+            client_id: "local-cli".to_string(),
+            actor_id: "local-user".to_string(),
+            input_origin: ServerInputOrigin::Cli,
+        };
+        let mut command = self.command_envelope(
+            &format!(
+                "server-interrupt-session-{}-{reason_hash}",
+                slug(session_id.as_str())
+            ),
+            &origin,
+            &command_hash,
+            CommandTarget::Agent(agent.agent_id.clone()),
+            CommandIntent::InterruptSession,
+            Some(reason.to_string()),
+        );
+        command
+            .structured_args
+            .push(("agent".to_string(), agent.name.clone()));
+        self.command_controller()
+            .interrupt_command(&command)
+            .map_err(ServerError::State)?;
+        self.record_server_request_handled(
+            &command,
+            &origin,
+            "interrupt_session",
+            None,
+            Some(serde_json::json!({
+                "session_id": session_id.to_string(),
+                "reason_hash": reason_hash,
+                "raw_reason_policy": "not_rendered",
+                "interrupt_kind": "typed_mid_turn",
+            })),
+        )
+        .map_err(ServerError::State)?;
+        Ok(())
     }
 }
 

@@ -134,7 +134,17 @@ impl ControlRepl {
             let line = match editor.readline(&self.prompt()) {
                 Ok(line) => line,
                 Err(ReadlineError::Interrupted) => {
-                    println!("Use `quit` to exit.");
+                    // ST6: Ctrl-C does NOT kill the client process. When a
+                    // session is live, it emits the typed mid-turn interrupt
+                    // frame on the open connection so the server aborts that
+                    // turn (reaping its runtime process group) and records the
+                    // turn-aborted event. With no live session it is a no-op
+                    // hint and the REPL keeps running.
+                    match self.interrupt_active_session() {
+                        Ok(Some(message)) => println!("{message}"),
+                        Ok(None) => println!("Use `quit` to exit."),
+                        Err(error) => println!("interrupt failed: {error}"),
+                    }
                     continue;
                 }
                 Err(ReadlineError::Eof) => {
@@ -761,6 +771,40 @@ Operator input: {line}
         )
         .map_err(debug_error)?;
         Ok(response.payload)
+    }
+
+    /// Emit the typed mid-turn interrupt (ST6) for the attached agent's active
+    /// session on the open connection, the Ctrl-C action.
+    ///
+    /// Returns `Ok(Some(message))` when an interrupt frame was sent for a live
+    /// session, `Ok(None)` when there is nothing to interrupt (no attached agent
+    /// or no active session), and `Err` only on a transport failure. This sends
+    /// the interrupt frame rather than killing the client process: the server
+    /// aborts the matching in-flight turn (reaping its runtime process group)
+    /// and records the turn-aborted event.
+    fn interrupt_active_session(&mut self) -> Result<Option<String>, String> {
+        let Some(agent) = self.attached_agent.clone() else {
+            return Ok(None);
+        };
+        let status = self.agent_status(&agent)?;
+        let Some(session_id) = status
+            .current_session_id
+            .as_ref()
+            .map(ToString::to_string)
+            .or_else(|| {
+                status
+                    .session
+                    .as_ref()
+                    .map(|session| session.session_id.to_string())
+            })
+        else {
+            return Ok(None);
+        };
+        let reason = "operator ctrl-c interrupt";
+        capo_server::send_interrupt(&self.address, &session_id, reason).map_err(debug_error)?;
+        Ok(Some(format!(
+            "interrupt sent for session {session_id} (turn aborted)"
+        )))
     }
 
     fn resolve_agent(&self, agent: Option<String>) -> Result<String, String> {

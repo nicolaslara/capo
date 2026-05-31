@@ -74,7 +74,7 @@ use server_client::{
     server_adapter_replay_fixture, server_agent_list, server_agent_register, server_agent_status,
     server_agent_steer, server_dashboard, server_dispatch_gate, server_dispatch_live_preflight,
     server_dispatch_live_run_local, server_dispatch_plan, server_dispatch_run_local,
-    server_recover, server_serve, server_session_start, server_task_send,
+    server_recover, server_serve, server_session_interrupt, server_session_start, server_task_send,
 };
 use tool_wrapper::run_wrapper_tool;
 use voice::submit_voice;
@@ -223,6 +223,11 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             if area == "server" && domain == "session" && command == "start" =>
         {
             server_session_start(&parsed, rest)
+        }
+        [area, domain, command, rest @ ..]
+            if area == "server" && domain == "session" && command == "interrupt" =>
+        {
+            server_session_interrupt(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "server" && command == "dashboard" => {
             server_dashboard(&parsed, rest)

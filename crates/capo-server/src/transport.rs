@@ -50,6 +50,21 @@
 //! production handler that observes it (via [`CancellationToken::is_cancelled`],
 //! available in all builds) returns promptly.
 //!
+//! ### In-band `Interrupt` (typed mid-turn interrupt, ST6)
+//!
+//! Distinct from `cancel` (which aborts one request by `id`) and from the
+//! coarse `StopAgent` domain command, an `interrupt` notification names a
+//! `session_id` and a `reason`: it is the typed *mid-turn* interrupt a client
+//! (the CLI Ctrl-C) sends on the open connection to abort the live
+//! generation/run for a session. When it matches the in-flight request the
+//! transport (1) signals that request's [`CancellationToken`] as *interrupted*
+//! (carrying the reason) so the running turn cooperatively reaps its runtime
+//! process group, (2) invokes [`RequestHandler::interrupt`] so the server
+//! records the typed turn-aborted event (`session.interrupted`) the thread
+//! projection renders, and (3) emits a typed `interrupted` frame and keeps the
+//! connection open. The interrupt drives the runtime's process-group kill (ST1)
+//! so descendants are reaped, leaving no surviving runtime process group.
+//!
 //! The request worker runs on a *detached* thread, not a scoped one, so the
 //! connection's read loop never blocks waiting for a cancelled (or
 //! idle-timed-out) request's worker to finish. A genuinely long, *non*-
@@ -89,30 +104,70 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// The JSON-RPC method name for the in-band cancel notification.
 const CANCEL_METHOD: &str = "cancel";
 
+/// The JSON-RPC method name for the typed mid-turn interrupt notification (ST6).
+/// Its `params` carry `session_id` and `reason`; it is distinct from `cancel`
+/// (request-id-scoped) and from the coarse `StopAgent` domain command.
+const INTERRUPT_METHOD: &str = "interrupt";
+
 /// A cooperative cancellation flag handed to the request handler so in-flight
-/// work can observe an in-band `Cancel` and stop early. The transport never
-/// *requires* the handler to honor it: a cancelled request frees the connection
-/// regardless, and any later result the handler produces is discarded.
+/// work can observe an in-band `Cancel` *or* a typed mid-turn `Interrupt` (ST6)
+/// and stop early. The transport never *requires* the handler to honor it: a
+/// cancelled/interrupted request frees the connection regardless, and any later
+/// result the handler produces is discarded.
+///
+/// Cancel and interrupt share the stop flag ([`Self::is_cancelled`] is `true`
+/// for both) so an existing cooperative handler honoring cancel also honors an
+/// interrupt without change. An *interrupt* additionally records its reason, so
+/// a handler that drives a runtime process-group kill on interrupt can label the
+/// turn-aborted event with it.
 #[derive(Clone, Debug, Default)]
-pub struct CancellationToken(Arc<AtomicBool>);
+pub struct CancellationToken {
+    stopped: Arc<AtomicBool>,
+    /// `Some(reason)` once a typed mid-turn `Interrupt` has been observed for
+    /// the in-flight request; `None` for a plain `Cancel` (or while still live).
+    interrupt_reason: Arc<Mutex<Option<String>>>,
+}
 
 impl CancellationToken {
     fn new() -> Self {
-        Self(Arc::new(AtomicBool::new(false)))
+        Self::default()
     }
 
     fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.stopped.store(true, Ordering::SeqCst);
     }
 
-    /// Whether an in-band `Cancel` has been observed for the in-flight request.
-    /// Handlers observe this to stop cooperative work early. It is available in
-    /// all builds so a production handler can poll it during long work; the
-    /// current production [`CapoServerHandler`] does not need to (its calls are
-    /// short), so it is exercised today by the deterministic in-band-cancel
-    /// test's scripted handler, but the cooperative path is real, not test-only.
+    /// Signal a typed mid-turn interrupt with its reason. Sets the shared stop
+    /// flag (so a cancel-aware handler also stops) and records the reason so the
+    /// handler can label the runtime process-group kill / turn-aborted event.
+    fn interrupt(&self, reason: &str) {
+        *self
+            .interrupt_reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason.to_string());
+        self.stopped.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether an in-band `Cancel` *or* `Interrupt` has been observed for the
+    /// in-flight request. Handlers observe this to stop cooperative work early.
+    /// It is available in all builds so a production handler can poll it during
+    /// long work; the current production [`CapoServerHandler`] does not need to
+    /// for its short request calls, but the cooperative path is real, not
+    /// test-only (the ST6 mid-turn-interrupt test's scripted turn polls it to
+    /// drive a runtime process-group kill).
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.stopped.load(Ordering::SeqCst)
+    }
+
+    /// The interrupt reason once a typed mid-turn `Interrupt` (not a plain
+    /// `Cancel`) has been observed, else `None`. A handler running a live turn
+    /// reads this to label the runtime process-group kill and the turn-aborted
+    /// event it records.
+    pub fn interrupt_reason(&self) -> Option<String> {
+        self.interrupt_reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -212,6 +267,19 @@ pub(crate) trait RequestHandler: Send + Sync + 'static {
         request: ServerRequest,
         cancel: &CancellationToken,
     ) -> TransportResult<ServerResponse>;
+
+    /// Handle a typed mid-turn `Interrupt` (ST6) for `session_id`: record the
+    /// turn-aborted event for the session so the thread projection renders it.
+    /// The transport calls this when an in-band `interrupt` frame matches the
+    /// in-flight request, in addition to signaling that request's
+    /// [`CancellationToken`] (which drives the running turn's runtime
+    /// process-group kill). The default is a no-op so a handler that does not
+    /// own session abort semantics is unaffected; the production
+    /// [`CapoServerHandler`] overrides it to drive
+    /// [`CapoServer::interrupt_session`]. An error is logged-and-dropped: a
+    /// failed abort record must not poison the connection, which still emits the
+    /// typed `interrupted` frame and stays open.
+    fn interrupt(&self, _session_id: &str, _reason: &str) {}
 }
 
 /// The production handler: each request runs through the shared
@@ -243,6 +311,19 @@ impl RequestHandler for CapoServerHandler {
             });
         }
         self.server.handle(request).map_err(TransportError::Server)
+    }
+
+    fn interrupt(&self, session_id: &str, reason: &str) {
+        // Record the typed turn-aborted event through the single
+        // `CapoServer::interrupt_session` serialization point. A failure (e.g. an
+        // unknown/already-ended session) is dropped rather than propagated: the
+        // connection must stay open and still emit the typed `interrupted` frame.
+        if let Err(error) = self.server.interrupt_session(session_id, reason) {
+            // The transport has no structured logger here; surface to stderr so
+            // an interrupt that could not be recorded is observable without
+            // crashing the connection.
+            eprintln!("capo-server: interrupt for session {session_id} failed: {error:?}");
+        }
     }
 }
 
@@ -469,10 +550,46 @@ pub(crate) fn serve_tcp_with_handler<H: RequestHandler>(
     Ok(accepted)
 }
 
-pub fn send_tcp(
+/// Build the typed mid-turn `interrupt` notification wire frame (ST6).
+///
+/// Shape: `{"jsonrpc":"2.0","method":"interrupt","params":{"session_id":..,"reason":..}}`.
+/// It carries no `id` (it is a notification, not a request), so it is the
+/// server-to-nothing half a client pushes on an open connection to abort the
+/// live turn for a session, distinct from `cancel` (request-id-scoped) and from
+/// the coarse `StopAgent` domain command. The CLI Ctrl-C handler sends this
+/// frame on the connection rather than killing the client process.
+pub fn interrupt_frame(session_id: &str, reason: &str) -> String {
+    EventNotification::new(
+        INTERRUPT_METHOD,
+        serde_json::json!({ "session_id": session_id, "reason": reason }),
+    )
+    .to_wire_frame()
+}
+
+/// Send a typed mid-turn `interrupt` (ST6) for `session_id` over a fresh
+/// loopback connection. This is the smallest client seam the CLI Ctrl-C path
+/// uses: it opens the connection, writes the `interrupt` notification frame, and
+/// returns. The server aborts the matching in-flight turn (signaling its
+/// cancellation token to reap the runtime process group) and records the typed
+/// turn-aborted event for the session. Because an interrupt is a notification,
+/// no response frame is owed, so this does not read one back.
+pub fn send_interrupt(
     address: impl ToSocketAddrs,
-    request: &ServerRequest,
-) -> TransportResult<ServerResponse> {
+    session_id: &str,
+    reason: &str,
+) -> TransportResult<()> {
+    let mut stream = connect_loopback(address)?;
+    let frame = interrupt_frame(session_id, reason);
+    stream
+        .write_all(frame.as_bytes())
+        .and_then(|_| stream.write_all(b"\n"))
+        .and_then(|_| stream.flush())
+        .map_err(TransportError::Io)
+}
+
+/// Resolve and connect to a loopback-only address, enforcing the same
+/// loopback constraint [`send_tcp`] does.
+fn connect_loopback(address: impl ToSocketAddrs) -> TransportResult<TcpStream> {
     let resolved = address
         .to_socket_addrs()
         .map_err(TransportError::Io)?
@@ -487,7 +604,14 @@ pub fn send_tcp(
             "server connect address must resolve only to loopback addresses, got {resolved:?}"
         )));
     }
-    let mut stream = TcpStream::connect(resolved.as_slice()).map_err(TransportError::Io)?;
+    TcpStream::connect(resolved.as_slice()).map_err(TransportError::Io)
+}
+
+pub fn send_tcp(
+    address: impl ToSocketAddrs,
+    request: &ServerRequest,
+) -> TransportResult<ServerResponse> {
+    let mut stream = connect_loopback(address)?;
     let request_json = jsonrpc::encode_request(request);
     stream
         .write_all(request_json.as_bytes())
@@ -519,6 +643,14 @@ pub enum TransportError {
     Cancelled {
         request_id: String,
     },
+    /// An in-flight turn was aborted by a typed mid-turn `Interrupt` (ST6),
+    /// naming the session and reason. Distinct from [`Self::Cancelled`] (a
+    /// request-id abort): the connection stays open and the server records a
+    /// turn-aborted event for the session.
+    Interrupted {
+        session_id: String,
+        reason: String,
+    },
 }
 
 /// One framed line read off a persistent connection, classified by intent.
@@ -527,6 +659,12 @@ enum Frame {
     Request(Box<ServerRequest>),
     /// An in-band `cancel` notification naming the `request_id` to abort.
     Cancel { request_id: Option<String> },
+    /// A typed mid-turn `interrupt` notification (ST6) naming the `session_id`
+    /// to abort and a `reason`. Distinct from `Cancel` and from `StopAgent`.
+    Interrupt {
+        session_id: Option<String>,
+        reason: String,
+    },
     /// A frame that parsed as JSON-RPC but is neither a dispatchable request
     /// nor a recognized notification, or one that failed bounded/utf-8/JSON
     /// decoding. `id` is the recoverable request id when one was present.
@@ -688,6 +826,37 @@ fn handle_connection<H: RequestHandler>(
                 // A cancel with nothing matching in flight is a no-op
                 // notification (no response frame is owed).
             }
+            ConnEvent::Incoming(Frame::Interrupt { session_id, reason }) => {
+                // Typed mid-turn interrupt (ST6): abort the in-flight turn on
+                // this connection. A connection serves one turn at a time, so
+                // the interrupt targets whatever is in flight; the `session_id`
+                // (when present) names the session the turn-aborted event is
+                // recorded against.
+                if let Some((request_id, cancel, _)) = &in_flight {
+                    // 1) Signal the worker as INTERRUPTED with the reason so the
+                    //    running turn cooperatively reaps its runtime process
+                    //    group (and can label the abort with the reason).
+                    cancel.interrupt(&reason);
+                    // 2) Record the typed turn-aborted event for the session so
+                    //    the thread projection renders it. A `None` session id
+                    //    only signals the in-flight worker (the handler has no
+                    //    session to record against).
+                    if let Some(session_id) = session_id.as_deref() {
+                        handler.interrupt(session_id, &reason);
+                    }
+                    // 3) Emit the typed `interrupted` frame and keep the
+                    //    connection open; the worker's eventual `Result` is
+                    //    discarded by the generation check below.
+                    let error = TransportError::Interrupted {
+                        session_id: session_id.unwrap_or_default(),
+                        reason,
+                    };
+                    let frame = jsonrpc::encode_error_response(Some(request_id), &error);
+                    write_frame(&mut write_half, &frame)?;
+                    in_flight = None;
+                }
+                // An interrupt with nothing in flight is a no-op notification.
+            }
             ConnEvent::Incoming(Frame::Invalid { id, error }) => {
                 write_frame(
                     &mut write_half,
@@ -758,6 +927,19 @@ fn classify_frame(line: &str) -> TransportResult<Frame> {
             .and_then(Value::as_str)
             .map(ToString::to_string);
         return Ok(Frame::Cancel { request_id });
+    }
+    if is_notification && method == Some(INTERRUPT_METHOD) {
+        let params = value.get("params");
+        let session_id = params
+            .and_then(|params| params.get("session_id"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let reason = params
+            .and_then(|params| params.get("reason"))
+            .and_then(Value::as_str)
+            .unwrap_or("interrupt requested")
+            .to_string();
+        return Ok(Frame::Interrupt { session_id, reason });
     }
     let request = jsonrpc::decode_request(line)?;
     Ok(Frame::Request(Box::new(request)))

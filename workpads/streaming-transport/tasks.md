@@ -355,7 +355,7 @@ Evidence:
 
 ## ST6 - Typed Mid-Turn Interrupt Wired To Ctrl-C
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -376,6 +376,47 @@ Verification:
   and emits the typed abort event.
 - Orphan-after-cancel reaping test (paired with ST1).
 - `cargo fmt` and focused `cargo test -p capo-server -p capo-runtime`.
+
+Evidence:
+
+- The typed mid-turn interrupt plumbing was already in place across
+  `crates/capo-server/src/transport.rs` (the `interrupt` JSON-RPC notification
+  method, `Frame::Interrupt`, `CancellationToken::interrupt`/`interrupt_reason`,
+  `RequestHandler::interrupt`, the `interrupted` error frame, and the
+  `interrupt_frame`/`send_interrupt` client seam), `transport/wire.rs`
+  (`TransportError::Interrupted` -> `error.data.kind=interrupted`), and
+  `crates/capo-server/src/lib.rs` (`CapoServer::interrupt_session`, recording the
+  `session.interrupted` turn-aborted event through the same single-writer
+  `interrupt_command` point). The gate failure was that the ST6 *verification
+  test* was missing, so its helpers (`jsonrpc_interrupt_frame`,
+  `ScriptedHandler::interrupts_for_test`, `InterruptLog::entries`) were dead code
+  (clippy `-D warnings`), and two long lines in `lib.rs`/`tests/transport.rs`
+  tripped `cargo fmt --check`.
+- Fix: added the deterministic ST6 transport test
+  `in_band_interrupt_aborts_in_flight_turn_and_emits_typed_abort_event`
+  (`crates/capo-server/src/tests/transport.rs`, scripted handler, no live
+  provider). It holds a live turn (`turn-*`) in flight, sends the typed
+  `interrupt` notification on the same open connection, and asserts: a typed
+  `error.data.kind=interrupted` frame naming the session + reason (distinct from
+  the ST3 `cancelled` kind); `RequestHandler::interrupt` fired once with
+  `(session-turn, operator ctrl-c)` so the `session.interrupted` event the thread
+  projection renders is recorded; the connection stays open (a follow-up request
+  succeeds). The orphan-after-cancel reaping is asserted at the transport level
+  via a new `TurnStopObserver`: the in-flight turn observes the interrupt
+  *reason* on its `CancellationToken` (`interrupt_reason()`), which is the signal
+  a real turn handler drives the runtime process-group kill with -- paired with
+  the ST1 runtime test
+  `cancel_terminates_descendant_process_group`
+  (`crates/capo-runtime/src/async_runner.rs`) that proves no surviving group. Ran
+  `cargo fmt` to wrap the two over-long lines.
+- Objective gate run from `/Users/nicolas/devel/capo-wt/streaming-transport`:
+  `cargo fmt --check` ok (exit 0); `cargo clippy --all-targets --all-features --
+  -D warnings` ok (exit 0; the three dead-code errors are gone); `cargo test
+  --workspace` ok (0 failures workspace-wide -- capo-server 75 passed/1 ignored
+  including the new ST6 case, capo-cli `server_transport` 11 passed, capo-runtime
+  38 passed including `cancel_terminates_descendant_process_group`, all other
+  crates green). Focused `cargo test -p capo-server --lib transport`: 12 passed,
+  0 failed.
 
 ## ST7 - Redaction-On-Emit On The Broadcast/SSE Egress Path
 
