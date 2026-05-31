@@ -1,6 +1,6 @@
-//! RTL10 tests: crash-safe in-flight runs -- persist the pid/process-group
-//! reference before the spawn returns, and reap the orphaned process group on
-//! restart through the production recovery path.
+//! RTL10/SG9 tests: crash-safe in-flight runs -- persist the pid/process-group
+//! reference before the spawn returns, then on restart probe that process group
+//! through the production recovery path.
 //!
 //! These are deterministic (no live provider):
 //!
@@ -11,14 +11,16 @@
 //!   `boot_id`). If that producer or its `live_provider.rs` call site regressed,
 //!   this test fails -- the marker is no longer self-attested by a test helper.
 //!
-//! - `restart_mid_turn_reaps_the_orphaned_process_group_and_leaves_a_consistent_read_model`
-//!   reaches the in-flight state by persisting the marker through that SAME
-//!   production producer (a real `/bin/sh` process group with a backgrounded
-//!   descendant stands in for an in-flight Codex run that outlived a controller
-//!   crash), then drives the PRODUCTION restart-recovery seam
-//!   (`ServerCommand::Recover` -> `recover_server` -> `recover_command`). The
-//!   recovery must reap the orphaned descendant before its delayed marker, leave
-//!   the thread read model consistent (no half-open run), and be idempotent
+//! - `restart_mid_turn_reattaches_the_live_run_without_killing_it` reaches the
+//!   in-flight state by persisting the marker through that SAME production
+//!   producer (a real `/bin/sh` process group with a backgrounded descendant
+//!   stands in for an in-flight Codex run that outlived a controller crash), then
+//!   drives the PRODUCTION restart-recovery seam (`ServerCommand::Recover` ->
+//!   `recover_server` -> `recover_command`). SG9 made that seam LIVENESS-AWARE:
+//!   the still-alive run carries a persisted `runtime_process_ref`, so recovery
+//!   REATTACHES to it in place (status `recovered`, a single `run.recovered`
+//!   event, the live descendant NOT killed) instead of reaping it and stamping
+//!   `exited_unknown`. The read model stays consistent and recovery is idempotent
 //!   across repeated restarts.
 
 use super::*;
@@ -265,14 +267,14 @@ fn persist_inflight_marker_via_production(
 
 #[cfg(unix)]
 #[test]
-fn restart_mid_turn_reaps_the_orphaned_process_group_and_leaves_a_consistent_read_model() {
+fn restart_mid_turn_reattaches_the_live_run_without_killing_it() {
     let root = temp_root();
     let workspace = root.join("workspace");
     let artifacts = root.join("artifacts");
     std::fs::create_dir_all(&workspace).expect("workspace");
     let workspace_str = workspace.to_string_lossy().to_string();
     let artifacts_str = artifacts.to_string_lossy().to_string();
-    let marker = workspace.join("orphan-survived.txt");
+    let marker = workspace.join("reattach-survivor.txt");
 
     let goal = "crash mid-turn".to_string();
     let project = ProjectId::new("project-capo");
@@ -290,10 +292,10 @@ fn restart_mid_turn_reaps_the_orphaned_process_group_and_leaves_a_consistent_rea
     );
 
     // Spawn a real in-flight process group with a backgrounded descendant that
-    // would write the marker after a delay -- the orphan a crash would leave
-    // running. We persist its pid through the PRODUCTION marker producer as the
-    // live path would, then drop our handle to simulate the controller dying
-    // mid-run.
+    // writes the marker after a delay -- the live run a crash would leave running.
+    // We persist its pid AND its runtime_process_ref through the PRODUCTION marker
+    // producer as the live path would (a persisted attachable handle), then drop
+    // our handle to simulate the controller dying mid-run.
     let runner = LocalProcessRunner::new(LocalProcessConfig::for_test(
         workspace.clone(),
         artifacts.clone(),
@@ -310,11 +312,13 @@ fn restart_mid_turn_reaps_the_orphaned_process_group_and_leaves_a_consistent_rea
             cwd: workspace,
             env: HashMap::new(),
         })
-        .expect("spawn in-flight orphan");
+        .expect("spawn in-flight live run");
     running
         .process
         .external_pid
-        .expect("pid recorded for the in-flight orphan");
+        .expect("pid recorded for the in-flight run");
+    let live_pid = running.process.external_pid;
+    let live_boot = running.process.boot_id.clone();
     let origin = system_origin();
     persist_inflight_marker_via_production(
         &server,
@@ -326,7 +330,7 @@ fn restart_mid_turn_reaps_the_orphaned_process_group_and_leaves_a_consistent_rea
 
     // The crash: the parent `/bin/sh` exits immediately after backgrounding the
     // descendant, the descendant keeps sleeping, and Capo no longer owns the
-    // child handle -- only the persisted pid survives. Dropping the running
+    // child handle -- only the persisted pid/ref survive. Dropping the running
     // handle stands in for the controller dying mid-run.
     std::thread::sleep(Duration::from_millis(100));
     drop(running);
@@ -345,36 +349,43 @@ fn restart_mid_turn_reaps_the_orphaned_process_group_and_leaves_a_consistent_rea
     );
 
     // Restart: drive the PRODUCTION recovery seam (the `recover` server command
-    // -> `recover_server` -> `recover_command`), which reaps the orphaned process
-    // group by the persisted pid and records the outcome inside a framed recovery
-    // attempt.
+    // -> `recover_server` -> `recover_command`). SG9 made it LIVENESS-AWARE: it
+    // probes the persisted process group NON-destructively, sees it still alive
+    // with an attachable runtime_process_ref, and REATTACHES in place inside a
+    // framed recovery attempt -- it does NOT kill the live run.
     let recovery = handle(&server, ServerCommand::Recover);
     let ServerResponsePayload::Recovery(recovery) = recovery.payload else {
         panic!("expected recovery response");
     };
     assert_eq!(
         recovery.recovered_run_count, 1,
-        "the one in-flight run is recovered"
+        "the one in-flight run is recovered (reattached)"
     );
 
-    // The reaped descendant never gets to write its marker.
+    // The reattached descendant survives: the live process was NOT killed.
     std::thread::sleep(Duration::from_millis(2200));
     assert!(
-        !marker.exists(),
-        "reaping the process group must kill the orphaned descendant"
+        marker.exists(),
+        "reattach must leave the live process running (no kill), unlike the RTL10 reaper"
     );
 
     // The thread read model is consistent: the run is terminal (recovered), not
-    // a half-open `running`, and is no longer active-looking.
-    assert_eq!(
-        server
-            .controller
-            .state()
-            .run(&run_id)
-            .unwrap()
-            .expect("run")
-            .status,
-        "recovered"
+    // a half-open `running` and never the blunt `exited_unknown`, and is no longer
+    // active-looking.
+    let recovered_run = server
+        .controller
+        .state()
+        .run(&run_id)
+        .unwrap()
+        .expect("run");
+    assert_eq!(recovered_run.status, "recovered");
+    assert_ne!(
+        recovered_run.status, "exited_unknown",
+        "SG9 never stamps the blunt exited_unknown status on a live run"
+    );
+    assert!(
+        recovered_run.recovery_of_run_id.is_none(),
+        "a reattach keeps the same run in place -- it is NOT a relaunch with recovery_of_run_id"
     );
     assert!(
         server
@@ -385,34 +396,55 @@ fn restart_mid_turn_reaps_the_orphaned_process_group_and_leaves_a_consistent_rea
             .is_empty()
     );
 
-    // The reap ran inside a framed recovery attempt: the production
+    // The reattach ran inside a framed recovery attempt: the production
     // `recover_command` brackets it with `begin_recovery`/`complete_recovery`, so
     // the summary carries a recovery_attempt_id and a watermark.
     assert!(
         !recovery.recovery_attempt_id.is_empty(),
-        "the reap must run inside a framed recovery attempt"
+        "the reattach must run inside a framed recovery attempt"
     );
     assert!(recovery.watermark.is_some());
 
-    // The per-run recovery events the state model prescribes were recorded.
-    let kinds: Vec<String> = server
+    // The reattach emits exactly one run.recovered event -- NO run.orphaned and NO
+    // run.exited, because the live process keeps running.
+    let recovery_events: Vec<_> = server
         .controller
         .state()
         .recent_events_for_session(&SessionId::new("session-crash"), 64)
         .unwrap()
         .into_iter()
-        .map(|event| event.kind)
+        .filter(|event| event.actor == "capo-recovery")
         .collect();
-    assert!(kinds.iter().any(|kind| kind == "run.orphaned"), "{kinds:?}");
-    assert!(kinds.iter().any(|kind| kind == "run.exited"), "{kinds:?}");
+    let kinds: Vec<&str> = recovery_events
+        .iter()
+        .map(|event| event.kind.as_str())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["run.recovered"],
+        "a reattach emits ONLY run.recovered (no orphaned/exited): {kinds:?}"
+    );
+    // The run.recovered payload encodes the reattach-vs-relaunch distinction.
+    let recovered_event = recovery_events
+        .iter()
+        .find(|event| event.kind == "run.recovered")
+        .expect("run.recovered event");
     assert!(
-        kinds.iter().any(|kind| kind == "run.recovered"),
-        "{kinds:?}"
+        recovered_event.payload_json.contains("\"reattached\":true"),
+        "the reattach payload must carry reattached:true: {}",
+        recovered_event.payload_json
+    );
+    assert!(
+        recovered_event
+            .payload_json
+            .contains("\"recovery_observation_kind\":\"reattached\""),
+        "the reattach payload records the reattached observation kind: {}",
+        recovered_event.payload_json
     );
 
     // Idempotent across repeated restarts: a second recovery that observes the
-    // same runtime state (the run no longer active-looking) records no new
-    // per-run recovery events and leaves the run terminal.
+    // same runtime state records no new per-run recovery events and leaves the run
+    // terminal.
     let run_started_before = run_recovery_event_count(&server, &SessionId::new("session-crash"));
     let recovery_again = handle(&server, ServerCommand::Recover);
     let ServerResponsePayload::Recovery(recovery_again) = recovery_again.payload else {
@@ -441,6 +473,11 @@ fn restart_mid_turn_reaps_the_orphaned_process_group_and_leaves_a_consistent_rea
             .status,
         "recovered"
     );
+
+    // Reap the still-live group so the test process tree does not leak.
+    if let Some(pid) = live_pid {
+        LocalProcessRunner::reap_orphan_process_group(pid, live_boot.as_deref());
+    }
 }
 
 /// Count the per-run recovery events (`run.orphaned`/`run.exited`/`run.recovered`)

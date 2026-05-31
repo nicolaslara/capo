@@ -180,12 +180,19 @@ impl RunRecoveryKind {
         }
     }
 
-    /// The terminal/recovered run STATUS the reconciled `Run` projection carries.
+    /// The terminal/recovered run STATUS the reconciled `Run` projection carries
+    /// AFTER the full recovery event sequence is applied.
+    ///
+    /// This must match the durable, rebuilt-from-log projection (the runs row uses
+    /// last-write-wins on `status`):
+    /// - `Reattached` emits a single `run.recovered` -> `recovered`.
+    /// - `Orphaned` emits `run.orphaned` then `run.exited` then `run.recovered`,
+    ///   so the run ends `recovered` (NOT the transient `orphaned`); returning
+    ///   `orphaned` here would diverge from the rebuilt projection.
+    /// - `Exited` emits `run.exited` then `run.recovered` -> `recovered`.
     pub const fn run_status(self) -> &'static str {
         match self {
-            Self::Reattached => "recovered",
-            Self::Orphaned => "orphaned",
-            Self::Exited => "exited",
+            Self::Reattached | Self::Orphaned | Self::Exited => "recovered",
         }
     }
 }

@@ -444,16 +444,19 @@ impl FakeBoundaryController {
     }
 
     /// SG9: reclaim every held workspace lease whose holding run is in
-    /// `dead_run_ids` (a run the liveness probe classified as exited/orphaned
-    /// during restart recovery), emitting `workspace.lease_released` with a
-    /// recovery reason so the freed lease is distinguishable from an explicit
-    /// release. A live (reattached) holder's lease is left untouched.
+    /// `dead_run_ids` (a run the liveness probe confirmed TERMINATED during restart
+    /// recovery), emitting `workspace.lease_released` with a recovery reason so the
+    /// freed lease is distinguishable from an explicit release. A still-alive
+    /// holder's lease is left untouched -- this includes a reattached run AND an
+    /// orphaned run (an orphan's process group is still alive and could still write
+    /// the workspace, so freeing its single-writer lease would be unsafe).
     ///
     /// This reclaims directly from the durable lease projection (it does not need
     /// the original workspace-root string), so it works after a restart where the
     /// only durable handle is the rebuilt lease row. Returns the lease ids
-    /// reclaimed. Idempotent: a lease already released is skipped, so a repeated
-    /// recovery pass reclaims nothing further.
+    /// reclaimed. Idempotent per dead holder: a repeated pass over the SAME dead
+    /// holder reclaims nothing further, while a NEW dead holder of a re-acquired
+    /// lease reclaims as a distinct event (the key folds in the holder's run id).
     pub fn reclaim_stale_workspace_leases(
         &self,
         dead_run_ids: &[RunId],
@@ -490,11 +493,26 @@ impl FakeBoundaryController {
             .to_string();
 
             // Reclaim is event-sourced through the holder's own session/run
-            // provenance (the dead holder). A STABLE event id + idempotency key
-            // (no wall-clock) keep a repeated recovery pass over the same lease
-            // from appending a second event.
+            // provenance (the dead holder). The event id + idempotency key
+            // discriminate on the DEAD HOLDER'S run id, not just the (stable,
+            // reused-in-place) workspace_lease_id: the same lease row is re-acquired
+            // by successive holders, so a key of `lease-reclaim:<lease_id>` alone
+            // would collide across holders and make `append_event` early-return on
+            // the SECOND dead holder -- never applying the `released` projection and
+            // permanently stranding the single-writer lock. Folding in the dead
+            // holder's run id makes each distinct dead holder reclaim a distinct
+            // event (durable + replay-deterministic, unlike wall-clock) while a
+            // repeated pass over the SAME dead holder still dedupes.
+            let holder_discriminator = lease
+                .holder_run_id
+                .as_ref()
+                .map(RunId::as_str)
+                .unwrap_or("no-run");
             let event = NewEvent {
-                event_id: format!("event-lease-reclaimed-{}", lease.workspace_lease_id),
+                event_id: format!(
+                    "event-lease-reclaimed-{}-{}",
+                    lease.workspace_lease_id, holder_discriminator
+                ),
                 kind: EventKind::WorkspaceLeaseReleased,
                 actor: "capo-recovery".to_string(),
                 project_id: Some(self.project_id.clone()),
@@ -506,8 +524,8 @@ impl FakeBoundaryController {
                 item_id: Some(lease.workspace_lease_id.clone()),
                 payload_json: payload,
                 idempotency_key: Some(format!(
-                    "recovery:lease-reclaim:{}",
-                    lease.workspace_lease_id
+                    "recovery:lease-reclaim:{}:{}",
+                    lease.workspace_lease_id, holder_discriminator
                 )),
                 redaction_state: RedactionState::Safe,
             };

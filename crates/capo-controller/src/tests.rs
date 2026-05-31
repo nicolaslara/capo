@@ -7142,8 +7142,9 @@ fn sg9_gone_run_classifies_exited_not_exited_unknown() {
         .expect("recover");
     assert_eq!(recovered.len(), 1);
     assert_eq!(
-        recovered[0].status, "exited",
-        "a gone run is terminal exited"
+        recovered[0].status, "recovered",
+        "a gone run is reconciled to the terminal `recovered` status (matching the \
+         durable run.exited -> run.recovered sequence), never `exited_unknown`"
     );
 
     let kinds = sg9_recovery_event_kinds(&controller, "session-gone");
@@ -7228,12 +7229,39 @@ fn sg9_alive_run_with_handle_reattaches_in_place_without_killing() {
         recovered[0].status, "recovered",
         "a still-alive attachable run is recovered (reattached) in place"
     );
+    assert!(
+        recovered[0].recovery_of_run_id.is_none(),
+        "a reattach keeps the SAME run -- it is NOT a relaunch with recovery_of_run_id"
+    );
 
     let kinds = sg9_recovery_event_kinds(&controller, "session-alive");
     assert_eq!(
         kinds,
         vec!["run.recovered".to_string()],
         "reattach emits ONLY run.recovered -- no run.exited, the process keeps running"
+    );
+
+    // Reattach-vs-relaunch encoding: the run.recovered payload pins the reattach
+    // (reattached:true + the reattached observation kind). A regression that
+    // dropped this flag or stamped a recovery_of_run_id would be caught here.
+    let recovered_event = controller
+        .state()
+        .recent_events_for_session(&SessionId::new("session-alive"), 64)
+        .expect("events")
+        .into_iter()
+        .find(|event| event.actor == "capo-recovery" && event.kind == "run.recovered")
+        .expect("run.recovered event");
+    assert!(
+        recovered_event.payload_json.contains("\"reattached\":true"),
+        "the reattach payload must carry reattached:true: {}",
+        recovered_event.payload_json
+    );
+    assert!(
+        recovered_event
+            .payload_json
+            .contains("\"recovery_observation_kind\":\"reattached\""),
+        "the reattach payload records the reattached observation kind: {}",
+        recovered_event.payload_json
     );
 
     // The reattach did NOT signal the live group: its descendant survives.
@@ -7290,7 +7318,17 @@ fn sg9_alive_run_without_handle_classifies_orphaned() {
         .recover_inflight_runs("recovery-sg9-orphan")
         .expect("recover");
     assert_eq!(recovered.len(), 1);
-    assert_eq!(recovered[0].status, "orphaned");
+    // The orphan emits run.orphaned -> run.exited -> run.recovered, so the
+    // reconciled run ends `recovered`. The RETURN value must agree with the
+    // durable (last-write-wins) projection, not the transient `orphaned` status.
+    assert_eq!(
+        recovered[0].status, "recovered",
+        "the orphan is reconciled to the terminal `recovered` status"
+    );
+    assert!(
+        recovered[0].recovery_of_run_id.is_none(),
+        "an orphan reconciles the SAME run in place -- not a relaunch with recovery_of_run_id"
+    );
 
     let kinds = sg9_recovery_event_kinds(&controller, "session-orphan");
     assert_eq!(
@@ -7301,6 +7339,53 @@ fn sg9_alive_run_without_handle_classifies_orphaned() {
             "run.recovered".to_string(),
         ],
         "an unowned live orphan is recorded orphaned, then exited, then recovered"
+    );
+
+    // The durable projection ends `recovered`, and rebuilding from the event log
+    // reproduces the SAME terminal status (replay parity for the orphan path).
+    let durable = controller
+        .state()
+        .run(&RunId::new("run-orphan"))
+        .expect("run")
+        .expect("present");
+    assert_eq!(
+        durable.status, "recovered",
+        "the durable run projection ends `recovered`, agreeing with the return value"
+    );
+    controller.state().rebuild_projections().expect("rebuild");
+    assert_eq!(
+        controller
+            .state()
+            .run(&RunId::new("run-orphan"))
+            .expect("run")
+            .expect("present")
+            .status,
+        "recovered",
+        "the orphan status rebuilds identically from the event log"
+    );
+
+    // Reattach-vs-relaunch encoding: the orphan's run.recovered does NOT claim a
+    // reattach (the live process was NOT reattached -- it was recorded orphaned).
+    let recovered_event = controller
+        .state()
+        .recent_events_for_session(&SessionId::new("session-orphan"), 64)
+        .expect("events")
+        .into_iter()
+        .find(|event| event.actor == "capo-recovery" && event.kind == "run.recovered")
+        .expect("run.recovered event");
+    assert!(
+        recovered_event
+            .payload_json
+            .contains("\"reattached\":false"),
+        "an orphan must NOT be flagged reattached: {}",
+        recovered_event.payload_json
+    );
+    assert!(
+        recovered_event
+            .payload_json
+            .contains("\"recovery_observation_kind\":\"orphaned\""),
+        "the orphan recovery records the orphaned observation kind: {}",
+        recovered_event.payload_json
     );
 
     // Reap the live group so the test process tree does not leak.
@@ -7351,8 +7436,9 @@ fn sg9_repeated_recovery_is_idempotent() {
         .expect("first recover");
     assert_eq!(first.len(), 1);
     assert_eq!(
-        first[0].status, "exited",
-        "the classification verdict is exited"
+        first[0].status, "recovered",
+        "the reconciled run ends `recovered` (matching the durable run.exited -> \
+         run.recovered sequence)"
     );
     let after_first = sg9_recovery_event_kinds(&controller, "session-idem");
     assert_eq!(
@@ -7458,6 +7544,82 @@ fn sg9_recovery_reclaims_stale_lease_from_dead_holder() {
     );
 }
 
+/// SG9 regression: the SAME workspace lease, reclaimed for dead holder A,
+/// re-acquired by holder B, and reclaimed again, must end FREE -- the reclaim
+/// idempotency key discriminates on the dead holder's run id, so the second
+/// reclaim is NOT swallowed by `append_event`'s dedupe (which would otherwise
+/// strand the single-writer lock permanently).
+#[test]
+fn sg9_re_reclaim_of_a_re_acquired_lease_frees_the_lock() {
+    let project = ProjectId::new("project-capo");
+    let controller =
+        RealBoundaryController::open(project.clone(), temp_root()).expect("open controller");
+    let workspace = "/workspace/capo";
+
+    // Holder A acquires the lease, then crashes; recovery reclaims it.
+    let holder_a = sg9_lease_scope("session-a", "run-a", workspace);
+    assert!(
+        controller
+            .acquire_workspace_write_lease(&holder_a)
+            .expect("A acquire")
+            .may_write()
+    );
+    let reclaimed_a = controller
+        .reclaim_stale_workspace_leases(&[RunId::new("run-a")], "A crashed")
+        .expect("reclaim A");
+    assert_eq!(reclaimed_a.len(), 1, "A's lease is reclaimed");
+
+    // Holder B acquires the SAME workspace (same lease row, reused in place), then
+    // crashes too.
+    let holder_b = sg9_lease_scope("session-b", "run-b", workspace);
+    assert!(
+        controller
+            .acquire_workspace_write_lease(&holder_b)
+            .expect("B acquire")
+            .may_write(),
+        "B can acquire the lease A freed"
+    );
+
+    // Recovery reclaims B's lease. With a key keyed only on the (reused)
+    // workspace_lease_id this would collide with A's reclaim and append_event would
+    // early-return -- leaving B's lease HELD forever. Keyed on the dead holder's
+    // run id, B's reclaim is a distinct event and the lease is actually released.
+    let reclaimed_b = controller
+        .reclaim_stale_workspace_leases(&[RunId::new("run-b")], "B crashed")
+        .expect("reclaim B");
+    assert_eq!(
+        reclaimed_b.len(),
+        1,
+        "B's lease must be reclaimed even though the same lease was reclaimed for A"
+    );
+    assert!(
+        controller
+            .workspace_lease_holder(&holder_b)
+            .expect("holder lookup")
+            .is_none(),
+        "the re-acquired-then-re-died lease must end FREE, not stranded held"
+    );
+
+    // A fresh writer can take the freed lease.
+    let holder_c = sg9_lease_scope("session-c", "run-c", workspace);
+    assert!(
+        controller
+            .acquire_workspace_write_lease(&holder_c)
+            .expect("C acquire")
+            .may_write(),
+        "the next writer acquires the freed lease"
+    );
+
+    // Re-reclaiming the SAME dead holder B is still idempotent (no new event).
+    let reclaimed_b_again = controller
+        .reclaim_stale_workspace_leases(&[RunId::new("run-b")], "B crashed")
+        .expect("reclaim B again");
+    assert!(
+        reclaimed_b_again.is_empty(),
+        "a repeated pass over the same dead holder reclaims nothing further"
+    );
+}
+
 /// SG9: full recovery sweep wires lease reclaim into the run classification --
 /// a gone run's lease is reclaimed by `recover_inflight_runs`.
 #[test]
@@ -7499,6 +7661,74 @@ fn sg9_recover_inflight_runs_reclaims_lease_of_gone_run() {
             .is_none(),
         "recovery reclaimed the dead run's stale lease"
     );
+}
+
+/// SG9: an ORPHANED run is still ALIVE (its process group keeps running), so the
+/// recovery sweep must NOT reclaim its single-writer workspace lease -- freeing it
+/// would let a new writer race the live orphan and break the SG5 single-writer
+/// invariant. Only a confirmed-terminal (exited) run's lease is reclaimed.
+#[cfg(unix)]
+#[test]
+fn sg9_recover_inflight_runs_keeps_lease_of_live_orphan() {
+    use capo_runtime::{LocalProcessConfig, LocalProcessRequest, LocalProcessRunner};
+    use std::collections::HashMap;
+
+    let project = ProjectId::new("project-capo");
+    let controller =
+        FakeBoundaryController::open(project.clone(), temp_root()).expect("open controller");
+
+    // Spawn a real, still-running process group (a live orphan with NO attachable
+    // runtime_process_ref).
+    let workspace = temp_root();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let runner =
+        LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), temp_root()));
+    let running = runner
+        .spawn_process(LocalProcessRequest {
+            run_id: RunId::new("run-live-orphan"),
+            turn_id: None,
+            program: "/bin/sh".to_string(),
+            argv: vec!["-c".to_string(), "(sleep 3) &".to_string()],
+            cwd: workspace,
+            env: HashMap::new(),
+        })
+        .expect("spawn live group");
+    let pid = running.process.external_pid.expect("pid recorded");
+    let boot = running.process.boot_id.clone();
+    drop(running);
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    // Live pid, no runtime_process_ref -> classified Orphaned, but still alive.
+    sg9_seed_inflight_run(
+        &controller,
+        &project,
+        "session-live-orphan",
+        "run-live-orphan",
+        Some(pid),
+        boot.as_deref(),
+        None,
+    );
+    let holder = sg9_lease_scope("session-live-orphan", "run-live-orphan", "/workspace/capo");
+    controller
+        .acquire_workspace_write_lease(&holder)
+        .expect("acquire");
+
+    controller
+        .recover_inflight_runs("recovery-sg9-live-orphan")
+        .expect("recover");
+
+    // The live orphan KEEPS its lease: it is still running, so reclaiming would be
+    // unsafe.
+    assert!(
+        controller
+            .workspace_lease_holder(&holder)
+            .expect("holder")
+            .is_some(),
+        "a still-alive orphan must keep its single-writer lease (not reclaimed)"
+    );
+
+    // Reap the live group so the test process tree does not leak.
+    LocalProcessRunner::reap_orphan_process_group(pid, boot.as_deref());
 }
 
 fn sg9_lease_scope(session: &str, run: &str, workspace_root: &str) -> crate::WorkspaceLeaseScope {

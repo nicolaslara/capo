@@ -249,22 +249,28 @@ impl FakeBoundaryController {
         self.stop_agent_name(agent_name, reason)
     }
 
-    /// Restart recovery: reap orphaned in-flight process groups and reconcile
-    /// the read model, framed as a single recovery attempt (RTL10).
+    /// Restart recovery: the one production restart-recovery seam (driven by
+    /// `ServerCommand::Recover`).
     ///
-    /// This is the one production restart-recovery seam (driven by
-    /// `ServerCommand::Recover`). It replaces the blunt
-    /// `mark_active_runs_exited_unknown` -- which marked *every* live-looking run
-    /// `exited_unknown` and left any still-running children orphaned -- with the
-    /// crash-safe reaper: for each in-flight run it loads the PID/boot-id its
-    /// spawn persisted before returning, probes that process group, reaps it if
-    /// still alive within the same boot, and records
-    /// `run.orphaned`/`run.exited`/`run.recovered`. The whole sweep stays inside
-    /// the `begin_recovery`/`complete_recovery` bracket the state model's Restart
-    /// Recovery order requires, so it projects into `recovery_attempts` exactly
-    /// like before. Phase 1 reaps and records; it does not reattach (full
-    /// liveness-probe reattach stays in `safety-gates`).
+    /// SG9 makes this delegate to [`Self::recover_command_liveness_aware`], so the
+    /// live restart path is now LIVENESS-AWARE: it probes each in-flight run's
+    /// persisted process group NON-destructively, REATTACHES a still-alive
+    /// attachable run in place (instead of killing it like the RTL10 reaper did),
+    /// classifies the rest into `run.orphaned`/`run.exited`/`run.recovered`, and
+    /// reclaims any single-writer lease a dead holder left. The blunt
+    /// `mark_active_runs_exited_unknown` path is fully replaced in production.
     pub fn recover_command(&self, command: &CommandEnvelope) -> StateResult<RecoveryReport> {
+        self.recover_command_liveness_aware(command)
+    }
+
+    /// RTL10 phase-1 reaper: probe each in-flight run's persisted process group
+    /// and KILL it if still alive, marking it terminal. Retained as the
+    /// destructive fallback and exercised by the RTL10 reaper tests; the live
+    /// restart path uses [`Self::recover_command_liveness_aware`] instead.
+    pub fn recover_command_reaping(
+        &self,
+        command: &CommandEnvelope,
+    ) -> StateResult<RecoveryReport> {
         require_intent(command, CommandIntent::Recover);
         let recovery_attempt_id = format!(
             "recovery-{}-after-{}",
@@ -403,11 +409,16 @@ impl FakeBoundaryController {
             &observations,
         )?;
 
-        // SG5/SG9: reclaim any single-writer lease held by a run that did NOT
-        // reattach. A reattached (still-live) run keeps its lease.
+        // SG5/SG9: reclaim any single-writer lease held by a run that has
+        // TERMINATED (`Exited`). A reattached run is still alive (keeps its lease),
+        // and -- critically -- an `Orphaned` run is ALSO still alive: its process
+        // group keeps running and could still write the workspace, so freeing its
+        // write lease (and handing it to a new writer) would put two live writers
+        // on the same root and break the SG5 single-writer invariant. Only a run
+        // whose process is confirmed gone is safe to reclaim from.
         let dead_run_ids: Vec<RunId> = observations
             .iter()
-            .filter(|observation| observation.kind != RunRecoveryKind::Reattached)
+            .filter(|observation| observation.kind == RunRecoveryKind::Exited)
             .map(|observation| observation.run_id.clone())
             .collect();
         if !dead_run_ids.is_empty() {
