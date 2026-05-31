@@ -676,6 +676,22 @@ mod tests {
             !stdout_seen.contains("second"),
             "received `second` before unblocking the child: not incremental, got {stdout_seen:?}"
         );
+        // Positive liveness check: "before exit" is a CHECKED fact, not an
+        // inference. The child is parked on `read _line`, so its process group
+        // must still have a live member at the instant the first delta arrived.
+        // A buffer-then-emit-after-exit runner could only deliver `first` once
+        // the child had already exited, so this would read `false` (and, because
+        // the child never exits without stdin we never write until we see the
+        // delta, the prior `next_delta()` would have timed out first).
+        #[cfg(unix)]
+        {
+            let pid = running.external_pid().expect("pid recorded");
+            assert!(
+                crate::process_group_is_alive(pid),
+                "the child must still be running when the first delta is observed (pid {pid}); \
+                 a delta arriving only after exit is not incremental"
+            );
+        }
 
         // Unblock the child so it emits the rest and exits.
         running.write_stdin(b"go\n").await.expect("write stdin");
@@ -741,8 +757,9 @@ mod tests {
         let workspace = temp_root("workspace-cap");
         let artifacts = temp_root("artifacts-cap");
         std::fs::create_dir_all(&workspace).unwrap();
+        let config_cap = 16;
         let mut config = LocalProcessConfig::for_test(workspace.clone(), artifacts);
-        config.output_limit_bytes = 16;
+        config.output_limit_bytes = config_cap;
         let runner = AsyncLocalProcessRunner::new(config);
 
         let mut running = runner
@@ -773,6 +790,15 @@ mod tests {
             "A".repeat(40),
             "the live delta stream must carry the FULL output, uncapped"
         );
+        // The cap-the-stream failure mode pinned directly: the streamed bytes
+        // must exceed the cap. A runner that capped the egress stream (not just
+        // the persisted artifact) would deliver at most `cap` bytes here.
+        assert!(
+            streamed.len() > config_cap,
+            "the delta stream ({} bytes) must exceed the {config_cap}-byte cap; \
+             capping the stream (not just the artifact) violates the invariant",
+            streamed.len()
+        );
 
         let outcome = running.wait().await.expect("wait");
         assert_eq!(
@@ -785,7 +811,11 @@ mod tests {
         // The (capped) artifact is preserved, not discarded -- both halves of the
         // invariant pinned: deltas un-capped (40 bytes), artifact capped (16).
         let persisted = std::fs::read(&outcome.stdout.path).unwrap();
-        assert_eq!(persisted.len(), 16, "artifact must be capped to the limit");
+        assert_eq!(
+            persisted.len(),
+            config_cap,
+            "artifact must be capped to the limit"
+        );
         assert!(outcome.stdout.path.exists());
         // The truncation is surfaced as a runtime event.
         assert!(

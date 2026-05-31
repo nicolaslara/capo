@@ -1980,7 +1980,7 @@ fn is_reapable_pid(pid: u32) -> bool {
 /// Probe whether the process *group* led by `pid` still has any live member,
 /// without affecting it (`kill -0 -<pid>`).
 #[cfg(unix)]
-fn process_group_is_alive(pid: u32) -> bool {
+pub(crate) fn process_group_is_alive(pid: u32) -> bool {
     // Never probe (or, downstream, signal) the self/init groups: a low PID from
     // a corrupted marker must read as "not alive" so the reaper records
     // `already_gone` rather than `kill -0 -0` (which would succeed against our
