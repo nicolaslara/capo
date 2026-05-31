@@ -883,6 +883,55 @@ pub(crate) fn apply_projection_record(
                 sequence,
             ],
         )?,
+        ProjectionRecord::RunScore(score) => {
+            validate_projection_json(
+                "run_score",
+                &score.run_score_id,
+                "score_inputs_json",
+                &score.score_inputs_json,
+            )?;
+            transaction.execute(
+                "INSERT INTO run_scores(
+                    run_score_id, project_id, task_id, session_id, run_id, outcome,
+                    passed, criteria_total, criteria_met, observed_evidence_count,
+                    started_at, completed_at, duration_millis, score_inputs_json,
+                    updated_sequence
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                    ?14, ?15)
+                 ON CONFLICT(run_score_id) DO UPDATE SET
+                    project_id = excluded.project_id,
+                    task_id = excluded.task_id,
+                    session_id = excluded.session_id,
+                    run_id = excluded.run_id,
+                    outcome = excluded.outcome,
+                    passed = excluded.passed,
+                    criteria_total = excluded.criteria_total,
+                    criteria_met = excluded.criteria_met,
+                    observed_evidence_count = excluded.observed_evidence_count,
+                    started_at = excluded.started_at,
+                    completed_at = excluded.completed_at,
+                    duration_millis = excluded.duration_millis,
+                    score_inputs_json = excluded.score_inputs_json,
+                    updated_sequence = excluded.updated_sequence",
+                params![
+                    score.run_score_id,
+                    score.project_id.as_str(),
+                    score.task_id.as_ref().map(TaskId::as_str),
+                    score.session_id.as_str(),
+                    score.run_id.as_str(),
+                    score.outcome,
+                    score.passed as i64,
+                    score.criteria_total,
+                    score.criteria_met,
+                    score.observed_evidence_count,
+                    score.started_at,
+                    score.completed_at,
+                    score.duration_millis,
+                    score.score_inputs_json,
+                    sequence,
+                ],
+            )?
+        }
         ProjectionRecord::TaskOutcomeReport(report) => transaction.execute(
             "INSERT INTO task_outcome_reports(
                 task_outcome_report_id, project_id, task_id, session_id, run_id,

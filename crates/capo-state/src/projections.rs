@@ -33,6 +33,7 @@ pub enum ProjectionRecord {
     TaskOutcomeReport(TaskOutcomeReportProjection),
     ReviewFinding(ReviewFindingProjection),
     Evidence(EvidenceProjection),
+    RunScore(RunScoreProjection),
     SourceBinding(SourceBindingProjection),
     WorkpadIndexReset(WorkpadIndexResetProjection),
     WorkpadFile(WorkpadFileProjection),
@@ -626,6 +627,50 @@ pub struct EvidenceProjection {
     pub kind: String,
     pub artifact_id: Option<String>,
     pub confidence: i64,
+    pub updated_sequence: i64,
+}
+
+/// SG7: the durable, queryable outcome of `score_run` -- the run's pass/fail
+/// signal scored from OBSERVED verification evidence only, plus real wall-clock
+/// timing.
+///
+/// One row per `(run, scored inputs)`: the score id is keyed on the run and a
+/// stable digest of the observed evidence it scored, so re-scoring the SAME
+/// observed evidence is idempotent (same id, no duplicate) and a rebuild from
+/// the event log reconstructs the score identically. The `score_inputs_json`
+/// records exactly which observed verification verdicts fed the score, so the
+/// outcome is auditable and reproducible; agent-reported claims never appear
+/// here because `score_run` filters them out before they reach this projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunScoreProjection {
+    pub run_score_id: String,
+    pub project_id: ProjectId,
+    pub task_id: Option<TaskId>,
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    /// `passed` / `failed` / `inconclusive` -- the run outcome signal.
+    pub outcome: String,
+    /// True iff every required acceptance criterion was met by observed passing
+    /// evidence. The single trustworthy pass/fail derived from observed evidence.
+    pub passed: bool,
+    /// How many acceptance criteria were required for this run.
+    pub criteria_total: i64,
+    /// How many of those criteria observed passing evidence satisfied.
+    pub criteria_met: i64,
+    /// How many OBSERVED verification verdicts were scored (agent-reported
+    /// claims are excluded before scoring, so they never count here).
+    pub observed_evidence_count: i64,
+    /// Wall-clock millis-since-epoch the scored run started.
+    pub started_at: i64,
+    /// Wall-clock millis-since-epoch the scored run completed.
+    pub completed_at: i64,
+    /// `completed_at - started_at`, clamped at 0 -- the real run duration that
+    /// replaces the descriptive event-sequence-delta "duration".
+    pub duration_millis: i64,
+    /// A stable JSON digest of the observed evidence the score consumed (each
+    /// criterion, the observed verdict that matched it, and the source). The
+    /// reproducibility anchor: the same digest always yields the same score.
+    pub score_inputs_json: String,
     pub updated_sequence: i64,
 }
 

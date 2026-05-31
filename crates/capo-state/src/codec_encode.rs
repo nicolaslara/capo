@@ -458,6 +458,32 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             h: None,
             payload_json: "{}".to_string(),
         },
+        ProjectionRecord::RunScore(score) => ProjectionRecordRow {
+            kind: "run_score",
+            record_id: score.run_score_id.clone(),
+            a: Some(score.project_id.to_string()),
+            b: Some(score.session_id.to_string()),
+            c: Some(score.run_id.to_string()),
+            d: score.task_id.as_ref().map(ToString::to_string),
+            e: Some(score.outcome.clone()),
+            f: Some(score.started_at.to_string()),
+            g: Some(score.completed_at.to_string()),
+            // The score-inputs digest is the reproducibility anchor; it rides in
+            // its own positional slot so a rebuild reconstructs the exact inputs.
+            h: Some(score.score_inputs_json.clone()),
+            // The numeric verdict counts ride in the payload (positional slots
+            // a..h are exhausted), so a rebuild reconstructs the score row
+            // identically. `duration_millis` is derivable but persisted so the
+            // rebuilt row is byte-identical without recomputation.
+            payload_json: json!({
+                "passed": score.passed,
+                "criteria_total": score.criteria_total,
+                "criteria_met": score.criteria_met,
+                "observed_evidence_count": score.observed_evidence_count,
+                "duration_millis": score.duration_millis,
+            })
+            .to_string(),
+        },
         ProjectionRecord::TaskOutcomeReport(report) => ProjectionRecordRow {
             kind: "task_outcome_report",
             record_id: report.task_outcome_report_id.clone(),

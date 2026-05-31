@@ -2869,6 +2869,73 @@ fn sg3_revoked_and_expired_grant_state_rebuilds_identically_from_the_log() {
     assert_eq!(rebuilt, live);
 }
 
+#[test]
+fn sg7_run_scored_event_kind_round_trips() {
+    // SG7: the new run-score event kind has a stable wire string and round-trips
+    // through `as_str`/`from_wire`.
+    assert_eq!(EventKind::RunScored.as_str(), "run.scored");
+    assert_eq!(
+        EventKind::from_wire("run.scored"),
+        Some(EventKind::RunScored)
+    );
+}
+
+#[test]
+fn sg7_run_score_projection_persists_and_rebuilds_identically() {
+    // SG7: a RunScore projection persists to the `run_scores` table AND rebuilds
+    // byte-identically from the durable projection_records log on restart, so the
+    // scored outcome is queryable and reproducible across a server restart.
+    let store = temp_store("sg7-run-score");
+    let score = RunScoreProjection {
+        run_score_id: "run-score-run-sg7-abc123".to_string(),
+        project_id: ProjectId::new("project-capo"),
+        task_id: Some(TaskId::new("task-sg7")),
+        session_id: SessionId::new("session-sg7"),
+        run_id: RunId::new("run-sg7"),
+        outcome: "passed".to_string(),
+        passed: true,
+        criteria_total: 2,
+        criteria_met: 2,
+        observed_evidence_count: 2,
+        started_at: 1_700_000_000_000,
+        completed_at: 1_700_000_003_500,
+        duration_millis: 3_500,
+        score_inputs_json:
+            "{\"criteria\":[],\"observed_verdicts\":[],\"source\":\"observed-runner\"}".to_string(),
+        updated_sequence: 0,
+    };
+
+    store
+        .append_event(
+            NewEvent::new("event-sg7-run-score", EventKind::RunScored, "test"),
+            &[ProjectionRecord::RunScore(score.clone())],
+        )
+        .expect("append run score");
+
+    // Queryable both by id and per-session.
+    let by_id = store
+        .run_score_by_id("run-score-run-sg7-abc123")
+        .expect("run score by id")
+        .expect("score present");
+    assert_eq!(by_id.outcome, "passed");
+    assert!(by_id.passed);
+    assert_eq!(by_id.duration_millis, 3_500);
+    assert_eq!(by_id.criteria_total, 2);
+    assert_eq!(by_id.observed_evidence_count, 2);
+    let live = store
+        .run_scores_for_session(&SessionId::new("session-sg7"))
+        .expect("scores for session");
+    assert_eq!(live.len(), 1);
+
+    // Restart/replay: a rebuild over the durable log reconstructs the score row
+    // identically (the wall-clock timing and inputs survive verbatim).
+    store.rebuild_projections().expect("rebuild");
+    let rebuilt = store
+        .run_scores_for_session(&SessionId::new("session-sg7"))
+        .expect("scores after rebuild");
+    assert_eq!(rebuilt, live);
+}
+
 fn temp_store(name: &str) -> SqliteStateStore {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

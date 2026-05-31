@@ -587,7 +587,7 @@ Notes:
 
 ## SG7 - score_run Over Observed Evidence And Wall-Clock Timing
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -616,6 +616,59 @@ Verification:
 Must not do:
 
 - Do not let any agent-reported field contribute to the computed score.
+
+Evidence:
+
+- Placement (SG7 open question resolved in `knowledge.md`): `score_run` lives in
+  `capo-controller` (`crates/capo-controller/src/score_run.rs`), beside the SG6
+  `VerificationRunner` gate that produces the observed evidence it consumes -- the
+  score is the loop's verdict over observed evidence, so the computation belongs
+  with the loop owner, not `capo-eval` (descriptive reporting) or `capo-server`
+  (transport).
+- OBSERVED-evidence-only scoring: `FakeBoundaryController::score_run(scope,
+  &[AcceptanceCriterion])` reads back the `evidence.recorded` events for the run
+  and keeps ONLY those stamped by the SG6 runner -- actor
+  `VERIFICATION_EVIDENCE_ACTOR` (`capo-controller-verification`) AND payload
+  `source = "observed-runner"` (`VERIFICATION_EVIDENCE_SOURCE`). Everything else
+  (agent-reported summaries/claims, any other actor or `source`) is filtered out
+  in `parse_observed_verdict` before it can influence the score, so injecting
+  only agent-reported claims never raises it. A typed `AcceptanceCriterion`
+  (label + required `VerificationKind`) is MET only when an OBSERVED PASS of its
+  kind exists (the gate already re-derived pass/fail from the real exit status,
+  never an agent claim); the run `passed` iff every criterion is met, yielding a
+  `RunScoreOutcome` of `passed`/`failed`/`inconclusive` (empty criteria set).
+- Real wall-clock timing: the scored outcome carries `started_at`/`completed_at`
+  (caller-supplied clock millis-since-epoch) and a derived `duration_millis`,
+  replacing the `capo-eval` event-sequence-delta "duration".
+- Durable + reproducible: a `run.scored` event kind (`RunScored`) and a
+  `RunScoreProjection` were added to `capo-state` (enum + `as_str`/`from_wire`
+  round-trip; `run_scores` table in `schema.rs` + clear-list; apply
+  INSERT/UPDATE in `apply.rs`; `run_score_by_id`/`run_scores_for_session` queries
+  in `queries.rs`; codec round-trip in `codec.rs`/`codec_encode.rs` with the
+  scalar verdict counts riding in `payload_json` since positional slots a..h are
+  taken). The score id is keyed on `(run, stable digest of the scored inputs)`,
+  so re-scoring the SAME observed evidence is idempotent (same id, no duplicate
+  row) and a rebuild from the event log reconstructs the score identically.
+- New public types exported from `capo-controller` lib: `AcceptanceCriterion`,
+  `RunScore`, `RunScoreOutcome`, `RunScoreScope`, `ScoredCriterion`.
+- Tests (focused, deterministic): `crates/capo-controller/src/score_run.rs` --
+  passing observed evidence scores passed; failing observed evidence scores
+  failed; agent-reported claims alone do NOT raise the score (and a real observed
+  pass added afterward DOES, proving the filter excludes only the claim);
+  controlled-clock wall-clock timing (`duration_millis` = completed - started, not
+  an event delta); durable + queryable + reproducible across a store reopen +
+  `rebuild_projections` + idempotent re-score. `crates/capo-state/src/tests.rs` --
+  `sg7_run_scored_event_kind_round_trips`,
+  `sg7_run_score_projection_persists_and_rebuilds_identically`.
+- Commands run (from `/Users/nicolas/devel/capo-wt/safety-gates`):
+  `cargo test -p capo-controller score_run` (5 passed),
+  `cargo test -p capo-state sg7` (2 passed), `cargo fmt --check` (exit 0 after
+  `cargo fmt`), `cargo clippy --all-targets --all-features -- -D warnings`
+  (exit 0, no warnings), `cargo test --workspace` (exit 0; 0 failed
+  workspace-wide; capo-controller 87 passed/0 failed/1 ignored, capo-state 54
+  passed/0 failed). `git diff --check` clean. Acceptance met. No live Codex smoke
+  required (SG7 verification is deterministic scripted-evidence + controlled-clock
+  + replay only).
 
 ## SG8 - Controller-Owned Shadow-Git Checkpoint/Rollback
 

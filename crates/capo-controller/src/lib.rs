@@ -37,6 +37,7 @@ mod local_dispatch;
 mod permission_round_trip;
 mod real_controller;
 mod resource_ceiling;
+mod score_run;
 mod session_control;
 mod tool_dispatch;
 mod turn_loop;
@@ -55,6 +56,9 @@ pub use real_controller::{
 };
 pub use resource_ceiling::{
     CeilingBreach, CeilingTurnOutcome, RunResourceCeiling, RunResourceUsage,
+};
+pub use score_run::{
+    AcceptanceCriterion, RunScore, RunScoreOutcome, RunScoreScope, ScoredCriterion,
 };
 pub use tool_dispatch::{
     PermissionDecideOutcome, ToolDispatchOutcome, ToolDispatchScope, ToolRefusal,

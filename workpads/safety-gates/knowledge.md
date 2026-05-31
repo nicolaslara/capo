@@ -343,7 +343,23 @@ state-model.md:1179).
   into the loop owner. `capo-eval` is the descriptive reporting layer and
   `capo-server` is transport; neither produces the verdict. `score_run` (SG7)
   CONSUMES the observed `evidence.recorded(kind=test/smoke)` this gate persists;
-  its own placement is resolved in SG7.
+  its own placement is resolved in SG7. RESOLVED for `score_run` (SG7): it ALSO
+  lives in `capo-controller` (`crates/capo-controller/src/score_run.rs`), beside
+  the SG6 gate that produces the observed evidence it scores. Same rationale as
+  SG6: the score is the loop's verdict over observed evidence, so the computation
+  that derives the verdict belongs with the loop owner, not the descriptive
+  report. `score_run` reads ONLY the observed `evidence.recorded` events stamped
+  by the SG6 runner (actor `capo-controller-verification` AND payload
+  `source = observed-runner`) -- agent-reported evidence is filtered out before it
+  can influence the score -- compares them to typed `AcceptanceCriterion`s,
+  derives a `passed`/`failed`/`inconclusive` `RunScoreOutcome`, stamps REAL
+  wall-clock `started_at`/`completed_at`/`duration_millis` from a caller-supplied
+  clock (replacing the `capo-eval` event-sequence-delta "duration"), and persists
+  a durable `run.scored` event + `RunScoreProjection` (new in `capo-state`) keyed
+  on `(run, score-inputs digest)` so a re-score of the same observed evidence is
+  idempotent and a rebuild from the event log reconstructs the score identically.
+  `capo-eval` may later RENDER the stored projection into its markdown roll-up but
+  does not compute it.
 - Should `CapabilityGrantExpired` be a distinct materialized event, or should
   expiry be evaluated purely from `expires_at` at decide time with no event? The
   SG3 acceptance allows it as optional; the replay test must reconstruct expired

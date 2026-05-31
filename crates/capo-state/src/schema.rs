@@ -413,6 +413,23 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             confidence INTEGER NOT NULL,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS run_scores (
+            run_score_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            task_id TEXT,
+            session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            passed INTEGER NOT NULL,
+            criteria_total INTEGER NOT NULL,
+            criteria_met INTEGER NOT NULL,
+            observed_evidence_count INTEGER NOT NULL,
+            started_at INTEGER NOT NULL,
+            completed_at INTEGER NOT NULL,
+            duration_millis INTEGER NOT NULL,
+            score_inputs_json TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS task_outcome_reports (
             task_outcome_report_id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -563,6 +580,7 @@ pub(crate) fn clear_projection_tables(transaction: &Transaction<'_>) -> StateRes
         "memory_records",
         "memory_sources",
         "evidence",
+        "run_scores",
         "task_outcome_reports",
         "review_findings",
         "source_bindings",

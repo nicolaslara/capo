@@ -10,9 +10,9 @@ use crate::{
     AgentProjection, CapabilityGrantProjection, ConnectivityExposureProjection, EvidenceProjection,
     MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
     PermissionApprovalProjection, ProjectProjection, ProjectionRecord, ReviewFindingProjection,
-    RunProjection, RuntimeTargetProjection, SessionProjection, SourceBindingProjection, StateError,
-    StateResult, TaskOutcomeReportProjection, TaskProjection, ToolCallProjection,
-    ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection,
+    RunProjection, RunScoreProjection, RuntimeTargetProjection, SessionProjection,
+    SourceBindingProjection, StateError, StateResult, TaskOutcomeReportProjection, TaskProjection,
+    ToolCallProjection, ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection,
     WorkpadIndexResetProjection, WorkpadTaskProjection, WorkspaceLeaseProjection, optional_id,
 };
 
@@ -574,6 +574,65 @@ pub(crate) fn projection_record_from_row(
             confidence: required_i64(&projection_kind, "evidence", g, "confidence")?,
             updated_sequence: 0,
         })),
+        "run_score" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            let id = record_id.clone();
+            Ok(ProjectionRecord::RunScore(RunScoreProjection {
+                run_score_id: record_id,
+                project_id: ProjectId::new(required_field(
+                    &projection_kind,
+                    "run_score",
+                    a,
+                    "project_id",
+                )?),
+                session_id: SessionId::new(required_field(
+                    &projection_kind,
+                    "run_score",
+                    b,
+                    "session_id",
+                )?),
+                run_id: RunId::new(required_field(&projection_kind, "run_score", c, "run_id")?),
+                task_id: optional_id(d),
+                outcome: required_field(&projection_kind, "run_score", e, "outcome")?,
+                started_at: required_i64(&projection_kind, "run_score", f, "started_at")?,
+                completed_at: required_i64(&projection_kind, "run_score", g, "completed_at")?,
+                passed: payload
+                    .get("passed")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                criteria_total: required_payload_i64(
+                    &projection_kind,
+                    &id,
+                    &payload,
+                    "criteria_total",
+                )?,
+                criteria_met: required_payload_i64(
+                    &projection_kind,
+                    &id,
+                    &payload,
+                    "criteria_met",
+                )?,
+                observed_evidence_count: required_payload_i64(
+                    &projection_kind,
+                    &id,
+                    &payload,
+                    "observed_evidence_count",
+                )?,
+                duration_millis: required_payload_i64(
+                    &projection_kind,
+                    &id,
+                    &payload,
+                    "duration_millis",
+                )?,
+                score_inputs_json: required_field(
+                    &projection_kind,
+                    "run_score",
+                    h,
+                    "score_inputs_json",
+                )?,
+                updated_sequence: 0,
+            }))
+        }
         "task_outcome_report" => {
             let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
             Ok(ProjectionRecord::TaskOutcomeReport(

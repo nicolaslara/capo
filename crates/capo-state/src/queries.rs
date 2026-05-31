@@ -11,10 +11,10 @@ use crate::{
     AgentProjection, CapabilityGrantProjection, ConnectivityExposureProjection, EventRecord,
     EvidenceProjection, InFlightRun, MemoryPacketProjection, MemoryRecordProjection,
     MemorySourceProjection, PermissionApprovalProjection, ReviewFindingProjection, RunProjection,
-    RuntimeTargetProjection, SessionProjection, SourceBindingProjection, SqliteStateStore,
-    StateError, StateResult, TaskOutcomeReportProjection, TaskProjection, ToolCallProjection,
-    ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection, WorkpadTaskProjection,
-    WorkspaceLeaseProjection, optional_id,
+    RunScoreProjection, RuntimeTargetProjection, SessionProjection, SourceBindingProjection,
+    SqliteStateStore, StateError, StateResult, TaskOutcomeReportProjection, TaskProjection,
+    ToolCallProjection, ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection,
+    WorkpadTaskProjection, WorkspaceLeaseProjection, optional_id,
 };
 
 impl SqliteStateStore {
@@ -930,6 +930,45 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    /// SG7: a single run-score row by id, or `None` if absent.
+    ///
+    /// `score_run` reads this back to dedupe an identical re-score and to expose
+    /// the durable, queryable outcome (which survives restart because it rebuilds
+    /// from the `run.scored` event).
+    pub fn run_score_by_id(&self, run_score_id: &str) -> StateResult<Option<RunScoreProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT run_score_id, project_id, task_id, session_id, run_id, outcome, passed,
+                    criteria_total, criteria_met, observed_evidence_count, started_at,
+                    completed_at, duration_millis, score_inputs_json, updated_sequence
+             FROM run_scores
+             WHERE run_score_id = ?1",
+        )?;
+        let score = statement
+            .query_row(params![run_score_id], run_score_from_row)
+            .optional()?;
+        Ok(score)
+    }
+
+    /// SG7: every run-score row for a session, oldest first.
+    pub fn run_scores_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> StateResult<Vec<RunScoreProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT run_score_id, project_id, task_id, session_id, run_id, outcome, passed,
+                    criteria_total, criteria_met, observed_evidence_count, started_at,
+                    completed_at, duration_millis, score_inputs_json, updated_sequence
+             FROM run_scores
+             WHERE session_id = ?1
+             ORDER BY updated_sequence ASC, run_score_id ASC",
+        )?;
+        let rows = statement.query_map(params![session_id.as_str()], run_score_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn memory_packets_for_session(
         &self,
         session_id: &SessionId,
@@ -1785,6 +1824,26 @@ fn parse_inflight_marker(payload_json: &str) -> Option<InFlightMarker> {
         external_pid,
         boot_id,
         runtime_process_ref,
+    })
+}
+
+fn run_score_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunScoreProjection> {
+    Ok(RunScoreProjection {
+        run_score_id: row.get(0)?,
+        project_id: ProjectId::new(row.get::<_, String>(1)?),
+        task_id: optional_id(row.get::<_, Option<String>>(2)?),
+        session_id: SessionId::new(row.get::<_, String>(3)?),
+        run_id: RunId::new(row.get::<_, String>(4)?),
+        outcome: row.get(5)?,
+        passed: row.get::<_, i64>(6)? != 0,
+        criteria_total: row.get(7)?,
+        criteria_met: row.get(8)?,
+        observed_evidence_count: row.get(9)?,
+        started_at: row.get(10)?,
+        completed_at: row.get(11)?,
+        duration_millis: row.get(12)?,
+        score_inputs_json: row.get(13)?,
+        updated_sequence: row.get(14)?,
     })
 }
 
