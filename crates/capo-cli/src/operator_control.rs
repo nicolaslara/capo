@@ -735,6 +735,35 @@ Operator input: {line}
         mock_provider_output_jsonl: Option<&str>,
         timeout_seconds: u64,
     ) -> Result<capo_server::DispatchRunSummary, String> {
+        // The operator surfaces only render the run; the loop's `TurnFinished`
+        // annotation is carried alongside it (and asserted by the production-path
+        // test). Return the run so the existing callers/renderers are unchanged.
+        Ok(self
+            .run_codex_dispatch_turn(
+                agent,
+                goal,
+                session_id,
+                run_id,
+                mock_provider_output_jsonl,
+                timeout_seconds,
+            )?
+            .run)
+    }
+
+    /// Drive ONE operator turn through the single production orchestration command
+    /// and return the loop's full outcome (the run summary PLUS the loop's
+    /// `TurnFinished` annotation). The operator REPL renders only the run, but the
+    /// `TurnFinished` is what proves a real operator invocation flowed THROUGH
+    /// `run_dispatch_turn` rather than hand-sequencing the dispatch primitives.
+    fn run_codex_dispatch_turn(
+        &mut self,
+        agent: &str,
+        goal: &str,
+        session_id: &str,
+        run_id: &str,
+        mock_provider_output_jsonl: Option<&str>,
+        timeout_seconds: u64,
+    ) -> Result<capo_server::DispatchTurnSummary, String> {
         let turn_id = format!("turn-{}-{}", slug(agent), stable_cli_hash(goal));
         let workspace = std::env::current_dir()
             .map_err(debug_error)?
@@ -745,7 +774,21 @@ Operator input: {line}
             .join("control-live-artifacts")
             .display()
             .to_string();
-        let preflight = self.send_request(ServerCommand::PreflightLiveProvider {
+        // AI1: the operator/live-run flow issues the single production
+        // orchestration command (`RunDispatchTurn`) instead of hand-sequencing
+        // `PreflightLiveProvider` + `RunLiveProviderLocal` beside the loop. The
+        // server routes this through `run_dispatch_turn`, which drives the same
+        // preflight/run dispatch primitives AND annotates the run with the loop's
+        // `TurnFinished`, so the path the design is built around is the path that
+        // a real operator invocation executes.
+        //
+        // This is a single operator turn, so the per-run ceiling bounds one turn:
+        // `max_turns = 1` with no prior usage. The wall-clock bound is the caller's
+        // `timeout_seconds`; the token/cost ceiling is left effectively unbounded
+        // here (no provider token source on this phase-1 path -- RTL9 wires the
+        // real Codex token round-trip), so a single operator turn never trips a
+        // token breach.
+        let response = self.send_request(ServerCommand::RunDispatchTurn {
             agent_name: agent.to_string(),
             adapter: "codex".to_string(),
             goal: goal.to_string(),
@@ -761,30 +804,23 @@ Operator input: {line}
             raw_output_policy: "artifacts_scanned_redacted".to_string(),
             tool_wrapper_policy: "capo_wrapped_required".to_string(),
             live_provider_opt_in: true,
-        })?;
-        let ServerResponsePayload::LiveProviderPreflighted(preflight) = preflight else {
-            return Err("server returned unexpected response for Codex preflight".to_string());
-        };
-        let run = self.send_request(ServerCommand::RunLiveProviderLocal {
-            dispatch_plan_id: preflight.dispatch_plan_id,
-            goal: goal.to_string(),
             live_execution_opt_in: mock_provider_output_jsonl.is_none(),
             mock_runtime_opt_in: mock_provider_output_jsonl.is_some(),
             mock_provider_output_name: mock_provider_output_jsonl
                 .map(|_| "capo-control-planner-mock-codex.jsonl".to_string()),
             mock_provider_output_jsonl: mock_provider_output_jsonl.map(ToString::to_string),
             timeout_seconds,
-            // Ops set the spawn-path codex binary via `CAPO_CODEX_BIN`, resolved
-            // server-side; the operator-control flow passes no explicit override.
-            codex_program_override: None,
-            // The operator-control planner flow stays read-only/dry-run: a live
-            // workspace write goes through the attended `dispatch run-live` path.
+            max_turns: 1,
+            max_token_cost: u64::MAX,
+            turns_taken_before: 0,
+            token_cost_before: 0,
+            turn_token_cost: 0,
             unattended: true,
         })?;
-        let ServerResponsePayload::DispatchRun(run) = run else {
-            return Err("server returned unexpected response for Codex live run".to_string());
+        let ServerResponsePayload::DispatchTurn(turn) = response else {
+            return Err("server returned unexpected response for Codex dispatch turn".to_string());
         };
-        Ok(run)
+        Ok(turn)
     }
 
     fn agent_status(&mut self, agent: &str) -> Result<AgentSummary, String> {
@@ -1191,5 +1227,122 @@ mod tests {
             Some("| Number | Double |\n|---:|---:|\n| 1 | 2 |\n| 2 | 4 |")
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    const CODEX_FIXTURE: &str = include_str!("../../capo-adapters/fixtures/codex-exec.jsonl");
+
+    /// AI1: the PRODUCTION operator/live-run caller flows THROUGH
+    /// `run_dispatch_turn` and emits the loop's `TurnFinished`.
+    ///
+    /// This drives the real operator entry point
+    /// (`ControlRepl::run_codex_dispatch_turn`, the same code
+    /// `run_codex_live_turn`/`start`/`send`/the capo planner call) against a real
+    /// loopback server -- not the in-process `run_dispatch_turn` harness -- with a
+    /// deterministic mock-runtime Codex turn (no real provider binary). It asserts
+    /// the production caller (a) gets back the loop's `TurnFinished` annotation keyed
+    /// to the turn it drove, and (b) the server persisted the live dispatch substrate
+    /// (the live preflight gate + the mock-ingest `run.exited`). Both are produced
+    /// ONLY by the loop path, so a green test pins the acceptance to the real
+    /// production surface, not to the `RunDispatchTurn` command in isolation.
+    #[test]
+    fn operator_live_run_caller_flows_through_run_dispatch_turn_and_emits_turn_finished() {
+        use capo_core::ProjectId;
+        use std::net::TcpListener;
+
+        let server_root = std::env::temp_dir().join(format!(
+            "capo-operator-loop-path-{}",
+            stable_cli_hash("operator-loop-path")
+        ));
+        let _ = std::fs::remove_dir_all(&server_root);
+        std::fs::create_dir_all(&server_root).expect("mkdir server root");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address").to_string();
+        let serve_root = server_root.clone();
+        // The operator caller issues exactly one connection per `send_request`:
+        // RegisterAgent, StartSession, then RunDispatchTurn -> three connections.
+        // Size the bounded server to match so the thread drains and joins.
+        let server_thread = std::thread::spawn(move || {
+            capo_server::serve_tcp(
+                listener,
+                ProjectId::new("project-capo"),
+                serve_root,
+                Some(3),
+            )
+            .expect("serve tcp")
+        });
+
+        let mut repl = ControlRepl::new(
+            address.clone(),
+            None,
+            Box::new(NonePlanner),
+            server_root.clone(),
+        );
+
+        let goal = "Drive a live operator turn through the production loop";
+        repl.send_request(ServerCommand::RegisterAgent {
+            name: "codex-local".to_string(),
+        })
+        .expect("register agent");
+        let started = repl
+            .start_agent_session("codex-local", "codex", goal)
+            .expect("start session");
+
+        let turn = repl
+            .run_codex_dispatch_turn(
+                "codex-local",
+                goal,
+                &started.session_id.to_string(),
+                &started.run_id.to_string(),
+                Some(CODEX_FIXTURE),
+                30,
+            )
+            .expect("run codex dispatch turn");
+
+        // The production caller got back the loop's TurnFinished annotation, keyed
+        // to the turn it drove -- the loop's emission, not a raw run summary. Only
+        // the run_dispatch_turn path produces this; the old hand-sequenced
+        // preflight+run path returned a bare DispatchRun with no TurnFinished.
+        let expected_turn_id = format!("turn-{}-{}", slug("codex-local"), stable_cli_hash(goal));
+        assert_eq!(turn.finished.turn_id, expected_turn_id);
+        assert!(
+            turn.finished.observed_terminal_event,
+            "the loop's TurnFinished must observe the turn's terminal event"
+        );
+        assert_eq!(turn.finished.stop_reason, "completed");
+        assert!(turn.ceiling_breach_code.is_none());
+        assert_eq!(turn.run.status, "mocked_live_provider_output_ingested");
+        assert!(!turn.run.provider_cli_executed);
+
+        // The server persisted the LIVE dispatch substrate the loop drives: the
+        // live preflight gate and the mock-ingest run completion. This is the same
+        // event shape the in-process loop test asserts -- one path, one event shape.
+        let state = capo_state::SqliteStateStore::open(&server_root).expect("state");
+        let events = state
+            .recent_events_for_session(&started.session_id, 64)
+            .expect("session events");
+        assert!(
+            events.iter().any(|event| {
+                event.kind == "adapter.dispatch_gate_checked"
+                    && event
+                        .payload_json
+                        .contains("\"preflight_kind\":\"live_provider\"")
+            }),
+            "the operator caller must drive the live preflight gate through the loop"
+        );
+        assert!(
+            events.iter().any(|event| {
+                event.kind == "run.exited"
+                    && event
+                        .payload_json
+                        .contains("mock_live_provider_output_ingested_without_provider_cli")
+            }),
+            "the operator caller's run.exited must carry the loop's mock-ingest completion"
+        );
+
+        // The three operator requests are exactly the bounded server's connection
+        // budget, so it has already drained; join the thread (no leaked server).
+        let _ = server_thread.join();
+        let _ = std::fs::remove_dir_all(&server_root);
     }
 }

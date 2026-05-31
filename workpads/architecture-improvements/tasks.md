@@ -49,35 +49,65 @@ Verification:
 - `cargo fmt` / `cargo clippy --all-targets --all-features -- -D warnings` /
   `cargo test --workspace`.
 
-Evidence (2026-05-31):
+Evidence (2026-05-31, updated after boundary review):
 
-- Production wiring: `CapoServer::handle` now routes `ServerCommand::RunDispatchTurn`
+- Production caller REWIRED (the core acceptance): the operator/live-run flow
+  `crates/capo-cli/src/operator_control.rs::run_codex_live_turn_with_options`
+  (reached from the operator REPL `start`/`send` paths and the capo planner
+  `plan_with_operator_agent`) now issues a SINGLE `ServerCommand::RunDispatchTurn`
+  instead of hand-sequencing `PreflightLiveProvider` + `RunLiveProviderLocal`
+  beside the loop. A real operator turn therefore flows THROUGH
+  `run_dispatch_turn` (the loop drives preflight/run and ANNOTATES the run with a
+  `TurnFinished`). The operator surfaces still render only the run, but the
+  loop's `TurnFinished` is now produced and observable on the production path
+  (carried in the `DispatchTurn` payload via the new `run_codex_dispatch_turn`).
+- Documented, justified exception (per the acceptance clause): the low-level
+  `capo server dispatch live-run-local` / `plan` / `gate` / `live-preflight` /
+  `run-local` CLI subcommands (`crates/capo-cli/src/server_client/dispatch.rs`)
+  intentionally remain single-primitive surfaces — each issues exactly one
+  dispatch `ServerCommand` against a pre-existing `--dispatch-plan`, so an
+  operator/test can step the dispatch state machine one primitive at a time.
+  Folding them into the loop command would defeat their step-debugging purpose.
+  The orchestrated operator/live-run flow goes through `RunDispatchTurn`; these
+  are not that flow. A code comment records this exception at the function.
+- Server wiring: `CapoServer::handle` routes `ServerCommand::RunDispatchTurn`
   through `self.run_dispatch_turn(...)` and returns a `DispatchTurn` payload
-  pairing the run summary with the loop's `TurnFinished` annotation
-  (`crates/capo-server/src/lib.rs`). Completed the wire codec: added the
-  `encode_dispatch_run`/`decode_dispatch_run` helpers (shared by the `dispatch_run`
-  payload and the `run` field of `dispatch_turn`) and the `dispatch_turn`
-  encode/decode arms (`crates/capo-server/src/transport/codec.rs`); published
-  `run_dispatch_turn`/`dispatch_turn` in the wire schema enums
-  (`crates/capo-server/src/transport/contract.rs`) and regenerated the checked-in
-  `contract/jsonrpc-schema.json` snapshot; added the two missing exhaustive match
-  arms + sample command/payload values in the contract test
-  (`crates/capo-server/src/tests/contract.rs`).
-- Verification test (production command path, not a bespoke harness): added
-  `run_dispatch_turn_command_drives_the_loop_through_the_production_handle_path`
-  and `run_dispatch_turn_command_rejects_a_zero_wall_clock_timeout` in
-  `crates/capo-server/src/tests/turn_orchestration.rs`. The first drives
-  `ServerCommand::RunDispatchTurn` through `CapoServer::handle` (live-mock codex
-  turn, fail-closed live gate) and asserts the returned `DispatchTurn` carries a
-  loop `TurnFinished` keyed to the turn AND that the persisted dispatch event
-  sequence is byte-identical to the in-process loop over the same inputs (one
-  path, one event shape, drove the live preflight gate). The second proves the
-  command rejects a zero wall-clock timeout before any provider runs.
-- Gate run (worktree, 2026-05-31): `cargo fmt --check` ok; `cargo clippy
-  --all-targets --all-features -- -D warnings` clean; `cargo test --workspace`
-  all green (capo-server lib 93 passed, 0 failed). No live Codex smoke required
-  for AI1 (the deterministic live-mock fixture path satisfies the verification).
-- Acceptance: met. Did NOT git commit (workflow commits after review).
+  pairing the run summary with the loop's `TurnFinished`
+  (`crates/capo-server/src/lib.rs`). Wire codec: `encode_dispatch_run`/
+  `decode_dispatch_run` helpers + the `dispatch_turn` encode/decode arms
+  (`crates/capo-server/src/transport/codec.rs`); `run_dispatch_turn`/
+  `dispatch_turn` published in the wire schema enums
+  (`crates/capo-server/src/transport/contract.rs`) with the checked-in
+  `contract/jsonrpc-schema.json` snapshot.
+- Verification tests:
+  - PRODUCTION caller test (not the command in isolation):
+    `operator_live_run_caller_flows_through_run_dispatch_turn_and_emits_turn_finished`
+    (`crates/capo-cli/src/operator_control.rs` tests) drives the real
+    `run_codex_dispatch_turn` against a loopback server with a mock-runtime Codex
+    turn and asserts it gets back the loop's `TurnFinished` keyed to the turn AND
+    that the server persisted the live preflight gate + the mock-ingest
+    `run.exited` (the loop substrate). This fails if the caller reverts to the
+    raw preflight+run pair (no `TurnFinished` would come back).
+  - Live-substrate parity:
+    `loop_live_turn_drives_the_same_dispatch_sequence_as_the_hand_sequenced_live_path`
+    drives the raw `PreflightLiveProvider` + `RunLiveProviderLocal` pair (Arm A)
+    and `run_dispatch_turn` (Arm B) over identical live inputs and asserts the
+    dispatch event sequences are identical modulo the loop's one idempotent
+    leading `adapter.dispatch_planned` — i.e. one run-completion shape for the
+    live path, not loop==loop.
+  - Codec round-trip: the contract test's `sample_commands()`/`sample_payloads()`
+    loop now round-trips every sample (including `RunDispatchTurn`/`DispatchTurn`,
+    with distinct non-empty ref lists) through the real codec, so a field-order/
+    name bug in a new decode arm fails the build.
+  - Plus the prior handle-path and zero-timeout tests in
+    `crates/capo-server/src/tests/turn_orchestration.rs`.
+- Gate run (worktree, 2026-05-31): `cargo fmt --check` / `cargo clippy
+  --all-targets --all-features -- -D warnings` / `cargo test --workspace` all
+  green. No live Codex smoke required for AI1 (the deterministic live-mock
+  fixture path satisfies the verification).
+- Acceptance: met (production operator/live-run path flows through the loop;
+  documented exception for the low-level step primitives). Did NOT git commit
+  (workflow commits after review).
 
 ## AI2 - Inject a real Codex `AgentAdapter` as the default chat backend
 

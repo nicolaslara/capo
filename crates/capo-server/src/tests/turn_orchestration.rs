@@ -365,6 +365,164 @@ fn run_dispatch_turn_command_drives_the_loop_through_the_production_handle_path(
 }
 
 #[test]
+fn loop_live_turn_drives_the_same_dispatch_sequence_as_the_hand_sequenced_live_path() {
+    // AI1/RTL4 for the LIVE substrate: the loop's live turn produces the SAME
+    // dispatch event sequence as the hand-sequenced `PreflightLiveProvider` +
+    // `RunLiveProviderLocal` path the operator flow USED TO run beside the loop.
+    // This proves "one path, one event shape" for the live path specifically --
+    // not loop==loop, but loop == the raw two-command live sequence it replaces.
+    let goal = "Run the live substrate through the dispatch primitives";
+
+    // Arm A: the hand-sequenced direct live path (preflight then live run),
+    // driven with the deterministic mock-runtime codex output (no real provider).
+    let direct_root = temp_root();
+    let direct = CapoServer::open(ProjectId::new("project-capo"), &direct_root).expect("server");
+    register_and_start(&direct, "codex-local", goal, "session-direct", "run-direct");
+    let preflight = handle(
+        &direct,
+        ServerCommand::PreflightLiveProvider {
+            agent_name: "codex-local".to_string(),
+            adapter: "codex".to_string(),
+            goal: goal.to_string(),
+            workspace: "/tmp/capo-workspace".to_string(),
+            artifacts: "/tmp/capo-artifacts".to_string(),
+            session_id: "session-direct".to_string(),
+            run_id: "run-direct".to_string(),
+            turn_id: "turn-direct".to_string(),
+            capability_profile: "trusted-local".to_string(),
+            runtime_scope: "local_process_loopback".to_string(),
+            credential_scan_policy: "metadata_only_no_secret_read".to_string(),
+            raw_prompt_policy: "not_rendered".to_string(),
+            raw_output_policy: "artifacts_scanned_redacted".to_string(),
+            tool_wrapper_policy: "capo_wrapped_required".to_string(),
+            live_provider_opt_in: true,
+        },
+    );
+    let ServerResponsePayload::LiveProviderPreflighted(preflight) = preflight.payload else {
+        panic!("expected a live provider preflight response");
+    };
+    let direct_run = handle(
+        &direct,
+        ServerCommand::RunLiveProviderLocal {
+            dispatch_plan_id: preflight.dispatch_plan_id.clone(),
+            goal: goal.to_string(),
+            live_execution_opt_in: false,
+            mock_runtime_opt_in: true,
+            mock_provider_output_name: Some("codex-exec.jsonl".to_string()),
+            mock_provider_output_jsonl: Some(CODEX_FIXTURE.to_string()),
+            timeout_seconds: 30,
+            codex_program_override: None,
+            unattended: true,
+        },
+    );
+    let ServerResponsePayload::DispatchRun(direct_run) = direct_run.payload else {
+        panic!("expected a dispatch run response");
+    };
+
+    // Arm B: the loop-driven live path (run_dispatch_turn), identical inputs
+    // except a distinct session/run id so the two states are independent.
+    let loop_root = temp_root();
+    let loop_server = CapoServer::open(ProjectId::new("project-capo"), &loop_root).expect("server");
+    register_and_start(
+        &loop_server,
+        "codex-local",
+        goal,
+        "session-loop",
+        "run-loop",
+    );
+    let ceiling = RunResourceCeiling::for_live_provider(4, Duration::from_secs(30), 1_000);
+    let outcome = loop_server
+        .run_dispatch_turn(DispatchTurnRequest {
+            agent_name: "codex-local".to_string(),
+            adapter: "codex".to_string(),
+            goal: goal.to_string(),
+            workspace: "/tmp/capo-workspace".to_string(),
+            artifacts: "/tmp/capo-artifacts".to_string(),
+            session_id: "session-loop".to_string(),
+            run_id: "run-loop".to_string(),
+            turn_id: "turn-loop".to_string(),
+            mode: live_mode_under_ceiling(ceiling, RunResourceUsage::default(), 0),
+        })
+        .expect("run dispatch turn");
+
+    // Same run-completion truth as the hand-sequenced live path.
+    assert_eq!(outcome.run.status, direct_run.status);
+    assert_eq!(outcome.run.status, "mocked_live_provider_output_ingested");
+    assert_eq!(
+        outcome.run.provider_cli_executed,
+        direct_run.provider_cli_executed
+    );
+    assert!(!outcome.run.provider_cli_executed);
+    assert_eq!(outcome.run.input_event_count, direct_run.input_event_count);
+    assert_eq!(
+        outcome.run.appended_event_count,
+        direct_run.appended_event_count
+    );
+    assert_eq!(outcome.run.tool_event_count, direct_run.tool_event_count);
+    assert_eq!(
+        outcome.run.completed_turn_count,
+        direct_run.completed_turn_count
+    );
+
+    // The dispatch-relevant event sequence is identical between the loop's live
+    // turn and the hand-sequenced live path, MODULO exactly one intentional,
+    // idempotent difference: the loop always opens a turn with an explicit
+    // `PlanDispatch` (uniform across the deterministic and live arms), so it emits
+    // one leading `adapter.dispatch_planned` that the raw `PreflightLiveProvider`
+    // path does not (the live preflight embeds its plan into the gate). The plan is
+    // idempotent (same plan id). Everything else -- the gate, the projected batch,
+    // the dispatch execution, run.exited, and replay -- must match exactly. This is
+    // "one run-completion shape" for the live path, not loop==loop.
+    let direct_kinds = dispatch_event_kinds(&direct_root, "session-direct");
+    let loop_kinds = dispatch_event_kinds(&loop_root, "session-loop");
+    let count_planned = |kinds: &[String]| {
+        kinds
+            .iter()
+            .filter(|kind| *kind == "adapter.dispatch_planned")
+            .count()
+    };
+    assert_eq!(
+        count_planned(&loop_kinds),
+        count_planned(&direct_kinds) + 1,
+        "the loop adds exactly one idempotent leading plan vs the raw live path"
+    );
+    let strip_planned = |kinds: Vec<String>| {
+        kinds
+            .into_iter()
+            .filter(|kind| kind != "adapter.dispatch_planned")
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        strip_planned(loop_kinds.clone()),
+        strip_planned(direct_kinds.clone()),
+        "apart from the loop's idempotent leading plan, the loop's live turn must \
+         produce the same dispatch event sequence as the hand-sequenced \
+         PreflightLiveProvider + RunLiveProviderLocal path"
+    );
+    // Sanity: both drove the live preflight gate and the mock-ingest run.exited,
+    // and the loop drove the plan.
+    assert!(
+        loop_kinds
+            .iter()
+            .any(|kind| kind == "adapter.dispatch_planned")
+    );
+    for required in ["adapter.dispatch_gate_checked", "run.exited"] {
+        assert!(
+            direct_kinds.iter().any(|kind| kind == required),
+            "hand-sequenced live path missing {required}"
+        );
+        assert!(
+            loop_kinds.iter().any(|kind| kind == required),
+            "loop live path missing {required}"
+        );
+    }
+    // The loop annotated the live run with a TurnFinished -- the loop's emission
+    // the hand-sequenced path never produced.
+    assert_eq!(outcome.finished.turn_id.as_str(), "turn-loop");
+    assert!(outcome.finished.observed_terminal_event());
+}
+
+#[test]
 fn run_dispatch_turn_command_rejects_a_zero_wall_clock_timeout() {
     // AI1: a live turn must run inside a wall-clock-bounded ceiling. The
     // production command rejects a zero timeout before any provider runs, with a

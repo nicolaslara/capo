@@ -22,7 +22,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::contract::{self, WireSample};
-use crate::{ServerCommand, ServerError, ServerResponsePayload};
+use crate::{
+    ServerCommand, ServerError, ServerInputOrigin, ServerRequest, ServerResponse,
+    ServerResponsePayload, jsonrpc_request_roundtrip, jsonrpc_response_roundtrip,
+};
 
 /// The checked-in contract directory: `crates/capo-server/contract/`.
 fn contract_dir() -> PathBuf {
@@ -334,20 +337,45 @@ fn schema_enumerations_cover_every_wire_variant() {
         "error kinds",
     );
 
-    // Every command method tag the codec can emit is published.
+    // Every command method tag the codec can emit is published AND every sample
+    // command survives a full encode/decode round-trip through the real codec.
+    // The round-trip is what catches a field-order/name bug in a decode arm (a
+    // tag-only schema check cannot): a sample of every variant -- including the
+    // new `RunDispatchTurn` -- goes through `encode_command`/`decode_command`
+    // (via the request envelope) and must come back unchanged.
     for command in sample_commands() {
         let tag = command_method(&command);
         assert!(
             request_methods.iter().any(|m| m == tag),
             "schema request methods missing `{tag}`: {request_methods:?}"
         );
+        let request = ServerRequest::cli(command.clone());
+        assert_eq!(
+            jsonrpc_request_roundtrip(&request),
+            request,
+            "command `{tag}` did not survive a codec round-trip"
+        );
     }
-    // Every payload tag the codec can emit is published.
+    // Every payload tag the codec can emit is published AND every sample payload
+    // survives a full encode/decode round-trip through the real codec (the same
+    // field-order/name guard for `DispatchTurn` and every other payload variant).
     for payload in sample_payloads() {
         let tag = payload_type(&payload);
         assert!(
             payload_tags.iter().any(|t| t == tag),
             "schema payload types missing `{tag}`: {payload_tags:?}"
+        );
+        let response = ServerResponse {
+            request_id: "contract-roundtrip".to_string(),
+            client_id: "local-cli".to_string(),
+            actor_id: "local-user".to_string(),
+            input_origin: ServerInputOrigin::Cli,
+            payload: payload.clone(),
+        };
+        assert_eq!(
+            jsonrpc_response_roundtrip(&response),
+            response,
+            "payload `{tag}` did not survive a codec round-trip"
         );
     }
     // Every domain error kind is published, plus the transport-only kinds.
@@ -670,11 +698,14 @@ fn sample_payloads() -> Vec<ServerResponsePayload> {
             finished: TurnFinishedSummary {
                 turn_id: s(),
                 stop_reason: s(),
-                observed_terminal_event: false,
-                summary_refs: vec![],
-                observed_tool_refs: vec![],
+                observed_terminal_event: true,
+                // Distinct, non-empty, differently-shaped ref lists so the codec
+                // round-trip detects a field swap (e.g. summary_refs decoded into
+                // observed_tool_refs) rather than passing on two empty vecs.
+                summary_refs: vec!["summary-a".to_string(), "summary-b".to_string()],
+                observed_tool_refs: vec!["tool-a".to_string()],
             },
-            ceiling_breach_code: None,
+            ceiling_breach_code: Some("max_turns_exceeded".to_string()),
         }),
         ServerResponsePayload::Recovery(RecoverySummary {
             recovery_attempt_id: s(),

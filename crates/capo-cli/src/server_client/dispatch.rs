@@ -233,6 +233,17 @@ pub(crate) fn server_dispatch_run_local(
     ))
 }
 
+// AI1 documented exception: `capo server dispatch live-run-local` (and its sibling
+// `plan`/`gate`/`live-preflight`/`run-local`) are the LOW-LEVEL single-primitive
+// CLI surface, by design. Each issues exactly one dispatch `ServerCommand` against
+// an already-existing `--dispatch-plan` (here, produced by a prior
+// `live-preflight`), so an operator/test can step the dispatch state machine one
+// primitive at a time. It is NOT the orchestrated operator/live-run flow -- that
+// flow is `operator_control.rs::run_codex_live_turn_with_options`, which now issues
+// the single `ServerCommand::RunDispatchTurn` so a real user-invoked live run flows
+// THROUGH `run_dispatch_turn` (the loop) and emits `TurnFinished`. Folding these
+// step primitives into the loop command would defeat their purpose (you could no
+// longer drive a single primitive in isolation), so they intentionally remain raw.
 pub(crate) fn server_dispatch_live_run_local(
     parsed: &ParsedArgs,
     args: &[String],
