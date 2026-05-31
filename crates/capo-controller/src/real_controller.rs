@@ -190,6 +190,22 @@ impl RealBoundaryController {
         })
     }
 
+    /// AI2: return this production handle with the underlying core's chat adapter
+    /// swapped (a per-agent view, not a global default).
+    ///
+    /// The server uses this to route a Codex-BOUND agent's `SendTask`/`SteerAgent`
+    /// through the [`CodexLiveAdapter`] while every other agent keeps the shared
+    /// (fake) adapter. The core clone shares the one SQLite store (it is a path
+    /// handle), so this changes only which handle drives the chat turn; the
+    /// persisted store and projection path are identical. The Codex chat turn
+    /// itself fails CLOSED-FAST when [`capo_adapters::codex_live_chat_gate_open`]
+    /// is off, so this binding never spawns or blocks unless the operator opts in.
+    #[must_use]
+    pub fn with_adapter(mut self, adapter: AgentAdapterHandle) -> Self {
+        self.core = self.core.with_adapter(adapter);
+        self
+    }
+
     /// Open the real controller with an explicit permission policy and adapter.
     pub fn open_with_permission_policy_and_adapter(
         project_id: ProjectId,

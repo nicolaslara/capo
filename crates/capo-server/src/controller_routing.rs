@@ -64,6 +64,7 @@
 //! [`ControllerSelection::Real`] default. The default routing is recorded in
 //! `workpads/real-turn-loop/knowledge.md`.
 
+use capo_adapters::AgentAdapterHandle;
 use capo_controller::{
     FakeAgentRegistration, FakeBoundaryController, FakeReadModelObservation, FakeRunRefs,
     RealBoundaryController, RecoveryReport,
@@ -160,6 +161,36 @@ impl<'a> ControllerRoute<'a> {
             ControllerSelection::Real => {
                 Self::Real(Box::new(RealBoundaryController::from_core(core.clone())))
             }
+        }
+    }
+
+    /// AI2: a route whose chat handle is the supplied per-agent adapter (a
+    /// Codex-bound [`AgentAdapterHandle::codex`]), built over a CLONE of the
+    /// shared core.
+    ///
+    /// This is the binding-respecting chat route: the server uses it ONLY for a
+    /// Codex-bound agent's `SendTask`/`SteerAgent`, so that agent's chat turn
+    /// drives the real Codex handle while every other agent keeps the shared
+    /// (fake/default) adapter through [`Self::new`]. The core clone shares the one
+    /// SQLite store (a path handle), so swapping the adapter changes only which
+    /// handle drives the turn, never the persisted store/projection path. A bound
+    /// agent's turn still fails CLOSED-FAST (immediate typed error, no spawn) when
+    /// the live-provider gate is off. Codex chat respects the same routing switch:
+    /// the `Fake` selection (the documented rollback) keeps the fake adapter even
+    /// for a bound agent, so a single env value can disable the real path entirely.
+    pub(crate) fn new_codex_bound(
+        selection: ControllerSelection,
+        core: &'a FakeBoundaryController,
+        adapter: AgentAdapterHandle,
+    ) -> Self {
+        match selection {
+            // Rollback (the documented `Fake` selection / falsey opt-in): keep the
+            // shared fake adapter even for a Codex-bound agent, so a single env
+            // value disables the real chat path without any code change.
+            ControllerSelection::Fake => Self::Fake(core),
+            ControllerSelection::Real => Self::Real(Box::new(
+                RealBoundaryController::from_core(core.clone()).with_adapter(adapter),
+            )),
         }
     }
 

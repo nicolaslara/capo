@@ -8,6 +8,7 @@ fn server_native_sessions_allow_multiple_historical_sessions_per_agent() {
         &server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
 
@@ -112,6 +113,7 @@ fn server_native_session_start_persists_goal_hash_instead_of_raw_goal() {
         &server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     let raw_goal = "DO_NOT_PERSIST_RAW_GOAL_SV13";
@@ -205,6 +207,7 @@ fn server_rejects_adapter_fixtures_over_raw_body_cap() {
         &server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(

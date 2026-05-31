@@ -544,6 +544,7 @@ fn error_kinds() -> Vec<&'static str> {
         "unknown_session",
         "run_session_mismatch",
         "adapter_session_mismatch",
+        "unsupported_chat_adapter",
         "remote",
         "cancelled",
         "interrupted",

@@ -208,6 +208,7 @@ impl ControlRepl {
         if !agents.iter().any(|agent| agent.name == CAPO_PLANNER_AGENT) {
             let response = self.send_request(ServerCommand::RegisterAgent {
                 name: CAPO_PLANNER_AGENT.to_string(),
+                adapter: "fake".to_string(),
             })?;
             if !matches!(response, ServerResponsePayload::AgentRegistered(_)) {
                 return Err(
@@ -689,6 +690,7 @@ Operator input: {line}
         }
         let response = self.send_request(ServerCommand::RegisterAgent {
             name: agent.to_string(),
+            adapter: "fake".to_string(),
         })?;
         if matches!(response, ServerResponsePayload::AgentRegistered(_)) {
             Ok(())
@@ -1282,6 +1284,7 @@ mod tests {
         let goal = "Drive a live operator turn through the production loop";
         repl.send_request(ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         })
         .expect("register agent");
         let started = repl

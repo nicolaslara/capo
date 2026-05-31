@@ -67,6 +67,7 @@ fn run_lifecycle(selection: ControllerSelection, terminal: ServerCommand) -> Obs
         &server,
         ServerCommand::RegisterAgent {
             name: "routing-agent".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     response_payload_variants.push(payload_variant(&registered.payload));
@@ -241,6 +242,7 @@ fn post_cutover_default_selection_is_real_with_a_one_value_fake_rollback() {
         &server,
         ServerCommand::RegisterAgent {
             name: "default-routing-agent".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     assert_eq!(payload_variant(&registered.payload), "AgentRegistered");
@@ -291,6 +293,7 @@ fn real_routing_over_injected_scripted_mock_drives_that_adapter() {
         &server,
         ServerCommand::RegisterAgent {
             name: "injected-agent".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     let sent = handle(

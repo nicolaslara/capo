@@ -22,6 +22,7 @@ fn server_live_provider_preflight_gates_codex_and_claude_without_execution() {
             &server,
             ServerCommand::RegisterAgent {
                 name: agent.to_string(),
+                adapter: "fake".to_string(),
             },
         );
         handle(
@@ -94,6 +95,7 @@ fn server_live_provider_preflight_fails_closed_without_opt_in_or_policies() {
         &server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(
@@ -177,6 +179,7 @@ fn server_live_provider_preflight_changed_policy_does_not_leave_stale_ready_gate
         &server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(
@@ -291,6 +294,7 @@ fn server_live_provider_local_run_requires_ready_codex_preflight_and_mock_opt_in
         &server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(
@@ -467,6 +471,7 @@ fn server_live_provider_local_run_rechecks_prompt_after_existing_real_execution(
         &server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(
@@ -566,6 +571,7 @@ fn server_live_provider_run_exit_audit_distinguishes_mock_and_real_metadata() {
         &server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(
@@ -665,6 +671,7 @@ fn server_live_provider_local_run_blocks_claude_in_first_live_slice() {
         &server,
         ServerCommand::RegisterAgent {
             name: "claude-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(
@@ -736,6 +743,7 @@ fn server_live_provider_local_run_rejects_credential_like_paths() {
         &server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(
@@ -814,6 +822,7 @@ fn server_live_provider_local_run_rejects_symlinked_credential_paths() {
         &server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(

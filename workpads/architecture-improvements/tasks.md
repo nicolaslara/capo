@@ -111,7 +111,11 @@ Evidence (2026-05-31, updated after boundary review):
 
 ## AI2 - Real Codex `AgentAdapter` for the chat surface (binding-respecting, fail-closed-fast)
 
-Status: done. Priority: high. Source: real-turn-loop arch review.
+Status: done (controller seam). The PRODUCTION ROUTE that makes this seam
+reachable by a user end-to-end is AI4 (also done) -- before AI4 the
+`CodexLiveAdapter` had no production caller: `capo server serve` always built the
+controller with the fake adapter and `capo server agent register` rejected
+non-fake adapters. Priority: high. Source: real-turn-loop arch review.
 
 Problem:
 
@@ -328,3 +332,90 @@ Evidence (2026-05-31, worktree `feat/architecture-improvements`):
   BOTH the server route and the direct CLI `SendTask` surfaces; the per-turn
   summary is a real dispatched result, not the fake shim; the documented parity
   divergence is the intended "one dispatch path, one event shape").
+
+## AI4 - Make AI2 real-Codex chat reachable END-TO-END through the running server
+
+Status: done. Priority: high. Source: AI2 boundary review (the `CodexLiveAdapter`
+seam had no production route).
+
+Problem:
+
+- AI2 built a correct, fail-closed-fast `CodexLiveAdapter` and a binding-respecting
+  controller seam (`RealBoundaryController::open_codex_chat` /
+  `CapoServer::open_with_controller_and_adapter`), but NO production caller wired
+  it: `capo server serve` (`serve_tcp` -> `CapoServer::open`) always built the
+  controller with the default fake adapter, and `capo server agent register`
+  rejected any non-fake `--adapter` (`require_fake_arg` in
+  `crates/capo-cli/src/server_client.rs`: "--adapter only supports fake in SV1").
+  So real-Codex chat via `SendTask`/`SteerAgent` was UNREACHABLE by a user.
+
+Acceptance (met):
+
+- `capo server agent register --adapter codex` registers a CODEX-BOUND agent. The
+  CLI's `require_fake_arg("--adapter")` was relaxed to `require_chat_adapter_arg`,
+  which accepts `fake` (the default) and `codex` and rejects everything else
+  (`crates/capo-cli/src/server_client.rs`). `--runtime` is still `fake`-only.
+  Mock/fake agents are unchanged.
+- The `--adapter` binding travels to the server on the wire:
+  `ServerCommand::RegisterAgent { name, adapter }` (`crates/capo-server/src/types.rs`),
+  encoded/decoded with a back-compatible default (`adapter` omitted => `fake`) in
+  `crates/capo-server/src/transport/codec.rs`; the published schema enum gained the
+  new `unsupported_chat_adapter` error kind (regenerated
+  `contract/jsonrpc-schema.json`).
+- The server binds the adapter PER AGENT (not a global default). `CapoServer` holds
+  `CodexChatBindings` (an `Arc<Mutex<HashSet<String>>>` of codex-bound agent names +
+  the workspace/artifact roots under `<state_root>/codex-chat` + an absolute
+  `CAPO_CODEX_BIN` override). `RegisterAgent { adapter: "codex" }` records the
+  binding (and rejects any other value with `ServerError::UnsupportedChatAdapter`).
+  At `SendTask`/`SteerAgent` the new `CapoServer::chat_controller(agent_name)`
+  routes a bound agent through `ControllerRoute::new_codex_bound` (a
+  `RealBoundaryController::with_adapter(codex_handle)` view over a CLONE of the
+  shared core -- the SQLite store is a path handle, so only the chat handle
+  changes), and every other agent through the ordinary `command_controller`. Codex
+  is never the global default; the `Fake`/rollback selection keeps the fake adapter
+  even for a bound agent. `with_adapter` was added to `FakeBoundaryController` and
+  `RealBoundaryController` (`crates/capo-controller/`).
+- Fail-closed-fast preserved: a codex-bound chat with the gate OFF
+  (`codex_live_chat_gate_open()==false`) returns an IMMEDIATE typed error
+  (`StateError::CodexLiveChat` -> wire) -- no spawn, no block -- exactly as the AI2
+  adapter already enforced; the server merely routes to it.
+
+Verification (met):
+
+- DETERMINISTIC END-TO-END (always-on): `crates/capo-server/src/tests/codex_chat.rs`
+  `codex_bound_chat_flows_real_stub_output_end_to_end_through_the_running_server`
+  drives the REAL server path (`serve_tcp` over loopback + `send_tcp` client) with
+  a deterministic absolute-path `codex` STUB pinned via `CAPO_CODEX_BIN` and the
+  live gate open. It asserts `SendTask`'s returned `external_session_ref` is the
+  codex-live binding ref AND the persisted session summary is the STUB's parsed
+  `agent_message` text (`CODEX_STUB_E2E_CHAT_SUMMARY`) -- NOT a fake summary -- and
+  that a FAKE-bound agent on the SAME server still routes through the fake adapter.
+- FAIL-CLOSED-FAST END-TO-END: `codex_bound_chat_fails_closed_fast_end_to_end_when_gate_is_off`
+  (gate OFF, codex pinned to a non-existent path) asserts the codex-bound `SendTask`
+  returns a typed fail-closed transport error in well under a second (no spawn, no
+  hang).
+- CLI PROCESS PATH: `crates/capo-cli/tests/server_transport/live.rs`
+  `cli_registers_codex_agent_and_gets_real_stub_chat_through_running_server` spawns
+  a real `capo server serve` process (gate + `CAPO_CODEX_BIN` stub in the SERVER
+  env), runs `capo server agent register --adapter codex` + `capo server task send`,
+  and asserts the rendered agent-status `latest_summary` is the stub's real text;
+  `cli_rejects_unsupported_chat_adapter_on_register` asserts `--adapter claude` is
+  rejected client-side.
+- LIVE OPT-IN SMOKE: `codex_live_chat_smoke` (`#[ignore]` + both env gates) sends a
+  trivial goal to a codex agent through the real server and asserts real Codex
+  output; it skips cleanly when the gates are unset or `codex` is unavailable.
+- The mock/planner tests stay GREEN: `capo_planner_tracks_decisions_*` and the
+  whole CLI/server suites pass unchanged (a fake agent still routes to the fake
+  adapter). The AI1 consolidation kept the planner connection count at 28; AI4
+  adds no connections to that flow.
+- Gate run (worktree, 2026-05-31): `cargo fmt --all --check` (exit 0); `cargo
+  clippy --all-targets --all-features -- -D warnings` (exit 0); `cargo test
+  --workspace` COMPLETED green (exit 0, 0 failed; the two new deterministic E2E
+  tests pass, the live smoke is `#[ignore]`d). No live Codex required (the
+  deterministic stub path satisfies the verification). Did NOT git commit (workflow
+  commits after review).
+
+Acceptance: met (real-Codex chat is now reachable end-to-end through the running
+server: register `--adapter codex`, then `SendTask`/`SteerAgent` drive the real
+read-only one-shot Codex per the agent's binding, fail-closed-fast when the gate is
+off, with fake agents unchanged).

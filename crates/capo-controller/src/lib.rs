@@ -126,6 +126,21 @@ impl FakeBoundaryController {
         &self.state
     }
 
+    /// AI2: return a clone of this core with its chat adapter handle swapped.
+    ///
+    /// The core's [`SqliteStateStore`] is a path handle, so the clone shares one
+    /// database with the source -- swapping the adapter changes ONLY which handle
+    /// drives the chat turn (`send_task`/`redirect`), never the persisted store.
+    /// The server uses this to drive a Codex-BOUND agent's chat turn through the
+    /// [`AgentAdapterHandle::codex`] handle while leaving the shared default
+    /// (fake) core untouched for every other agent. This is the binding-respecting
+    /// seam: it is a per-agent view, not a new global default.
+    #[must_use]
+    pub fn with_adapter(mut self, adapter: AgentAdapterHandle) -> Self {
+        self.adapter = adapter;
+        self
+    }
+
     pub fn initialize(&self, command: &CommandEnvelope) -> StateResult<ControllerInit> {
         require_intent(command, CommandIntent::InitializeProject);
         Ok(ControllerInit {

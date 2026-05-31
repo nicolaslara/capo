@@ -46,6 +46,11 @@ pub enum ServerError {
         session_adapter: String,
         requested_adapter: String,
     },
+    /// AI2: `RegisterAgent` requested a chat adapter binding other than the two
+    /// supported values (`fake`, `codex`). Rejected before the agent is created.
+    UnsupportedChatAdapter {
+        adapter: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -107,6 +112,12 @@ impl From<ServerInputOrigin> for InputOrigin {
 pub enum ServerCommand {
     RegisterAgent {
         name: String,
+        /// AI2: the agent's chat adapter binding. `fake` (the default) keeps the
+        /// deterministic fake adapter for `SendTask`/`SteerAgent`; `codex` binds
+        /// the real read-only one-shot [`capo_adapters::CodexLiveAdapter`] for
+        /// THIS agent's chat turns (fail-closed-fast when the live-provider gate
+        /// is off). Binding is per-agent: Codex is never a global chat default.
+        adapter: String,
     },
     SendTask {
         agent_name: String,
@@ -818,7 +829,7 @@ pub struct RecoverySummary {
 
 fn default_request_id(command: &ServerCommand) -> String {
     match command {
-        ServerCommand::RegisterAgent { name } => {
+        ServerCommand::RegisterAgent { name, .. } => {
             format!("server-agent-register-{}", slug(name))
         }
         ServerCommand::SendTask {

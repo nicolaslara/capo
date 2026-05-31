@@ -288,6 +288,7 @@ fn schema_enumerations_cover_every_wire_variant() {
             ServerError::UnknownSession { .. } => "unknown_session",
             ServerError::RunSessionMismatch { .. } => "run_session_mismatch",
             ServerError::AdapterSessionMismatch { .. } => "adapter_session_mismatch",
+            ServerError::UnsupportedChatAdapter { .. } => "unsupported_chat_adapter",
         }
     }
 
@@ -426,7 +427,10 @@ fn string_enum(schema: &serde_json::Value, path: &[&str], what: &str) -> Vec<Str
 fn sample_commands() -> Vec<ServerCommand> {
     let s = || "x".to_string();
     vec![
-        ServerCommand::RegisterAgent { name: s() },
+        ServerCommand::RegisterAgent {
+            name: s(),
+            adapter: s(),
+        },
         ServerCommand::SendTask {
             agent_name: s(),
             goal: s(),

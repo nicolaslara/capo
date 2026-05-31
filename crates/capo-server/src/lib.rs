@@ -2,9 +2,11 @@
 //!
 //! This crate owns the typed request/response surface that clients should use
 //! before choosing a concrete transport such as a local socket or remote API.
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use capo_adapters::AgentAdapterHandle;
+use capo_adapters::{AgentAdapterHandle, CodexLiveAdapter};
 use capo_controller::{FakeBoundaryController, LocalAdapterDispatchRunStart};
 use capo_core::{AgentId, CommandIntent, CommandTarget, ProjectId, RunId, SessionId, TaskId};
 use capo_state::{
@@ -63,6 +65,76 @@ pub struct CapoServer {
     project_id: ProjectId,
     controller: FakeBoundaryController,
     controller_selection: ControllerSelection,
+    /// AI2: the per-agent Codex chat binding registry + the config a Codex-bound
+    /// turn needs.
+    codex_chat: CodexChatBindings,
+}
+
+/// AI2: the server's record of which registered agents are bound to the real
+/// Codex chat adapter, plus the workspace/artifact roots and (optional) program
+/// override a Codex-bound `SendTask`/`SteerAgent` turn needs.
+///
+/// Binding is PER-AGENT, recorded at `RegisterAgent` time, and consulted at chat
+/// time. A non-Codex agent never appears here and keeps the shared (fake/default)
+/// adapter, so Codex is never a global chat default. The bound set is shared
+/// across the server's cloned views (register and chat arrive on different
+/// connections of the same server process) behind a [`Mutex`]. The Codex chat
+/// turn itself is fail-closed-fast: even a bound agent's turn returns an immediate
+/// typed error (no spawn) when [`capo_adapters::codex_live_chat_gate_open`] is off.
+#[derive(Clone, Debug)]
+struct CodexChatBindings {
+    bound_agents: Arc<Mutex<HashSet<String>>>,
+    workspace_root: PathBuf,
+    artifact_root: PathBuf,
+    /// Absolute path to a codex binary (ops `CAPO_CODEX_BIN`; tests a stub). Only
+    /// honored when absolute -- the runtime spawns with `env_clear()`.
+    program_override: Option<String>,
+}
+
+impl CodexChatBindings {
+    /// Derive the Codex chat config from the server `state_root`: the one-shot
+    /// runs confined to `<state_root>/codex-chat/workspace` and writes artifacts
+    /// under `<state_root>/codex-chat/artifacts`. An absolute `CAPO_CODEX_BIN`
+    /// pins the codex program; a relative value is ignored (env_clear spawn).
+    fn from_state_root(state_root: &Path) -> Self {
+        let base = state_root.join("codex-chat");
+        let program_override = std::env::var("CAPO_CODEX_BIN")
+            .ok()
+            .filter(|path| Path::new(path).is_absolute());
+        Self {
+            bound_agents: Arc::new(Mutex::new(HashSet::new())),
+            workspace_root: base.join("workspace"),
+            artifact_root: base.join("artifacts"),
+            program_override,
+        }
+    }
+
+    /// Record that `agent_name` is bound to the Codex chat adapter.
+    fn bind(&self, agent_name: &str) {
+        self.bound_agents
+            .lock()
+            .expect("codex chat binding lock")
+            .insert(agent_name.to_string());
+    }
+
+    /// Whether `agent_name` is bound to the Codex chat adapter.
+    fn is_bound(&self, agent_name: &str) -> bool {
+        self.bound_agents
+            .lock()
+            .expect("codex chat binding lock")
+            .contains(agent_name)
+    }
+
+    /// Build the per-agent Codex chat handle. The handle drives the real one-shot
+    /// only when the live-provider gate is open; otherwise it fails closed-fast.
+    fn codex_handle(&self) -> AgentAdapterHandle {
+        let mut adapter =
+            CodexLiveAdapter::new(self.workspace_root.clone(), self.artifact_root.clone());
+        if let Some(program) = self.program_override.as_deref() {
+            adapter = adapter.with_codex_program_override(program);
+        }
+        AgentAdapterHandle::codex(adapter)
+    }
 }
 
 impl CapoServer {
@@ -88,12 +160,14 @@ impl CapoServer {
         state_root: impl AsRef<Path>,
         controller_selection: ControllerSelection,
     ) -> ServerResult<Self> {
+        let codex_chat = CodexChatBindings::from_state_root(state_root.as_ref());
         let controller = FakeBoundaryController::open(project_id.clone(), state_root)
             .map_err(ServerError::State)?;
         Ok(Self {
             project_id,
             controller,
             controller_selection,
+            codex_chat,
         })
     }
 
@@ -118,6 +192,7 @@ impl CapoServer {
         controller_selection: ControllerSelection,
         adapter: AgentAdapterHandle,
     ) -> ServerResult<Self> {
+        let codex_chat = CodexChatBindings::from_state_root(state_root.as_ref());
         let controller =
             FakeBoundaryController::open_with_adapter(project_id.clone(), state_root, adapter)
                 .map_err(ServerError::State)?;
@@ -125,6 +200,7 @@ impl CapoServer {
             project_id,
             controller,
             controller_selection,
+            codex_chat,
         })
     }
 
@@ -142,12 +218,46 @@ impl CapoServer {
         ControllerRoute::new(self.controller_selection, &self.controller)
     }
 
+    /// AI2: the chat-routing view for `agent_name`'s `SendTask`/`SteerAgent`.
+    ///
+    /// If the agent registered with `--adapter codex` it is in the per-agent
+    /// Codex binding registry, so its chat turn routes through a Codex-bound view
+    /// of the shared core (the real read-only one-shot when the live-provider gate
+    /// is open; an immediate fail-closed-fast typed error when it is off). Every
+    /// other (fake/default) agent routes through the ordinary
+    /// [`Self::command_controller`], so Codex is never a global chat default.
+    fn chat_controller(&self, agent_name: &str) -> ControllerRoute<'_> {
+        if self.codex_chat.is_bound(agent_name) {
+            ControllerRoute::new_codex_bound(
+                self.controller_selection,
+                &self.controller,
+                self.codex_chat.codex_handle(),
+            )
+        } else {
+            self.command_controller()
+        }
+    }
+
     pub fn handle(&self, request: ServerRequest) -> ServerResult<ServerResponse> {
         let request_id = request.request_id.clone();
         let origin = request.origin.clone();
         match request.command {
-            ServerCommand::RegisterAgent { name } => {
-                let command_hash = command_identity_hash(format!("register_agent:{name}"));
+            ServerCommand::RegisterAgent { name, adapter } => {
+                // AI2: resolve the agent's chat adapter binding. `fake` (default)
+                // keeps the deterministic adapter; `codex` binds the real Codex
+                // chat handle for THIS agent only (fail-closed-fast on chat).
+                // Anything else is rejected before the agent is created.
+                let codex_bound = match adapter.as_str() {
+                    "fake" => false,
+                    "codex" => true,
+                    other => {
+                        return Err(ServerError::UnsupportedChatAdapter {
+                            adapter: other.to_string(),
+                        });
+                    }
+                };
+                let command_hash =
+                    command_identity_hash(format!("register_agent:{name}:{adapter}"));
                 let command = self.command_envelope(
                     &request_id,
                     &origin,
@@ -160,6 +270,9 @@ impl CapoServer {
                     .command_controller()
                     .register_agent_command(&command)
                     .map_err(ServerError::State)?;
+                if codex_bound {
+                    self.codex_chat.bind(&registration.agent_name);
+                }
                 self.record_server_request_handled(&command, &origin, "register_agent", None, None)
                     .map_err(ServerError::State)?;
                 self.response(
@@ -200,14 +313,17 @@ impl CapoServer {
                     CommandIntent::SendTask,
                     Some(goal),
                 );
+                // AI2: pick the chat route by the agent's binding BEFORE moving the
+                // name into the command args -- a Codex-bound agent drives the real
+                // Codex handle; every other agent keeps the default adapter.
+                let chat_controller = self.chat_controller(&agent_name);
                 command
                     .structured_args
                     .push(("agent".to_string(), agent_name));
                 command
                     .structured_args
                     .push(("scenario".to_string(), scenario));
-                let run = self
-                    .command_controller()
+                let run = chat_controller
                     .send_task_command(&command)
                     .map_err(ServerError::State)?;
                 self.record_server_request_handled(
@@ -258,7 +374,10 @@ impl CapoServer {
                 command
                     .structured_args
                     .push(("agent".to_string(), agent_name.clone()));
-                self.command_controller()
+                // AI2: SteerAgent routes by the agent's binding too -- a Codex-bound
+                // agent's steer turn drives the real Codex handle (fail-closed-fast
+                // when the live-provider gate is off); others keep the default.
+                self.chat_controller(&agent_name)
                     .redirect_command(&command)
                     .map_err(ServerError::State)?;
                 self.record_server_request_handled(

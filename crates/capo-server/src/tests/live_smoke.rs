@@ -60,6 +60,7 @@ fn register_and_start(server: &CapoServer, session: &str, run: &str, goal: &str)
         server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(

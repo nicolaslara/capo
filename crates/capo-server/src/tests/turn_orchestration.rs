@@ -19,6 +19,7 @@ fn register_and_start(server: &CapoServer, agent: &str, goal: &str, session: &st
         server,
         ServerCommand::RegisterAgent {
             name: agent.to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(

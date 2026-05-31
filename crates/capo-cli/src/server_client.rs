@@ -51,7 +51,11 @@ pub(crate) fn server_agent_register(
     parsed: &ParsedArgs,
     args: &[String],
 ) -> Result<String, String> {
-    require_fake_arg(args, "--adapter")?;
+    // AI2: `--adapter` now binds the agent's CHAT adapter. `fake` (the default)
+    // keeps the deterministic adapter; `codex` binds the real read-only one-shot
+    // Codex chat handle for this agent's `SendTask`/`SteerAgent` (fail-closed-fast
+    // when the live-provider gate is off). Any other value is rejected here.
+    let adapter = require_chat_adapter_arg(args, "--adapter")?;
     require_fake_arg(args, "--runtime")?;
     let name = required_arg(args, "--name")?;
     let response = handle(
@@ -60,7 +64,7 @@ pub(crate) fn server_agent_register(
         request(
             args,
             "server-agent-register",
-            ServerCommand::RegisterAgent { name },
+            ServerCommand::RegisterAgent { name, adapter },
         )?,
     )?;
     let header = render_response_header(&response);
@@ -427,7 +431,7 @@ pub(super) fn render_response_header(response: &ServerResponse) -> String {
 pub(crate) fn render_agent_line(agent: &AgentSummary) -> String {
     let session = agent.session.as_ref();
     format!(
-        "agent={} status={} current_session={} session_status={} run_status={} adapter_kind={} evidence_count={} evidence_refs={} turn_count={} turn_ids={} latest_dispatch_plan={} latest_dispatch_gate={} latest_dispatch_execution={} dispatch_gate_status={} dispatch_gate_reasons={} dispatch_next_action={} dispatch_execution_status={} dispatch_runtime_process_ref={} dispatch_provider_cli_execution_allowed={} dispatch_provider_cli_executed={} dispatch_credential_scan_status={} dispatch_raw_prompt_policy={} dispatch_raw_output_policy={} tool_calls={} memory_packets={}\n",
+        "agent={} status={} current_session={} session_status={} run_status={} adapter_kind={} latest_summary={} evidence_count={} evidence_refs={} turn_count={} turn_ids={} latest_dispatch_plan={} latest_dispatch_gate={} latest_dispatch_execution={} dispatch_gate_status={} dispatch_gate_reasons={} dispatch_next_action={} dispatch_execution_status={} dispatch_runtime_process_ref={} dispatch_provider_cli_execution_allowed={} dispatch_provider_cli_executed={} dispatch_credential_scan_status={} dispatch_raw_prompt_policy={} dispatch_raw_output_policy={} tool_calls={} memory_packets={}\n",
         agent.name,
         agent.status,
         agent
@@ -443,6 +447,9 @@ pub(crate) fn render_agent_line(agent: &AgentSummary) -> String {
             .unwrap_or("none"),
         session
             .and_then(|session| session.adapter_kind.as_deref())
+            .unwrap_or("none"),
+        session
+            .and_then(|session| session.latest_summary.as_deref())
             .unwrap_or("none"),
         session.map(|session| session.evidence_count).unwrap_or(0),
         session
@@ -506,6 +513,24 @@ fn require_fake_arg(args: &[String], key: &str) -> Result<(), String> {
     match optional_value(args, key)?.as_deref() {
         None | Some("fake") => Ok(()),
         Some(other) => Err(format!("{key} only supports `fake` in SV1, got `{other}`")),
+    }
+}
+
+/// AI2: resolve the agent's CHAT adapter binding from `key` (e.g. `--adapter`).
+///
+/// Accepts `fake` (the default when omitted) and `codex`; rejects anything else.
+/// `codex` binds the real read-only one-shot Codex chat adapter for the agent's
+/// `SendTask`/`SteerAgent` turns (fail-closed-fast when the live-provider gate is
+/// off). This RELAXES the previous `require_fake_arg("--adapter")` so a user can
+/// register a Codex-bound agent and reach real Codex chat through the running
+/// server; the default stays `fake`, so mock/fake agents are unchanged.
+fn require_chat_adapter_arg(args: &[String], key: &str) -> Result<String, String> {
+    match optional_value(args, key)?.as_deref() {
+        None | Some("fake") => Ok("fake".to_string()),
+        Some("codex") => Ok("codex".to_string()),
+        Some(other) => Err(format!(
+            "{key} supports `fake` (default) or `codex`, got `{other}`"
+        )),
     }
 }
 

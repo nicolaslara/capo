@@ -160,6 +160,7 @@ fn register_and_start(address: &str, agent: &str, session: &str, run: &str, goal
         "e2e-register",
         ServerCommand::RegisterAgent {
             name: agent.to_string(),
+            adapter: "fake".to_string(),
         },
     );
     assert!(matches!(

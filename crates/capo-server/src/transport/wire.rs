@@ -189,5 +189,9 @@ fn server_error_wire(error: &ServerError) -> (&'static str, String) {
                 "session {session_id} uses adapter {session_adapter}, not requested adapter {requested_adapter}"
             ),
         ),
+        ServerError::UnsupportedChatAdapter { adapter } => (
+            "unsupported_chat_adapter",
+            format!("unsupported chat adapter `{adapter}`; expected `fake` (default) or `codex`"),
+        ),
     }
 }

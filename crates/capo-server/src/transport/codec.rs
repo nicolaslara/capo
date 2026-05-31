@@ -69,9 +69,10 @@ pub(super) fn decode_response_result(
 
 pub(super) fn encode_command(command: &ServerCommand) -> Value {
     match command {
-        ServerCommand::RegisterAgent { name } => json!({
+        ServerCommand::RegisterAgent { name, adapter } => json!({
             "type": "register_agent",
             "name": name,
+            "adapter": adapter,
         }),
         ServerCommand::SendTask {
             agent_name,
@@ -309,6 +310,9 @@ pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
     match required_string(value, "type")?.as_str() {
         "register_agent" => Ok(ServerCommand::RegisterAgent {
             name: required_string(value, "name")?,
+            // Back-compat: an older client that omits `adapter` defaults to the
+            // fake chat adapter, so a missing field never binds Codex by surprise.
+            adapter: optional_string(value, "adapter")?.unwrap_or_else(|| "fake".to_string()),
         }),
         "send_task" => Ok(ServerCommand::SendTask {
             agent_name: required_string(value, "agent_name")?,

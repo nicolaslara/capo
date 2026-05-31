@@ -623,6 +623,7 @@ fn live_tail_streams_real_committed_events_from_write_bearing_commands() {
             "stream-register",
             ServerCommand::RegisterAgent {
                 name: "tail-agent".to_string(),
+                adapter: "fake".to_string(),
             },
         ),
     )

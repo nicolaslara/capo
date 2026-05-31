@@ -32,18 +32,21 @@ fn subscribe_backlog_returns_only_events_after_the_watermark_in_order() {
         &server,
         ServerCommand::RegisterAgent {
             name: "alpha".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(
         &server,
         ServerCommand::RegisterAgent {
             name: "beta".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(
         &server,
         ServerCommand::RegisterAgent {
             name: "gamma".to_string(),
+            adapter: "fake".to_string(),
         },
     );
 
@@ -102,6 +105,7 @@ fn event_tail_has_no_gap_and_no_duplicate_across_the_backlog_to_live_seam() {
         &server,
         ServerCommand::RegisterAgent {
             name: "operator".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(
@@ -185,6 +189,7 @@ fn session_scoped_subscribe_tails_only_the_named_session() {
         &server,
         ServerCommand::RegisterAgent {
             name: "scoped".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     let sent = handle(
@@ -219,6 +224,7 @@ fn session_scoped_subscribe_tails_only_the_named_session() {
         &server,
         ServerCommand::RegisterAgent {
             name: "other".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     server
@@ -371,6 +377,7 @@ fn read_thread_projects_real_turn_events_into_the_server_thread_payload() {
         &server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     let session_id = "session-codex-local-1";

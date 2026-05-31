@@ -101,6 +101,7 @@ fn tcp_transport_round_trips_server_requests_and_recovers_state() {
             "tcp-register-mock-codex",
             ServerCommand::RegisterAgent {
                 name: "mock-codex".to_string(),
+                adapter: "fake".to_string(),
             },
         ),
     )
