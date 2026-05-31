@@ -484,6 +484,27 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             })
             .to_string(),
         },
+        ProjectionRecord::Checkpoint(checkpoint) => ProjectionRecordRow {
+            kind: "checkpoint",
+            record_id: checkpoint.checkpoint_id.clone(),
+            a: Some(checkpoint.project_id.to_string()),
+            b: Some(checkpoint.session_id.to_string()),
+            c: Some(checkpoint.run_id.to_string()),
+            d: checkpoint.turn_id.clone(),
+            e: Some(checkpoint.kind.clone()),
+            f: Some(checkpoint.commit_ref.clone()),
+            g: Some(checkpoint.workspace_root.clone()),
+            h: Some(checkpoint.content_hash.clone()),
+            // Positional slots a..h are exhausted, so the shadow-git dir and the
+            // lifecycle timestamps ride in the payload, so a rebuild reconstructs
+            // the checkpoint row identically.
+            payload_json: json!({
+                "shadow_git_dir": checkpoint.shadow_git_dir,
+                "created_at": checkpoint.created_at,
+                "restored_at": checkpoint.restored_at,
+            })
+            .to_string(),
+        },
         ProjectionRecord::TaskOutcomeReport(report) => ProjectionRecordRow {
             kind: "task_outcome_report",
             record_id: report.task_outcome_report_id.clone(),

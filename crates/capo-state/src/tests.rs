@@ -2936,6 +2936,94 @@ fn sg7_run_score_projection_persists_and_rebuilds_identically() {
     assert_eq!(rebuilt, live);
 }
 
+#[test]
+fn sg8_checkpoint_event_kinds_round_trip() {
+    // SG8: the checkpoint event kinds have stable wire strings and round-trip
+    // through `as_str`/`from_wire` so they survive a rebuild from the log.
+    assert_eq!(EventKind::CheckpointCreated.as_str(), "checkpoint.created");
+    assert_eq!(
+        EventKind::CheckpointRestored.as_str(),
+        "checkpoint.restored"
+    );
+    assert_eq!(
+        EventKind::from_wire("checkpoint.created"),
+        Some(EventKind::CheckpointCreated)
+    );
+    assert_eq!(
+        EventKind::from_wire("checkpoint.restored"),
+        Some(EventKind::CheckpointRestored)
+    );
+}
+
+#[test]
+fn sg8_checkpoint_projection_persists_and_rebuilds_identically() {
+    // SG8: a checkpoint projection persists to the `checkpoints` table AND
+    // rebuilds byte-identically from the durable projection_records log on
+    // restart, so a checkpoint taken before a restart (its restorable commit ref)
+    // survives and is still restorable after. The restore event re-emits the SAME
+    // row with `restored_at` stamped.
+    let store = temp_store("sg8-checkpoint");
+    let created = CheckpointProjection {
+        checkpoint_id: "checkpoint-run-sg8-abc123".to_string(),
+        project_id: ProjectId::new("project-capo"),
+        session_id: SessionId::new("session-sg8"),
+        run_id: RunId::new("run-sg8"),
+        turn_id: Some("turn-1".to_string()),
+        kind: "shadow_git".to_string(),
+        commit_ref: "0123456789abcdef0123456789abcdef01234567".to_string(),
+        workspace_root: "/work/capo".to_string(),
+        shadow_git_dir: "/state/shadow/2f776f726b2f6361706f".to_string(),
+        content_hash: "fedcba9876543210fedcba9876543210fedcba98".to_string(),
+        created_at: Some("1700000000000".to_string()),
+        restored_at: None,
+        updated_sequence: 0,
+    };
+    store
+        .append_event(
+            NewEvent::new(
+                "event-sg8-checkpoint-created",
+                EventKind::CheckpointCreated,
+                "test",
+            ),
+            &[ProjectionRecord::Checkpoint(created.clone())],
+        )
+        .expect("append checkpoint created");
+
+    // Restore re-emits the same row with restored_at stamped.
+    let mut restored = created.clone();
+    restored.restored_at = Some("1700000005000".to_string());
+    store
+        .append_event(
+            NewEvent::new(
+                "event-sg8-checkpoint-restored",
+                EventKind::CheckpointRestored,
+                "test",
+            ),
+            &[ProjectionRecord::Checkpoint(restored.clone())],
+        )
+        .expect("append checkpoint restored");
+
+    // Queryable by id and per-run, reflecting the restored state.
+    let by_id = store
+        .checkpoint_by_id("checkpoint-run-sg8-abc123")
+        .expect("checkpoint by id")
+        .expect("checkpoint present");
+    assert_eq!(by_id.commit_ref, created.commit_ref);
+    assert!(by_id.is_restored(), "restored_at stamped");
+    let live = store
+        .checkpoints_for_run(&RunId::new("run-sg8"))
+        .expect("checkpoints for run");
+    assert_eq!(live.len(), 1, "restore updates the SAME row in place");
+
+    // Restart/replay: a rebuild over the durable log reconstructs the checkpoint
+    // row identically (commit ref + content hash + restored_at survive verbatim).
+    store.rebuild_projections().expect("rebuild");
+    let rebuilt = store
+        .checkpoints_for_run(&RunId::new("run-sg8"))
+        .expect("checkpoints after rebuild");
+    assert_eq!(rebuilt, live);
+}
+
 fn temp_store(name: &str) -> SqliteStateStore {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

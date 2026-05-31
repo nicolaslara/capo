@@ -31,6 +31,7 @@ use capo_tools::{
 };
 
 mod adapter_replay;
+mod checkpoint;
 mod fake_session;
 mod grant_lifecycle;
 mod local_dispatch;
@@ -44,6 +45,7 @@ mod turn_loop;
 mod verification;
 mod workspace_lock;
 
+pub use checkpoint::{CheckpointCreated, CheckpointError, CheckpointRestored, CheckpointScope};
 pub use grant_lifecycle::{
     GrantReadBackDecision, GrantReadBackSource, GrantRevocation, GrantRevocationScope,
 };

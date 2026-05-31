@@ -402,6 +402,41 @@ impl RealBoundaryController {
         self.core.workspace_lease_holder(scope)
     }
 
+    /// SG8: create a shadow-git checkpoint of the workspace BEFORE a real write,
+    /// so the write is reversible by one `Restore` command.
+    pub fn create_checkpoint(
+        &self,
+        scope: &crate::CheckpointScope,
+    ) -> StateResult<Result<crate::CheckpointCreated, crate::CheckpointError>> {
+        self.core.create_checkpoint(scope)
+    }
+
+    /// SG8: restore a checkpoint -- the `Restore` command. Returns the workspace
+    /// to the exact state captured by the checkpoint's shadow commit.
+    pub fn restore_checkpoint(
+        &self,
+        scope: &crate::CheckpointScope,
+        checkpoint_id: &str,
+    ) -> StateResult<Result<crate::CheckpointRestored, crate::CheckpointError>> {
+        self.core.restore_checkpoint(scope, checkpoint_id)
+    }
+
+    /// SG8: read one checkpoint back by id (`None` when absent).
+    pub fn checkpoint(
+        &self,
+        checkpoint_id: &str,
+    ) -> StateResult<Option<capo_state::CheckpointProjection>> {
+        self.core.checkpoint(checkpoint_id)
+    }
+
+    /// SG8: every checkpoint for a run, oldest first.
+    pub fn checkpoints_for_run(
+        &self,
+        run_id: &capo_core::RunId,
+    ) -> StateResult<Vec<capo_state::CheckpointProjection>> {
+        self.core.checkpoints_for_run(run_id)
+    }
+
     /// Borrow the Capo registry behind the real exposure, for callers that need
     /// the tool definitions (schemas/scopes) directly.
     pub fn capo_registry(&self) -> Option<&CapoToolRegistry> {

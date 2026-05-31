@@ -682,7 +682,7 @@ Evidence:
 
 ## SG8 - Controller-Owned Shadow-Git Checkpoint/Rollback
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -709,6 +709,83 @@ Verification:
 - Restart/replay test proving checkpoint refs survive restart and a checkpoint
   taken before restart is still restorable after.
 - `cargo fmt`.
+
+Evidence:
+
+- Mechanism (open question RESOLVED in `knowledge.md`): shadow-git is a SEPARATE
+  shadow `.git` directory, NOT a stash-ring. Each workspace gets a bare shadow
+  repo whose `GIT_DIR` lives under the controller's state root
+  (`<shadow_git_root>/<workspace-key>`, keyed by the SAME collision-free lower-hex
+  encoding of the lexically-normalized workspace root the SG5 lock uses) and whose
+  `GIT_WORK_TREE` is the workspace itself, so the user's own `.git` is NEVER
+  touched (proven by `sg8_shadow_git_does_not_touch_workspace_dot_git`). A
+  checkpoint is a commit in that shadow repo; the commit SHA is the restorable
+  ref. Restorable per-turn (each checkpoint is its own commit, taken with a
+  distinct id per turn) and survives restart (the shadow repo + commits are on
+  disk and the commit SHA is in the durable `CheckpointProjection` +
+  `checkpoint.created` event).
+- New event kinds: `CheckpointRestored` (`checkpoint.restored`) added to
+  `crates/capo-state/src/event.rs` (enum variant, `as_str`, and the `from_wire`
+  `ALL` list so it round-trips); `CheckpointCreated` (`checkpoint.created`)
+  already existed (the RTL floor emits it) and is reused. The designed
+  `checkpoints` projection/table graduates from design to code here.
+- New event-sourced projection: `CheckpointProjection` added to
+  `crates/capo-state/src/projections.rs` (the designed `checkpoints` row:
+  `checkpoint_id`/`project_id`/`session_id`/`run_id`/`turn_id`/`kind`/`commit_ref`/
+  `workspace_root`/`shadow_git_dir`/`content_hash`/`created_at`/`restored_at`,
+  with `commit_ref`/`is_restored` helpers), threaded through the schema
+  (`schema.rs`: `checkpoints` table + clear-list), apply INSERT/UPDATE
+  (`apply.rs`), the `checkpoint_by_id`/`checkpoints_for_run` queries
+  (`queries.rs`), and the codec round-trip (`codec.rs`/`codec_encode.rs`:
+  positional slots a..h carry project/session/run/turn/kind/commit_ref/
+  workspace_root/content_hash; the shadow-git dir + lifecycle timestamps ride in
+  `payload_json`), so the checkpoint rebuilds identically from the event log via
+  `rebuild_projections`.
+- Controller-owned checkpoint/rollback: new
+  `crates/capo-controller/src/checkpoint.rs` adds `CheckpointScope`,
+  `FakeBoundaryController::create_checkpoint` (init the shadow repo on first use
+  via `git init --bare` so `GIT_DIR` resolves the metadata directly; `git add -A`;
+  `git commit --allow-empty --no-verify` with `-c commit.gpgsign=false -c
+  core.hooksPath=/dev/null` and a pinned `capo-checkpoint` identity so a commit
+  never fails on the operator's gpg/hooks/identity config; record the commit SHA
+  as the restorable ref on `checkpoint.created` + projection; idempotent
+  re-checkpoint keyed on `(run, turn, content tree SHA)`), `restore_checkpoint`
+  (the `Restore` command: read the durable checkpoint back by id -- works after a
+  restart -- `git checkout --force <sha> -- .` then `git clean -fdx` so files
+  added AFTER the checkpoint are removed, leaving the workspace byte-identical to
+  the checkpointed state; emit the auditable `checkpoint.restored` event and
+  re-emit the projection with `restored_at` stamped), plus `checkpoint` and
+  `checkpoints_for_run` read-backs. All re-exported on `RealBoundaryController`
+  (`real_controller.rs`) and from `lib.rs` (`CheckpointCreated`,
+  `CheckpointError`, `CheckpointRestored`, `CheckpointScope`). This UPGRADES the
+  RTL single-snapshot floor (`capo-server::safety_floor::WorkspaceCheckpoint`, a
+  directory copy under the artifact root with no projection): the per-turn
+  shadow-git checkpoints are restorable per-turn and survive restart, which the
+  RTL directory-copy snapshot is not.
+- Tests (focused, deterministic, scripted via real on-disk workspaces + system
+  git -- no live providers): `crates/capo-controller/src/checkpoint.rs` -- 7 SG8
+  tests: create -> write -> restore returns the workspace to the prior state
+  (reverting a modified file, restoring a deleted file, removing a file added
+  after the checkpoint); per-turn checkpoints independently restorable;
+  checkpoint survives restart and is restorable after (reopen store ->
+  `rebuild_projections` -> the commit ref/content hash/dirs reconstruct
+  identically, and a NEW controller over the rebuilt state still restores the
+  pre-restart checkpoint); idempotent re-checkpoint of the same tree (one row, no
+  duplicate); create + restore are auditable events with `restored_at` stamped;
+  restore of an unknown checkpoint is a typed error not a panic; shadow git never
+  touches the workspace's own `.git`. `crates/capo-state/src/tests.rs` -- 2 SG8
+  tests: `sg8_checkpoint_event_kinds_round_trip` and
+  `sg8_checkpoint_projection_persists_and_rebuilds_identically` (restore updates
+  the SAME row in place; the row reconstructs identically after a rebuild).
+- Commands run (from `/Users/nicolas/devel/capo-wt/safety-gates`):
+  `cargo test -p capo-controller checkpoint::` (7 passed),
+  `cargo test -p capo-state sg8` (2 passed), `cargo fmt --check` (exit 0 after
+  `cargo fmt`), `cargo clippy --all-targets --all-features -- -D warnings`
+  (exit 0, no warnings), `cargo test --workspace` (exit 0; 0 failed
+  workspace-wide; capo-controller 98 passed/0 failed/1 ignored, capo-state 56
+  passed/0 failed). `git diff --check` clean. Acceptance met. No live Codex smoke
+  required (SG8 verification is deterministic real-workspace + system-git +
+  replay only).
 
 ## SG9 - Liveness-Aware Restart Recovery Replacing exited_unknown
 

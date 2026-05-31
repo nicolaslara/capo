@@ -328,9 +328,30 @@ state-model.md:1179).
 
 ## Open Questions
 
-- Is shadow-git a separate `.git` worktree/index or a stash-ring? Either way the
-  chosen mechanism must be restorable per-turn and survive a server restart;
-  resolve in SG8.
+- Is shadow-git a separate `.git` worktree/index or a stash-ring? RESOLVED (SG8):
+  a SEPARATE shadow `.git` directory, NOT a stash-ring. Each workspace gets a bare
+  shadow repo whose `GIT_DIR` lives under the controller's state root
+  (`<shadow_git_root>/<workspace-key>`, keyed by the SAME collision-free lower-hex
+  encoding of the lexically-normalized workspace root the SG5 lock uses) and whose
+  `GIT_WORK_TREE` is the workspace itself, so the user's own `.git` is NEVER
+  touched. A checkpoint is a commit in that shadow repo; the commit SHA is the
+  restorable ref, recorded on a durable `checkpoint.created` event +
+  `CheckpointProjection`. This satisfies both hard requirements: restorable
+  per-turn (each checkpoint is its own commit, keyed `(run, turn, content tree
+  SHA)`) and survives restart (the shadow repo + commits are on disk and the
+  commit SHA rebuilds from the event log). A stash-ring was rejected because it is
+  bounded, harder to address per-turn, and entangled with the workspace's own
+  index. Restore is `git checkout --force <sha> -- .` then `git clean -fdx`
+  (removing files added after the checkpoint), leaving the workspace
+  byte-identical to the checkpointed state, recorded as an auditable
+  `checkpoint.restored` event. The mechanism lives in
+  `crates/capo-controller/src/checkpoint.rs` (the LOOP owner, beside the other SG
+  gates); it UPGRADES the RTL single-snapshot floor
+  (`capo-server::safety_floor::WorkspaceCheckpoint`, a directory copy under the
+  artifact root with no projection), which is neither restorable per-turn nor
+  restart-surviving. OS-level git-worktree ISOLATION (a separate checked-out
+  worktree) stays a depth-workpad non-goal; SG8 is the shadow-commit checkpoint
+  ring only.
 - Does `score_run` live in `capo-eval` (currently a stub at
   `crates/capo-eval/src/lib.rs`) or in `capo-server`? RESOLVED for the
   `VerificationRunner` half (SG6): the verification GATE lives in

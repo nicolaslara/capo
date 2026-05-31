@@ -34,6 +34,7 @@ pub enum ProjectionRecord {
     ReviewFinding(ReviewFindingProjection),
     Evidence(EvidenceProjection),
     RunScore(RunScoreProjection),
+    Checkpoint(CheckpointProjection),
     SourceBinding(SourceBindingProjection),
     WorkpadIndexReset(WorkpadIndexResetProjection),
     WorkpadFile(WorkpadFileProjection),
@@ -672,6 +673,66 @@ pub struct RunScoreProjection {
     /// reproducibility anchor: the same digest always yields the same score.
     pub score_inputs_json: String,
     pub updated_sequence: i64,
+}
+
+/// SG8: the controller-owned shadow-git checkpoint, projected from the
+/// `checkpoint.created` / `checkpoint.restored` event pair.
+///
+/// This graduates the designed `checkpoints` table
+/// (`state-model.md:1042`) from design to code. One row per checkpoint id; the
+/// `checkpoint.restored` event re-emits the SAME row with `restored_at` (and the
+/// restore detail) stamped, so the rollback is auditable and the projection
+/// rebuilds identically from the event log.
+///
+/// The checkpoint mechanism is a SEPARATE shadow `.git` directory (resolving the
+/// SG8 open question): the workspace root is checkpointed by committing it into a
+/// shadow repo whose `GIT_DIR` lives under the state root and whose
+/// `GIT_WORK_TREE` is the workspace, so the user's real `.git` is never touched.
+/// The commit SHA is the restorable ref ([`Self::commit_ref`]); it is durable on
+/// disk in the shadow repo and recorded here, so a checkpoint taken before a
+/// restart is still restorable after.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointProjection {
+    /// Stable per-checkpoint key. One row per checkpoint; the restore event
+    /// updates this same row in place.
+    pub checkpoint_id: String,
+    pub project_id: ProjectId,
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    pub turn_id: Option<String>,
+    /// The checkpoint mechanism kind (`shadow_git` for SG8). Recorded so a later
+    /// mechanism change is distinguishable on the log.
+    pub kind: String,
+    /// The shadow-repo commit SHA this checkpoint is restorable to. This is the
+    /// durable, restart-surviving ref: it lives in the shadow `.git` on disk and
+    /// is recorded here so restore can `git checkout` it after a restart.
+    pub commit_ref: String,
+    /// The workspace root the checkpoint covers.
+    pub workspace_root: String,
+    /// The shadow `.git` directory the checkpoint commit lives in.
+    pub shadow_git_dir: String,
+    /// A content fingerprint of the checkpointed tree (the shadow commit's tree
+    /// SHA), so two checkpoints of identical content share a fingerprint and a
+    /// rebuild reconstructs the row identically.
+    pub content_hash: String,
+    /// When the checkpoint was created (epoch-millis string).
+    pub created_at: Option<String>,
+    /// When the checkpoint was last restored, set by `checkpoint.restored`.
+    /// `None` until a `Restore` command targets this checkpoint.
+    pub restored_at: Option<String>,
+    pub updated_sequence: i64,
+}
+
+impl CheckpointProjection {
+    /// The shadow-repo commit SHA this checkpoint is restorable to.
+    pub fn commit_ref(&self) -> &str {
+        &self.commit_ref
+    }
+
+    /// SG8: whether this checkpoint has been restored at least once.
+    pub fn is_restored(&self) -> bool {
+        self.restored_at.is_some()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

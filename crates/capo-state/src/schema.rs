@@ -430,6 +430,21 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             score_inputs_json TEXT NOT NULL,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS checkpoints (
+            checkpoint_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            turn_id TEXT,
+            kind TEXT NOT NULL,
+            commit_ref TEXT NOT NULL,
+            workspace_root TEXT NOT NULL,
+            shadow_git_dir TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            created_at TEXT,
+            restored_at TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS task_outcome_reports (
             task_outcome_report_id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -581,6 +596,7 @@ pub(crate) fn clear_projection_tables(transaction: &Transaction<'_>) -> StateRes
         "memory_sources",
         "evidence",
         "run_scores",
+        "checkpoints",
         "task_outcome_reports",
         "review_findings",
         "source_bindings",

@@ -8,13 +8,14 @@ use crate::{
     AdapterDispatchGateProjection, AdapterDispatchPlanProjection,
     AdapterDispatchPromptMaterializationProjection, AdapterDispatchPromptSourceProjection,
     AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
-    AgentProjection, CapabilityGrantProjection, ConnectivityExposureProjection, EventKind,
-    EventRecord, EvidenceProjection, InFlightRun, MemoryPacketProjection, MemoryRecordProjection,
-    MemorySourceProjection, PermissionApprovalProjection, ReviewFindingProjection, RunProjection,
-    RunScoreProjection, RuntimeTargetProjection, SessionProjection, SourceBindingProjection,
-    SqliteStateStore, StateError, StateResult, TaskOutcomeReportProjection, TaskProjection,
-    ToolCallProjection, ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection,
-    WorkpadTaskProjection, WorkspaceLeaseProjection, optional_id,
+    AgentProjection, CapabilityGrantProjection, CheckpointProjection,
+    ConnectivityExposureProjection, EventKind, EventRecord, EvidenceProjection, InFlightRun,
+    MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
+    PermissionApprovalProjection, ReviewFindingProjection, RunProjection, RunScoreProjection,
+    RuntimeTargetProjection, SessionProjection, SourceBindingProjection, SqliteStateStore,
+    StateError, StateResult, TaskOutcomeReportProjection, TaskProjection, ToolCallProjection,
+    ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection, WorkpadTaskProjection,
+    WorkspaceLeaseProjection, optional_id,
 };
 
 impl SqliteStateStore {
@@ -431,6 +432,43 @@ impl SqliteStateStore {
                 updated_sequence: row.get(8)?,
             })
         })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    /// SG8: read one shadow-git checkpoint back by id (`None` when absent), so the
+    /// controller can read back the restorable commit ref before a `Restore`.
+    pub fn checkpoint_by_id(
+        &self,
+        checkpoint_id: &str,
+    ) -> StateResult<Option<CheckpointProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT checkpoint_id, project_id, session_id, run_id, turn_id, kind,
+                    commit_ref, workspace_root, shadow_git_dir, content_hash,
+                    created_at, restored_at, updated_sequence
+             FROM checkpoints
+             WHERE checkpoint_id = ?1",
+        )?;
+        let checkpoint = statement
+            .query_row(params![checkpoint_id], checkpoint_from_row)
+            .optional()?;
+        Ok(checkpoint)
+    }
+
+    /// SG8: every checkpoint for a run, oldest first -- the per-turn checkpoint
+    /// ring the loop takes and the recovery/audit path reads.
+    pub fn checkpoints_for_run(&self, run_id: &RunId) -> StateResult<Vec<CheckpointProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT checkpoint_id, project_id, session_id, run_id, turn_id, kind,
+                    commit_ref, workspace_root, shadow_git_dir, content_hash,
+                    created_at, restored_at, updated_sequence
+             FROM checkpoints
+             WHERE run_id = ?1
+             ORDER BY updated_sequence ASC, checkpoint_id ASC",
+        )?;
+        let rows = statement.query_map(params![run_id.as_str()], checkpoint_from_row)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StateError::from)
     }
@@ -1891,6 +1929,24 @@ fn run_score_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunScoreProje
         duration_millis: row.get(12)?,
         score_inputs_json: row.get(13)?,
         updated_sequence: row.get(14)?,
+    })
+}
+
+fn checkpoint_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CheckpointProjection> {
+    Ok(CheckpointProjection {
+        checkpoint_id: row.get(0)?,
+        project_id: ProjectId::new(row.get::<_, String>(1)?),
+        session_id: SessionId::new(row.get::<_, String>(2)?),
+        run_id: RunId::new(row.get::<_, String>(3)?),
+        turn_id: row.get(4)?,
+        kind: row.get(5)?,
+        commit_ref: row.get(6)?,
+        workspace_root: row.get(7)?,
+        shadow_git_dir: row.get(8)?,
+        content_hash: row.get(9)?,
+        created_at: row.get(10)?,
+        restored_at: row.get(11)?,
+        updated_sequence: row.get(12)?,
     })
 }
 

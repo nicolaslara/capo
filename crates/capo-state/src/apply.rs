@@ -932,6 +932,41 @@ pub(crate) fn apply_projection_record(
                 ],
             )?
         }
+        ProjectionRecord::Checkpoint(checkpoint) => transaction.execute(
+            "INSERT INTO checkpoints(
+                checkpoint_id, project_id, session_id, run_id, turn_id, kind,
+                commit_ref, workspace_root, shadow_git_dir, content_hash,
+                created_at, restored_at, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(checkpoint_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                session_id = excluded.session_id,
+                run_id = excluded.run_id,
+                turn_id = excluded.turn_id,
+                kind = excluded.kind,
+                commit_ref = excluded.commit_ref,
+                workspace_root = excluded.workspace_root,
+                shadow_git_dir = excluded.shadow_git_dir,
+                content_hash = excluded.content_hash,
+                created_at = excluded.created_at,
+                restored_at = excluded.restored_at,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                checkpoint.checkpoint_id,
+                checkpoint.project_id.as_str(),
+                checkpoint.session_id.as_str(),
+                checkpoint.run_id.as_str(),
+                checkpoint.turn_id,
+                checkpoint.kind,
+                checkpoint.commit_ref,
+                checkpoint.workspace_root,
+                checkpoint.shadow_git_dir,
+                checkpoint.content_hash,
+                checkpoint.created_at,
+                checkpoint.restored_at,
+                sequence,
+            ],
+        )?,
         ProjectionRecord::TaskOutcomeReport(report) => transaction.execute(
             "INSERT INTO task_outcome_reports(
                 task_outcome_report_id, project_id, task_id, session_id, run_id,

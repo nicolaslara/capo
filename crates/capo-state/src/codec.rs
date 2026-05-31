@@ -7,12 +7,13 @@ use serde_json::Value;
 
 use crate::codec_adapter::decode_adapter_projection;
 use crate::{
-    AgentProjection, CapabilityGrantProjection, ConnectivityExposureProjection, EvidenceProjection,
-    MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
-    PermissionApprovalProjection, ProjectProjection, ProjectionRecord, ReviewFindingProjection,
-    RunProjection, RunScoreProjection, RuntimeTargetProjection, SessionProjection,
-    SourceBindingProjection, StateError, StateResult, TaskOutcomeReportProjection, TaskProjection,
-    ToolCallProjection, ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection,
+    AgentProjection, CapabilityGrantProjection, CheckpointProjection,
+    ConnectivityExposureProjection, EvidenceProjection, MemoryPacketProjection,
+    MemoryRecordProjection, MemorySourceProjection, PermissionApprovalProjection,
+    ProjectProjection, ProjectionRecord, ReviewFindingProjection, RunProjection,
+    RunScoreProjection, RuntimeTargetProjection, SessionProjection, SourceBindingProjection,
+    StateError, StateResult, TaskOutcomeReportProjection, TaskProjection, ToolCallProjection,
+    ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection,
     WorkpadIndexResetProjection, WorkpadTaskProjection, WorkspaceLeaseProjection, optional_id,
 };
 
@@ -630,6 +631,40 @@ pub(crate) fn projection_record_from_row(
                     h,
                     "score_inputs_json",
                 )?,
+                updated_sequence: 0,
+            }))
+        }
+        "checkpoint" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::Checkpoint(CheckpointProjection {
+                checkpoint_id: record_id,
+                project_id: ProjectId::new(required_field(
+                    &projection_kind,
+                    "checkpoint",
+                    a,
+                    "project_id",
+                )?),
+                session_id: SessionId::new(required_field(
+                    &projection_kind,
+                    "checkpoint",
+                    b,
+                    "session_id",
+                )?),
+                run_id: RunId::new(required_field(&projection_kind, "checkpoint", c, "run_id")?),
+                turn_id: d,
+                kind: required_field(&projection_kind, "checkpoint", e, "kind")?,
+                commit_ref: required_field(&projection_kind, "checkpoint", f, "commit_ref")?,
+                workspace_root: required_field(
+                    &projection_kind,
+                    "checkpoint",
+                    g,
+                    "workspace_root",
+                )?,
+                content_hash: required_field(&projection_kind, "checkpoint", h, "content_hash")?,
+                shadow_git_dir: payload_optional_string(&payload, "shadow_git_dir")
+                    .unwrap_or_default(),
+                created_at: payload_optional_string(&payload, "created_at"),
+                restored_at: payload_optional_string(&payload, "restored_at"),
                 updated_sequence: 0,
             }))
         }
