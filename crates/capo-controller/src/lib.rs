@@ -46,7 +46,9 @@ pub use real_controller::{
 pub use resource_ceiling::{
     CeilingBreach, CeilingTurnOutcome, RunResourceCeiling, RunResourceUsage,
 };
-pub use tool_dispatch::{ToolDispatchOutcome, ToolDispatchScope};
+pub use tool_dispatch::{
+    PermissionDecideOutcome, ToolDispatchOutcome, ToolDispatchScope, ToolRefusal,
+};
 pub use turn_loop::{TurnFinished, TurnStopReason};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

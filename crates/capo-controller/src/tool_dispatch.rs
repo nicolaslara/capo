@@ -19,8 +19,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use capo_tools::{
-    AgentReportRecord, CapoToolResult, EVIDENCE_SOURCE_RUNTIME_OUTPUT, ToolAuditEvent,
-    ToolExposure, ToolExposureRequest, ToolExposureResult, WrapperToolResult,
+    AgentReportRecord, CapoToolResult, EVIDENCE_SOURCE_RUNTIME_OUTPUT, PermissionDecision,
+    ToolAuditEvent, ToolExposure, ToolExposureRequest, ToolExposureResult, WrapperToolResult,
 };
 
 use super::*;
@@ -59,8 +59,94 @@ pub struct ToolDispatchOutcome {
     /// The canonical event kinds appended for this call, in order, so a test can
     /// assert the real audit event sequence.
     pub observed_event_kinds: Vec<String>,
+    /// SG1: the typed decide outcome recorded for this call before the tool ran
+    /// (or was blocked). Carries the policy `PermissionDecision`'s
+    /// `decision_source`/`persistence`/`explanation` so the loop has a structured
+    /// decide outcome (not a raw error string) even when everything is allowed,
+    /// and so a `deny` surfaces an agent-readable refusal the loop can reflect on.
+    pub decide: PermissionDecideOutcome,
     /// The raw typed result, so callers can inspect the narrow output.
     pub result: ToolExposureResult,
+}
+
+/// SG1: the typed permission-decide outcome the real loop's decide step records
+/// before any tool invocation or workspace write proceeds.
+///
+/// Every dispatch -- allow OR deny -- carries one of these so the audit trail is
+/// complete even when the decision is allow, and a denied write surfaces as a
+/// structured, agent-readable refusal (not a raw error string) the loop can
+/// reflect on rather than silently continuing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PermissionDecideOutcome {
+    /// `true` when the policy allowed the request (`effect == "allow"`).
+    pub allowed: bool,
+    /// The raw policy effect (`allow`/`deny`/`cancel`).
+    pub effect: String,
+    /// The capability grant id the decision issued (an allow grant authorizes a
+    /// later request; a deny grant blocks it).
+    pub capability_grant_id: String,
+    /// `decision_source` from the [`PermissionDecision`] (e.g.
+    /// `allow_trusted_local_profile`, `static_policy:read-only-local`), recorded
+    /// on every decide outcome so the audit trail names the policy that decided.
+    pub decision_source: String,
+    /// `persistence` from the [`PermissionDecision`] (`once`/`until_session_end`/
+    /// ...). Drives whether the allow path materializes a durable grant.
+    pub persistence: String,
+    /// The human/agent-readable explanation from the [`PermissionDecision`].
+    pub explanation: String,
+    /// `true` when a `capability.grant_created` event was appended for this
+    /// decision (allow or deny) with non-observational persistence.
+    pub grant_created: bool,
+    /// The structured, agent-readable refusal for a denied call, or `None` when
+    /// allowed. The loop reflects on this rather than a raw error string.
+    pub refusal: Option<ToolRefusal>,
+}
+
+impl PermissionDecideOutcome {
+    fn from_decision(decision: &PermissionDecision, tool_name: &str, grant_created: bool) -> Self {
+        let allowed = decision.effect == "allow";
+        let refusal = (!allowed).then(|| ToolRefusal {
+            tool_name: tool_name.to_string(),
+            decision_source: decision.decision_source.clone(),
+            scope_json: decision.scope_json.clone(),
+            reason: decision.explanation.clone(),
+        });
+        Self {
+            allowed,
+            effect: decision.effect.clone(),
+            capability_grant_id: decision.capability_grant_id.clone(),
+            decision_source: decision.decision_source.clone(),
+            persistence: decision.persistence.clone(),
+            explanation: decision.explanation.clone(),
+            grant_created,
+            refusal,
+        }
+    }
+}
+
+/// SG1: a structured, agent-readable refusal for a denied tool call.
+///
+/// Maps a policy `deny` for a (potentially write) tool onto a typed value the
+/// loop can reflect on and surface back to the agent -- the tool that was
+/// refused, which policy refused it, the scope it asked for, and the policy's
+/// own explanation -- rather than a raw error string.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolRefusal {
+    pub tool_name: String,
+    pub decision_source: String,
+    pub scope_json: String,
+    pub reason: String,
+}
+
+impl ToolRefusal {
+    /// A single agent-readable line summarizing the refusal, for the loop to
+    /// reflect back to the model.
+    pub fn agent_message(&self) -> String {
+        format!(
+            "Permission denied for tool `{}` by `{}`: {} (requested scope: {})",
+            self.tool_name, self.decision_source, self.reason, self.scope_json
+        )
+    }
 }
 
 impl FakeBoundaryController {
@@ -123,6 +209,19 @@ impl FakeBoundaryController {
             .iter()
             .any(|(_, kind, _)| matches!(kind, EventKind::ToolCallCompleted));
         let last_index = persistable.len().saturating_sub(1);
+        // SG1: the decide step materializes a `CapabilityGrant` (the lifecycle
+        // step 5 `capability.grant_created`) when the recorded decision has
+        // non-observational persistence. The tool layer's audit stream goes
+        // straight from `permission.decided` to `capability.grant_used`, so the
+        // grant-creation event is injected here, in the loop's decide step,
+        // immediately after the `permission.decided` event is recorded -- the
+        // tool/runtime layer's later `capability.grant_used`/invocation events
+        // proceed only after that decision is on the log.
+        let emit_grant_created = decision_creates_grant(
+            &normalized.permission_decision,
+            &normalized.capability_grant_id,
+        );
+        let mut grant_created = false;
         let mut observed_event_kinds = Vec::with_capacity(persistable.len());
         for (position, (index, kind, audit_event)) in persistable.iter().enumerate() {
             let kind = *kind;
@@ -169,13 +268,29 @@ impl FakeBoundaryController {
                 &projections,
             )?;
             observed_event_kinds.push(kind.as_str().to_string());
+
+            // SG1: record `capability.grant_created` directly after the decision
+            // is on the log (lifecycle steps 4 -> 5). The projection carries the
+            // full decision record (`decision_source`/`persistence`/`explanation`)
+            // so the durable grant store has a row to read back (SG3).
+            if matches!(kind, EventKind::PermissionDecided) && emit_grant_created {
+                self.append_capability_grant_created(scope, &normalized.permission_decision)?;
+                observed_event_kinds.push(EventKind::CapabilityGrantCreated.as_str().to_string());
+                grant_created = true;
+            }
         }
+        let decide = PermissionDecideOutcome::from_decision(
+            &normalized.permission_decision,
+            &normalized.tool_name,
+            grant_created,
+        );
         Ok(ToolDispatchOutcome {
             tool_call_id: scope.tool_call_id.clone(),
             tool_name: normalized.tool_name,
             tool_origin: normalized.tool_origin,
             status: normalized.status,
             output_artifact_id: normalized.output_artifact_id,
+            decide,
             observed_event_kinds,
             result,
         })
@@ -267,6 +382,86 @@ impl FakeBoundaryController {
             _ => Vec::new(),
         }
     }
+
+    /// SG1: append the lifecycle step-5 `capability.grant_created` event and its
+    /// durable [`CapabilityGrantProjection`], keyed to the turn.
+    ///
+    /// Called by the decide step immediately after the `permission.decided`
+    /// event, for any decision with non-observational persistence (allow OR a
+    /// `reject_always`-style deny grant). The persisted grant row carries the full
+    /// decision record (`effect`/`decision_source`/`persistence`/`explanation`)
+    /// so the durable grant store has a queryable, read-backable row -- this is
+    /// the grant SG3 reads back to authorize a later request, and the deny grant
+    /// that blocks one. The event payload uses `serde_json` so every interpolated
+    /// field is escaped for the full JSON grammar.
+    fn append_capability_grant_created(
+        &self,
+        scope: &ToolDispatchScope,
+        decision: &PermissionDecision,
+    ) -> StateResult<()> {
+        let payload = serde_json::json!({
+            "tool_call_id": scope.tool_call_id.to_string(),
+            "capability_grant_id": decision.capability_grant_id,
+            "effect": decision.effect,
+            "decision_source": decision.decision_source,
+            "persistence": decision.persistence,
+            "explanation": decision.explanation,
+        })
+        .to_string();
+        self.state.append_event(
+            scoped_event(
+                &format!(
+                    "event-tool-dispatch-{}-{}-{}",
+                    scope.session_id,
+                    scope.tool_call_id,
+                    dispatch_event_suffix(EventKind::CapabilityGrantCreated, 0)
+                ),
+                EventKind::CapabilityGrantCreated,
+                &self.project_id,
+                &scope.task_id,
+                &scope.agent_id,
+                &scope.session_id,
+                &scope.run_id,
+            )
+            .with_turn(scope.turn_id.to_string())
+            .with_item(scope.tool_call_id.to_string())
+            .with_payload(payload),
+            &[ProjectionRecord::CapabilityGrant(
+                capo_state::CapabilityGrantProjection {
+                    capability_grant_id: decision.capability_grant_id.clone(),
+                    capability_profile_id: decision.capability_profile_id.clone(),
+                    scope_json: decision.scope_json.clone(),
+                    effect: decision.effect.clone(),
+                    subject_json: decision.subject_json.clone(),
+                    decision_source: decision.decision_source.clone(),
+                    persistence: decision.persistence.clone(),
+                    explanation: decision.explanation.clone(),
+                    updated_sequence: 0,
+                },
+            )],
+        )?;
+        Ok(())
+    }
+}
+
+/// SG1: whether a recorded permission decision materializes a durable
+/// `CapabilityGrant` (lifecycle step 5).
+///
+/// A grant is created for any decision whose persistence is NOT purely
+/// observational and that issued a grant id. Every persistence value the
+/// prototype policies emit today (`once`, `until_turn_end`, `until_session_end`,
+/// `until_revoked`, `until_time`) is non-observational and creates a grant
+/// (an allow grant authorizes a later request; a `reject_always` deny grant
+/// blocks one); a future `observational` persistence would skip grant creation.
+fn decision_creates_grant(decision: &PermissionDecision, grant_id: &Option<String>) -> bool {
+    grant_id.is_some() && !persistence_is_observational(&decision.persistence)
+}
+
+/// Whether a persistence value is purely observational (records a decision but
+/// creates no durable grant). The lifecycle's "persistence is not purely
+/// observational" condition for emitting `capability.grant_created`.
+fn persistence_is_observational(persistence: &str) -> bool {
+    matches!(persistence, "observational" | "none")
 }
 
 /// The stable correlation id for one tool dispatch (ACI7): a turn-scoped value
@@ -327,6 +522,12 @@ struct NormalizedToolResult {
     /// The permission-decision id pinned to this call (ACI7), derived from the
     /// issued grant so the projection can join back to the authorization.
     permission_decision_id: Option<String>,
+    /// SG1: the full policy [`PermissionDecision`] for this call, so the dispatch
+    /// decide step can (a) enrich the persisted `permission.decided` event with
+    /// `decision_source`/`persistence`/`explanation`, (b) materialize a
+    /// `capability.grant_created` event + projection on a non-observational
+    /// decision, and (c) surface a typed allow/deny decide outcome.
+    permission_decision: PermissionDecision,
     /// ACI8: the agent-report classification for a `GO2` reporting tool, carrying
     /// the `agent_reported` source tag and the agent's self-declared confidence.
     /// `None` for observed tools (Capo registry / runtime wrappers), so a report
@@ -394,6 +595,7 @@ impl NormalizedToolResult {
             output_artifact_id: None,
             permission_decision_id: Some(permission_decision_id(&grant_id)),
             capability_grant_id: Some(grant_id),
+            permission_decision: result.permission_decision.clone(),
             agent_report: Some(AgentReportObservation {
                 source: result.source.clone(),
                 confidence: result.confidence,
@@ -422,6 +624,7 @@ impl NormalizedToolResult {
             output_artifact_id: artifact_or_none(&result.output_artifact_id),
             permission_decision_id: Some(permission_decision_id(&grant_id)),
             capability_grant_id: Some(grant_id),
+            permission_decision: result.permission_decision.clone(),
             agent_report: None,
             // ACI9: an allowed Capo tool produces OBSERVED runtime evidence; the
             // `tool.output_observed` event drives the `runtime_output` observation
@@ -463,6 +666,7 @@ impl NormalizedToolResult {
                 .map(|artifact| artifact.artifact_id.clone()),
             permission_decision_id: Some(permission_decision_id(&grant_id)),
             capability_grant_id: Some(grant_id),
+            permission_decision: result.permission_decision.clone(),
             agent_report: None,
             // ACI9: a runtime wrapper that ran produces OBSERVED evidence; the
             // `tool.output_observed` event drives the `runtime_output` observation
@@ -621,6 +825,34 @@ fn dispatch_event_payload(
             tool(),
             output_artifact_id()
         ),
+        // SG1: the decide-step events carry the FULL `PermissionDecision` record so
+        // the audit trail is complete even when everything is allowed. The
+        // requested event records the scope; the decided event records the
+        // effect/grant/decision_source/persistence/explanation. Built through
+        // `serde_json` so every field is escaped for the full JSON grammar.
+        EventKind::PermissionRequested => {
+            let decision = &normalized.permission_decision;
+            serde_json::json!({
+                "tool_call_id": scope.tool_call_id.to_string(),
+                "tool": normalized.tool_name,
+                "capability_profile_id": decision.capability_profile_id,
+                "scope_json": decision.scope_json,
+            })
+            .to_string()
+        }
+        EventKind::PermissionDecided => {
+            let decision = &normalized.permission_decision;
+            serde_json::json!({
+                "tool_call_id": scope.tool_call_id.to_string(),
+                "tool": normalized.tool_name,
+                "effect": decision.effect,
+                "capability_grant_id": decision.capability_grant_id,
+                "decision_source": decision.decision_source,
+                "persistence": decision.persistence,
+                "explanation": decision.explanation,
+            })
+            .to_string()
+        }
         _ => format!(
             "{{\"tool_call_id\":{},\"tool\":{},\"status\":{}}}",
             tool_call_id,

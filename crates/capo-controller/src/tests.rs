@@ -1958,9 +1958,9 @@ fn real_controller_projected_turn_rebuilds_identically_after_restart_replay() {
 /// (`session.*`/`run.*`/`memory.*`/`evidence.*`), not the per-turn tool-dispatch
 /// internals. The real handle now dispatches the `send_task` summary tool through
 /// the real `authorize_and_invoke` seam (a different `tool.*`/`permission.*`
-/// shape than the fake shim, and one fewer `capability.grant_created`), so the
-/// raw event count and the tool-dispatch sub-sequence intentionally diverge; the
-/// lifecycle the suite gates on does not.
+/// shape than the fake shim -- interleaved `permission.requested`/`decided`), so
+/// the raw event count and the tool-dispatch sub-sequence intentionally diverge;
+/// the lifecycle the suite gates on does not.
 type LifecycleFingerprint = (String, String, String, String, Vec<String>);
 
 /// The causal session event-kind sequence (sequence order), dropping the
@@ -2719,9 +2719,11 @@ fn production_send_task_command_dispatches_summary_tool_through_authorize_and_in
     let summary_tool_call_id = format!("tool-{}", registration.agent_name);
 
     // The canonical REAL audit sequence (the ACI1 dispatch shape) was persisted
-    // for the summary tool, keyed to this turn -- not the fake shim's hand-rolled
-    // shape (which has no interleaved `permission.*` and carries an extra
-    // `capability.grant_created`).
+    // for the summary tool, keyed to this turn. SG1 wired the decide step's
+    // lifecycle step 5 into this path, so the sequence now carries
+    // `capability.grant_created` after `permission.decided` (the decision is
+    // recorded, then the grant materialized, before the tool/runtime layer's
+    // `capability.grant_used`/invocation proceeds).
     let turn_events = controller
         .state()
         .events_for_session_turn(&refs.session_id, &turn_id)
@@ -2740,6 +2742,7 @@ fn production_send_task_command_dispatches_summary_tool_through_authorize_and_in
             "tool.call_requested",
             "permission.requested",
             "permission.decided",
+            "capability.grant_created",
             "capability.grant_used",
             "tool.invocation_started",
             "tool.output_artifact_recorded",
@@ -2849,13 +2852,16 @@ fn real_controller_turn_invokes_a_capo_tool_through_authorize_and_invoke() {
     assert_eq!(result.output, "agent running");
     assert_eq!(outcome.status, "completed");
 
-    // The canonical real audit event sequence was persisted (in order).
+    // The canonical real audit event sequence was persisted (in order). SG1's
+    // decide step inserts `capability.grant_created` after `permission.decided`
+    // (lifecycle step 5) before the tool layer's `capability.grant_used`.
     assert_eq!(
         outcome.observed_event_kinds,
         vec![
             "tool.call_requested",
             "permission.requested",
             "permission.decided",
+            "capability.grant_created",
             "capability.grant_used",
             "tool.invocation_started",
             "tool.output_artifact_recorded",
@@ -4817,4 +4823,313 @@ fn codex_bound_chat_fails_closed_fast_when_gate_is_off() {
         }
         other => panic!("expected StateError::CodexLiveChat, got {other:?}"),
     }
+}
+
+// --- SG1: PermissionPolicy enforcement wired into the real decide step -----
+//
+// The real loop's tool-dispatch decide step
+// (`RealBoundaryController::dispatch_tool_call`) runs `PermissionPolicy::decide`
+// through `authorize_and_invoke` BEFORE any tool invocation or workspace write,
+// follows the documented lifecycle (append `permission.requested`, evaluate,
+// append `permission.decided`, and on a non-observational decision append
+// `capability.grant_created`), records `decision_source`/`persistence`/
+// `explanation` on the decision, and surfaces a `deny` as a typed decide outcome
+// (with a structured, agent-readable refusal) that blocks the invocation.
+
+/// SG1 allow path: an allowed request emits the requested -> decided ->
+/// grant-created sequence (lifecycle steps 2,4,5), records the full decision
+/// fields on the decided + grant-created events, materializes a durable grant
+/// projection, and reports a typed allow decide outcome -- and the tool then
+/// proceeds (grant_used + invocation + completion).
+#[test]
+fn sg1_allowed_request_emits_requested_decided_grant_created_sequence() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{CapoToolContext, CapoToolRequest, ToolExposureRequest};
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("sg1-allow-session"));
+    let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        // The TrustedLocal policy remains the real controller default; it is
+        // reachable through the real loop (not the fake test-only policy).
+        PermissionPolicy::allow_trusted_local(),
+        scripted,
+    )
+    .expect("open real controller");
+    let registration = controller
+        .register_agent("sg1-allow-worker")
+        .expect("agent");
+    let refs = controller
+        .send_task(&registration, "Inspect agent status under the decide step")
+        .expect("send task");
+
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-sg1-allow"),
+        tool_call_id: ToolCallId::new("tool-sg1-allow"),
+    };
+    let outcome = controller
+        .dispatch_tool_call(
+            &scope,
+            ToolExposureRequest::Capo(CapoToolRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: scope.session_id.clone(),
+                tool_id: "capo.agent_status".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                context: CapoToolContext {
+                    task_status: "task active".to_string(),
+                    agent_status: "agent running".to_string(),
+                    session_summary: "summary".to_string(),
+                    workpad_excerpt: "section".to_string(),
+                    evidence_note: "note".to_string(),
+                    capability_scope: "state:read:agent".to_string(),
+                },
+            }),
+        )
+        .expect("dispatch allowed capo tool");
+
+    // Typed decide outcome: allowed, grant created, no refusal.
+    assert!(outcome.decide.allowed);
+    assert_eq!(outcome.decide.effect, "allow");
+    assert!(outcome.decide.grant_created);
+    assert_eq!(outcome.decide.refusal, None);
+    assert_eq!(
+        outcome.decide.decision_source,
+        "allow_trusted_local_profile"
+    );
+    assert_eq!(outcome.decide.persistence, "until_session_end");
+    assert!(!outcome.decide.explanation.is_empty());
+
+    // The documented lifecycle sequence: requested -> decided -> grant-created
+    // appear in order, BEFORE the tool layer's grant_used + invocation.
+    let decided = outcome
+        .observed_event_kinds
+        .iter()
+        .position(|kind| kind == "permission.decided")
+        .expect("permission.decided present");
+    let grant_created = outcome
+        .observed_event_kinds
+        .iter()
+        .position(|kind| kind == "capability.grant_created")
+        .expect("capability.grant_created present");
+    let grant_used = outcome
+        .observed_event_kinds
+        .iter()
+        .position(|kind| kind == "capability.grant_used")
+        .expect("capability.grant_used present");
+    let requested = outcome
+        .observed_event_kinds
+        .iter()
+        .position(|kind| kind == "permission.requested")
+        .expect("permission.requested present");
+    assert!(requested < decided, "requested precedes decided");
+    assert!(decided < grant_created, "decided precedes grant-created");
+    assert!(
+        grant_created < grant_used,
+        "grant-created precedes grant_used"
+    );
+
+    // The decided event payload records decision_source/persistence/explanation
+    // (the audit trail is complete even when allowed).
+    let turn_events = controller
+        .state()
+        .events_for_session_turn(&refs.session_id, "turn-sg1-allow")
+        .expect("turn events");
+    let decided_event = turn_events
+        .iter()
+        .find(|event| event.kind == "permission.decided")
+        .expect("decided event persisted");
+    assert!(decided_event.payload_json.contains("\"effect\":\"allow\""));
+    assert!(
+        decided_event
+            .payload_json
+            .contains("\"decision_source\":\"allow_trusted_local_profile\"")
+    );
+    assert!(
+        decided_event
+            .payload_json
+            .contains("\"persistence\":\"until_session_end\"")
+    );
+    assert!(decided_event.payload_json.contains("\"explanation\":"));
+
+    // A durable grant projection was created and is read-backable.
+    let grant_created_event = turn_events
+        .iter()
+        .find(|event| event.kind == "capability.grant_created")
+        .expect("grant-created event persisted");
+    assert!(
+        grant_created_event
+            .payload_json
+            .contains(&outcome.decide.capability_grant_id)
+    );
+    let grants = controller.state().capability_grants().expect("grants");
+    let grant = grants
+        .iter()
+        .find(|grant| grant.capability_grant_id == outcome.decide.capability_grant_id)
+        .expect("durable grant projection present");
+    assert_eq!(grant.effect, "allow");
+    assert_eq!(grant.decision_source, "allow_trusted_local_profile");
+    assert_eq!(grant.persistence, "until_session_end");
+
+    // The tool then proceeded (the decide step gated the call but allowed it).
+    assert_eq!(outcome.status, "completed");
+    assert!(
+        outcome
+            .observed_event_kinds
+            .iter()
+            .any(|kind| kind == "tool.call_completed")
+    );
+}
+
+/// SG1 deny path: a denied request blocks the invocation -- NO tool runs (no
+/// `capability.grant_used`, no `tool.invocation_started`, no
+/// `tool.call_completed`) -- and surfaces a typed `deny` decide outcome with a
+/// structured, agent-readable refusal (not a raw error string) plus the full
+/// decision fields recorded on the decided event.
+#[test]
+fn sg1_denied_request_blocks_invocation_with_structured_refusal() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{CapoToolContext, CapoToolRequest, PermissionPolicy, ToolExposureRequest};
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("sg1-deny-session"));
+    // The Static read-only policy is reachable through the real loop and denies a
+    // write/mutating tool.
+    let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        PermissionPolicy::static_read_only_local(),
+        scripted,
+    )
+    .expect("open real controller");
+    let registration = controller.register_agent("sg1-deny-worker").expect("agent");
+    let refs = controller
+        .send_task(
+            &registration,
+            "Attempt a write tool under a read-only policy",
+        )
+        .expect("send task");
+
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-sg1-deny"),
+        tool_call_id: ToolCallId::new("tool-sg1-deny"),
+    };
+    // capo.evidence_record is an ACI write/mutating tool; the read-only policy denies it.
+    let outcome = controller
+        .dispatch_tool_call(
+            &scope,
+            ToolExposureRequest::Capo(CapoToolRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: scope.session_id.clone(),
+                tool_id: "capo.evidence_record".to_string(),
+                capability_profile_id: "static-read-only-local".to_string(),
+                context: CapoToolContext {
+                    task_status: "task active".to_string(),
+                    agent_status: "agent running".to_string(),
+                    session_summary: "summary".to_string(),
+                    workpad_excerpt: "section".to_string(),
+                    evidence_note: "note".to_string(),
+                    capability_scope: "tool:invoke:capo.evidence_record".to_string(),
+                },
+            }),
+        )
+        .expect("dispatch denied capo tool");
+
+    // Typed deny decide outcome with a structured, agent-readable refusal.
+    assert!(!outcome.decide.allowed);
+    assert_eq!(outcome.decide.effect, "deny");
+    assert_eq!(outcome.status, "denied");
+    let refusal = outcome
+        .decide
+        .refusal
+        .as_ref()
+        .expect("a denied write maps to a structured refusal");
+    assert_eq!(refusal.tool_name, "capo.evidence_record");
+    assert_eq!(refusal.decision_source, "static_policy:read-only-local");
+    assert!(!refusal.reason.is_empty());
+    // The agent-readable message is a structured line, not a raw error string.
+    let message = refusal.agent_message();
+    assert!(message.contains("capo.evidence_record"));
+    assert!(message.contains("static_policy:read-only-local"));
+
+    // The invocation was BLOCKED: no tool ran. None of the grant-use / invocation
+    // / completion events were emitted.
+    for blocked_kind in [
+        "capability.grant_used",
+        "tool.invocation_started",
+        "tool.output_observed",
+        "tool.call_completed",
+        "tool.result_delivered",
+    ] {
+        assert!(
+            !outcome
+                .observed_event_kinds
+                .iter()
+                .any(|kind| kind == blocked_kind),
+            "denied dispatch must not emit {blocked_kind}",
+        );
+    }
+
+    // The decide step still recorded the decision (requested + decided) so the
+    // audit trail is complete; the deny also materialized a deny grant.
+    assert!(
+        outcome
+            .observed_event_kinds
+            .iter()
+            .any(|kind| kind == "permission.requested")
+    );
+    assert!(
+        outcome
+            .observed_event_kinds
+            .iter()
+            .any(|kind| kind == "permission.decided")
+    );
+    assert!(outcome.decide.grant_created);
+
+    let turn_events = controller
+        .state()
+        .events_for_session_turn(&refs.session_id, "turn-sg1-deny")
+        .expect("turn events");
+    // No tool invocation event was persisted for the denied call.
+    assert!(
+        !turn_events
+            .iter()
+            .any(|event| event.kind == "tool.invocation_started")
+    );
+    let decided_event = turn_events
+        .iter()
+        .find(|event| event.kind == "permission.decided")
+        .expect("decided event persisted");
+    assert!(decided_event.payload_json.contains("\"effect\":\"deny\""));
+    assert!(
+        decided_event
+            .payload_json
+            .contains("\"decision_source\":\"static_policy:read-only-local\"")
+    );
+    assert!(decided_event.payload_json.contains("\"explanation\":"));
+
+    // The persisted tool-call projection reached the terminal denied status (it
+    // did not stick at "requested"), and no output artifact was produced.
+    let tools = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    let projection = tools
+        .iter()
+        .find(|tool| tool.tool_call_id == scope.tool_call_id)
+        .expect("denied projection present");
+    assert_eq!(projection.status, "denied");
+    assert_eq!(projection.output_artifact_id, None);
+
+    // The deny grant is durable and read-backable, with effect=deny.
+    let grants = controller.state().capability_grants().expect("grants");
+    assert!(grants.iter().any(|grant| {
+        grant.capability_grant_id == outcome.decide.capability_grant_id && grant.effect == "deny"
+    }));
 }

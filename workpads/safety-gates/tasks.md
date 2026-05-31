@@ -69,7 +69,7 @@ Verification:
 
 ## SG1 - Wire PermissionPolicy And ToolExposure Enforcement Into The Decide Step
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -107,6 +107,37 @@ Must not do:
 
 - Do not let the decide step pass requests straight to the runtime without a
   recorded `permission.decided` event.
+
+Evidence:
+
+- The real loop's decide step is `RealBoundaryController::dispatch_tool_call` ->
+  `FakeBoundaryController::dispatch_tool_call`
+  (`crates/capo-controller/src/tool_dispatch.rs`), which runs
+  `PermissionPolicy::decide` via `ToolExposure::authorize_and_invoke` BEFORE any
+  tool invocation. SG1 completed the lifecycle there: it now appends
+  `capability.grant_created` (with a durable `CapabilityGrantProjection`)
+  immediately after `permission.decided` for any non-observational decision
+  (allow OR `reject_always` deny), enriches the `permission.requested` /
+  `permission.decided` event payloads with
+  `decision_source`/`persistence`/`explanation`/`effect`/`capability_grant_id`,
+  and returns a typed `PermissionDecideOutcome` (new `decide` field on
+  `ToolDispatchOutcome`) carrying a structured `ToolRefusal` (with
+  `agent_message()`) on deny. `PermissionPolicy::allow_trusted_local()` stays the
+  real controller default; `Static`/`TrustedLocal` are both reachable; the fake
+  policy is test-only.
+- Files changed: `crates/capo-controller/src/tool_dispatch.rs` (lifecycle
+  wiring + typed decide outcome), `crates/capo-controller/src/lib.rs` (export
+  `PermissionDecideOutcome`/`ToolRefusal`), `crates/capo-controller/src/tests.rs`
+  (two new SG1 tests
+  `sg1_allowed_request_emits_requested_decided_grant_created_sequence`,
+  `sg1_denied_request_blocks_invocation_with_structured_refusal`; updated the two
+  existing dispatch-sequence assertions + their stale comments to include
+  `capability.grant_created`).
+- Commands run (from `/Users/nicolas/devel/capo-wt/safety-gates`):
+  `cargo fmt --check` (clean after `cargo fmt`),
+  `cargo clippy --all-targets --all-features -- -D warnings` (exit 0, no
+  warnings), `cargo test -p capo-controller` (50 passed, 0 failed, 1 ignored),
+  `cargo test --workspace` (all crates ok, 0 failed). `git diff --check` clean.
 
 ## SG2 - AgentAdapter Permission Round-Trip And ACP Option Mapping Against Fakes
 
