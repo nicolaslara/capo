@@ -166,7 +166,7 @@ impl FakeBoundaryController {
         scope: &RunScoreScope,
         criteria: &[AcceptanceCriterion],
     ) -> StateResult<RunScore> {
-        let observed = self.observed_verdicts_for_run(&scope.session_id, &scope.run_id)?;
+        let observed = self.observed_verdicts_for_run(&scope.run_id)?;
 
         // Score each criterion: MET only when an observed PASS of its kind exists.
         let scored_criteria: Vec<ScoredCriterion> = criteria
@@ -305,12 +305,17 @@ impl FakeBoundaryController {
     /// [`VERIFICATION_EVIDENCE_SOURCE`] -- are returned. This is the single point
     /// where agent-reported evidence is excluded: anything not stamped observed is
     /// dropped before it can influence the score.
-    fn observed_verdicts_for_run(
-        &self,
-        session_id: &SessionId,
-        run_id: &RunId,
-    ) -> StateResult<Vec<ObservedVerdict>> {
-        let events = self.state.recent_events_for_session(session_id, 1000)?;
+    fn observed_verdicts_for_run(&self, run_id: &RunId) -> StateResult<Vec<ObservedVerdict>> {
+        // Run-scoped, unbounded read: the score is a deterministic function of
+        // the run's observed evidence, so we must consider EVERY evidence event
+        // for the run, not the most-recent N of the whole session. A fixed
+        // session-wide cap (the old `recent_events_for_session(_, 1000)`) could
+        // truncate an early verification verdict out of the window in a
+        // long-lived session, mis-scoring a passing run and -- because the
+        // score id is keyed on the observed-verdict digest -- splitting a
+        // re-score into a duplicate row as the session grew. Filtering by
+        // `run_id` (and `kind`) in SQL with no LIMIT removes both hazards.
+        let events = self.state.evidence_events_for_run(run_id)?;
         let mut verdicts = Vec::new();
         for event in &events {
             if let Some(verdict) = parse_observed_verdict(event, run_id) {
@@ -614,6 +619,206 @@ mod tests {
             .expect("re-score");
         assert!(raised.passed, "an observed pass raises the score");
         assert_eq!(raised.observed_evidence_count, 1);
+    }
+
+    /// Append a crafted `evidence.recorded` event with caller-chosen `actor`
+    /// and payload `source`, claiming a passing verdict of `kind`. This lets a
+    /// test isolate each anti-spoofing guard: it can satisfy one of the two
+    /// (actor / source) independent checks while violating the other, proving
+    /// that EITHER guard alone is sufficient to filter the event.
+    fn inject_evidence(
+        controller: &FakeBoundaryController,
+        evidence_id: &str,
+        actor: &str,
+        source: &str,
+        kind: VerificationKind,
+    ) {
+        let scope = verification_scope();
+        let payload = serde_json::json!({
+            "source": source,
+            "verification_kind": kind.label(),
+            "command": "cargo test --workspace",
+            "passed": true,
+            "exit_status": "0",
+        })
+        .to_string();
+        let mut event = scoped_event(
+            &format!("event-{evidence_id}"),
+            EventKind::EvidenceRecorded,
+            &controller.project_id,
+            &scope.task_id,
+            &scope.agent_id,
+            &scope.session_id,
+            &scope.run_id,
+        )
+        .with_turn(scope.turn_id.to_string())
+        .with_item(evidence_id)
+        .with_payload(payload);
+        event.actor = actor.to_string();
+        controller
+            .state
+            .append_event(event, &[])
+            .expect("append crafted evidence");
+    }
+
+    #[test]
+    fn observed_source_with_a_non_observed_actor_is_filtered() {
+        // ISOLATES THE ACTOR GUARD: the payload carries the genuine observed
+        // `source = observed-runner` and a right-kind passing verdict, but the
+        // event's actor is NOT the observed runner. The actor stamp alone must
+        // reject it; if the actor check were deleted, the (still-correct) source
+        // would let this forged event raise the score.
+        let (controller, _workspace, _artifacts) = controller();
+        inject_evidence(
+            &controller,
+            "evidence-forged-actor",
+            "agent-sg7-claims",
+            VERIFICATION_EVIDENCE_SOURCE,
+            VerificationKind::Test,
+        );
+
+        let score = controller
+            .score_run(
+                &score_scope(0, 100),
+                &[AcceptanceCriterion::new(
+                    "cargo test passes",
+                    VerificationKind::Test,
+                )],
+            )
+            .expect("score run");
+
+        assert_eq!(
+            score.observed_evidence_count, 0,
+            "a non-observed actor is filtered even with the observed source"
+        );
+        assert_eq!(score.criteria_met, 0);
+        assert!(!score.passed);
+        assert!(!score.scored_criteria[0].met);
+    }
+
+    #[test]
+    fn observed_actor_with_a_forged_source_is_filtered() {
+        // ISOLATES THE SOURCE GUARD: the event carries the genuine observed
+        // actor, but its payload `source` is a forged/agent channel. The payload
+        // self-identification alone must reject it; if the source check were
+        // deleted, the (matching) actor would let this event raise the score.
+        let (controller, _workspace, _artifacts) = controller();
+        inject_evidence(
+            &controller,
+            "evidence-forged-source",
+            VERIFICATION_EVIDENCE_ACTOR,
+            "agent-reported",
+            VerificationKind::Test,
+        );
+
+        let score = controller
+            .score_run(
+                &score_scope(0, 100),
+                &[AcceptanceCriterion::new(
+                    "cargo test passes",
+                    VerificationKind::Test,
+                )],
+            )
+            .expect("score run");
+
+        assert_eq!(
+            score.observed_evidence_count, 0,
+            "a forged payload source is filtered even with the observed actor"
+        );
+        assert_eq!(score.criteria_met, 0);
+        assert!(!score.passed);
+        assert!(!score.scored_criteria[0].met);
+    }
+
+    #[test]
+    fn an_observed_pass_of_the_wrong_kind_does_not_meet_a_criterion() {
+        // KIND DISCRIMINATION: a GENUINE observed pass exists, but of a
+        // different kind (Check) than the criterion requires (Test). Scoring
+        // matches a criterion only when the verdict's kind equals the
+        // criterion's required kind, so this verdict is considered as observed
+        // evidence (count == 1) yet does not satisfy the Test criterion. If the
+        // kind comparison were dropped, this would falsely score the run passed
+        // on irrelevant evidence.
+        let (controller, workspace, artifacts) = controller();
+        // OBSERVED: a real exit-0 verdict, but kind = Check (label "check").
+        observe(
+            &controller,
+            &workspace,
+            artifacts,
+            VerificationKind::Check,
+            0,
+        );
+
+        let score = controller
+            .score_run(
+                &score_scope(0, 100),
+                &[AcceptanceCriterion::new(
+                    "cargo test passes",
+                    VerificationKind::Test,
+                )],
+            )
+            .expect("score run");
+
+        assert_eq!(
+            score.observed_evidence_count, 1,
+            "the wrong-kind verdict WAS considered as observed evidence"
+        );
+        assert!(
+            !score.passed,
+            "a passing verdict of a different kind must not meet the criterion"
+        );
+        assert_eq!(score.outcome, RunScoreOutcome::Failed);
+        assert_eq!(score.criteria_met, 0);
+        assert!(!score.scored_criteria[0].met);
+        assert!(score.scored_criteria[0].evidence_id.is_none());
+    }
+
+    #[test]
+    fn mixed_kind_criteria_each_match_only_their_own_kind() {
+        // Multi-criteria mixed-kind proof: observe a passing Test and a passing
+        // Smoke; score against Test + Smoke + Check criteria. Test and Smoke are
+        // met by their same-kind verdicts; Check has no observed verdict and
+        // stays unmet -- so the run is Failed, and each criterion matched only
+        // its own kind (no cross-kind satisfaction).
+        let (controller, workspace, artifacts) = controller();
+        observe(
+            &controller,
+            &workspace,
+            artifacts.clone(),
+            VerificationKind::Test,
+            0,
+        );
+        observe(
+            &controller,
+            &workspace,
+            artifacts,
+            VerificationKind::Smoke,
+            0,
+        );
+
+        let score = controller
+            .score_run(
+                &score_scope(0, 100),
+                &[
+                    AcceptanceCriterion::new("cargo test passes", VerificationKind::Test),
+                    AcceptanceCriterion::new("smoke passes", VerificationKind::Smoke),
+                    AcceptanceCriterion::new("cargo check passes", VerificationKind::Check),
+                ],
+            )
+            .expect("score run");
+
+        assert_eq!(score.observed_evidence_count, 2);
+        assert_eq!(score.criteria_total, 3);
+        assert_eq!(score.criteria_met, 2, "Test and Smoke met; Check unmet");
+        assert!(!score.passed);
+        assert_eq!(score.outcome, RunScoreOutcome::Failed);
+        // Test criterion -> met by the Test verdict.
+        assert!(score.scored_criteria[0].met);
+        // Smoke criterion -> met by the Smoke verdict.
+        assert!(score.scored_criteria[1].met);
+        // Check criterion -> no observed Check verdict, stays unmet (the Test /
+        // Smoke passes did not leak across kinds).
+        assert!(!score.scored_criteria[2].met);
     }
 
     /// Open a second controller handle over the SAME state db as `base` (the

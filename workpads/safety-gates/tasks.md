@@ -669,6 +669,16 @@ Evidence:
   passed/0 failed). `git diff --check` clean. Acceptance met. No live Codex smoke
   required (SG7 verification is deterministic scripted-evidence + controlled-clock
   + replay only).
+- Gate fix (2026-05-31): the objective gate failed on `cargo fmt --check` only
+  (`fmt=fail clippy=ok test=ok`). The import block in
+  `crates/capo-state/src/queries.rs` had `EventRecord,` and `EvidenceProjection,`
+  split across two lines; `cargo fmt` wants them collapsed onto one line:
+  `EventRecord, EvidenceProjection, InFlightRun, ...`. Applied that single
+  formatting fix (no logic change). Re-ran the full gate from
+  `/Users/nicolas/devel/capo-wt/safety-gates`: `cargo fmt --check` (exit 0),
+  `cargo clippy --all-targets --all-features -- -D warnings` (exit 0, no
+  warnings), `cargo test --workspace` (exit 0; 0 failed workspace-wide, 26
+  `test result: ok` suites). Acceptance still met.
 
 ## SG8 - Controller-Owned Shadow-Git Checkpoint/Rollback
 

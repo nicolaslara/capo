@@ -8,8 +8,8 @@ use crate::{
     AdapterDispatchGateProjection, AdapterDispatchPlanProjection,
     AdapterDispatchPromptMaterializationProjection, AdapterDispatchPromptSourceProjection,
     AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
-    AgentProjection, CapabilityGrantProjection, ConnectivityExposureProjection, EventRecord,
-    EvidenceProjection, InFlightRun, MemoryPacketProjection, MemoryRecordProjection,
+    AgentProjection, CapabilityGrantProjection, ConnectivityExposureProjection, EventKind,
+    EventRecord, EvidenceProjection, InFlightRun, MemoryPacketProjection, MemoryRecordProjection,
     MemorySourceProjection, PermissionApprovalProjection, ReviewFindingProjection, RunProjection,
     RunScoreProjection, RuntimeTargetProjection, SessionProjection, SourceBindingProjection,
     SqliteStateStore, StateError, StateResult, TaskOutcomeReportProjection, TaskProjection,
@@ -1726,6 +1726,53 @@ impl SqliteStateStore {
                 redaction_state: row.get(13)?,
             })
         })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    /// All `evidence.recorded` events for a single run, in ascending sequence
+    /// order, with NO recency cap.
+    ///
+    /// Unlike [`Self::recent_events_for_session`] (which keeps only the most
+    /// recent `limit` events for the whole session, a UI/diagnostics tail), this
+    /// read is run-scoped and unbounded: the SG7 run score is a deterministic
+    /// function of a run's observed verification evidence, so every matching
+    /// event for the run must be visible regardless of how many later events the
+    /// long-lived session accumulated. The `run_id` and `kind` filters are
+    /// applied in SQL (before any limit), so a session with thousands of events
+    /// from other turns/runs never truncates an early verification verdict out
+    /// of the scored set, keeping the score stable and idempotent across
+    /// re-scores as the session grows.
+    pub fn evidence_events_for_run(&self, run_id: &RunId) -> StateResult<Vec<EventRecord>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT sequence, event_id, kind, actor, project_id, task_id, agent_id, session_id,
+                    run_id, turn_id, item_id, payload_json, idempotency_key, redaction_state
+             FROM events
+             WHERE run_id = ?1 AND kind = ?2
+             ORDER BY sequence ASC",
+        )?;
+        let rows = statement.query_map(
+            params![run_id.as_str(), EventKind::EvidenceRecorded.as_str()],
+            |row| {
+                Ok(EventRecord {
+                    sequence: row.get(0)?,
+                    event_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    actor: row.get(3)?,
+                    project_id: optional_id(row.get::<_, Option<String>>(4)?),
+                    task_id: optional_id(row.get::<_, Option<String>>(5)?),
+                    agent_id: optional_id(row.get::<_, Option<String>>(6)?),
+                    session_id: optional_id(row.get::<_, Option<String>>(7)?),
+                    run_id: optional_id(row.get::<_, Option<String>>(8)?),
+                    turn_id: row.get(9)?,
+                    item_id: row.get(10)?,
+                    payload_json: row.get(11)?,
+                    idempotency_key: row.get(12)?,
+                    redaction_state: row.get(13)?,
+                })
+            },
+        )?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StateError::from)
     }
