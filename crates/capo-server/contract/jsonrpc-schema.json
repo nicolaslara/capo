@@ -239,6 +239,7 @@
             "gate_dispatch",
             "run_dispatch_local",
             "run_live_provider_local",
+            "run_dispatch_turn",
             "recover",
             "subscribe",
             "read_thread"
@@ -307,6 +308,7 @@
                     "live_provider_preflighted",
                     "dispatch_gated",
                     "dispatch_run",
+                    "dispatch_turn",
                     "recovery",
                     "subscribed",
                     "thread"

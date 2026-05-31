@@ -17,7 +17,7 @@ converged). AI1/AI2 are HIGH priority and gate meaningful `goal-autonomy`
 
 ## AI1 - Wire `run_dispatch_turn` as the single production orchestration path
 
-Status: pending. Priority: high. Source: real-turn-loop arch review.
+Status: done. Priority: high. Source: real-turn-loop arch review.
 
 Problem:
 
@@ -48,6 +48,36 @@ Verification:
   asserts it produces the loop's dispatch event sequence + a `TurnFinished`.
 - `cargo fmt` / `cargo clippy --all-targets --all-features -- -D warnings` /
   `cargo test --workspace`.
+
+Evidence (2026-05-31):
+
+- Production wiring: `CapoServer::handle` now routes `ServerCommand::RunDispatchTurn`
+  through `self.run_dispatch_turn(...)` and returns a `DispatchTurn` payload
+  pairing the run summary with the loop's `TurnFinished` annotation
+  (`crates/capo-server/src/lib.rs`). Completed the wire codec: added the
+  `encode_dispatch_run`/`decode_dispatch_run` helpers (shared by the `dispatch_run`
+  payload and the `run` field of `dispatch_turn`) and the `dispatch_turn`
+  encode/decode arms (`crates/capo-server/src/transport/codec.rs`); published
+  `run_dispatch_turn`/`dispatch_turn` in the wire schema enums
+  (`crates/capo-server/src/transport/contract.rs`) and regenerated the checked-in
+  `contract/jsonrpc-schema.json` snapshot; added the two missing exhaustive match
+  arms + sample command/payload values in the contract test
+  (`crates/capo-server/src/tests/contract.rs`).
+- Verification test (production command path, not a bespoke harness): added
+  `run_dispatch_turn_command_drives_the_loop_through_the_production_handle_path`
+  and `run_dispatch_turn_command_rejects_a_zero_wall_clock_timeout` in
+  `crates/capo-server/src/tests/turn_orchestration.rs`. The first drives
+  `ServerCommand::RunDispatchTurn` through `CapoServer::handle` (live-mock codex
+  turn, fail-closed live gate) and asserts the returned `DispatchTurn` carries a
+  loop `TurnFinished` keyed to the turn AND that the persisted dispatch event
+  sequence is byte-identical to the in-process loop over the same inputs (one
+  path, one event shape, drove the live preflight gate). The second proves the
+  command rejects a zero wall-clock timeout before any provider runs.
+- Gate run (worktree, 2026-05-31): `cargo fmt --check` ok; `cargo clippy
+  --all-targets --all-features -- -D warnings` clean; `cargo test --workspace`
+  all green (capo-server lib 93 passed, 0 failed). No live Codex smoke required
+  for AI1 (the deterministic live-mock fixture path satisfies the verification).
+- Acceptance: met. Did NOT git commit (workflow commits after review).
 
 ## AI2 - Inject a real Codex `AgentAdapter` as the default chat backend
 

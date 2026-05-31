@@ -203,6 +203,57 @@ pub enum ServerCommand {
         /// `!unattended`), so a `true` here forces the read-only dry-run profile.
         unattended: bool,
     },
+    /// AI1: drive ONE turn through the single production orchestration path
+    /// ([`crate::CapoServer::run_dispatch_turn`]) -- the loop DRIVES
+    /// preflight/gate/run over the dispatch primitives and ANNOTATES the run it
+    /// drove with a `TurnFinished`. This is the production command the
+    /// operator/live-run flow issues so the loop the design is built around is the
+    /// path that executes, instead of hand-sequencing
+    /// `PreflightLiveProvider` + `RunLiveProviderLocal` beside the loop.
+    ///
+    /// It carries the live-provider turn inputs plus the RTL7 resource ceiling and
+    /// per-run usage as flat scalars (the handler rebuilds
+    /// [`capo_controller::RunResourceCeiling`]/[`capo_controller::RunResourceUsage`]),
+    /// so the wire stays simple and the loop's ceiling enforcement is honored on
+    /// the production path.
+    RunDispatchTurn {
+        agent_name: String,
+        adapter: String,
+        goal: String,
+        workspace: String,
+        artifacts: String,
+        session_id: String,
+        run_id: String,
+        turn_id: String,
+        capability_profile: String,
+        runtime_scope: String,
+        credential_scan_policy: String,
+        raw_prompt_policy: String,
+        raw_output_policy: String,
+        tool_wrapper_policy: String,
+        live_provider_opt_in: bool,
+        live_execution_opt_in: bool,
+        mock_runtime_opt_in: bool,
+        mock_provider_output_name: Option<String>,
+        mock_provider_output_jsonl: Option<String>,
+        /// Wall-clock bound (seconds) for the live turn. A live turn MUST run
+        /// inside a wall-clock-bounded ceiling, so this is required; the handler
+        /// rejects a zero. Wired to the runtime timeout.
+        timeout_seconds: u64,
+        /// Turns ceiling for the run (the loop counts the turn about to run).
+        max_turns: u32,
+        /// Token/cost ceiling for the run, in provider cost units.
+        max_token_cost: u64,
+        /// Per-run turns already taken before this turn (carried across turns).
+        turns_taken_before: u32,
+        /// Per-run token/cost already accrued before this turn.
+        token_cost_before: u64,
+        /// Pre-turn token/cost estimate for the turn about to run.
+        turn_token_cost: u64,
+        /// RTL9: whether this turn runs unattended (forces the read-only dry-run
+        /// profile; a live workspace write needs an attended run).
+        unattended: bool,
+    },
     Recover,
     /// Tail the append-only event log (ST4). The subscriber catches up on the
     /// backlog strictly after `from_sequence` (optionally filtered to one
@@ -463,6 +514,12 @@ pub enum ServerResponsePayload {
     LiveProviderPreflighted(LiveProviderPreflightSummary),
     DispatchGated(DispatchGateSummary),
     DispatchRun(DispatchRunSummary),
+    /// AI1: the outcome of driving one turn through the single production
+    /// orchestration path ([`crate::CapoServer::run_dispatch_turn`]): the dispatch
+    /// run summary (the existing run-completion truth) PLUS the loop's
+    /// `TurnFinished` annotation, so the production path observably emits the
+    /// loop's outcome rather than only the raw run.
+    DispatchTurn(DispatchTurnSummary),
     Recovery(RecoverySummary),
     /// The catch-up backlog for a [`ServerCommand::Subscribe`] (ST4). Live
     /// events that follow are pushed as JSON-RPC notifications
@@ -669,6 +726,47 @@ impl DispatchRunSummary {
     }
 }
 
+/// AI1: the wire-facing outcome of one turn driven through
+/// [`crate::CapoServer::run_dispatch_turn`]. It pairs the dispatch run summary
+/// (the single run-completion truth) with the loop's `TurnFinished` annotation
+/// and the optional ceiling-breach reason, so the production operator/live-run
+/// path returns the SAME loop outcome the in-process tests assert -- one path,
+/// one event shape.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DispatchTurnSummary {
+    pub run: DispatchRunSummary,
+    pub finished: TurnFinishedSummary,
+    /// When the live turn was aborted by the resource ceiling, the stable breach
+    /// code (e.g. `max_turns_exceeded`); `None` on a normal completion.
+    pub ceiling_breach_code: Option<String>,
+}
+
+/// AI1: the wire shape of [`capo_controller::TurnFinished`]'s replay-stable,
+/// equality-significant fields. The volatile append-count `replay` diagnostic is
+/// deliberately omitted -- it is per-run and not replay-stable -- so this carries
+/// only the fields a client can rely on across a restart/replay.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TurnFinishedSummary {
+    pub turn_id: String,
+    /// `completed` / `interrupted` / `stopped` / `failed`.
+    pub stop_reason: String,
+    pub observed_terminal_event: bool,
+    pub summary_refs: Vec<String>,
+    pub observed_tool_refs: Vec<String>,
+}
+
+impl TurnFinishedSummary {
+    pub(crate) fn from_finished(finished: &capo_controller::TurnFinished) -> Self {
+        Self {
+            turn_id: finished.turn_id.to_string(),
+            stop_reason: finished.stop_reason.as_str().to_string(),
+            observed_terminal_event: finished.observed_terminal_event,
+            summary_refs: finished.summary_refs.clone(),
+            observed_tool_refs: finished.observed_tool_refs.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskRunSummary {
     pub task_id: TaskId,
@@ -854,6 +952,25 @@ fn default_request_id(command: &ServerCommand) -> String {
                     .as_deref()
                     .map(slug)
                     .unwrap_or_else(|| "provider".to_string())
+            )
+        }
+        ServerCommand::RunDispatchTurn {
+            adapter,
+            agent_name,
+            goal,
+            session_id,
+            run_id,
+            turn_id,
+            ..
+        } => {
+            format!(
+                "server-dispatch-turn-{}-{}-{}-{}-{}-{}",
+                slug(adapter),
+                slug(agent_name),
+                slug(session_id),
+                slug(run_id),
+                slug(turn_id),
+                stable_hash(goal.as_bytes())
             )
         }
         ServerCommand::Recover => "server-recover".to_string(),

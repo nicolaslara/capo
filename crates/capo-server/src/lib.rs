@@ -1075,6 +1075,105 @@ impl CapoServer {
                     )),
                 )
             }
+            ServerCommand::RunDispatchTurn {
+                agent_name,
+                adapter,
+                goal,
+                workspace,
+                artifacts,
+                session_id,
+                run_id,
+                turn_id,
+                capability_profile,
+                runtime_scope,
+                credential_scan_policy,
+                raw_prompt_policy,
+                raw_output_policy,
+                tool_wrapper_policy,
+                live_provider_opt_in,
+                live_execution_opt_in,
+                mock_runtime_opt_in,
+                mock_provider_output_name,
+                mock_provider_output_jsonl,
+                timeout_seconds,
+                max_turns,
+                max_token_cost,
+                turns_taken_before,
+                token_cost_before,
+                turn_token_cost,
+                unattended,
+            } => {
+                // AI1: the single production orchestration path. The loop DRIVES
+                // the existing preflight/run dispatch primitives and ANNOTATES the
+                // run with a `TurnFinished`; the operator/live-run flow issues this
+                // command instead of hand-sequencing those primitives beside the
+                // loop, so the path the design claims is the path that executes.
+                //
+                // A live turn must run inside a wall-clock-bounded ceiling
+                // (`run_dispatch_turn` rejects a turn whose ceiling does not bound
+                // wall-clock); a zero timeout cannot satisfy that, so reject it
+                // here with a clear message rather than letting the loop reject a
+                // degenerate ceiling.
+                if timeout_seconds == 0 {
+                    return Err(ServerError::AdapterFixture(
+                        "RunDispatchTurn requires a non-zero wall-clock timeout (the live turn \
+                         runs inside a wall-clock-bounded resource ceiling)"
+                            .to_string(),
+                    ));
+                }
+                let ceiling = capo_controller::RunResourceCeiling::for_live_provider(
+                    max_turns,
+                    std::time::Duration::from_secs(timeout_seconds),
+                    max_token_cost,
+                );
+                let usage_before = capo_controller::RunResourceUsage {
+                    turns_taken: turns_taken_before,
+                    wall_clock_elapsed: std::time::Duration::ZERO,
+                    token_cost: token_cost_before,
+                };
+                let outcome = self.run_dispatch_turn(DispatchTurnRequest {
+                    agent_name,
+                    adapter,
+                    goal,
+                    workspace,
+                    artifacts,
+                    session_id,
+                    run_id,
+                    turn_id,
+                    mode: DispatchTurnMode::LiveProvider(Box::new(LiveProviderTurn {
+                        capability_profile,
+                        runtime_scope,
+                        credential_scan_policy,
+                        raw_prompt_policy,
+                        raw_output_policy,
+                        tool_wrapper_policy,
+                        live_provider_opt_in,
+                        live_execution_opt_in,
+                        mock_runtime_opt_in,
+                        mock_provider_output_name,
+                        mock_provider_output_jsonl,
+                        ceiling,
+                        usage_before,
+                        turn_token_cost,
+                        // The spawn-path codex binary is resolved server-side from
+                        // `CAPO_CODEX_BIN`; the command carries no explicit override.
+                        codex_program_override: None,
+                        unattended,
+                    })),
+                })?;
+                let summary = DispatchTurnSummary {
+                    run: outcome.run,
+                    finished: TurnFinishedSummary::from_finished(&outcome.finished),
+                    ceiling_breach_code: outcome
+                        .ceiling_breach
+                        .map(|breach| breach.code().to_string()),
+                };
+                self.response(
+                    request_id,
+                    origin,
+                    ServerResponsePayload::DispatchTurn(summary),
+                )
+            }
             ServerCommand::Recover => {
                 let recovery = self.recover_server(&request_id, &origin)?;
                 self.response(

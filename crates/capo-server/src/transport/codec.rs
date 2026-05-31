@@ -11,9 +11,10 @@ use super::{
 };
 use crate::{
     AdapterReplaySummary, AgentSummary, DispatchGateSummary, DispatchPlanSummary,
-    DispatchRunSummary, LiveProviderPreflightSummary, RecoverySummary, ServerClientOrigin,
-    ServerCommand, ServerEvent, ServerResponse, ServerResponsePayload, ServerThread,
-    ServerThreadItem, ServerThreadTurn, SessionSummary, SubscriptionBacklog, TaskRunSummary,
+    DispatchRunSummary, DispatchTurnSummary, LiveProviderPreflightSummary, RecoverySummary,
+    ServerClientOrigin, ServerCommand, ServerEvent, ServerResponse, ServerResponsePayload,
+    ServerThread, ServerThreadItem, ServerThreadTurn, SessionSummary, SubscriptionBacklog,
+    TaskRunSummary, TurnFinishedSummary,
 };
 
 pub(super) fn encode_origin(origin: &ServerClientOrigin) -> Value {
@@ -228,6 +229,62 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             "codex_program_override": codex_program_override,
             "unattended": unattended,
         }),
+        ServerCommand::RunDispatchTurn {
+            agent_name,
+            adapter,
+            goal,
+            workspace,
+            artifacts,
+            session_id,
+            run_id,
+            turn_id,
+            capability_profile,
+            runtime_scope,
+            credential_scan_policy,
+            raw_prompt_policy,
+            raw_output_policy,
+            tool_wrapper_policy,
+            live_provider_opt_in,
+            live_execution_opt_in,
+            mock_runtime_opt_in,
+            mock_provider_output_name,
+            mock_provider_output_jsonl,
+            timeout_seconds,
+            max_turns,
+            max_token_cost,
+            turns_taken_before,
+            token_cost_before,
+            turn_token_cost,
+            unattended,
+        } => json!({
+            "type": "run_dispatch_turn",
+            "agent_name": agent_name,
+            "adapter": adapter,
+            "goal": goal,
+            "workspace": workspace,
+            "artifacts": artifacts,
+            "session_id": session_id,
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "capability_profile": capability_profile,
+            "runtime_scope": runtime_scope,
+            "credential_scan_policy": credential_scan_policy,
+            "raw_prompt_policy": raw_prompt_policy,
+            "raw_output_policy": raw_output_policy,
+            "tool_wrapper_policy": tool_wrapper_policy,
+            "live_provider_opt_in": live_provider_opt_in,
+            "live_execution_opt_in": live_execution_opt_in,
+            "mock_runtime_opt_in": mock_runtime_opt_in,
+            "mock_provider_output_name": mock_provider_output_name,
+            "mock_provider_output_jsonl": mock_provider_output_jsonl,
+            "timeout_seconds": timeout_seconds,
+            "max_turns": max_turns,
+            "max_token_cost": max_token_cost,
+            "turns_taken_before": turns_taken_before,
+            "token_cost_before": token_cost_before,
+            "turn_token_cost": turn_token_cost,
+            "unattended": unattended,
+        }),
         ServerCommand::Recover => json!({ "type": "recover" }),
         ServerCommand::Subscribe {
             session_id,
@@ -337,6 +394,36 @@ pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
             mock_provider_output_jsonl: optional_string(value, "mock_provider_output_jsonl")?,
             timeout_seconds: required_usize(value, "timeout_seconds")? as u64,
             codex_program_override: optional_string(value, "codex_program_override")?,
+            // Safe default: a turn with no explicit `unattended` flag is treated
+            // as unattended, which forces the read-only dry-run profile (RTL6/9).
+            unattended: optional_bool(value, "unattended")?.unwrap_or(true),
+        }),
+        "run_dispatch_turn" => Ok(ServerCommand::RunDispatchTurn {
+            agent_name: required_string(value, "agent_name")?,
+            adapter: required_string(value, "adapter")?,
+            goal: required_string(value, "goal")?,
+            workspace: required_string(value, "workspace")?,
+            artifacts: required_string(value, "artifacts")?,
+            session_id: required_string(value, "session_id")?,
+            run_id: required_string(value, "run_id")?,
+            turn_id: required_string(value, "turn_id")?,
+            capability_profile: required_string(value, "capability_profile")?,
+            runtime_scope: required_string(value, "runtime_scope")?,
+            credential_scan_policy: required_string(value, "credential_scan_policy")?,
+            raw_prompt_policy: required_string(value, "raw_prompt_policy")?,
+            raw_output_policy: required_string(value, "raw_output_policy")?,
+            tool_wrapper_policy: required_string(value, "tool_wrapper_policy")?,
+            live_provider_opt_in: required_bool(value, "live_provider_opt_in")?,
+            live_execution_opt_in: required_bool(value, "live_execution_opt_in")?,
+            mock_runtime_opt_in: required_bool(value, "mock_runtime_opt_in")?,
+            mock_provider_output_name: optional_string(value, "mock_provider_output_name")?,
+            mock_provider_output_jsonl: optional_string(value, "mock_provider_output_jsonl")?,
+            timeout_seconds: required_usize(value, "timeout_seconds")? as u64,
+            max_turns: required_usize(value, "max_turns")? as u32,
+            max_token_cost: required_usize(value, "max_token_cost")? as u64,
+            turns_taken_before: required_usize(value, "turns_taken_before")? as u32,
+            token_cost_before: required_usize(value, "token_cost_before")? as u64,
+            turn_token_cost: required_usize(value, "turn_token_cost")? as u64,
             // Safe default: a turn with no explicit `unattended` flag is treated
             // as unattended, which forces the read-only dry-run profile (RTL6/9).
             unattended: optional_bool(value, "unattended")?.unwrap_or(true),
@@ -452,27 +539,22 @@ pub(super) fn encode_payload(payload: &ServerResponsePayload) -> Value {
             "reasons": gate.reasons,
             "raw_prompt_policy": gate.raw_prompt_policy,
         }),
-        ServerResponsePayload::DispatchRun(run) => json!({
-            "type": "dispatch_run",
-            "dispatch_plan_id": run.dispatch_plan_id,
-            "dispatch_execution_id": run.dispatch_execution_id,
-            "adapter": run.adapter,
-            "session_id": run.session_id.to_string(),
-            "run_id": run.run_id.to_string(),
-            "provider_cli_execution_allowed": run.provider_cli_execution_allowed,
-            "provider_cli_executed": run.provider_cli_executed,
-            "status": run.status,
-            "runtime_process_ref": run.runtime_process_ref,
-            "credential_scan_status": run.credential_scan_status,
-            "raw_prompt_policy": run.raw_prompt_policy,
-            "raw_output_policy": run.raw_output_policy,
-            "reason_codes": run.reason_codes,
-            "input_event_count": run.input_event_count,
-            "appended_event_count": run.appended_event_count,
-            "tool_event_count": run.tool_event_count,
-            "summary_event_count": run.summary_event_count,
-            "completed_turn_count": run.completed_turn_count,
-            "observed_token_cost": run.observed_token_cost,
+        ServerResponsePayload::DispatchRun(run) => {
+            let mut value = encode_dispatch_run(run);
+            value["type"] = json!("dispatch_run");
+            value
+        }
+        ServerResponsePayload::DispatchTurn(turn) => json!({
+            "type": "dispatch_turn",
+            "run": encode_dispatch_run(&turn.run),
+            "finished": {
+                "turn_id": turn.finished.turn_id,
+                "stop_reason": turn.finished.stop_reason,
+                "observed_terminal_event": turn.finished.observed_terminal_event,
+                "summary_refs": turn.finished.summary_refs,
+                "observed_tool_refs": turn.finished.observed_tool_refs,
+            },
+            "ceiling_breach_code": turn.ceiling_breach_code,
         }),
         ServerResponsePayload::Recovery(recovery) => json!({
             "type": "recovery",
@@ -495,6 +577,62 @@ pub(super) fn encode_payload(payload: &ServerResponsePayload) -> Value {
             "turns": thread.turns.iter().map(encode_thread_turn).collect::<Vec<_>>(),
         }),
     }
+}
+
+/// AI1: encode a [`DispatchRunSummary`] to its wire object. Shared by the
+/// `dispatch_run` payload and the `dispatch_turn` payload (whose `run` field is
+/// the same run summary) so the two paths emit one identical run shape. The
+/// caller sets the top-level `type` tag for the standalone `dispatch_run`
+/// payload; the embedded `run` object inside `dispatch_turn` carries no tag.
+fn encode_dispatch_run(run: &DispatchRunSummary) -> Value {
+    json!({
+        "dispatch_plan_id": run.dispatch_plan_id,
+        "dispatch_execution_id": run.dispatch_execution_id,
+        "adapter": run.adapter,
+        "session_id": run.session_id.to_string(),
+        "run_id": run.run_id.to_string(),
+        "provider_cli_execution_allowed": run.provider_cli_execution_allowed,
+        "provider_cli_executed": run.provider_cli_executed,
+        "status": run.status,
+        "runtime_process_ref": run.runtime_process_ref,
+        "credential_scan_status": run.credential_scan_status,
+        "raw_prompt_policy": run.raw_prompt_policy,
+        "raw_output_policy": run.raw_output_policy,
+        "reason_codes": run.reason_codes,
+        "input_event_count": run.input_event_count,
+        "appended_event_count": run.appended_event_count,
+        "tool_event_count": run.tool_event_count,
+        "summary_event_count": run.summary_event_count,
+        "completed_turn_count": run.completed_turn_count,
+        "observed_token_cost": run.observed_token_cost,
+    })
+}
+
+/// AI1: decode a [`DispatchRunSummary`] from its wire object. The inverse of
+/// [`encode_dispatch_run`]; shared by the `dispatch_run` payload and the `run`
+/// field of the `dispatch_turn` payload so both decode one identical run shape.
+fn decode_dispatch_run(value: &Value) -> TransportResult<DispatchRunSummary> {
+    Ok(DispatchRunSummary {
+        dispatch_plan_id: required_string(value, "dispatch_plan_id")?,
+        dispatch_execution_id: required_string(value, "dispatch_execution_id")?,
+        adapter: required_string(value, "adapter")?,
+        session_id: SessionId::new(required_string(value, "session_id")?),
+        run_id: RunId::new(required_string(value, "run_id")?),
+        provider_cli_execution_allowed: required_bool(value, "provider_cli_execution_allowed")?,
+        provider_cli_executed: required_bool(value, "provider_cli_executed")?,
+        status: required_string(value, "status")?,
+        runtime_process_ref: optional_string(value, "runtime_process_ref")?,
+        credential_scan_status: required_string(value, "credential_scan_status")?,
+        raw_prompt_policy: required_string(value, "raw_prompt_policy")?,
+        raw_output_policy: required_string(value, "raw_output_policy")?,
+        reason_codes: required_string(value, "reason_codes")?,
+        input_event_count: required_usize(value, "input_event_count")?,
+        appended_event_count: required_usize(value, "appended_event_count")?,
+        tool_event_count: required_usize(value, "tool_event_count")?,
+        summary_event_count: required_usize(value, "summary_event_count")?,
+        completed_turn_count: required_usize(value, "completed_turn_count")?,
+        observed_token_cost: value.get("observed_token_cost").and_then(Value::as_u64),
+    })
 }
 
 fn encode_thread_turn(turn: &ServerThreadTurn) -> Value {
@@ -683,26 +821,22 @@ pub(super) fn decode_payload(value: &Value) -> TransportResult<ServerResponsePay
             reasons: required_string(value, "reasons")?,
             raw_prompt_policy: required_string(value, "raw_prompt_policy")?,
         })),
-        "dispatch_run" => Ok(ServerResponsePayload::DispatchRun(DispatchRunSummary {
-            dispatch_plan_id: required_string(value, "dispatch_plan_id")?,
-            dispatch_execution_id: required_string(value, "dispatch_execution_id")?,
-            adapter: required_string(value, "adapter")?,
-            session_id: SessionId::new(required_string(value, "session_id")?),
-            run_id: RunId::new(required_string(value, "run_id")?),
-            provider_cli_execution_allowed: required_bool(value, "provider_cli_execution_allowed")?,
-            provider_cli_executed: required_bool(value, "provider_cli_executed")?,
-            status: required_string(value, "status")?,
-            runtime_process_ref: optional_string(value, "runtime_process_ref")?,
-            credential_scan_status: required_string(value, "credential_scan_status")?,
-            raw_prompt_policy: required_string(value, "raw_prompt_policy")?,
-            raw_output_policy: required_string(value, "raw_output_policy")?,
-            reason_codes: required_string(value, "reason_codes")?,
-            input_event_count: required_usize(value, "input_event_count")?,
-            appended_event_count: required_usize(value, "appended_event_count")?,
-            tool_event_count: required_usize(value, "tool_event_count")?,
-            summary_event_count: required_usize(value, "summary_event_count")?,
-            completed_turn_count: required_usize(value, "completed_turn_count")?,
-            observed_token_cost: value.get("observed_token_cost").and_then(Value::as_u64),
+        "dispatch_run" => Ok(ServerResponsePayload::DispatchRun(decode_dispatch_run(
+            value,
+        )?)),
+        "dispatch_turn" => Ok(ServerResponsePayload::DispatchTurn(DispatchTurnSummary {
+            run: decode_dispatch_run(required_value(value, "run")?)?,
+            finished: {
+                let finished = required_value(value, "finished")?;
+                TurnFinishedSummary {
+                    turn_id: required_string(finished, "turn_id")?,
+                    stop_reason: required_string(finished, "stop_reason")?,
+                    observed_terminal_event: required_bool(finished, "observed_terminal_event")?,
+                    summary_refs: required_string_array(finished, "summary_refs")?,
+                    observed_tool_refs: required_string_array(finished, "observed_tool_refs")?,
+                }
+            },
+            ceiling_breach_code: optional_string(value, "ceiling_breach_code")?,
         })),
         "recovery" => Ok(ServerResponsePayload::Recovery(RecoverySummary {
             recovery_attempt_id: required_string(value, "recovery_attempt_id")?,

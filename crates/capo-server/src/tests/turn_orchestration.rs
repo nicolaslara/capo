@@ -186,6 +186,243 @@ fn loop_turn_drives_the_same_dispatch_sequence_as_the_direct_command_path() {
 }
 
 #[test]
+fn run_dispatch_turn_command_drives_the_loop_through_the_production_handle_path() {
+    // AI1: the PRODUCTION command path (`ServerCommand::RunDispatchTurn` through
+    // `CapoServer::handle`) is the single orchestration path. This test drives
+    // that command -- not the in-process `run_dispatch_turn` harness -- and
+    // asserts it (a) returns a `DispatchTurn` payload whose `TurnFinished`
+    // annotation came from the loop, and (b) persists the exact dispatch event
+    // sequence the loop produces. So the path the design claims (loop drives
+    // Plan/Gate/Run and emits `TurnFinished`) is the path a production caller
+    // exercises, and its read models/events match the in-process loop's.
+    let goal = "Drive the loop through the production RunDispatchTurn command";
+
+    // Arm A: the production command path through `handle`, with a deterministic
+    // mock-runtime codex turn (no real provider binary, fail-closed live gate).
+    let command_root = temp_root();
+    let command_server =
+        CapoServer::open(ProjectId::new("project-capo"), &command_root).expect("server");
+    register_and_start(
+        &command_server,
+        "codex-local",
+        goal,
+        "session-command",
+        "run-command",
+    );
+    let response = handle(
+        &command_server,
+        ServerCommand::RunDispatchTurn {
+            agent_name: "codex-local".to_string(),
+            adapter: "codex".to_string(),
+            goal: goal.to_string(),
+            workspace: "/tmp/capo-workspace".to_string(),
+            artifacts: "/tmp/capo-artifacts".to_string(),
+            session_id: "session-command".to_string(),
+            run_id: "run-command".to_string(),
+            turn_id: "turn-command".to_string(),
+            capability_profile: "trusted-local".to_string(),
+            runtime_scope: "local_process_loopback".to_string(),
+            credential_scan_policy: "metadata_only_no_secret_read".to_string(),
+            raw_prompt_policy: "not_rendered".to_string(),
+            raw_output_policy: "artifacts_scanned_redacted".to_string(),
+            tool_wrapper_policy: "capo_wrapped_required".to_string(),
+            live_provider_opt_in: true,
+            live_execution_opt_in: false,
+            mock_runtime_opt_in: true,
+            mock_provider_output_name: Some("codex-exec.jsonl".to_string()),
+            mock_provider_output_jsonl: Some(CODEX_FIXTURE.to_string()),
+            timeout_seconds: 30,
+            max_turns: 4,
+            max_token_cost: 1_000,
+            turns_taken_before: 0,
+            token_cost_before: 0,
+            turn_token_cost: 0,
+            unattended: true,
+        },
+    );
+    let ServerResponsePayload::DispatchTurn(command_turn) = response.payload else {
+        panic!("the production RunDispatchTurn command must return a DispatchTurn payload");
+    };
+
+    // Arm B: the in-process loop over identical inputs (distinct session/run so
+    // the two states are independent). Its outcome is the reference shape.
+    let loop_root = temp_root();
+    let loop_server = CapoServer::open(ProjectId::new("project-capo"), &loop_root).expect("server");
+    register_and_start(
+        &loop_server,
+        "codex-local",
+        goal,
+        "session-loop",
+        "run-loop",
+    );
+    let ceiling =
+        RunResourceCeiling::for_live_provider(4, std::time::Duration::from_secs(30), 1_000);
+    let outcome = loop_server
+        .run_dispatch_turn(DispatchTurnRequest {
+            agent_name: "codex-local".to_string(),
+            adapter: "codex".to_string(),
+            goal: goal.to_string(),
+            workspace: "/tmp/capo-workspace".to_string(),
+            artifacts: "/tmp/capo-artifacts".to_string(),
+            session_id: "session-loop".to_string(),
+            run_id: "run-loop".to_string(),
+            turn_id: "turn-loop".to_string(),
+            mode: live_mode_under_ceiling(ceiling, RunResourceUsage::default(), 0),
+        })
+        .expect("run dispatch turn");
+
+    // The command path annotated the run with a TurnFinished -- the loop's
+    // emission, keyed to the turn the command drove.
+    assert_eq!(command_turn.finished.turn_id, "turn-command");
+    assert_eq!(
+        command_turn.finished.stop_reason,
+        outcome.finished.stop_reason.as_str()
+    );
+    assert_eq!(
+        command_turn.finished.observed_terminal_event,
+        outcome.finished.observed_terminal_event()
+    );
+    assert!(command_turn.finished.observed_terminal_event);
+    assert!(command_turn.ceiling_breach_code.is_none());
+
+    // The run-completion truth matches the in-process loop's (one event shape).
+    assert_eq!(command_turn.run.status, outcome.run.status);
+    assert_eq!(
+        command_turn.run.status,
+        "mocked_live_provider_output_ingested"
+    );
+    assert_eq!(
+        command_turn.run.provider_cli_executed,
+        outcome.run.provider_cli_executed
+    );
+    assert!(!command_turn.run.provider_cli_executed);
+    assert_eq!(
+        command_turn.run.input_event_count,
+        outcome.run.input_event_count
+    );
+    assert_eq!(
+        command_turn.run.appended_event_count,
+        outcome.run.appended_event_count
+    );
+    assert_eq!(
+        command_turn.run.tool_event_count,
+        outcome.run.tool_event_count
+    );
+    assert_eq!(
+        command_turn.run.completed_turn_count,
+        outcome.run.completed_turn_count
+    );
+    assert_eq!(
+        command_turn.finished.summary_refs.len(),
+        outcome.finished.summary_refs.len()
+    );
+
+    // The persisted dispatch event sequence is identical between the production
+    // command path and the in-process loop: one path, one event shape.
+    let command_kinds = dispatch_event_kinds(&command_root, "session-command");
+    let loop_kinds = dispatch_event_kinds(&loop_root, "session-loop");
+    assert_eq!(
+        command_kinds, loop_kinds,
+        "the RunDispatchTurn command path must persist the same dispatch event \
+         sequence as the in-process loop"
+    );
+    // Sanity: the live-provider sequence actually drove the substrate -- planned,
+    // the live preflight gate, and run.exited (the mock-ingest run completion).
+    for required in [
+        "adapter.dispatch_planned",
+        "adapter.dispatch_gate_checked",
+        "run.exited",
+    ] {
+        assert!(
+            command_kinds.iter().any(|kind| kind == required),
+            "production command path missing dispatch event {required}"
+        );
+    }
+    // The command path drove the LIVE preflight gate (not the deterministic
+    // fixture gate): the same live substrate the in-process loop test asserts.
+    let state = SqliteStateStore::open(&command_root).expect("state");
+    let events = state
+        .recent_events_for_session(&SessionId::new("session-command"), 64)
+        .expect("events");
+    assert!(
+        events.iter().any(|event| {
+            event.kind == "adapter.dispatch_gate_checked"
+                && event
+                    .payload_json
+                    .contains("\"preflight_kind\":\"live_provider\"")
+        }),
+        "the command path must drive the live preflight gate"
+    );
+    assert!(
+        events.iter().any(|event| {
+            event.kind == "run.exited"
+                && event
+                    .payload_json
+                    .contains("mock_live_provider_output_ingested_without_provider_cli")
+        }),
+        "the command path's run.exited must carry the mock-ingest completion reason"
+    );
+}
+
+#[test]
+fn run_dispatch_turn_command_rejects_a_zero_wall_clock_timeout() {
+    // AI1: a live turn must run inside a wall-clock-bounded ceiling. The
+    // production command rejects a zero timeout before any provider runs, with a
+    // clear message -- the live path never runs without a wall-clock bound.
+    let goal = "Reject a zero-timeout RunDispatchTurn command";
+    let root = temp_root();
+    let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
+    register_and_start(&server, "codex-local", goal, "session-zero", "run-zero");
+    let error = server
+        .handle(ServerRequest::cli(ServerCommand::RunDispatchTurn {
+            agent_name: "codex-local".to_string(),
+            adapter: "codex".to_string(),
+            goal: goal.to_string(),
+            workspace: "/tmp/capo-workspace".to_string(),
+            artifacts: "/tmp/capo-artifacts".to_string(),
+            session_id: "session-zero".to_string(),
+            run_id: "run-zero".to_string(),
+            turn_id: "turn-zero".to_string(),
+            capability_profile: "trusted-local".to_string(),
+            runtime_scope: "local_process_loopback".to_string(),
+            credential_scan_policy: "metadata_only_no_secret_read".to_string(),
+            raw_prompt_policy: "not_rendered".to_string(),
+            raw_output_policy: "artifacts_scanned_redacted".to_string(),
+            tool_wrapper_policy: "capo_wrapped_required".to_string(),
+            live_provider_opt_in: true,
+            live_execution_opt_in: false,
+            mock_runtime_opt_in: true,
+            mock_provider_output_name: Some("codex-exec.jsonl".to_string()),
+            mock_provider_output_jsonl: Some(CODEX_FIXTURE.to_string()),
+            timeout_seconds: 0,
+            max_turns: 4,
+            max_token_cost: 1_000,
+            turns_taken_before: 0,
+            token_cost_before: 0,
+            turn_token_cost: 0,
+            unattended: true,
+        }))
+        .expect_err("a zero-timeout live turn must be rejected");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("wall-clock"),
+        "expected the wall-clock-bound rejection, got: {message}"
+    );
+
+    // No provider run reached the state.
+    let state = SqliteStateStore::open(&root).expect("state");
+    let events = state
+        .recent_events_for_session(&SessionId::new("session-zero"), 64)
+        .expect("events");
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.kind == "run.exited" || event.kind == "run.aborted"),
+        "the rejected command must not run or abort a provider"
+    );
+}
+
+#[test]
 fn real_controller_matches_fake_path_over_a_scripted_adapter_from_the_server_crate() {
     // RTL5: the RealBoundaryController is the production consumer of the RTL3
     // loop and the RTL1 trait. Driven from the server crate (the controller's
