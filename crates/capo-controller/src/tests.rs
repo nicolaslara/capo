@@ -5272,6 +5272,9 @@ fn sg2_allow_once_round_trip_allows_turn_scoped_and_returns_option_id() {
     assert_eq!(response.outcome.option_id(), Some("opt-allow_once"));
     assert_eq!(response.capo_persistence.as_deref(), Some("until_turn_end"));
     assert!(!response.adapter_error);
+    // An honored allow is the ONLY path where the adapter may proceed.
+    assert!(!response.must_not_proceed);
+    assert!(response.may_proceed());
     let grant_id = response
         .capability_grant_id
         .as_ref()
@@ -5546,6 +5549,24 @@ fn sg2_policy_deny_overrules_adapter_allow_option() {
     assert!(!response.allowed());
     assert_eq!(response.capo_decision, "deny");
     assert_eq!(response.capability_grant_id, None);
+    // SAFETY-CRITICAL: the wire outcome returned to the adapter must NOT be the
+    // offered allow option's `selected{opt-allow_once}` -- an ACP adapter reads
+    // that as "permitted, proceed" and would run the exact call the policy denied.
+    // No reject option was offered here, so the outcome is `cancelled`, and the
+    // explicit `must_not_proceed` flag halts the adapter unambiguously.
+    assert_ne!(
+        response.outcome,
+        AcpPermissionOutcome::Selected {
+            option_id: "opt-allow_once".to_string()
+        },
+        "a policy-denied allow option must NOT return that allow option's selected outcome",
+    );
+    assert_eq!(response.outcome, AcpPermissionOutcome::Cancelled);
+    assert!(
+        response.must_not_proceed,
+        "a policy deny must signal must_not_proceed so the adapter cannot proceed",
+    );
+    assert!(!response.may_proceed());
     let grants = controller.state().capability_grants().expect("grants");
     assert!(
         !grants
@@ -5556,11 +5577,143 @@ fn sg2_policy_deny_overrules_adapter_allow_option() {
 
     let decided = sg2_decided_event(&controller, &refs, "turn-sg2-policy-deny");
     assert!(decided.payload_json.contains("\"decision\":\"reject\""));
+    // The persisted adapter_response must match the wire outcome (cancelled), not
+    // the contradictory `selected{opt-allow_once}` the raw mapping carried.
+    assert!(decided.payload_json.contains("\"outcome\":\"cancelled\""));
+    assert!(
+        !decided
+            .payload_json
+            .contains("\"option_id\":\"opt-allow_once\""),
+        "the decided record must not persist the allow option id as the chosen response",
+    );
     assert!(
         decided
             .payload_json
             .contains("\"decision_source\":\"static_policy:read-only-local\"")
     );
+}
+
+/// SG2 policy authority (reject option offered): when the policy denies the scope
+/// but the adapter offered BOTH an allow and a reject option, the over-rule
+/// returns the REJECT option's `optionId` (a reject outcome the adapter cannot
+/// misread as proceed), still with `must_not_proceed` set and no grant.
+#[test]
+fn sg2_policy_deny_returns_reject_option_when_offered() {
+    let request = AdapterPermissionRequest::new(
+        "capo.file_write",
+        "filesystem:write:workspace",
+        "read-only-local",
+        sg2_options(&[
+            AcpPermissionOptionKind::AllowOnce,
+            AcpPermissionOptionKind::RejectOnce,
+        ]),
+    );
+    let (controller, _refs, scope, raised) = sg2_round_trip_setup(
+        "policy-deny-reject",
+        PermissionPolicy::static_read_only_local(),
+        request,
+    );
+
+    let response = controller
+        .decide_adapter_permission(&scope, &raised)
+        .expect("decide round-trip");
+
+    assert!(!response.allowed());
+    assert_eq!(response.capo_decision, "deny");
+    // The wire outcome is the offered reject option's id, NOT the allow option's.
+    assert_eq!(response.outcome.option_id(), Some("opt-reject_once"));
+    assert!(response.must_not_proceed);
+    // A policy over-rule of an allow option still materializes no grant: the
+    // reject option id is only the wire signal, not a durable reject decision.
+    assert_eq!(response.capability_grant_id, None);
+}
+
+/// SG2 loop-driven round-trip (closing leg): the loop PULLS the raised request
+/// from the bound adapter, the controller decides it, and the response is
+/// DELIVERED back to the adapter -- and the adapter proceeds on an allow. This
+/// proves the full raise -> decide -> deliver round-trip is driven THROUGH the
+/// loop, not assembled by the test harness, and that the closing leg exists.
+#[test]
+fn sg2_loop_drives_round_trip_allow_and_adapter_proceeds() {
+    let request = AdapterPermissionRequest::new(
+        "capo.file_write",
+        "filesystem:write:workspace",
+        "trusted-local-dev",
+        sg2_options(&[AcpPermissionOptionKind::AllowOnce]),
+    );
+    let (controller, _refs, scope, _raised) = sg2_round_trip_setup(
+        "loop-allow",
+        PermissionPolicy::allow_trusted_local(),
+        request,
+    );
+
+    // The LOOP pulls the raised request, decides it, and delivers it back.
+    let outcome = controller
+        .run_adapter_permission_round_trip(&scope)
+        .expect("loop drives round-trip")
+        .expect("adapter raised a request for this request_ref");
+
+    assert!(outcome.response.allowed());
+    assert_eq!(outcome.response.outcome.option_id(), Some("opt-allow_once"));
+    // Closing leg: the adapter received the response and would proceed.
+    assert!(outcome.delivery.proceeded);
+    assert!(!outcome.delivery.adapter_error);
+}
+
+/// SG2 loop-driven round-trip (closing leg, deny): the loop delivers a
+/// policy-deny-of-an-allow-option response back to the adapter, and the adapter
+/// HALTS (does not proceed) -- so the over-rule is honored end-to-end, not just
+/// in the returned struct.
+#[test]
+fn sg2_loop_drives_round_trip_policy_deny_halts_adapter() {
+    let request = AdapterPermissionRequest::new(
+        "capo.file_write",
+        "filesystem:write:workspace",
+        "read-only-local",
+        sg2_options(&[AcpPermissionOptionKind::AllowOnce]),
+    );
+    let (controller, _refs, scope, _raised) = sg2_round_trip_setup(
+        "loop-policy-deny",
+        PermissionPolicy::static_read_only_local(),
+        request,
+    );
+
+    let outcome = controller
+        .run_adapter_permission_round_trip(&scope)
+        .expect("loop drives round-trip")
+        .expect("adapter raised a request");
+
+    assert!(!outcome.response.allowed());
+    assert!(outcome.response.must_not_proceed);
+    // Closing leg: the adapter must NOT proceed with the denied tool call.
+    assert!(
+        !outcome.delivery.proceeded,
+        "the adapter must halt on a policy-denied allow option",
+    );
+}
+
+/// SG2 loop-driven round-trip: when the adapter raised NO request for the
+/// `request_ref`, the loop hook is a no-op (`None`), never inventing a decision.
+#[test]
+fn sg2_loop_round_trip_absent_request_is_noop() {
+    let request = AdapterPermissionRequest::new(
+        "capo.file_write",
+        "filesystem:write:workspace",
+        "trusted-local-dev",
+        sg2_options(&[AcpPermissionOptionKind::AllowOnce]),
+    );
+    let (controller, _refs, mut scope, _raised) = sg2_round_trip_setup(
+        "loop-absent",
+        PermissionPolicy::allow_trusted_local(),
+        request,
+    );
+    // Point the loop at a request_ref the adapter never scripted.
+    scope.request_ref = "perm-loop-absent-unscripted".to_string();
+
+    let outcome = controller
+        .run_adapter_permission_round_trip(&scope)
+        .expect("loop drives round-trip");
+    assert!(outcome.is_none(), "no raised request means no decision");
 }
 
 /// SG2 round-trip lifecycle + restart/replay: the requested -> decided ->

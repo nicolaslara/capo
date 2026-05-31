@@ -25,12 +25,31 @@
 
 use capo_adapters::{
     AcpOptionMapping, AcpPermissionOutcome, AdapterPermissionCancelReason,
-    AdapterPermissionRequest, AdapterPermissionResponse, map_acp_options_trusted_local,
+    AdapterPermissionRequest, AdapterPermissionResponse, PermissionDeliveryAck,
+    map_acp_options_trusted_local,
 };
 use capo_core::SessionId;
 use capo_tools::{PermissionPolicy, PermissionRequest};
 
 use super::*;
+
+/// SG2: the loop-driven outcome of one full adapter permission round-trip --
+/// raise -> decide -> deliver -- so the round-trip is a STEP the loop pulls and
+/// drives, not a sibling API the caller invokes out of band.
+///
+/// The depth ACP adapter reuses this exact shape: the loop pulls the raised
+/// request through the [`AgentAdapter`] seam, the controller decides + persists
+/// it, and the loop delivers the response back through the adapter, capturing the
+/// adapter's proceed/halt acknowledgement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PermissionRoundTripOutcome {
+    /// The decided response (the chosen ACP `optionId`/`cancelled` + Capo
+    /// decision identity) returned to the adapter.
+    pub response: AdapterPermissionResponse,
+    /// The adapter's acknowledgement after the response was delivered back to it:
+    /// whether it would proceed with the requested tool call.
+    pub delivery: PermissionDeliveryAck,
+}
 
 /// Where one adapter permission round-trip hangs on the loop's scope tree, so the
 /// persisted `permission.*`/`capability.*` events carry the same
@@ -95,6 +114,41 @@ impl FakeBoundaryController {
         self.record_round_trip(scope, request, AcpOptionMapping::cancelled())
     }
 
+    /// SG2: drive ONE full adapter permission round-trip THROUGH the loop.
+    ///
+    /// This is the loop-side step that keeps the round-trip a thing the loop
+    /// DRIVES rather than a sibling API a caller invokes out of band (mirroring
+    /// how `run_turn` pulls the adapter's event batch and dispatch sits inside the
+    /// turn). It:
+    ///
+    /// 1. PULLS the raised request from the bound adapter through the
+    ///    [`AgentAdapter::scripted_permission_request`] seam (keyed by
+    ///    `scope.request_ref`), so the loop ingests the raise rather than the
+    ///    caller hand-feeding it.
+    /// 2. DECIDES it via [`Self::decide_adapter_permission`] (policy + ACP
+    ///    mapping + lifecycle persistence).
+    /// 3. DELIVERS the response back to the adapter through
+    ///    [`AgentAdapter::deliver_permission_response`] and captures the adapter's
+    ///    proceed/halt acknowledgement.
+    ///
+    /// Returns `Ok(None)` when the adapter raised no request for `request_ref`.
+    /// Fixture-only: the live ACP JSON-RPC wire is the depth workpad, which
+    /// reuses this same loop hook with a real adapter behind the seam.
+    pub fn run_adapter_permission_round_trip(
+        &self,
+        scope: &PermissionRoundTripScope,
+    ) -> StateResult<Option<PermissionRoundTripOutcome>> {
+        // 1. The loop pulls the raised request from the adapter seam.
+        let Some(request) = self.adapter.scripted_permission_request(&scope.request_ref) else {
+            return Ok(None);
+        };
+        // 2. The controller decides + persists it.
+        let response = self.decide_adapter_permission(scope, &request)?;
+        // 3. The loop delivers the response back to the adapter (closing leg).
+        let delivery = self.adapter.deliver_permission_response(&response);
+        Ok(Some(PermissionRoundTripOutcome { response, delivery }))
+    }
+
     /// Persist the round-trip lifecycle and build the adapter response.
     ///
     /// The mapping's `cancel_reason` distinguishes the operator-cancel path (no
@@ -121,12 +175,29 @@ impl FakeBoundaryController {
         // policy is the authority on whether the scope is permitted; the ACP
         // option chooses persistence/grant behavior. A policy deny overrides an
         // allow option; a cancel mapping stays a cancel.
-        let resolved = resolve_decision(&self.permission_policy, &policy_decision, &mapping);
+        let resolved =
+            resolve_decision(&self.permission_policy, &policy_decision, &mapping, request);
 
         let permission_decision_id = format!("decision-round-trip-{}", scope.request_ref);
-        let capability_grant_id = resolved
-            .creates_grant
-            .then(|| format!("grant-round-trip-{}-{}", scope.request_ref, resolved.effect));
+        // Materialize a CANONICAL `PermissionDecision` so the grant-creation rule
+        // AND the grant projection are decided by the SAME machinery the tool
+        // dispatch path uses (`decision_creates_grant` + the shared
+        // `append_capability_grant_created_event`), not a second hand-rolled copy.
+        // The candidate grant id is only USED if `decision_creates_grant` says so.
+        let candidate_grant_id =
+            format!("grant-round-trip-{}-{}", scope.request_ref, resolved.effect);
+        let canonical_decision = resolved.to_permission_decision(
+            request,
+            &scope.session_id,
+            &scope_json,
+            candidate_grant_id.clone(),
+        );
+        let creates_grant = crate::tool_dispatch::decision_creates_grant(
+            &canonical_decision,
+            &Some(candidate_grant_id),
+        );
+        let capability_grant_id =
+            creates_grant.then(|| canonical_decision.capability_grant_id.clone());
 
         // Lifecycle step 2: append `permission.requested` (records the requested
         // scope + the offered ACP option list).
@@ -155,14 +226,28 @@ impl FakeBoundaryController {
         )?;
 
         // Lifecycle step 5: on an allow (or a durable `reject_always` deny) with
-        // non-observational persistence, materialize the durable grant.
-        if let Some(grant_id) = capability_grant_id.as_deref() {
-            self.append_round_trip_grant(
-                scope,
-                request,
-                &resolved,
-                &permission_decision_id,
-                grant_id,
+        // non-observational persistence, materialize the durable grant through
+        // the SHARED canonical writer the tool dispatch path uses, so the grant
+        // projection contract is derived from the `PermissionDecision` once.
+        if capability_grant_id.is_some() {
+            self.append_capability_grant_created_event(
+                crate::tool_dispatch::CapabilityGrantEventKeys {
+                    event_id: format!(
+                        "event-permission-round-trip-{}-{}-grant",
+                        scope.session_id, scope.request_ref
+                    ),
+                    task_id: &scope.task_id,
+                    agent_id: &scope.agent_id,
+                    session_id: &scope.session_id,
+                    run_id: &scope.run_id,
+                    turn_id: scope.turn_id.to_string(),
+                    item_ref: scope.request_ref.clone(),
+                },
+                &canonical_decision,
+                serde_json::json!({
+                    "request_ref": scope.request_ref,
+                    "permission_decision_id": permission_decision_id,
+                }),
             )?;
         }
 
@@ -170,14 +255,24 @@ impl FakeBoundaryController {
             mapping.cancel_reason,
             Some(AdapterPermissionCancelReason::NoSelectableOption)
         );
+        // The adapter must not proceed on anything but an allow: any deny
+        // (including a policy deny over-ruling an offered allow option), any
+        // cancel, and the adapter-error path all halt the requested tool call.
+        let must_not_proceed = resolved.effect != "allow";
 
         Ok(AdapterPermissionResponse {
-            outcome: mapping.outcome,
+            // The wire outcome is the RESOLVED outcome, not the raw mapping
+            // outcome: a policy deny that over-rules an offered allow option must
+            // NOT return that allow option's `selected{optionId}` (an ACP adapter
+            // would read it as "proceed"). `resolve_decision` rewrites it to a
+            // reject option's id when one was offered, else `cancelled`.
+            outcome: resolved.outcome,
             capo_decision: resolved.effect.to_string(),
             capo_persistence: resolved.persistence.map(str::to_string),
             permission_decision_id,
             capability_grant_id,
             adapter_error,
+            must_not_proceed,
         })
     }
 
@@ -208,61 +303,6 @@ impl FakeBoundaryController {
         )?;
         Ok(())
     }
-
-    fn append_round_trip_grant(
-        &self,
-        scope: &PermissionRoundTripScope,
-        request: &AdapterPermissionRequest,
-        resolved: &ResolvedDecision,
-        permission_decision_id: &str,
-        grant_id: &str,
-    ) -> StateResult<()> {
-        let scope_json = serde_json::json!([request.scope]).to_string();
-        let subject_json =
-            serde_json::json!({ "session_id": scope.session_id.to_string() }).to_string();
-        let persistence = resolved.persistence.unwrap_or("once").to_string();
-        let payload = serde_json::json!({
-            "request_ref": scope.request_ref,
-            "permission_decision_id": permission_decision_id,
-            "capability_grant_id": grant_id,
-            "effect": resolved.effect,
-            "decision_source": resolved.decision_source,
-            "persistence": persistence,
-            "explanation": resolved.explanation,
-        })
-        .to_string();
-        self.state.append_event(
-            scoped_event(
-                &format!(
-                    "event-permission-round-trip-{}-{}-grant",
-                    scope.session_id, scope.request_ref
-                ),
-                EventKind::CapabilityGrantCreated,
-                &self.project_id,
-                &scope.task_id,
-                &scope.agent_id,
-                &scope.session_id,
-                &scope.run_id,
-            )
-            .with_turn(scope.turn_id.to_string())
-            .with_item(scope.request_ref.clone())
-            .with_payload(payload),
-            &[ProjectionRecord::CapabilityGrant(
-                capo_state::CapabilityGrantProjection {
-                    capability_grant_id: grant_id.to_string(),
-                    capability_profile_id: request.capability_profile_id.clone(),
-                    scope_json,
-                    effect: resolved.effect.to_string(),
-                    subject_json,
-                    decision_source: resolved.decision_source.clone(),
-                    persistence,
-                    explanation: resolved.explanation.clone(),
-                    updated_sequence: 0,
-                },
-            )],
-        )?;
-        Ok(())
-    }
 }
 
 /// The resolved Capo decision after combining the policy decision with the ACP
@@ -270,13 +310,47 @@ impl FakeBoundaryController {
 struct ResolvedDecision {
     /// `allow` / `deny` / `cancel`.
     effect: &'static str,
+    /// The ACP outcome to return to the adapter AND persist as `adapter_response`.
+    ///
+    /// This is the mapping's outcome for the common path, but is REWRITTEN when a
+    /// policy deny over-rules an offered allow option so the wire outcome never
+    /// reports the allow option's `selected{optionId}` (which an ACP adapter
+    /// would read as "permitted, proceed").
+    outcome: AcpPermissionOutcome,
     /// The grant persistence the decision downscoped to, or `None` on cancel /
     /// transient reject.
     persistence: Option<&'static str>,
     decision_source: String,
     explanation: String,
-    /// Whether a durable `capability.grant_created` should be materialized.
-    creates_grant: bool,
+}
+
+impl ResolvedDecision {
+    /// Project this resolved round-trip decision onto the CANONICAL
+    /// [`capo_tools::PermissionDecision`] every grant writer consumes, so the
+    /// SG2 round-trip feeds the SAME `decision_creates_grant` durable-deny rule
+    /// and the SAME `append_capability_grant_created_event` projection writer the
+    /// SG1 tool path uses. The `effect` is the grant effect (`allow`/`deny`); a
+    /// `cancel` carries `persistence = none` so the shared rule emits no grant.
+    fn to_permission_decision(
+        &self,
+        request: &AdapterPermissionRequest,
+        session_id: &SessionId,
+        scope_json: &str,
+        capability_grant_id: String,
+    ) -> capo_tools::PermissionDecision {
+        capo_tools::PermissionDecision {
+            capability_grant_id,
+            capability_profile_id: request.capability_profile_id.clone(),
+            effect: self.effect.to_string(),
+            scope_json: scope_json.to_string(),
+            subject_json: serde_json::json!({ "session_id": session_id.to_string() }).to_string(),
+            decision_source: self.decision_source.clone(),
+            // A cancel has no grant persistence; the shared `decision_creates_grant`
+            // rule treats `none` as observational and emits no grant.
+            persistence: self.persistence.unwrap_or("none").to_string(),
+            explanation: self.explanation.clone(),
+        }
+    }
 }
 
 /// Combine the policy decision with the ACP option mapping into the final Capo
@@ -293,15 +367,16 @@ fn resolve_decision(
     policy: &PermissionPolicy,
     policy_decision: &capo_tools::PermissionDecision,
     mapping: &AcpOptionMapping,
+    request: &AdapterPermissionRequest,
 ) -> ResolvedDecision {
     let decision_source = policy_decision.decision_source.clone();
     match mapping.capo_decision {
         "cancel" => ResolvedDecision {
             effect: "cancel",
+            outcome: mapping.outcome.clone(),
             persistence: None,
             decision_source,
             explanation: cancel_explanation(mapping),
-            creates_grant: false,
         },
         "allow" => {
             let policy_allows = policy_decision.effect == "allow";
@@ -309,6 +384,8 @@ fn resolve_decision(
                 let persistence = mapping.capo_persistence.unwrap_or("until_turn_end");
                 ResolvedDecision {
                     effect: "allow",
+                    // An honored allow returns the selected allow option's id.
+                    outcome: mapping.outcome.clone(),
                     persistence: Some(persistence),
                     decision_source,
                     explanation: format!(
@@ -321,20 +398,36 @@ fn resolve_decision(
                             .unwrap_or("allow"),
                         persistence
                     ),
-                    creates_grant: true,
                 }
             } else {
                 // The adapter offered an allow option but the policy denies the
-                // scope: the policy wins. No grant.
+                // scope: the policy wins. No grant. CRUCIALLY, do NOT return the
+                // allow option's `selected{optionId}` as the ACP outcome -- an
+                // ACP adapter reads that as "permitted, proceed" and would run the
+                // exact tool call the policy denied. Rewrite the wire outcome to a
+                // reject option's id if one was offered, else `cancelled`, and the
+                // `must_not_proceed` flag halts the adapter regardless.
+                let (outcome, outcome_note) = match request.first_reject_option() {
+                    Some(reject) => (
+                        AcpPermissionOutcome::Selected {
+                            option_id: reject.option_id.clone(),
+                        },
+                        format!("returned reject option `{}`", reject.option_id),
+                    ),
+                    None => (
+                        AcpPermissionOutcome::Cancelled,
+                        "no reject option offered; returned `cancelled`".to_string(),
+                    ),
+                };
                 ResolvedDecision {
                     effect: "deny",
+                    outcome,
                     persistence: None,
                     decision_source,
                     explanation: format!(
-                        "policy denied the scope ({}); the ACP allow option cannot over-rule it",
-                        policy_decision.explanation
+                        "policy denied the scope ({}); the ACP allow option cannot over-rule it; {}",
+                        policy_decision.explanation, outcome_note
                     ),
-                    creates_grant: false,
                 }
             }
         }
@@ -345,6 +438,9 @@ fn resolve_decision(
             let durable = matches!(mapping.capo_persistence, Some("until_revoked"));
             ResolvedDecision {
                 effect: "deny",
+                // A reject option returns its own `selected{optionId}` (a reject
+                // outcome the adapter cannot misread as proceed).
+                outcome: mapping.outcome.clone(),
                 persistence: mapping.capo_persistence,
                 decision_source,
                 explanation: format!(
@@ -360,7 +456,6 @@ fn resolve_decision(
                         " (transient, no grant)"
                     }
                 ),
-                creates_grant: durable,
             }
         }
     }
@@ -424,7 +519,11 @@ fn round_trip_decided_payload(
         "deny" => "reject",
         other => other,
     };
-    let adapter_response = match &mapping.outcome {
+    // The persisted `adapter_response` records the RESOLVED outcome (the same one
+    // returned to the adapter), not the raw mapping outcome -- so a policy-deny of
+    // an offered allow option never records a `selected{allow_optionId}` that
+    // contradicts the `decision = reject` on the same record.
+    let adapter_response = match &resolved.outcome {
         AcpPermissionOutcome::Selected { option_id } => serde_json::json!({
             "outcome": "selected",
             "option_id": option_id,

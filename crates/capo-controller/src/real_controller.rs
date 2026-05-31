@@ -50,8 +50,8 @@ use capo_adapters::{AdapterPermissionRequest, AdapterPermissionResponse};
 
 use crate::{
     ControllerInit, FakeAgentRegistration, FakeBoundaryController, FakeReadModelObservation,
-    FakeRunRefs, PermissionCancellation, PermissionRoundTripScope, ProjectId, RecoveryReport,
-    ToolDispatchOutcome, ToolDispatchScope, TurnFinished,
+    FakeRunRefs, PermissionCancellation, PermissionRoundTripOutcome, PermissionRoundTripScope,
+    ProjectId, RecoveryReport, ToolDispatchOutcome, ToolDispatchScope, TurnFinished,
 };
 
 /// Run references returned by the real controller. Alias of [`FakeRunRefs`] so
@@ -330,6 +330,17 @@ impl RealBoundaryController {
     ) -> StateResult<AdapterPermissionResponse> {
         self.core
             .cancel_adapter_permission(scope, request, cancellation)
+    }
+
+    /// SG2: drive one full adapter permission round-trip (raise -> decide ->
+    /// deliver) THROUGH the loop, pulling the raised request from the bound
+    /// adapter and delivering the decided response back to it. Fixture-only; the
+    /// depth ACP adapter reuses this hook with a real adapter behind the seam.
+    pub fn run_adapter_permission_round_trip(
+        &self,
+        scope: &PermissionRoundTripScope,
+    ) -> StateResult<Option<PermissionRoundTripOutcome>> {
+        self.core.run_adapter_permission_round_trip(scope)
     }
 
     /// Borrow the Capo registry behind the real exposure, for callers that need

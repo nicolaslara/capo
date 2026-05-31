@@ -236,6 +236,29 @@ Evidence:
   --workspace` (all crates ok, 0 failed; capo-controller 58 passed/0 failed/1
   ignored, capo-adapters 36 passed/0 failed/2 ignored). `git diff --check` clean.
   Acceptance met; live ACP JSON-RPC wire stays out of scope (depth).
+- Review-fix pass (2026-05-31): applied four confirmed SG2 review findings.
+  (1) SAFETY: a policy deny that over-rules an offered allow option no longer
+  returns that allow option's ACP `selected{optionId}` (which an ACP adapter
+  reads as "proceed"). `resolve_decision` now REWRITES the wire outcome to a
+  reject option's id when one was offered, else `cancelled`, and
+  `AdapterPermissionResponse` gained a `must_not_proceed` halt flag (true on any
+  deny/cancel/adapter-error). The persisted `permission.decided` `adapter_response`
+  records the RESOLVED outcome, so it can no longer contradict `decision=reject`.
+  (2) ARCH: the round-trip no longer re-implements grant materialization; it now
+  builds a canonical `capo_tools::PermissionDecision` and funnels through the SAME
+  `decision_creates_grant` durable-deny rule + a SHARED
+  `append_capability_grant_created_event` writer the SG1 tool path uses (one
+  projection-construction contract, no forked grant model). (3) ARCH: added a
+  loop-side step `run_adapter_permission_round_trip` (pull raised request from the
+  adapter seam -> decide -> deliver back), so the round-trip is a loop-driven step,
+  not a sibling API. (4) TESTS: added the closing leg --
+  `AgentAdapter::deliver_permission_response` returning a `PermissionDeliveryAck`
+  (proceed iff allowed and not halted) -- with end-to-end tests proving the adapter
+  proceeds on allow and halts on a policy deny. Tests now: `cargo test
+  -p capo-controller sg2` (12 passed), workspace `cargo fmt --check` /
+  `cargo clippy --all-targets --all-features -- -D warnings` / `cargo test
+  --workspace` all exit 0 (capo-controller 62 passed/0 failed/1 ignored,
+  capo-adapters 37 passed/0 failed/2 ignored).
 
 ## SG3 - Grant Read-Back, Revoke/Expire Events, Projection Columns, And Revoke Command
 

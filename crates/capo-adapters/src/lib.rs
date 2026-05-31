@@ -16,7 +16,8 @@ mod scripted_mock_agent;
 pub use acp_client::{AcpClientCall, AcpSessionSetupPlan};
 pub use adapter::{
     AdapterSession, AdapterSessionRequest, AgentAdapter, AgentAdapterHandle, FakeAdapter,
-    FakeProviderConnector, FakeProviderInfo, ProviderConnector, TurnOutput, TurnRequest,
+    FakeProviderConnector, FakeProviderInfo, PermissionDeliveryAck, ProviderConnector, TurnOutput,
+    TurnRequest,
 };
 pub use codex_live::{
     CODEX_LIVE_PREFLIGHT_OPT_IN_ENV, CODEX_LIVE_RUN_OPT_IN_ENV, CodexLiveAdapter,

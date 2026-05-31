@@ -131,6 +131,24 @@ impl AdapterPermissionRequest {
             .map(|option| option.option_id.clone())
             .collect()
     }
+
+    /// The first offered reject option (`reject_once` preferred over
+    /// `reject_always`), if any.
+    ///
+    /// Used when a policy deny over-rules an offered allow option: rather than
+    /// returning the allow option's id (which an ACP adapter would read as
+    /// "permitted, proceed"), Capo returns a reject option's id when one was
+    /// offered so the wire outcome matches the Capo deny.
+    pub fn first_reject_option(&self) -> Option<&AcpPermissionOption> {
+        self.options
+            .iter()
+            .find(|option| option.kind == AcpPermissionOptionKind::RejectOnce)
+            .or_else(|| {
+                self.options
+                    .iter()
+                    .find(|option| option.kind == AcpPermissionOptionKind::RejectAlways)
+            })
+    }
 }
 
 /// The ACP outcome Capo returns to the adapter for a permission request.
@@ -325,12 +343,26 @@ pub struct AdapterPermissionResponse {
     /// `true` when the adapter request must be FAILED (the no-selectable-option
     /// adapter-error path); the adapter must not proceed.
     pub adapter_error: bool,
+    /// `true` whenever the adapter MUST NOT proceed with the requested tool call:
+    /// any Capo deny (including a policy deny over-ruling an offered allow
+    /// option), any cancel, or the adapter-error path. This is the single,
+    /// unambiguous "do not proceed" signal an ACP adapter consumes -- the raw
+    /// `outcome` alone is not safe to read, because a `selected{optionId}` only
+    /// means "proceed" when `must_not_proceed` is false.
+    pub must_not_proceed: bool,
 }
 
 impl AdapterPermissionResponse {
     /// `true` when an allow option was selected (the adapter may proceed).
     pub fn allowed(&self) -> bool {
         self.capo_decision == "allow"
+    }
+
+    /// `true` when the adapter may proceed with the tool call: the policy
+    /// allowed AND no halt signal is set. The inverse of [`Self::must_not_proceed`]
+    /// for an allow.
+    pub fn may_proceed(&self) -> bool {
+        self.allowed() && !self.must_not_proceed
     }
 }
 

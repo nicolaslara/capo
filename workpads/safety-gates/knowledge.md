@@ -135,6 +135,25 @@ Each ACP option kind is covered by a deterministic controller test plus a replay
 test proving the round-trip grant rebuilds identically from the event log. The
 live wire round-trip stays in depth.
 
+SG2 review-fix invariants (2026-05-31): the central safety semantic is that a
+policy deny ALWAYS halts the adapter, even when an allow option was offered. The
+ACP wire outcome returned to (and persisted for) the adapter must therefore never
+be the allow option's `selected{optionId}` on a policy over-rule -- an ACP adapter
+consuming `response.outcome` reads `selected` as "permitted, proceed". The
+controller rewrites the over-rule outcome to a reject option's id (when offered)
+else `cancelled`, and `AdapterPermissionResponse` carries an explicit
+`must_not_proceed` halt flag that is the single safe signal an adapter consumes
+(`may_proceed()` = allowed AND not halted). The round-trip's grant materialization
+and durable-deny rule are NOT a second copy: it builds a canonical
+`PermissionDecision` and funnels through the SAME `decision_creates_grant` +
+`append_capability_grant_created_event` machinery the SG1 tool dispatch path owns,
+so SG3 grant read-back reads ONE grant model. The round-trip is also a loop-driven
+step (`run_adapter_permission_round_trip`: pull the raised request from the
+`AgentAdapter` seam -> decide -> deliver the response back through
+`AgentAdapter::deliver_permission_response`, capturing a `PermissionDeliveryAck`),
+not a sibling API invoked beside the loop; the depth ACP adapter reuses this same
+hook with a real adapter behind the seam.
+
 ## Grant Lifecycle: Read-Back, Revoke, Expiry (SG3)
 
 Grants must authorize, not just record. Today the grant store is write-only: the

@@ -41,7 +41,9 @@ mod tool_dispatch;
 mod turn_loop;
 
 pub use local_dispatch::LocalAdapterDispatchRunStart;
-pub use permission_round_trip::{PermissionCancellation, PermissionRoundTripScope};
+pub use permission_round_trip::{
+    PermissionCancellation, PermissionRoundTripOutcome, PermissionRoundTripScope,
+};
 pub use real_controller::{
     RealAgentRegistration, RealBoundaryController, RealReadModelObservation, RealRunRefs,
 };

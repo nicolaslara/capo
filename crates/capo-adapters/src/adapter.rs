@@ -1,7 +1,9 @@
 use capo_core::{BoundaryBinding, BoundaryKind, SessionId, TurnId};
 
 use crate::codex_live::{CodexLiveAdapter, CodexLiveChatError};
-use crate::{AdapterPermissionRequest, NormalizedAdapterEvent, ScriptedMockAgent};
+use crate::{
+    AdapterPermissionRequest, AdapterPermissionResponse, NormalizedAdapterEvent, ScriptedMockAgent,
+};
 
 /// Provider-neutral seam every agent provider implements.
 ///
@@ -61,18 +63,54 @@ pub trait AgentAdapter {
         None
     }
 
-    /// SG2: the adapter permission round-trip raise side.
+    /// SG2: the adapter permission round-trip RAISE side.
     ///
     /// An interactive provider (ACP, and the fake/scripted adapters that stand in
     /// for it) raises a permission request -- the requested scope plus the ACP
-    /// `PermissionOption[]` it is offering -- which the controller decides and
-    /// answers with an [`crate::AdapterPermissionResponse`] (the chosen `optionId`
-    /// or `cancelled`). Adapters that never prompt for permission default to
-    /// `None`. This is fixture/option-mapping only: it does NOT speak the live ACP
-    /// JSON-RPC wire (that is the depth workpad).
+    /// `PermissionOption[]` it is offering -- which the controller decides. The
+    /// closing leg (returning the chosen `optionId`/`cancelled` to the adapter) is
+    /// [`AgentAdapter::deliver_permission_response`]. Adapters that never prompt
+    /// for permission default to `None`. This is fixture/option-mapping only: it
+    /// does NOT speak the live ACP JSON-RPC wire (that is the depth workpad).
     fn scripted_permission_request(&self, _request_ref: &str) -> Option<AdapterPermissionRequest> {
         None
     }
+
+    /// SG2: the adapter permission round-trip DELIVER side (the closing leg).
+    ///
+    /// After the controller decides a raised request, the loop delivers the
+    /// [`AdapterPermissionResponse`] back THROUGH this seam, and the adapter
+    /// reports whether it would proceed with the tool call. The default derives
+    /// the ack purely from the response (proceed iff the policy allowed AND the
+    /// `must_not_proceed` halt signal is clear) -- so a fake/scripted adapter
+    /// honors a Capo deny/cancel/adapter-error by NOT proceeding, even when the
+    /// raw ACP `outcome` carries a selected option id. The depth ACP adapter
+    /// overrides this to write the real ACP wire frame; the proceed/halt contract
+    /// is identical.
+    fn deliver_permission_response(
+        &self,
+        response: &AdapterPermissionResponse,
+    ) -> PermissionDeliveryAck {
+        PermissionDeliveryAck {
+            proceeded: response.may_proceed(),
+            adapter_error: response.adapter_error,
+        }
+    }
+}
+
+/// SG2: the adapter's acknowledgement of a delivered [`AdapterPermissionResponse`]
+/// -- the closing leg of the permission round-trip.
+///
+/// `proceeded` is the single safety-relevant bit: `true` only when the adapter
+/// would go ahead with the requested tool call. A Capo deny (including a policy
+/// deny over-ruling an offered allow option), a cancel, or the adapter-error path
+/// all yield `proceeded = false`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PermissionDeliveryAck {
+    /// `true` iff the adapter would proceed with the requested tool call.
+    pub proceeded: bool,
+    /// `true` when the request failed as an adapter error (no selectable option).
+    pub adapter_error: bool,
 }
 
 /// Thin dispatch handle over the concrete [`AgentAdapter`] implementations.
@@ -164,6 +202,13 @@ impl AgentAdapter for AgentAdapterHandle {
 
     fn scripted_permission_request(&self, request_ref: &str) -> Option<AdapterPermissionRequest> {
         self.as_adapter().scripted_permission_request(request_ref)
+    }
+
+    fn deliver_permission_response(
+        &self,
+        response: &AdapterPermissionResponse,
+    ) -> PermissionDeliveryAck {
+        self.as_adapter().deliver_permission_response(response)
     }
 }
 
@@ -367,6 +412,40 @@ mod tests {
         assert_eq!(interrupted.status, "canceled");
         let stopped = handle.stop(&session, "done");
         assert_eq!(stopped.status, "completed");
+    }
+
+    #[test]
+    fn deliver_permission_response_default_honors_halt_signal() {
+        let adapter = FakeAdapter;
+        // An allow with no halt signal proceeds.
+        let allow = AdapterPermissionResponse {
+            outcome: crate::AcpPermissionOutcome::Selected {
+                option_id: "opt-allow_once".to_string(),
+            },
+            capo_decision: "allow".to_string(),
+            capo_persistence: Some("until_turn_end".to_string()),
+            permission_decision_id: "decision-1".to_string(),
+            capability_grant_id: Some("grant-1".to_string()),
+            adapter_error: false,
+            must_not_proceed: false,
+        };
+        let ack = adapter.deliver_permission_response(&allow);
+        assert!(ack.proceeded);
+        assert!(!ack.adapter_error);
+
+        // A policy deny that over-rules an allow option still carries a `selected`
+        // outcome string in some shapes, but `must_not_proceed` halts the adapter.
+        let deny = AdapterPermissionResponse {
+            outcome: crate::AcpPermissionOutcome::Cancelled,
+            capo_decision: "deny".to_string(),
+            capo_persistence: None,
+            permission_decision_id: "decision-2".to_string(),
+            capability_grant_id: None,
+            adapter_error: false,
+            must_not_proceed: true,
+        };
+        let ack = adapter.deliver_permission_response(&deny);
+        assert!(!ack.proceeded, "a halt signal must stop the adapter");
     }
 
     #[test]

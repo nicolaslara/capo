@@ -399,33 +399,72 @@ impl FakeBoundaryController {
         scope: &ToolDispatchScope,
         decision: &PermissionDecision,
     ) -> StateResult<()> {
-        let payload = serde_json::json!({
+        let extra_payload = serde_json::json!({
             "tool_call_id": scope.tool_call_id.to_string(),
-            "capability_grant_id": decision.capability_grant_id,
-            "effect": decision.effect,
-            "decision_source": decision.decision_source,
-            "persistence": decision.persistence,
-            "explanation": decision.explanation,
-        })
-        .to_string();
-        self.state.append_event(
-            scoped_event(
-                &format!(
+        });
+        self.append_capability_grant_created_event(
+            CapabilityGrantEventKeys {
+                event_id: format!(
                     "event-tool-dispatch-{}-{}-{}",
                     scope.session_id,
                     scope.tool_call_id,
                     dispatch_event_suffix(EventKind::CapabilityGrantCreated, 0)
                 ),
+                task_id: &scope.task_id,
+                agent_id: &scope.agent_id,
+                session_id: &scope.session_id,
+                run_id: &scope.run_id,
+                turn_id: scope.turn_id.to_string(),
+                item_ref: scope.tool_call_id.to_string(),
+            },
+            decision,
+            extra_payload,
+        )
+    }
+
+    /// SG1/SG2: the SINGLE canonical writer for `capability.grant_created` + its
+    /// durable [`CapabilityGrantProjection`].
+    ///
+    /// Both the tool-dispatch decide step (SG1) and the adapter permission
+    /// round-trip (SG2) funnel grant materialization through here so there is ONE
+    /// projection-construction contract (`subject_json`/`scope_json`/`effect`/...)
+    /// derived from the canonical [`PermissionDecision`], rather than two
+    /// independent hand-built copies that SG3 read-back would have to keep in sync.
+    /// Only the EVENT KEYS (id/scope/item ref) and any caller-specific extra
+    /// payload fields differ between the two paths.
+    pub(crate) fn append_capability_grant_created_event(
+        &self,
+        keys: CapabilityGrantEventKeys<'_>,
+        decision: &PermissionDecision,
+        extra_payload: serde_json::Value,
+    ) -> StateResult<()> {
+        let mut payload = serde_json::json!({
+            "capability_grant_id": decision.capability_grant_id,
+            "effect": decision.effect,
+            "decision_source": decision.decision_source,
+            "persistence": decision.persistence,
+            "explanation": decision.explanation,
+        });
+        if let (Some(payload_obj), Some(extra_obj)) =
+            (payload.as_object_mut(), extra_payload.as_object())
+        {
+            for (key, value) in extra_obj {
+                payload_obj.insert(key.clone(), value.clone());
+            }
+        }
+        self.state.append_event(
+            scoped_event(
+                &keys.event_id,
                 EventKind::CapabilityGrantCreated,
                 &self.project_id,
-                &scope.task_id,
-                &scope.agent_id,
-                &scope.session_id,
-                &scope.run_id,
+                keys.task_id,
+                keys.agent_id,
+                keys.session_id,
+                keys.run_id,
             )
-            .with_turn(scope.turn_id.to_string())
-            .with_item(scope.tool_call_id.to_string())
-            .with_payload(payload),
+            .with_turn(keys.turn_id)
+            .with_item(keys.item_ref)
+            .with_payload(payload.to_string()),
             &[ProjectionRecord::CapabilityGrant(
                 capo_state::CapabilityGrantProjection {
                     capability_grant_id: decision.capability_grant_id.clone(),
@@ -442,6 +481,21 @@ impl FakeBoundaryController {
         )?;
         Ok(())
     }
+}
+
+/// The event-keying inputs that differ per caller of
+/// [`FakeBoundaryController::append_capability_grant_created_event`]: the event
+/// id, the scope-tree ids, the turn, and the item ref. The grant PROJECTION
+/// itself is derived entirely from the canonical [`PermissionDecision`], so the
+/// two writers (tool dispatch + permission round-trip) cannot drift.
+pub(crate) struct CapabilityGrantEventKeys<'a> {
+    pub event_id: String,
+    pub task_id: &'a TaskId,
+    pub agent_id: &'a AgentId,
+    pub session_id: &'a SessionId,
+    pub run_id: &'a RunId,
+    pub turn_id: String,
+    pub item_ref: String,
 }
 
 /// SG1: whether a recorded permission decision materializes a durable
@@ -466,7 +520,10 @@ impl FakeBoundaryController {
 /// path creates a grant; the durable-deny arm exists for a future
 /// `reject_always` policy. A purely observational persistence
 /// (`observational`/`none`) never creates a grant for either effect.
-fn decision_creates_grant(decision: &PermissionDecision, grant_id: &Option<String>) -> bool {
+pub(crate) fn decision_creates_grant(
+    decision: &PermissionDecision,
+    grant_id: &Option<String>,
+) -> bool {
     if grant_id.is_none() || persistence_is_observational(&decision.persistence) {
         return false;
     }
