@@ -290,6 +290,31 @@ the `real-turn-loop` single-snapshot safety floor: the RTL pre-write snapshot
 restorable per-turn and survive restart. Checkpoint artifacts and restore are
 recorded as observed evidence/events so a rollback is auditable.
 
+Floor wiring (corrected after review): the RTL floor is not left running its own
+parallel checkpoint mechanism. `capo-server`'s `create_pre_write_checkpoint`
+DELEGATES to the controller's `FakeBoundaryController::create_checkpoint` (and
+the new `CapoServer::restore_pre_write_checkpoint` delegates to
+`restore_checkpoint`), so there is exactly ONE checkpoint mechanism and ONE
+`checkpoint.created` payload contract (`checkpoint_kind = "shadow_git"`, carrying
+`commit_ref`/`shadow_git_dir`/`content_hash` plus a `CheckpointProjection`) across
+the floor and the loop. The old directory-copy `WorkspaceCheckpoint`
+(`single_snapshot_directory_copy`, no projection) is retired: `WorkspaceCheckpoint`
+is now a shadow-git view (commit SHA + shadow `.git` dir) and the floor's
+`run_workspace_write_turn` live arm and `live_provider` both take the shadow-git
+checkpoint. The shadow `.git` lives under the controller state root
+(`SqliteStateStore::shadow_git_root()` = `<state_root>/shadow-git`), so the floor
+checkpoint survives restart exactly like a loop checkpoint.
+
+`.git` protection (locked in by test): the destructive restore path
+(`git checkout --force <sha> -- .` then `git clean -fdx`) is now exercised over a
+work tree that contains the workspace's OWN top-level `.git` AND a nested
+sub-repo `.git`. git special-cases the top-level `.git` (it survives the
+checkout+clean), which is pinned as a regression guard. A NESTED `.git` is NOT
+top-level-protected by git, so `clean -fdx` removes it as untracked content
+during restore; this is intentional and asserted (not silently relied upon).
+Full OS-level worktree ISOLATION that would protect nested sub-repos stays a
+depth-workpad non-goal.
+
 ## Liveness-Aware Restart Recovery (SG9)
 
 Recovery is liveness-aware, replacing the blunt path that marks all live-looking

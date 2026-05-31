@@ -10,9 +10,10 @@
 //!   shared path-containment engine ([`capo_tools::confine_write_path`], which
 //!   reuses the runtime tool wrappers' `ensure_under_workspace`). A write
 //!   outside the confined workspace is rejected *before any process is spawned*.
-//! - Reversibility: a single pre-write snapshot of the confined workspace is
-//!   captured and recorded via a `checkpoint.created` event, so any RTL live
-//!   write is reversible by one documented restore command.
+//! - Reversibility: a pre-write shadow-git checkpoint of the confined workspace
+//!   is captured (via the controller-owned mechanism, see the SG8 UPGRADE note
+//!   below) and recorded via a `checkpoint.created` event, so any RTL live write
+//!   is reversible by one documented restore command.
 //! - Never unattended: diff-preview/dry-run is the DEFAULT. A live write
 //!   requires an explicit opt-in env gate (mirroring `CAPO_SERVER_RUN_CODEX_LIVE`)
 //!   AND must not be unattended.
@@ -22,20 +23,39 @@
 //! records the abort as a `run.hard_killed` event.
 //!
 //! Out of scope here (kept in `safety-gates`): full `PermissionPolicy`
-//! enforcement, the `VerificationRunner`, and full shadow-git. The per-run
-//! resource ceiling and its `run.aborted` event are RTL7; orphan reaping
+//! enforcement and the `VerificationRunner`. The per-run resource ceiling and
+//! its `run.aborted` event are RTL7; orphan reaping
 //! (`run.orphaned`/`run.recovered`) is RTL10.
+//!
+//! SG8 UPGRADE: the pre-write checkpoint is no longer a directory copy under the
+//! artifact root. The floor now delegates to the controller-owned shadow-git
+//! checkpoint (`capo_controller::FakeBoundaryController::create_checkpoint`), so
+//! there is exactly ONE checkpoint mechanism and ONE `checkpoint.created` payload
+//! contract across the floor and the loop, and the pre-write snapshot is
+//! restorable per-turn and survives a restart (the directory copy was neither).
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use capo_core::{CommandIntent, CommandTarget, RunId, SessionId};
+use capo_controller::{CheckpointError as ControllerCheckpointError, CheckpointScope};
+use capo_core::{AgentId, CommandIntent, CommandTarget, RunId, SessionId, TaskId, TurnId};
 use capo_runtime::{LocalProcessRunner, LocalRunningProcess};
 use capo_state::{EventKind, NewEvent, RedactionState};
 use capo_tools::confine_write_path;
 
 use crate::util::{command_identity_hash, stable_hash};
 use crate::{CapoServer, ServerClientOrigin, ServerError, ServerResult};
+
+/// The synthetic task/agent identity a floor-driven (RTL6) workspace-write
+/// checkpoint is scoped to.
+///
+/// The floor's [`RunTurnRef`] carries only `(session, run, turn)` -- the
+/// load-bearing scope for finding and restoring a checkpoint, which is keyed by
+/// `checkpoint_id`. The controller's [`CheckpointScope`] also stamps a task/agent
+/// on the `checkpoint.created` event for audit attribution; the floor stamps
+/// these stable synthetic ids so a floor checkpoint is distinguishable on the log
+/// from a loop checkpoint while still funnelling through the SAME shadow-git path.
+const FLOOR_CHECKPOINT_TASK_ID: &str = "task-workspace-write-floor";
+const FLOOR_CHECKPOINT_AGENT_ID: &str = "agent-workspace-write-floor";
 
 /// The env gate that opts a workspace-write turn into a real live write.
 ///
@@ -98,43 +118,47 @@ pub fn resolve_write_mode_with_env(
     }
 }
 
-/// A single pre-write snapshot of a confined workspace.
+/// A single pre-write checkpoint of a confined workspace, taken via the
+/// controller-owned shadow-git mechanism (SG8).
 ///
-/// Phase 1 uses a single-snapshot directory copy under the artifact root (full
-/// shadow-git stays in `safety-gates`). It is reversible by one documented
-/// command: [`Self::restore_command`] returns that command, and
-/// [`Self::restore`] performs it programmatically. The snapshot is recorded via
-/// a `checkpoint.created` event so it survives restart/replay.
+/// The checkpoint is a commit in a per-workspace shadow `.git` (a separate
+/// `GIT_DIR` under the controller's state root; the workspace's own `.git` is
+/// never touched). The restorable ref is the shadow commit SHA. It is reversible
+/// by one documented command: [`Self::restore_command`] returns that command, and
+/// [`CapoServer::restore_pre_write_checkpoint`] performs it programmatically
+/// (through the SAME controller `restore_checkpoint` path the loop uses). The
+/// checkpoint is recorded via a `checkpoint.created` event + a durable
+/// `CheckpointProjection`, so it survives restart/replay and is restorable
+/// per-turn -- which the prior directory-copy snapshot was not.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceCheckpoint {
     pub checkpoint_id: String,
     pub workspace_root: PathBuf,
-    pub snapshot_root: PathBuf,
+    /// The per-workspace shadow `.git` directory the checkpoint commit lives in.
+    pub shadow_git_dir: PathBuf,
+    /// The shadow-repo commit SHA the checkpoint is restorable to.
+    pub commit_ref: String,
+    /// The shadow commit's tree SHA -- a content fingerprint of the checkpointed
+    /// workspace.
     pub content_hash: String,
-    pub file_count: usize,
 }
 
 impl WorkspaceCheckpoint {
     /// The single documented command that restores the workspace to its
     /// pre-write state. Recorded in the event payload and asserted by tests.
+    ///
+    /// This is the shadow-git restore: check the checkpoint commit's tree out
+    /// over the workspace, then remove files added after the checkpoint, with
+    /// `GIT_DIR`/`GIT_WORK_TREE` pinned so the workspace's own `.git` is never
+    /// consulted.
     pub fn restore_command(&self) -> String {
         format!(
-            "rm -rf {workspace}/* && cp -a {snapshot}/. {workspace}/",
+            "GIT_DIR={git_dir} GIT_WORK_TREE={workspace} git checkout --force {commit} -- . && \
+             GIT_DIR={git_dir} GIT_WORK_TREE={workspace} git clean -fdx",
+            git_dir = self.shadow_git_dir.display(),
             workspace = self.workspace_root.display(),
-            snapshot = self.snapshot_root.display()
+            commit = self.commit_ref,
         )
-    }
-
-    /// Restore the confined workspace to the snapshot's pre-write state.
-    ///
-    /// This is the programmatic equivalent of [`Self::restore_command`]: it
-    /// clears the confined workspace and re-materializes the snapshot, leaving
-    /// the workspace byte-identical to the moment the checkpoint was taken.
-    pub fn restore(&self) -> Result<(), String> {
-        clear_dir_contents(&self.workspace_root).map_err(|error| error.to_string())?;
-        copy_dir_recursive(&self.snapshot_root, &self.workspace_root)
-            .map_err(|error| error.to_string())?;
-        Ok(())
     }
 }
 
@@ -294,15 +318,24 @@ impl CapoServer {
     /// Capture and record a single pre-write checkpoint of the confined
     /// workspace.
     ///
-    /// The workspace is confined again here (defense in depth) and snapshotted
-    /// into `<artifact_root>/checkpoints/<checkpoint_id>`. A `checkpoint.created`
-    /// event records the snapshot location, content hash, file count, and the
-    /// one documented restore command, so any later live write is reversible.
-    /// The event is idempotent on `(run_id, content_hash)`, so re-capturing the
-    /// same pre-write state does not append a duplicate.
+    /// SG8: this delegates to the controller-owned shadow-git checkpoint
+    /// (`FakeBoundaryController::create_checkpoint`) -- the SAME mechanism the
+    /// loop uses -- rather than the prior directory copy under the artifact root.
+    /// The workspace is confined again here (defense in depth), then a commit is
+    /// taken in a per-workspace shadow `.git` under the controller's state root
+    /// (the workspace's own `.git` is never touched). A `checkpoint.created`
+    /// event + durable `CheckpointProjection` record the restorable commit SHA,
+    /// so any later live write is reversible per-turn and the checkpoint survives
+    /// restart. The checkpoint id is keyed on `(run, turn, content tree SHA)`, so
+    /// re-capturing the same pre-write state is idempotent.
+    ///
+    /// `artifact_root` is unused by the shadow-git path (the shadow repo lives
+    /// under the controller state root, not the artifact root) but is retained on
+    /// the signature for the floor's confine-the-artifact-root defense in depth
+    /// and so the call sites do not churn.
     pub fn create_pre_write_checkpoint(
         &self,
-        origin: &ServerClientOrigin,
+        _origin: &ServerClientOrigin,
         run_turn: RunTurnRef<'_>,
         workspace_root: &str,
         artifact_root: &str,
@@ -313,88 +346,73 @@ impl CapoServer {
             turn_id,
         } = run_turn;
         let confined_workspace = self.confine_workspace_write(workspace_root, workspace_root)?;
-        let confined_artifacts = confine_write_path(Path::new(artifact_root), &confined_workspace)
-            .or_else(|_| {
-                // Artifacts may legitimately live outside the workspace; only
-                // reject `..`-escapes / credential-like components there.
-                let root = Path::new(artifact_root);
-                if root
-                    .components()
-                    .any(|component| matches!(component, std::path::Component::ParentDir))
-                {
-                    Err(ServerError::AdapterFixture(format!(
-                        "checkpoint artifact root rejected: {artifact_root}"
-                    )))
-                } else {
-                    Ok(root.to_path_buf())
-                }
-            })?;
-
-        let checkpoints_root = confined_artifacts.join("checkpoints");
-        let checkpoint_id = format!(
-            "checkpoint-{}",
-            stable_hash(format!("{run_id}:{turn_id}:{}", confined_workspace.display()).as_bytes())
-        );
-        let snapshot_root = checkpoints_root.join(&checkpoint_id);
-        if snapshot_root.exists() {
-            let _ = fs::remove_dir_all(&snapshot_root);
+        // Defense in depth: reject an artifact root that escapes via `..`, even
+        // though the shadow repo no longer lives under it.
+        if Path::new(artifact_root)
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(ServerError::AdapterFixture(format!(
+                "checkpoint artifact root rejected: {artifact_root}"
+            )));
         }
-        fs::create_dir_all(&snapshot_root).map_err(|error| {
-            ServerError::AdapterFixture(format!(
-                "failed to create checkpoint snapshot dir: {error}"
-            ))
-        })?;
-        let (content_hash, file_count) = copy_dir_recursive(&confined_workspace, &snapshot_root)
-            .map_err(|error| {
-                ServerError::AdapterFixture(format!("failed to snapshot workspace: {error}"))
-            })?;
 
-        let checkpoint = WorkspaceCheckpoint {
-            checkpoint_id: checkpoint_id.clone(),
-            workspace_root: confined_workspace.clone(),
-            snapshot_root: snapshot_root.clone(),
-            content_hash: content_hash.clone(),
-            file_count,
+        let scope = CheckpointScope {
+            task_id: TaskId::new(FLOOR_CHECKPOINT_TASK_ID),
+            agent_id: AgentId::new(FLOOR_CHECKPOINT_AGENT_ID),
+            session_id: SessionId::new(session_id),
+            run_id: RunId::new(run_id),
+            turn_id: TurnId::new(turn_id),
+            workspace_root: confined_workspace.display().to_string(),
+            shadow_git_root: self.controller.shadow_git_root().display().to_string(),
         };
+        let created = self
+            .controller
+            .create_checkpoint(&scope)
+            .map_err(ServerError::State)?
+            .map_err(server_checkpoint_error)?;
 
-        let session = SessionId::new(session_id);
-        let run = RunId::new(run_id);
-        let event = NewEvent {
-            event_id: format!(
-                "event-checkpoint-created-{}",
-                stable_hash(format!("{checkpoint_id}:{content_hash}").as_bytes())
-            ),
-            kind: EventKind::CheckpointCreated,
-            actor: origin.actor_id.clone(),
-            project_id: Some(self.project_id.clone()),
-            task_id: None,
-            agent_id: None,
-            session_id: Some(session.clone()),
-            run_id: Some(run.clone()),
-            turn_id: Some(turn_id.to_string()),
-            item_id: Some(checkpoint_id.clone()),
-            payload_json: serde_json::json!({
-                "checkpoint_id": checkpoint_id,
-                "checkpoint_kind": "single_snapshot_directory_copy",
-                "workspace_root": confined_workspace.display().to_string(),
-                "snapshot_root": snapshot_root.display().to_string(),
-                "content_hash": content_hash,
-                "file_count": file_count,
-                "reversible": true,
-                "restore_command": checkpoint.restore_command(),
-            })
-            .to_string(),
-            idempotency_key: Some(format!(
-                "checkpoint-created:{}:{}:{}",
-                self.project_id, run, content_hash
-            )),
-            redaction_state: RedactionState::Safe,
+        Ok(WorkspaceCheckpoint {
+            checkpoint_id: created.checkpoint_id,
+            workspace_root: confined_workspace,
+            shadow_git_dir: PathBuf::from(created.projection.shadow_git_dir),
+            commit_ref: created.commit_ref,
+            content_hash: created.content_hash,
+        })
+    }
+
+    /// SG8: restore a pre-write checkpoint by id -- the floor's `Restore` command.
+    ///
+    /// Delegates to the controller's `restore_checkpoint` (the SAME path the loop
+    /// uses), so the floor and the loop share one restore mechanism. Returns the
+    /// workspace to the exact state captured by the checkpoint's shadow commit and
+    /// records an auditable `checkpoint.restored` event. The checkpoint is read
+    /// back from the durable projection, so this works after a restart.
+    pub fn restore_pre_write_checkpoint(
+        &self,
+        run_turn: RunTurnRef<'_>,
+        workspace_root: &str,
+        checkpoint_id: &str,
+    ) -> ServerResult<()> {
+        let RunTurnRef {
+            session_id,
+            run_id,
+            turn_id,
+        } = run_turn;
+        let scope = CheckpointScope {
+            task_id: TaskId::new(FLOOR_CHECKPOINT_TASK_ID),
+            agent_id: AgentId::new(FLOOR_CHECKPOINT_AGENT_ID),
+            session_id: SessionId::new(session_id),
+            run_id: RunId::new(run_id),
+            turn_id: TurnId::new(turn_id),
+            workspace_root: workspace_root.to_string(),
+            shadow_git_root: self.controller.shadow_git_root().display().to_string(),
         };
         self.controller
-            .state()
-            .append_event(event, &[])
-            .map_err(ServerError::State)?;
-        Ok(checkpoint)
+            .restore_checkpoint(&scope, checkpoint_id)
+            .map_err(ServerError::State)?
+            .map_err(server_checkpoint_error)?;
+        Ok(())
     }
 
     /// Controller-owned hard kill of a live run.
@@ -484,72 +502,11 @@ impl CapoServer {
     }
 }
 
-/// Recursively copy `src` into `dst`, returning `(content_hash, file_count)`.
-///
-/// The content hash is an order-independent FNV-1a roll-up of every relative
-/// path and its bytes, so it is a stable fingerprint of the snapshot regardless
-/// of directory iteration order.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<(String, usize)> {
-    fs::create_dir_all(dst)?;
-    let mut hash_accumulator: u64 = 0;
-    let mut file_count = 0usize;
-    copy_dir_into(src, src, dst, &mut hash_accumulator, &mut file_count)?;
-    Ok((format!("fnv1a64:{hash_accumulator:016x}"), file_count))
-}
-
-fn copy_dir_into(
-    base: &Path,
-    src: &Path,
-    dst: &Path,
-    hash_accumulator: &mut u64,
-    file_count: &mut usize,
-) -> std::io::Result<()> {
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let source_path = entry.path();
-        let relative = source_path.strip_prefix(base).unwrap_or(&source_path);
-        let target_path = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            fs::create_dir_all(&target_path)?;
-            copy_dir_into(
-                base,
-                &source_path,
-                &target_path,
-                hash_accumulator,
-                file_count,
-            )?;
-        } else if file_type.is_file() {
-            let bytes = fs::read(&source_path)?;
-            fs::write(&target_path, &bytes)?;
-            *hash_accumulator ^= fnv1a64(relative.to_string_lossy().as_bytes());
-            *hash_accumulator ^= fnv1a64(&bytes);
-            *file_count += 1;
-        }
-        // Symlinks and other special files are intentionally skipped: the
-        // confined workspace snapshot only captures regular files for phase 1.
-    }
-    Ok(())
-}
-
-fn clear_dir_contents(dir: &Path) -> std::io::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            fs::remove_dir_all(&path)?;
-        } else {
-            fs::remove_file(&path)?;
-        }
-    }
-    Ok(())
-}
-
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
+/// Map a controller [`CheckpointError`](ControllerCheckpointError) into the
+/// server's error type, preserving the agent-readable message.
+fn server_checkpoint_error(error: ControllerCheckpointError) -> ServerError {
+    ServerError::AdapterFixture(format!(
+        "shadow-git checkpoint failed: {}",
+        error.agent_message()
+    ))
 }

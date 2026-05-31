@@ -168,6 +168,14 @@ impl SqliteStateStore {
         self.root.join("artifacts")
     }
 
+    /// The controller-owned root under which per-workspace shadow `.git`
+    /// directories live (SG8 checkpoint/rollback). Mirrors [`Self::artifact_root`]
+    /// so the shadow-git checkpoint store hangs off the same durable state root
+    /// and survives restart alongside the event log.
+    pub fn shadow_git_root(&self) -> PathBuf {
+        self.root.join("shadow-git")
+    }
+
     pub fn append_event(
         &self,
         event: NewEvent,

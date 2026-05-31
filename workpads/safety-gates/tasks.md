@@ -786,6 +786,37 @@ Evidence:
   passed/0 failed). `git diff --check` clean. Acceptance met. No live Codex smoke
   required (SG8 verification is deterministic real-workspace + system-git +
   replay only).
+- Review-fix pass (2026-05-31): the original SG8 cut built the controller
+  shadow-git mechanism but did NOT wire it into the RTL floor, so two parallel
+  checkpoint mechanisms ran (the directory-copy floor stayed effective) and the
+  shared `checkpoint.created` kind had two divergent payloads. Fixed by actually
+  performing the upgrade (option (a)): `capo-server`'s
+  `create_pre_write_checkpoint` now DELEGATES to
+  `FakeBoundaryController::create_checkpoint`, and a new
+  `CapoServer::restore_pre_write_checkpoint` delegates to `restore_checkpoint`, so
+  the floor and the loop share ONE checkpoint mechanism and ONE
+  `checkpoint.created` contract (`checkpoint_kind = "shadow_git"` + a
+  `CheckpointProjection`). The directory-copy `WorkspaceCheckpoint` (and its
+  `copy_dir_recursive`/`clear_dir_contents`/`fnv1a64` helpers) is retired;
+  `WorkspaceCheckpoint` is now a shadow-git view (commit SHA + shadow `.git`
+  dir + content hash). Added `SqliteStateStore::shadow_git_root()` (=
+  `<state_root>/shadow-git`) and a `FakeBoundaryController::shadow_git_root()`
+  accessor so the floor keys its shadow repo under the controller state root.
+  Updated the RTL6 floor tests
+  (`crates/capo-server/src/tests/safety_floor.rs`): the pre-write-checkpoint test
+  now asserts the shadow-git mechanism (no `.git` in the workspace, the
+  `checkpoint_kind="shadow_git"` payload, restore via
+  `restore_pre_write_checkpoint`, and an auditable `checkpoint.restored` event);
+  the confinement-rejection test asserts no checkpoint was taken via the workspace
+  `.git`. Also extended `sg8_shadow_git_does_not_touch_workspace_dot_git`
+  (`crates/capo-controller/src/checkpoint.rs`) to exercise the DESTRUCTIVE restore
+  path (`git checkout --force` + `git clean -fdx`) over a work tree containing the
+  workspace's own top-level `.git` AND a nested sub-repo `.git`, locking in git's
+  top-level `.git` protection as a regression guard and asserting (and documenting)
+  that a nested `.git` is removed by `clean -fdx` as untracked content. Re-ran the
+  full gate from `/Users/nicolas/devel/capo-wt/safety-gates`: `cargo fmt --check`
+  (exit 0), `cargo clippy --all-targets --all-features -- -D warnings` (exit 0),
+  `cargo test --workspace` (exit 0).
 
 ## SG9 - Liveness-Aware Restart Recovery Replacing exited_unknown
 

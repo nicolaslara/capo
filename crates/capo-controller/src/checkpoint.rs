@@ -799,24 +799,38 @@ mod tests {
         assert!(error.agent_message().contains("unknown checkpoint"));
     }
 
-    /// SG8: the shadow-git mechanism never touches the workspace's own `.git`.
+    /// SG8: the shadow-git mechanism never touches the workspace's own `.git` --
+    /// across BOTH create AND the destructive restore (`git clean -fdx`), which is
+    /// the operation where a `.git`-deletion risk would actually live.
+    ///
+    /// This pins git's top-level `.git` protection (a `checkout`/`clean` over a
+    /// work tree never removes the top-level `.git`) as a regression guard against
+    /// the real destructive path, and documents the handling of a NESTED `.git`
+    /// (not special-cased by git): a nested sub-repo's `.git` IS cleaned by
+    /// `clean -fdx` because it is untracked content under the work tree. The
+    /// workspace's OWN top-level `.git` survives regardless.
     #[test]
     fn sg8_shadow_git_does_not_touch_workspace_dot_git() {
         let (controller, workspace, shadow, _state_root) = fixture();
-        // Give the workspace its own real git repo with a sentinel ref state.
+        // Give the workspace its own real top-level git repo with a sentinel,
+        // plus a NESTED sub-repo `.git` (which git does NOT top-level-protect).
         let user_git = workspace.join(".git");
         std::fs::create_dir_all(&user_git).expect("user .git");
         std::fs::write(user_git.join("SENTINEL"), "do-not-touch\n").expect("sentinel");
+        let nested = workspace.join("vendor").join("sub");
+        let nested_git = nested.join(".git");
+        std::fs::create_dir_all(&nested_git).expect("nested .git");
+        std::fs::write(nested_git.join("SENTINEL"), "nested\n").expect("nested sentinel");
         write_file(&workspace, "f.txt", "v1\n");
 
         let scope = scope(&workspace, &shadow, "turn-1");
-        controller
+        let created = controller
             .create_checkpoint(&scope)
             .expect("io")
             .expect("ok");
 
-        // The shadow git dir lives under the shadow root, NOT in the workspace's
-        // own `.git`, and the user's sentinel is untouched.
+        // After CREATE: the shadow git dir lives under the shadow root, NOT in
+        // the workspace's own `.git`, and the user's top-level sentinel survives.
         assert!(
             shadow.exists(),
             "shadow git root is created under the controller-owned root"
@@ -826,7 +840,42 @@ mod tests {
                 .ok()
                 .as_deref(),
             Some("do-not-touch\n"),
-            "workspace's own .git is never touched by the shadow repo"
+            "workspace's own .git is never touched by the shadow repo create"
+        );
+
+        // Mutate the workspace, then RESTORE -- exercising the destructive
+        // `git checkout --force` + `git clean -fdx` path over a work tree that
+        // contains the workspace's own `.git`.
+        write_file(&workspace, "added_after.txt", "remove me\n");
+        write_file(&workspace, "f.txt", "v2\n");
+        controller
+            .restore_checkpoint(&scope, &created.checkpoint_id)
+            .expect("io")
+            .expect("restore ok");
+
+        // The most dangerous operation (clean -fdx) did NOT remove the
+        // workspace's own top-level `.git`: git special-cases the top-level
+        // `.git` during checkout+clean, and we lock that in here.
+        assert_eq!(
+            std::fs::read_to_string(user_git.join("SENTINEL"))
+                .ok()
+                .as_deref(),
+            Some("do-not-touch\n"),
+            "workspace's own top-level .git survives the destructive restore (checkout + clean -fdx)"
+        );
+        // The checkpointed content is restored and post-checkpoint files removed.
+        assert_eq!(read_file(&workspace, "f.txt").as_deref(), Some("v1\n"));
+        assert!(
+            read_file(&workspace, "added_after.txt").is_none(),
+            "files added after the checkpoint are removed by restore"
+        );
+        // Documented behavior for a NESTED `.git` (git does not top-level-protect
+        // it): it is untracked content under the work tree, so `clean -fdx`
+        // removes it during restore. This is intentional and asserted so the
+        // behavior is locked in rather than silently relied upon.
+        assert!(
+            !nested_git.exists(),
+            "a nested sub-repo .git is untracked content and is removed by restore's clean -fdx"
         );
     }
 }

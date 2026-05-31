@@ -151,6 +151,13 @@ impl FakeBoundaryController {
         &self.state
     }
 
+    /// SG8: the controller-owned root under which per-workspace shadow `.git`
+    /// directories live. A [`CheckpointScope`] keys its shadow repo under this
+    /// root, so the floor and the loop take checkpoints into ONE store.
+    pub fn shadow_git_root(&self) -> std::path::PathBuf {
+        self.state.shadow_git_root()
+    }
+
     /// AI2: return a clone of this core with its chat adapter handle swapped.
     ///
     /// The core's [`SqliteStateStore`] is a path handle, so the clone shares one

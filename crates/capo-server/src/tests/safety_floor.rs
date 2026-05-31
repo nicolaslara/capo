@@ -87,11 +87,11 @@ fn out_of_confinement_write_is_rejected_before_any_process_runs() {
         "an absolute path outside the workspace must be rejected before any process runs"
     );
 
-    // No checkpoint snapshot directory was created (the floor never advanced
-    // past confinement), and no checkpoint event was recorded.
+    // No checkpoint was taken (the floor never advanced past confinement): no
+    // shadow `.git` is created in the workspace and no checkpoint event recorded.
     assert!(
-        !artifacts.join("checkpoints").exists(),
-        "rejected write must not create a checkpoint snapshot"
+        !workspace.join(".git").exists(),
+        "rejected write must not advance to taking a checkpoint"
     );
     let state = SqliteStateStore::open(&root).expect("state");
     let events = state
@@ -311,8 +311,11 @@ fn resolve_write_mode_with_env_is_an_and_gate_over_all_three_requirements() {
 
 #[test]
 fn pre_write_checkpoint_is_created_and_one_command_restores_the_workspace() {
-    // RTL6: the checkpoint is captured BEFORE the write, and a documented
-    // restore command returns the workspace to its pre-write state.
+    // RTL6 + SG8: the pre-write checkpoint is captured BEFORE the write through
+    // the controller-owned shadow-git mechanism (the floor no longer takes a
+    // directory copy), and the floor's `Restore` command -- which delegates to
+    // the SAME controller `restore_checkpoint` the loop uses -- returns the
+    // workspace to its pre-write state.
     let root = temp_root();
     let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
     let workspace = scratch_dir("workspace-ckpt");
@@ -321,29 +324,35 @@ fn pre_write_checkpoint_is_created_and_one_command_restores_the_workspace() {
     std::fs::write(workspace.join("src/lib.rs"), b"pre-write contents").expect("seed file");
     std::fs::write(workspace.join("README.md"), b"readme").expect("seed readme");
 
+    let run_turn = RunTurnRef {
+        session_id: "session-ckpt",
+        run_id: "run-ckpt",
+        turn_id: "turn-ckpt",
+    };
     let checkpoint = server
         .create_pre_write_checkpoint(
             &system_origin(),
-            RunTurnRef {
-                session_id: "session-ckpt",
-                run_id: "run-ckpt",
-                turn_id: "turn-ckpt",
-            },
+            run_turn,
             &workspace.display().to_string(),
             &artifacts.display().to_string(),
         )
         .expect("create pre-write checkpoint");
 
-    // The snapshot exists and captured the pre-write tree.
-    assert!(checkpoint.snapshot_root.exists());
-    assert_eq!(checkpoint.file_count, 2);
-    assert_eq!(
-        std::fs::read_to_string(checkpoint.snapshot_root.join("src/lib.rs")).unwrap(),
-        "pre-write contents"
+    // SG8: the checkpoint is a shadow-git commit, NOT a directory copy. The
+    // shadow `.git` lives under the controller state root (not in the workspace),
+    // and the restorable ref is the commit SHA.
+    assert!(!checkpoint.commit_ref.is_empty(), "commit ref recorded");
+    assert!(
+        checkpoint.shadow_git_dir.join("HEAD").is_file(),
+        "shadow .git exists under the controller-owned root"
+    );
+    assert!(
+        !workspace.join(".git").exists(),
+        "the floor's shadow repo never creates a .git in the workspace"
     );
 
-    // The checkpoint.created event was recorded with the documented restore
-    // command and the reversible flag.
+    // The checkpoint.created event was recorded with the shadow-git contract:
+    // the reversible flag and the shadow-git mechanism marker.
     let state = SqliteStateStore::open(&root).expect("state");
     let events = state
         .recent_events_for_session(&SessionId::new("session-ckpt"), 64)
@@ -360,8 +369,15 @@ fn pre_write_checkpoint_is_created_and_one_command_restores_the_workspace() {
     assert!(
         checkpoint_event
             .payload_json
-            .contains("\"restore_command\":"),
-        "checkpoint event must record the documented restore command"
+            .contains("\"checkpoint_kind\":\"shadow_git\""),
+        "the floor and the loop now emit ONE checkpoint.created contract (shadow_git), \
+         not the old single_snapshot_directory_copy"
+    );
+    assert!(
+        checkpoint_event
+            .payload_json
+            .contains(&format!("\"commit_ref\":\"{}\"", checkpoint.commit_ref)),
+        "checkpoint event records the restorable shadow commit SHA"
     );
 
     // Now simulate the write mutating the workspace...
@@ -373,15 +389,22 @@ fn pre_write_checkpoint_is_created_and_one_command_restores_the_workspace() {
     std::fs::write(workspace.join("src/new.rs"), b"a new file the write added").expect("new file");
     std::fs::remove_file(workspace.join("README.md")).expect("write deleted readme");
 
-    // ...and the ONE documented restore command returns the workspace to its
-    // pre-write state. We assert the recorded command and the programmatic
-    // restore (its equivalent) agree, then run the restore.
-    assert_eq!(checkpoint.restore_command(), {
-        let payload: serde_json::Value =
-            serde_json::from_str(&checkpoint_event.payload_json).expect("payload json");
-        payload["restore_command"].as_str().unwrap().to_string()
-    });
-    checkpoint.restore().expect("restore from checkpoint");
+    // ...and the ONE documented restore command (the shadow-git checkout+clean)
+    // returns the workspace to its pre-write state. The floor's programmatic
+    // restore delegates to the controller's `restore_checkpoint`.
+    assert!(
+        checkpoint
+            .restore_command()
+            .contains("git checkout --force"),
+        "the documented restore command is the shadow-git checkout"
+    );
+    server
+        .restore_pre_write_checkpoint(
+            run_turn,
+            &workspace.display().to_string(),
+            &checkpoint.checkpoint_id,
+        )
+        .expect("restore from checkpoint");
 
     assert_eq!(
         std::fs::read_to_string(workspace.join("src/lib.rs")).unwrap(),
@@ -396,6 +419,18 @@ fn pre_write_checkpoint_is_created_and_one_command_restores_the_workspace() {
     assert!(
         !workspace.join("src/new.rs").exists(),
         "restore must remove files the write added"
+    );
+
+    // SG8: the restore is auditable -- a checkpoint.restored event is recorded.
+    let events_after = SqliteStateStore::open(&root)
+        .expect("state")
+        .recent_events_for_session(&SessionId::new("session-ckpt"), 64)
+        .expect("events");
+    assert!(
+        events_after
+            .iter()
+            .any(|event| event.kind == "checkpoint.restored"),
+        "the floor restore emits an auditable checkpoint.restored event"
     );
 }
 
