@@ -620,7 +620,11 @@ Verification:
 
 ## ST11 - Deterministic Stream/SSE Wire-Snapshot Tests And Incremental CLI
 
-Status: pending.
+Status: done. (The `capo-web` SSE wire-snapshot bullet is delivered as a
+contract-level SSE-sequence fixture because `capo-web` is not a member of this
+worktree -- ST8 owns git-tracking `capo-web`; the SSE shape for a scripted event
+sequence is pinned here at the published-contract level and ST8 reuses
+`contract::sse_event_sequence`/`sse_frame`.)
 
 Acceptance:
 
@@ -643,6 +647,67 @@ Verification:
   `capo-web`, and `capo-cli`.
 - Restart/replay test passes.
 - `cargo fmt` and `git diff --check`.
+
+Evidence:
+
+- Live server-pushed event tail wired into the persistent connection: a
+  `Subscribe` now puts the connection into tailing mode
+  (`crates/capo-server/src/transport.rs` `start_event_tail` + `TailHandle`),
+  writing the catch-up `Subscribed` backlog as the response and then pumping live
+  `event` notifications on the same socket through a detached pump that blocks on
+  the broadcast with a bounded poll (`EventStream::recv_batch` /
+  `TailRecvError` in `crates/capo-server/src/event_tail.rs`). The write half is an
+  `Arc<Mutex<TcpStream>>` so the pump and the main loop never interleave bytes; a
+  `cancel` against a live tail (no request in flight) ends the tail with a typed
+  `cancelled` frame, and an `interrupt` while tailing still records the
+  turn-aborted event. `RequestHandler` gained `subscribe`/`supports_subscription`
+  (default off; `CapoServerHandler` delegates to `CapoServer::subscribe`, no
+  second writer).
+- Client seam: `subscribe_tcp` + `SubscribeStream`
+  (`crates/capo-server/src/transport.rs`, re-exported from `lib.rs`) open one
+  persistent connection, read the typed `Subscribed` backlog, then yield each live
+  committed event (`next_event` / `next_event_frame`, the latter returning the
+  verbatim wire bytes for snapshot assertions).
+- Deterministic stream wire-snapshot tests (fake/scripted agent, no live
+  provider) in `crates/capo-server/src/tests/stream.rs`:
+  `scripted_turn_streams_exact_backlog_and_live_event_frames` asserts the EXACT
+  JSON-RPC `event` notification wire bytes for a scripted turn;
+  `subscribe_tail_has_no_gap_and_no_duplicate_at_the_backlog_to_live_seam_over_the_wire`;
+  `in_band_cancel_on_the_subscribe_connection_ends_the_tail` (typed `cancelled`
+  frame); `mid_turn_interrupt_on_the_subscribe_connection_records_the_typed_abort`;
+  `live_tail_withholds_a_sensitive_event_body_and_never_emits_a_secret_raw`
+  (redaction-on-emit over the live wire);
+  `live_tail_streams_real_committed_events_from_write_bearing_commands` (the real
+  `CapoServerHandler` path); and the restart/replay
+  `thread_projection_and_subscriber_resume_identically_after_a_server_restart`
+  (the thread projection rebuilds byte-identically and a `from_sequence`
+  subscriber replays identically after reopening the store on the same root).
+- SSE wire-snapshot: `contract::sse_event_sequence` builds the canonical SSE
+  byte stream for a scripted three-event turn from `contract::sse_frame`, checked
+  in at `crates/capo-server/contract/snapshots/sse-event-sequence.txt` and
+  enforced by `tests::contract::sse_event_sequence_matches_the_checked_in_fixture`
+  (regenerate-and-diff via `CAPO_REGENERATE_WIRE_SNAPSHOTS=1`). `capo-web` is not a
+  member of this worktree, so this is the published-contract vehicle the web agent
+  (ST10) develops against; ST8 reuses it when it git-tracks `capo-web`.
+- Incremental CLI: `crates/capo-cli/src/operator_control.rs` `thread` no longer
+  one-shots `ReadThread { from_sequence: 0 }`. It drives the sequence watermark
+  contract -- `subscribe_tcp` from the session's last-rendered watermark, folds the
+  catch-up backlog and any live events (`drain_live_thread_events`), renders the
+  projected multi-turn read model plus an incremental tail of new events
+  (`render_thread_tail`), and advances a per-session `thread_watermarks` entry so a
+  repeated `thread` shows only what is new since the last read. Covered by CLI
+  integration tests in `crates/capo-cli/tests/server_transport/stream.rs`
+  (`control_thread_renders_incrementally_via_subscribe_over_the_persistent_connection`
+  and `control_thread_streams_new_events_committed_between_reads`, driving a real
+  server process).
+- Objective gate run from `/Users/nicolas/devel/capo-wt/streaming-transport`:
+  `cargo fmt --check` ok (exit 0); `cargo clippy --all-targets --all-features --
+  -D warnings` ok (exit 0); `cargo test --workspace` ok (0 failures workspace-wide
+  -- capo-server 90 passed/1 ignored including the 7 new `stream` cases and the new
+  contract SSE-sequence case, capo-cli `server_transport` 13 passed including the 2
+  new CLI thread-stream cases, capo-runtime 38, capo-state 47, all other crates
+  green). `capo-web` is not a member of this worktree, so its focused `cargo test`
+  is N/A here (owned by ST8).
 
 ## ST12 - Live Opt-In Streaming Smoke Paired With Deterministic Assertions
 

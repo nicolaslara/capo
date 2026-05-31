@@ -28,6 +28,7 @@ mod per_turn_artifacts;
 mod replay;
 mod safety_floor;
 mod sessions;
+mod stream;
 mod transport;
 mod turn_orchestration;
 

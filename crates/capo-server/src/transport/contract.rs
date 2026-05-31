@@ -129,6 +129,61 @@ fn sample_event() -> ServerEvent {
     }
 }
 
+/// A fixed, ordered scripted turn (three committed events of one session/turn) as
+/// the published example of what a web client renders from the event tail (ST11).
+/// All fields are stable literals so the SSE sequence snapshot is byte-stable.
+fn scripted_turn_events() -> Vec<ServerEvent> {
+    let event = |sequence: i64, event_id: &str, kind: &str, payload: &str| ServerEvent {
+        sequence,
+        event_id: event_id.to_string(),
+        kind: kind.to_string(),
+        actor: "fake-agent".to_string(),
+        project_id: Some("project-capo".to_string()),
+        task_id: None,
+        agent_id: Some("agent-demo".to_string()),
+        session_id: Some("session-demo".to_string()),
+        run_id: Some("run-demo".to_string()),
+        turn_id: Some("turn-2".to_string()),
+        item_id: None,
+        payload_json: payload.to_string(),
+        redaction_state: "safe".to_string(),
+    };
+    vec![
+        event(
+            45,
+            "event-0000000045",
+            "session.summary_updated",
+            "{\"summary\":\"starting the scripted turn\"}",
+        ),
+        event(
+            46,
+            "event-0000000046",
+            "tool.observation_recorded",
+            "{\"observation\":\"ran the scripted tool\"}",
+        ),
+        event(
+            47,
+            "event-0000000047",
+            "evidence.recorded",
+            "{\"summary\":\"scripted turn finished\"}",
+        ),
+    ]
+}
+
+/// The published SSE event-tail stream for a scripted turn (ST11): the canonical
+/// Server-Sent Events byte stream a browser bridge (`capo-web`, ST8) emits for the
+/// [`scripted_turn_events`] sequence. Each event is one [`sse_frame`] block; the
+/// concatenation is one SSE response body. This is checked in as a fixture so the
+/// SSE wire shape for a multi-event sequence cannot drift silently even though
+/// `capo-web` is not built in this workspace -- it is the contract the web agent
+/// develops against (ST10/ST11).
+pub fn sse_event_sequence() -> String {
+    scripted_turn_events()
+        .iter()
+        .map(|event| sse_frame(&EventNotification::for_event(event)))
+        .collect()
+}
+
 /// The complete, ordered set of checked-in wire snapshots, each produced by the
 /// live transport codec. Adding or changing a frame here is a deliberate change
 /// to the published contract and must be accompanied by regenerating the

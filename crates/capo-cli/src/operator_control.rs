@@ -1,10 +1,12 @@
+use std::collections::HashMap;
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use capo_adapters::CodexExecAdapter;
 use capo_server::{
-    AgentSummary, DispatchRunSummary, ServerCommand, ServerRequest, ServerResponsePayload,
-    TaskRunSummary, send_tcp,
+    AgentSummary, DispatchRunSummary, ServerCommand, ServerEvent, ServerRequest,
+    ServerResponsePayload, TaskRunSummary, TransportError, send_tcp, subscribe_tcp,
 };
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
@@ -78,6 +80,13 @@ fn control_planner(args: &[String]) -> Result<Box<dyn Planner>, String> {
     }
 }
 
+/// How long a `thread` tail drains immediately-available live events before it
+/// returns to the REPL prompt (ST11). The thread command is incremental, not a
+/// blocking long-lived follow: it renders the catch-up thread, then folds in any
+/// events that arrived in this short window. A committed event wakes the tail
+/// read immediately, so this only bounds the trailing idle wait.
+const THREAD_TAIL_DRAIN: Duration = Duration::from_millis(150);
+
 struct ControlRepl {
     address: String,
     server_started: bool,
@@ -86,6 +95,11 @@ struct ControlRepl {
     state_root: PathBuf,
     attached_agent: Option<String>,
     request_counter: usize,
+    /// Per-session sequence watermark for the incremental `thread` tail (ST11):
+    /// the highest event sequence already rendered for a session. A repeated
+    /// `thread` resumes a `Subscribe` from here, so it renders only what is new
+    /// since the last read instead of re-fetching the whole snapshot every time.
+    thread_watermarks: HashMap<String, i64>,
 }
 
 impl ControlRepl {
@@ -104,6 +118,7 @@ impl ControlRepl {
             state_root,
             attached_agent: None,
             request_counter: 0,
+            thread_watermarks: HashMap::new(),
         }
     }
 
@@ -429,23 +444,60 @@ Operator input: {line}
         self.read_agent_or_all(agent, ResultsAndEvidenceRenderer)
     }
 
-    /// Render the agent's multi-turn conversation thread (ST5): the read model
-    /// projected from the event log, replacing the single `latest_summary`. The
-    /// thread is read incrementally from sequence 0 and rendered turn-by-turn;
-    /// the client never authors thread ordering.
+    /// Render the agent's multi-turn conversation thread (ST5/ST11) by driving
+    /// sequence-driven incremental updates over the persistent connection, not a
+    /// `latest_summary` snapshot poll.
+    ///
+    /// The flow is the `Subscribe { from_sequence }` event-tail contract: it opens
+    /// a tail from the session's last-rendered watermark, reads the catch-up
+    /// backlog, then folds in any live events that stream in a short window,
+    /// advancing the per-session watermark by sequence. A repeated `thread`
+    /// therefore renders only what is new since the last read (the incremental
+    /// tail), while the full multi-turn structure is rendered from the projected
+    /// read model (`ReadThread`) the client never authors. The first `thread` for
+    /// a session resumes from `0` (the whole thread); the next resumes from the
+    /// watermark this call advanced to.
     fn thread(&mut self, agent: Option<String>) -> Result<String, String> {
         let summary = self.resolved_agent_status(agent)?;
         let Some(session) = summary.session.as_ref() else {
             return Ok(format!("{} has no active session.\n", summary.name));
         };
+        let session_id = session.session_id.to_string();
+        let from_sequence = self
+            .thread_watermarks
+            .get(&session_id)
+            .copied()
+            .unwrap_or(0);
+
+        // Open the event tail over the persistent connection from the watermark:
+        // the catch-up backlog plus the live tail, keyed by sequence.
+        let (backlog, mut stream) =
+            subscribe_tcp(&self.address, Some(session_id.clone()), from_sequence)
+                .map_err(debug_error)?;
+        // Fold the catch-up backlog and any events streaming in now, so the tail
+        // is genuinely incremental (events strictly after the watermark), advancing
+        // the watermark as we go.
+        let mut new_events: Vec<ServerEvent> = backlog.events;
+        let mut watermark = backlog.next_sequence;
+        drain_live_thread_events(&mut stream, &mut new_events, &mut watermark)?;
+        drop(stream);
+
+        // Render the full multi-turn structure from the projected read model (the
+        // client never authors thread ordering), then the incremental tail of new
+        // events since the last read.
         let response = self.send_request(ServerCommand::ReadThread {
-            session_id: session.session_id.to_string(),
+            session_id: session_id.clone(),
             from_sequence: 0,
         })?;
         let ServerResponsePayload::Thread(thread) = response else {
             return Err("server returned unexpected response for thread".to_string());
         };
-        Ok(render_thread(&summary.name, &thread))
+        let mut output = render_thread(&summary.name, &thread);
+        output.push_str(&render_thread_tail(from_sequence, &new_events));
+
+        // Advance the watermark so the next `thread` renders only newer events.
+        self.thread_watermarks.insert(session_id, watermark);
+        Ok(output)
     }
 
     fn details(&mut self, agent: Option<String>) -> Result<String, String> {
@@ -850,6 +902,67 @@ Operator input: {line}
 enum LineResult {
     Continue(String),
     Quit(String),
+}
+
+/// Drain the live event tail (ST11) for a short window, folding each newly
+/// streamed event into `new_events` and advancing `watermark` by sequence. This
+/// is the incremental tail the `thread` command renders: a committed event wakes
+/// the read immediately, and the bounded read timeout returns control to the REPL
+/// once the tail goes quiet. EOF (the server closed the tail) ends the drain.
+fn drain_live_thread_events(
+    stream: &mut capo_server::SubscribeStream,
+    new_events: &mut Vec<ServerEvent>,
+    watermark: &mut i64,
+) -> Result<(), String> {
+    stream
+        .set_read_timeout(Some(THREAD_TAIL_DRAIN))
+        .map_err(debug_error)?;
+    let deadline = Instant::now() + THREAD_TAIL_DRAIN;
+    loop {
+        match stream.next_event() {
+            Ok(Some(event)) => {
+                if event.sequence > *watermark {
+                    *watermark = event.sequence;
+                }
+                new_events.push(event);
+                if Instant::now() >= deadline {
+                    return Ok(());
+                }
+            }
+            // Clean EOF: the server tail ended.
+            Ok(None) => return Ok(()),
+            // The bounded read window elapsed with no further event: stop draining.
+            Err(TransportError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(debug_error(error)),
+        }
+    }
+}
+
+/// Render the incremental tail of events streamed since the last `thread` read
+/// (ST11). A first read (`from_sequence == 0`) does not print a tail header (the
+/// whole thread is already the structural render); a repeated read prints the new
+/// events that arrived strictly after the prior watermark.
+fn render_thread_tail(from_sequence: i64, new_events: &[ServerEvent]) -> String {
+    if from_sequence == 0 {
+        // First read: the structural thread render already covers the backlog, so
+        // there is nothing incremental to append.
+        return String::new();
+    }
+    if new_events.is_empty() {
+        return "Streamed (no new events since last read)\n".to_string();
+    }
+    let mut output = format!("Streamed ({} new events)\n", new_events.len());
+    for event in new_events {
+        output.push_str(&format!("  + [{}] {}\n", event.sequence, event.kind));
+    }
+    output
 }
 
 fn help_text() -> String {

@@ -27,7 +27,7 @@ mod util;
 use controller_routing::ControllerRoute;
 pub use controller_routing::{ControllerSelection, REAL_CONTROLLER_OPT_IN_ENV};
 use dispatch::DispatchExecutionOutcome;
-pub use event_tail::EventStream;
+pub use event_tail::{EventStream, TailRecvError};
 use live_provider::{LiveProviderLocalRunRequest, LiveProviderPreflightRequest};
 pub use safety_floor::{
     LIVE_WRITE_OPT_IN_ENV, RunTurnRef, WorkspaceCheckpoint, WorkspaceWriteOutcome,
@@ -35,8 +35,8 @@ pub use safety_floor::{
 };
 pub use transport::contract;
 pub use transport::{
-    CancellationToken, EVENT_TAIL_METHOD, EventNotification, TransportError, interrupt_frame,
-    send_interrupt, send_tcp, serve_tcp,
+    CancellationToken, EVENT_TAIL_METHOD, EventNotification, SubscribeStream, TransportError,
+    interrupt_frame, send_interrupt, send_tcp, serve_tcp, subscribe_tcp,
 };
 #[cfg(test)]
 pub(crate) use transport::{jsonrpc_request_roundtrip, jsonrpc_response_roundtrip};

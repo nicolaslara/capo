@@ -19,9 +19,24 @@
 //! stream only ever yields an event whose `sequence` is strictly greater than
 //! the highest sequence it has already delivered.
 
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Duration;
+
 use capo_state::EventSubscription;
 
 use crate::ServerEvent;
+
+/// The outcome of a bounded blocking poll on a live event tail
+/// ([`EventStream::recv_batch`]).
+#[derive(Debug)]
+pub enum TailRecvError {
+    /// No committed event arrived within the poll window. The caller loops to
+    /// re-check its stop flag and poll again.
+    Timeout,
+    /// The broadcast hub (and every other store handle) was dropped, so no
+    /// further events can ever arrive. The tail is finished.
+    Disconnected,
+}
 
 /// A live tail over committed events, paired with the catch-up backlog by
 /// `CapoServer::subscribe`. It holds the broadcast subscription and the
@@ -70,8 +85,44 @@ impl EventStream {
     /// earlier poll) and is dropped; an event for a different session (when a
     /// filter is set) is skipped without advancing the watermark past it.
     pub fn next_batch(&mut self) -> Vec<ServerEvent> {
+        self.fold_records(self.subscription.drain_pending())
+    }
+
+    /// Block (up to `timeout`) for the next committed event, then drain any more
+    /// that arrived alongside it, applying the same seam dedupe and session
+    /// filter as [`Self::next_batch`] and advancing the watermark.
+    ///
+    /// This is the blocking primitive the transport's live tail pump (ST4/ST11)
+    /// uses so it is event-driven rather than a busy spin: a committed event wakes
+    /// it immediately, and a `timeout` with nothing pending returns
+    /// [`TailRecvError::Timeout`] so the pump can re-check its stop flag.
+    ///
+    /// A returned batch can be empty even on `Ok`: the first event that woke the
+    /// poll may be a seam duplicate or a filtered-out session, in which case the
+    /// watermark still advanced but nothing is yielded.
+    pub fn recv_batch(&mut self, timeout: Duration) -> Result<Vec<ServerEvent>, TailRecvError> {
+        let first = match self.subscription.receiver().recv_timeout(timeout) {
+            Ok(record) => record,
+            Err(RecvTimeoutError::Timeout) => return Err(TailRecvError::Timeout),
+            Err(RecvTimeoutError::Disconnected) => return Err(TailRecvError::Disconnected),
+        };
+        // Fold the event that woke us plus any others already buffered behind it,
+        // so a burst of commits is delivered in one batch in sequence order.
+        let mut records = vec![first];
+        records.extend(self.subscription.drain_pending());
+        Ok(self.fold_records(records))
+    }
+
+    /// Apply the seam dedupe and session filter to a set of committed records,
+    /// advancing the delivery watermark. Shared by [`Self::next_batch`] and
+    /// [`Self::recv_batch`] so the live-tail semantics are identical whether the
+    /// caller polls non-blocking or blocks on the next event.
+    fn fold_records(
+        &mut self,
+        records: impl IntoIterator<Item = capo_state::EventRecord>,
+    ) -> Vec<ServerEvent> {
         let mut batch = Vec::new();
-        for record in self.subscription.drain_pending() {
+        for record in records {
             // Seam dedupe: never re-deliver an event the backlog already carried
             // (or an earlier live batch delivered).
             if record.sequence <= self.delivered_through {

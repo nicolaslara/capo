@@ -91,7 +91,10 @@ pub mod contract;
 mod jsonrpc;
 mod wire;
 
-use crate::{CapoServer, ServerError, ServerRequest, ServerResponse};
+use crate::event_tail::TailRecvError;
+use crate::{
+    CapoServer, ServerCommand, ServerError, ServerRequest, ServerResponse, ServerResponsePayload,
+};
 
 const MAX_TRANSPORT_FRAME_BYTES: usize = 384 * 1024;
 
@@ -101,6 +104,12 @@ const MAX_TRANSPORT_FRAME_BYTES: usize = 384 * 1024;
 /// keeps the connection alive by reading; the read side never trips this. The
 /// value is generous enough for interactive request/response round-trips.
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Default poll interval for a live event-tail pump (ST4/ST11): how long it
+/// blocks on the next committed event before waking to re-check its stop flag. A
+/// committed event wakes the pump immediately (the wait is interruptible by a
+/// send), so this only bounds how soon a tail notices its connection closed.
+const DEFAULT_TAIL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The JSON-RPC method name for the in-band cancel notification.
 const CANCEL_METHOD: &str = "cancel";
@@ -269,6 +278,32 @@ pub(crate) trait RequestHandler: Send + Sync + 'static {
         cancel: &CancellationToken,
     ) -> TransportResult<ServerResponse>;
 
+    /// Open a live event tail (ST4/ST11) for a `Subscribe` request: the catch-up
+    /// backlog plus a live [`EventStream`] the connection pumps as server-initiated
+    /// `event` notifications. Returning `Some` puts the connection into tailing
+    /// mode after the `Subscribed` response; returning `None` (the default) means
+    /// this handler does not tail, and `Subscribe` is served as a one-shot backlog
+    /// response via [`Self::handle`]. The production [`CapoServerHandler`] overrides
+    /// it to delegate to [`CapoServer::subscribe`].
+    fn subscribe(
+        &self,
+        _session_id: Option<String>,
+        _from_sequence: i64,
+    ) -> TransportResult<(crate::SubscriptionBacklog, crate::EventStream)> {
+        Err(TransportError::Protocol(
+            "this handler does not support live subscription".to_string(),
+        ))
+    }
+
+    /// Whether [`Self::subscribe`] yields a live tail (so the connection enters
+    /// tailing mode after a `Subscribe`). The default handler does not tail; the
+    /// production [`CapoServerHandler`] does. Kept separate from `subscribe` so the
+    /// connection loop can decide to tail without opening (and then discarding) a
+    /// broadcast subscription for a non-tailing handler.
+    fn supports_subscription(&self) -> bool {
+        false
+    }
+
     /// Handle a typed mid-turn `Interrupt` (ST6) for `session_id`: record the
     /// turn-aborted event for the session so the thread projection renders it.
     /// The transport calls this when an in-band `interrupt` frame matches the
@@ -314,6 +349,20 @@ impl RequestHandler for CapoServerHandler {
         self.server.handle(request).map_err(TransportError::Server)
     }
 
+    fn subscribe(
+        &self,
+        session_id: Option<String>,
+        from_sequence: i64,
+    ) -> TransportResult<(crate::SubscriptionBacklog, crate::EventStream)> {
+        self.server
+            .subscribe(session_id, from_sequence)
+            .map_err(TransportError::Server)
+    }
+
+    fn supports_subscription(&self) -> bool {
+        true
+    }
+
     fn interrupt(&self, session_id: &str, reason: &str) {
         // Record the typed turn-aborted event through the single
         // `CapoServer::interrupt_session` serialization point. A failure (e.g. an
@@ -343,6 +392,11 @@ pub(crate) struct ServeConfig {
     /// Ceiling on connections served at once. The accept loop blocks once this
     /// many are live so a connection flood cannot spawn unbounded threads.
     max_concurrent_connections: usize,
+    /// How long a live event-tail pump (ST4/ST11) blocks waiting for the next
+    /// committed event before waking to re-check its stop flag. It bounds how
+    /// long a `Subscribe` tail lingers after its connection closes; it is not a
+    /// delivery latency floor (a committed event wakes the pump immediately).
+    tail_poll_interval: Duration,
 }
 
 impl ServeConfig {
@@ -372,6 +426,7 @@ impl Default for ServeConfig {
         Self {
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             max_concurrent_connections: DEFAULT_MAX_CONCURRENT_CONNECTIONS,
+            tail_poll_interval: DEFAULT_TAIL_POLL_INTERVAL,
         }
     }
 }
@@ -626,6 +681,106 @@ pub fn send_tcp(
     jsonrpc::decode_response(&line)
 }
 
+/// Open a live event-tail subscription over a persistent loopback connection
+/// (ST4/ST11), the client half of the server's `Subscribe` tail.
+///
+/// This is the incremental client seam the CLI uses instead of snapshot-polling:
+/// it opens one connection, sends a `Subscribe { session_id, from_sequence }`,
+/// reads the catch-up [`SubscriptionBacklog`] as the typed response, and returns
+/// a [`SubscribeStream`] that yields each subsequent committed event from the
+/// live `event` notifications on the *same* connection. There is no gap and no
+/// duplicate at the backlog-to-live seam (the server subscribes to the broadcast
+/// before snapshotting the backlog, and the live tail resumes strictly after the
+/// backlog watermark).
+pub fn subscribe_tcp(
+    address: impl ToSocketAddrs,
+    session_id: Option<String>,
+    from_sequence: i64,
+) -> TransportResult<(crate::SubscriptionBacklog, SubscribeStream)> {
+    let stream = connect_loopback(address)?;
+    let request = ServerRequest::cli(ServerCommand::Subscribe {
+        session_id,
+        from_sequence,
+    });
+    let mut write_half = stream.try_clone().map_err(TransportError::Io)?;
+    let request_json = jsonrpc::encode_request(&request);
+    write_half
+        .write_all(request_json.as_bytes())
+        .and_then(|_| write_half.write_all(b"\n"))
+        .and_then(|_| write_half.flush())
+        .map_err(TransportError::Io)?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).map_err(TransportError::Io)?;
+    let response = jsonrpc::decode_response(&line)?;
+    let ServerResponsePayload::Subscribed(backlog) = response.payload else {
+        return Err(TransportError::Protocol(
+            "subscribe did not return a Subscribed backlog".to_string(),
+        ));
+    };
+    Ok((
+        backlog,
+        SubscribeStream {
+            reader,
+            _write_half: write_half,
+        },
+    ))
+}
+
+/// The client side of a live event tail (ST4/ST11): a persistent connection
+/// reading the server's live `event` notification frames after the catch-up
+/// backlog. Each [`Self::next_event`] reads one committed event in sequence
+/// order. Dropping the stream closes the connection, which stops the server's
+/// tail pump.
+pub struct SubscribeStream {
+    reader: BufReader<TcpStream>,
+    // Held so the write half stays open for the connection's lifetime; the client
+    // could later use it to send a `cancel`/`interrupt` on the same connection.
+    _write_half: TcpStream,
+}
+
+impl SubscribeStream {
+    /// Read the next committed event off the live tail, blocking until one
+    /// arrives. Returns `Ok(None)` when the connection closed cleanly (the server
+    /// tail ended), and an error for a malformed frame or an I/O failure. A read
+    /// timeout can be installed on the underlying stream via
+    /// [`Self::set_read_timeout`] so a caller can poll with a deadline rather than
+    /// block forever.
+    pub fn next_event(&mut self) -> TransportResult<Option<crate::ServerEvent>> {
+        Ok(self.next_event_frame()?.map(|(_, event)| event))
+    }
+
+    /// Like [`Self::next_event`] but also returns the verbatim wire frame line
+    /// (newline stripped) the server emitted, so a deterministic snapshot test can
+    /// assert the exact JSON-RPC notification bytes, not a client re-encoding.
+    pub fn next_event_frame(&mut self) -> TransportResult<Option<(String, crate::ServerEvent)>> {
+        let mut line = String::new();
+        let read = self
+            .reader
+            .read_line(&mut line)
+            .map_err(TransportError::Io)?;
+        if read == 0 {
+            // Clean EOF: the server closed the tail.
+            return Ok(None);
+        }
+        let frame = line.trim_end().to_string();
+        let event = EventNotification::from_wire_frame(&frame)
+            .and_then(|notification| notification.decode_event())?;
+        Ok(Some((frame, event)))
+    }
+
+    /// Install a read timeout on the underlying connection so [`Self::next_event`]
+    /// returns a `WouldBlock`/`TimedOut` I/O error instead of blocking forever
+    /// when no live event arrives. A deterministic tail test uses this to bound
+    /// its wait.
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> TransportResult<()> {
+        self.reader
+            .get_ref()
+            .set_read_timeout(timeout)
+            .map_err(TransportError::Io)
+    }
+}
+
 pub type TransportResult<T> = Result<T, TransportError>;
 
 #[derive(Debug)]
@@ -720,7 +875,11 @@ fn handle_connection<H: RequestHandler>(
     stream
         .set_read_timeout(Some(config.idle_timeout))
         .map_err(TransportError::Io)?;
-    let mut write_half = stream.try_clone().map_err(TransportError::Io)?;
+    // The write half is shared between this loop and the live event-tail pump (a
+    // `Subscribe` puts the connection into tailing mode, ST4/ST11). A `Mutex`
+    // serializes the two writers so a tail `event` notification can never
+    // interleave bytes with a response frame on the same socket.
+    let write_half = Arc::new(Mutex::new(stream.try_clone().map_err(TransportError::Io)?));
     let read_half = stream;
 
     let (event_tx, event_rx) = mpsc::channel::<ConnEvent>();
@@ -751,6 +910,10 @@ fn handle_connection<H: RequestHandler>(
     // current request id, its cancellation token, and a generation so a
     // late handler result for an already-cancelled request is dropped.
     let mut in_flight: Option<(String, CancellationToken, u64)> = None;
+    // At most one live event tail per connection. It is started when a
+    // `Subscribe` request is served and stopped when the connection closes (or a
+    // new request supersedes it), so a tailing connection never leaks its pump.
+    let mut tail: Option<TailHandle> = None;
     let mut generation: u64 = 0;
     while let Ok(event) = event_rx.recv() {
         match event {
@@ -758,6 +921,9 @@ fn handle_connection<H: RequestHandler>(
                 if let Some((_, cancel, _)) = &in_flight {
                     cancel.cancel();
                 }
+                // Stopping the tail (its `Drop`) flips the pump's stop flag so the
+                // detached pump thread exits on its next poll wakeup.
+                drop(tail);
                 return Ok(());
             }
             ConnEvent::Incoming(Frame::Request(request)) => {
@@ -768,10 +934,41 @@ fn handle_connection<H: RequestHandler>(
                     let error = TransportError::Protocol(
                         "a request is already in flight on this connection".to_string(),
                     );
-                    write_frame(
-                        &mut write_half,
+                    write_shared_frame(
+                        &write_half,
                         &jsonrpc::encode_error_response(Some(&request.request_id), &error),
                     )?;
+                    continue;
+                }
+                // A `Subscribe` opens a live event tail (ST4/ST11): the connection
+                // serves the catch-up backlog as the response, then pumps live
+                // `event` notifications on the same socket. A fresh `Subscribe`
+                // supersedes any prior tail on this connection.
+                if let ServerCommand::Subscribe {
+                    session_id,
+                    from_sequence,
+                } = &request.command
+                    && handler.supports_subscription()
+                {
+                    drop(tail.take());
+                    match start_event_tail(
+                        &handler,
+                        &write_half,
+                        &request,
+                        session_id.clone(),
+                        *from_sequence,
+                        config,
+                    ) {
+                        Ok(handle) => tail = Some(handle),
+                        Err(error) => {
+                            // A subscribe that could not open its tail gets a typed
+                            // error frame and the connection stays open.
+                            write_shared_frame(
+                                &write_half,
+                                &jsonrpc::encode_error_response(Some(&request.request_id), &error),
+                            )?;
+                        }
+                    }
                     continue;
                 }
                 generation += 1;
@@ -820,9 +1017,18 @@ fn handle_connection<H: RequestHandler>(
                             request_id: request_id.clone(),
                         };
                         let frame = jsonrpc::encode_error_response(Some(request_id), &error);
-                        write_frame(&mut write_half, &frame)?;
+                        write_shared_frame(&write_half, &frame)?;
                         in_flight = None;
                     }
+                } else if tail.is_some() {
+                    // A cancel against a live event tail (no request in flight)
+                    // stops the tail and emits the typed `cancelled` frame so the
+                    // client knows the tail ended; the connection stays open.
+                    drop(tail.take());
+                    let error = TransportError::Cancelled {
+                        request_id: target.unwrap_or_default(),
+                    };
+                    write_shared_frame(&write_half, &jsonrpc::encode_error_response(None, &error))?;
                 }
                 // A cancel with nothing matching in flight is a no-op
                 // notification (no response frame is owed).
@@ -853,14 +1059,21 @@ fn handle_connection<H: RequestHandler>(
                         reason,
                     };
                     let frame = jsonrpc::encode_error_response(Some(request_id), &error);
-                    write_frame(&mut write_half, &frame)?;
+                    write_shared_frame(&write_half, &frame)?;
                     in_flight = None;
+                } else if let Some(session_id) = session_id.as_deref() {
+                    // No request in flight (e.g. while tailing): still record the
+                    // typed turn-aborted event so the thread projection renders the
+                    // interrupt. This is the connection a CLI Ctrl-C lands on when
+                    // the live turn runs under a separate connection but the tail is
+                    // here.
+                    handler.interrupt(session_id, &reason);
                 }
-                // An interrupt with nothing in flight is a no-op notification.
+                // An interrupt with nothing in flight is otherwise a no-op.
             }
             ConnEvent::Incoming(Frame::Invalid { id, error }) => {
-                write_frame(
-                    &mut write_half,
+                write_shared_frame(
+                    &write_half,
                     &jsonrpc::encode_error_response(id.as_deref(), &error),
                 )?;
             }
@@ -880,11 +1093,94 @@ fn handle_connection<H: RequestHandler>(
                     Ok(response) => jsonrpc::encode_success_response(&response),
                     Err(error) => jsonrpc::encode_error_response(Some(&request_id), &error),
                 };
-                write_frame(&mut write_half, &frame)?;
+                write_shared_frame(&write_half, &frame)?;
             }
         }
     }
+    drop(tail);
     Ok(())
+}
+
+/// A running live event tail on a connection (ST4/ST11). Holds the stop flag the
+/// detached pump thread polls; dropping the handle flips the flag so the pump
+/// exits on its next poll wakeup (it never has to be joined, matching the
+/// detached-worker discipline of the rest of the connection loop).
+struct TailHandle {
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for TailHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Open a live event tail for a `Subscribe` (ST4/ST11): write the catch-up
+/// `Subscribed` backlog as the response, then spawn a detached pump that streams
+/// live `event` notifications on the same socket until the connection closes.
+///
+/// The backlog snapshot and the live `EventStream` come from a single
+/// `RequestHandler::subscribe`, which subscribes to the broadcast *before*
+/// reading the backlog -- so the tail is gap-free and duplicate-free at the
+/// backlog-to-live seam (the same guarantee `CapoServer::subscribe` documents).
+/// The pump polls the stream with a bounded timeout so it wakes to notice the
+/// stop flag promptly even when no events arrive.
+fn start_event_tail<H: RequestHandler>(
+    handler: &Arc<H>,
+    write_half: &Arc<Mutex<TcpStream>>,
+    request: &ServerRequest,
+    session_id: Option<String>,
+    from_sequence: i64,
+    config: ServeConfig,
+) -> TransportResult<TailHandle> {
+    let (backlog, mut stream) = handler.subscribe(session_id, from_sequence)?;
+    // The catch-up backlog is the response to the `Subscribe` request itself, so a
+    // client reads it exactly like any other typed response before the live frames.
+    let response = ServerResponse {
+        request_id: request.request_id.clone(),
+        client_id: request.origin.client_id.clone(),
+        actor_id: request.origin.actor_id.clone(),
+        input_origin: request.origin.input_origin,
+        payload: ServerResponsePayload::Subscribed(backlog),
+    };
+    write_shared_frame(write_half, &jsonrpc::encode_success_response(&response))?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let pump_stop = Arc::clone(&stop);
+    let pump_writer = Arc::clone(write_half);
+    let poll_interval = config.tail_poll_interval;
+    thread::spawn(move || {
+        while !pump_stop.load(Ordering::SeqCst) {
+            // Block (bounded) on the next committed event so the pump is event-
+            // driven, not a busy spin, yet still wakes to re-check the stop flag.
+            match stream.recv_batch(poll_interval) {
+                Ok(events) => {
+                    for event in events {
+                        let frame = EventNotification::for_event(&event).to_wire_frame();
+                        if write_shared_frame(&pump_writer, &frame).is_err() {
+                            // The socket is gone (peer closed); end the pump.
+                            return;
+                        }
+                    }
+                }
+                // A poll with no event is normal: loop to re-check the stop flag.
+                Err(TailRecvError::Timeout) => {}
+                // The broadcast hub was torn down (server shutting down): end.
+                Err(TailRecvError::Disconnected) => return,
+            }
+        }
+    });
+    Ok(TailHandle { stop })
+}
+
+/// Write a framed line to a connection's shared write half (used by both the main
+/// loop and the live event-tail pump). Locks for the duration of one frame so the
+/// two writers never interleave bytes.
+fn write_shared_frame(write_half: &Arc<Mutex<TcpStream>>, frame: &str) -> TransportResult<()> {
+    let mut stream = write_half
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    write_frame(&mut stream, frame)
 }
 
 /// Read and classify one framed line from the connection. Returns `Ok(None)` on

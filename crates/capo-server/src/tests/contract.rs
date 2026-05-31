@@ -106,6 +106,62 @@ fn wire_snapshots_match_the_checked_in_contract() {
 }
 
 #[test]
+fn sse_event_sequence_matches_the_checked_in_fixture() {
+    // ST11: the SSE event-tail stream for a scripted multi-event turn is the
+    // capo-web contract vehicle (capo-web is not built in this workspace). The
+    // checked-in fixture pins the exact SSE byte stream for the scripted sequence
+    // so the web tail frames cannot drift silently; regenerate-and-diff like the
+    // JSON-RPC snapshots.
+    let path = contract_dir()
+        .join("snapshots")
+        .join("sse-event-sequence.txt");
+    let expected = contract::sse_event_sequence();
+    let on_disk = checked_in_or_regenerated(&path, &expected);
+    assert_eq!(
+        on_disk,
+        expected,
+        "the SSE event-tail sequence drifted from {}.\n\
+         If this change is intentional, regenerate with \
+         CAPO_REGENERATE_WIRE_SNAPSHOTS=1 cargo test -p capo-server --lib contract",
+        path.display()
+    );
+
+    // Each SSE block re-exposes a JSON-RPC `event` notification verbatim on its
+    // `data:` line, in committed (sequence) order, so a web client decodes a tail
+    // frame exactly like the raw socket transport.
+    let data_lines: Vec<&str> = expected
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .collect();
+    assert_eq!(
+        data_lines.len(),
+        3,
+        "the scripted SSE sequence must carry three event frames"
+    );
+    let mut last_sequence = 0;
+    for data in data_lines {
+        let value: serde_json::Value =
+            serde_json::from_str(data).expect("SSE data line is a JSON-RPC frame");
+        assert_eq!(
+            value.get("method").and_then(serde_json::Value::as_str),
+            Some("event"),
+            "each SSE data line is an `event` notification"
+        );
+        let sequence = value
+            .get("params")
+            .and_then(|params| params.get("event"))
+            .and_then(|event| event.get("sequence"))
+            .and_then(serde_json::Value::as_i64)
+            .expect("event sequence");
+        assert!(
+            sequence > last_sequence,
+            "SSE sequence frames must be in strictly increasing commit order"
+        );
+        last_sequence = sequence;
+    }
+}
+
+#[test]
 fn every_snapshot_frame_is_valid_json_rpc_2_0() {
     // The contract is JSON-RPC 2.0: every non-SSE frame parses as JSON and
     // carries `"jsonrpc":"2.0"`. The SSE frame wraps such a frame in an
