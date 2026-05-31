@@ -214,6 +214,20 @@ impl CodexLiveAdapter {
             self.artifact_root.clone(),
             goal.to_string(),
         );
+        // The chat one-shot runs against a fresh, confined, non-git workspace
+        // (the server's `workspace_root`), so Codex's trusted-directory/git-repo
+        // guard otherwise refuses to run with "Not inside a trusted directory and
+        // --skip-git-repo-check was not specified" and exits non-clean. Mirror the
+        // read-only `local_smoke_plan` and `local_workspace_write_launch_plan`,
+        // which add `--skip-git-repo-check` for the SAME reason, by inserting it
+        // before the positional `--cd <workspace> <prompt>` args. This stays
+        // read-only (`--sandbox read-only --ephemeral`) and confined (`--cd`); the
+        // flag only skips the git-repo guard, it does not relax the sandbox.
+        if let Some(cd_index) = launch_plan.argv.iter().position(|arg| arg == "--cd") {
+            launch_plan
+                .argv
+                .insert(cd_index, "--skip-git-repo-check".to_string());
+        }
         // Test/ops seam: an absolute override runs THAT binary (a stub for tests,
         // `CAPO_CODEX_BIN` for ops) instead of resolving `codex` from PATH. The
         // runtime spawns with `env_clear()`, so only an absolute path is honored.
