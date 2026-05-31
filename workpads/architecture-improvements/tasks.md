@@ -264,6 +264,24 @@ Evidence (2026-05-31, worktree `feat/architecture-improvements`):
   The workspace run completes green with that one test `--skip`ped. No live Codex
   smoke required for AI3 (the deterministic scripted-mock fixture path satisfies
   the verification). Did NOT git commit (workflow commits after review).
-- Acceptance: met (the production turn loop invokes the real dispatch seam; the
-  per-turn summary is a real dispatched result, not the fake shim; the documented
-  parity divergence is the intended "one dispatch path, one event shape").
+- Review follow-up (direct CLI send surfaces): the review noted the server live
+  path was rewired but the DIRECT (non-server) CLI `SendTask` surfaces still
+  routed through the fake shim. Fixed: `crates/capo-cli/src/main.rs` adds a
+  `real_controller(parsed)` helper (a `RealBoundaryController` over the same
+  SQLite-backed core whose `send_task*` dispatch the per-turn summary tool through
+  the REAL `authorize_and_invoke` seam). The three direct `SendTask` entry points
+  now use it: `crates/capo-cli/src/agent_session.rs` (`capo task send`),
+  `crates/capo-cli/src/workpad.rs` (`capo workpad-next` / `project memory
+  start-next`), and `crates/capo-cli/src/adapter_replay.rs` (both replay seeds;
+  the adapter-native replay still runs over the shared `core()`, since adapter
+  provenance is the adapter dedup's concern, not the local dispatch seam). So a
+  local `capo task send` now produces a real dispatched tool result (the canonical
+  observed audit sequence + `ToolCall`/`ToolObservation` projection + dispatch
+  provenance), matching the `server task send` production path. CLI test
+  expectations updated for the now-shared real shape (the dispatched summary's
+  `runtime_output` observation row and the `artifact-{tool_call_id}-{tool_id}`
+  output artifact id) in `crates/capo-cli/src/tests.rs`.
+- Acceptance: met (the production turn loop invokes the real dispatch seam -- via
+  BOTH the server route and the direct CLI `SendTask` surfaces; the per-turn
+  summary is a real dispatched result, not the fake shim; the documented parity
+  divergence is the intended "one dispatch path, one event shape").

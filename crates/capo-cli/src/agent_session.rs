@@ -2,7 +2,7 @@ use capo_core::{AgentId, CommandIntent, CommandTarget};
 use capo_state::{EvidenceProjection, ToolCallProjection, ToolObservationProjection};
 
 use crate::cli_surface::{ParsedArgs, optional_arg, required_arg};
-use crate::{controller, debug_error, envelope, project_id, state};
+use crate::{controller, debug_error, envelope, project_id, real_controller, state};
 
 pub(crate) fn init(parsed: &ParsedArgs) -> Result<String, String> {
     let command = envelope(
@@ -103,7 +103,10 @@ pub(crate) fn send_task(parsed: &ParsedArgs, args: &[String]) -> Result<String, 
     command
         .structured_args
         .push(("scenario".to_string(), scenario.clone()));
-    let refs = controller(parsed)?
+    // AI3: the direct `capo task send` surface dispatches the per-turn summary
+    // tool through the REAL `authorize_and_invoke` seam (not the fake shim),
+    // matching the server `task send` production path.
+    let refs = real_controller(parsed)?
         .send_task_command(&command)
         .map_err(debug_error)?;
     Ok(format!(
