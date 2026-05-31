@@ -442,6 +442,82 @@ impl FakeBoundaryController {
             .filter(WorkspaceLeaseProjection::is_held);
         Ok(lease)
     }
+
+    /// SG9: reclaim every held workspace lease whose holding run is in
+    /// `dead_run_ids` (a run the liveness probe classified as exited/orphaned
+    /// during restart recovery), emitting `workspace.lease_released` with a
+    /// recovery reason so the freed lease is distinguishable from an explicit
+    /// release. A live (reattached) holder's lease is left untouched.
+    ///
+    /// This reclaims directly from the durable lease projection (it does not need
+    /// the original workspace-root string), so it works after a restart where the
+    /// only durable handle is the rebuilt lease row. Returns the lease ids
+    /// reclaimed. Idempotent: a lease already released is skipped, so a repeated
+    /// recovery pass reclaims nothing further.
+    pub fn reclaim_stale_workspace_leases(
+        &self,
+        dead_run_ids: &[RunId],
+        reason: &str,
+    ) -> StateResult<Vec<String>> {
+        let mut reclaimed = Vec::new();
+        for lease in self.state.workspace_leases(&self.project_id)? {
+            if !lease.is_held() {
+                continue;
+            }
+            let holder_is_dead = lease
+                .holder_run_id
+                .as_ref()
+                .is_some_and(|run_id| dead_run_ids.contains(run_id));
+            if !holder_is_dead {
+                continue;
+            }
+
+            let released_at = epoch_millis().to_string();
+            let mut released = lease.clone();
+            released.status = WorkspaceLeaseProjection::RELEASED.to_string();
+            released.released_at = Some(released_at.clone());
+            released.release_reason = reason.to_string();
+            released.updated_sequence = 0;
+
+            let payload = serde_json::json!({
+                "workspace_lease_id": lease.workspace_lease_id,
+                "holder_session_id": lease.holder_session_id.as_str(),
+                "holder_run_id": lease.holder_run_id.as_ref().map(RunId::as_str),
+                "released_at": released_at,
+                "reason": reason,
+                "reclaimed_from_dead_holder": true,
+            })
+            .to_string();
+
+            // Reclaim is event-sourced through the holder's own session/run
+            // provenance (the dead holder). A STABLE event id + idempotency key
+            // (no wall-clock) keep a repeated recovery pass over the same lease
+            // from appending a second event.
+            let event = NewEvent {
+                event_id: format!("event-lease-reclaimed-{}", lease.workspace_lease_id),
+                kind: EventKind::WorkspaceLeaseReleased,
+                actor: "capo-recovery".to_string(),
+                project_id: Some(self.project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(lease.holder_session_id.clone()),
+                run_id: lease.holder_run_id.clone(),
+                turn_id: None,
+                item_id: Some(lease.workspace_lease_id.clone()),
+                payload_json: payload,
+                idempotency_key: Some(format!(
+                    "recovery:lease-reclaim:{}",
+                    lease.workspace_lease_id
+                )),
+                redaction_state: RedactionState::Safe,
+            };
+
+            self.state
+                .append_event(event, &[ProjectionRecord::WorkspaceLease(released)])?;
+            reclaimed.push(lease.workspace_lease_id);
+        }
+        Ok(reclaimed)
+    }
 }
 
 /// Build the typed conflict surfaced when a write contends with a lease another

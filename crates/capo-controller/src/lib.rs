@@ -23,8 +23,8 @@ use capo_runtime::{FakeRuntimeStartRequest, LocalProcessRunner, RuntimeRunner};
 use capo_state::{
     AgentProjection, ArtifactRecord, EventKind, EventRecord, NewEvent, ProjectProjection,
     ProjectedTurnOutcome, ProjectionRecord, RedactionState, RunProjection, RunReapKind,
-    RunReapObservation, SessionProjection, SqliteStateStore, StateError, StateResult,
-    TaskProjection,
+    RunReapObservation, RunRecoveryKind, RunRecoveryObservation, SessionProjection,
+    SqliteStateStore, StateError, StateResult, TaskProjection,
 };
 use capo_tools::{
     FakeToolRequest, PermissionDecision, PermissionPolicy, PermissionRequest, ToolExposure,
@@ -325,6 +325,127 @@ impl FakeBoundaryController {
             .collect();
         self.state
             .reap_orphaned_runs(&self.project_id, recovery_attempt_id, &observations)
+    }
+
+    /// SG9: LIVENESS-AWARE restart recovery, replacing the blunt path that marked
+    /// every live-looking run `exited_unknown` and improving on the RTL10 reaper
+    /// (which KILLS a live orphan).
+    ///
+    /// For each in-flight run it loads the PID/boot-id its spawn persisted before
+    /// returning (the `runtime.start_requested` in-flight marker) and probes that
+    /// process group NON-destructively via [`LocalProcessRunner::probe_run_health`]
+    /// (the `RuntimeRunner` health probe). It then classifies:
+    ///
+    /// - a still-alive run WITH an attachable runtime ref ->
+    ///   [`RunRecoveryKind::Reattached`] (the live process is REATTACHED in place,
+    ///   not killed; `run.recovered`);
+    /// - a still-alive run with no attachable ref -> [`RunRecoveryKind::Orphaned`]
+    ///   (`run.orphaned` then terminal `run.exited` then `run.recovered`);
+    /// - a gone / never-spawned run -> [`RunRecoveryKind::Exited`] (terminal
+    ///   `run.exited` then `run.recovered`).
+    ///
+    /// After classifying, any single-writer workspace lease (SG5) held by a run
+    /// that did NOT reattach (exited/orphaned) is RECLAIMED, so a dead holder no
+    /// longer blocks the next writer. Recovery is idempotent: a repeated restart
+    /// observing the same runtime state appends nothing (keyed on
+    /// `(run_id, recovery_observation_kind, observed_runtime_state_hash)`).
+    ///
+    /// Must run inside a recovery attempt bracket
+    /// ([`Self::recover_command_liveness_aware`]); exposed separately so tests can
+    /// drive a restart sweep deterministically.
+    pub fn recover_inflight_runs(
+        &self,
+        recovery_attempt_id: &str,
+    ) -> StateResult<Vec<RunProjection>> {
+        let inflight = self.state.inflight_runs_for_project(&self.project_id)?;
+        let observations: Vec<RunRecoveryObservation> = inflight
+            .into_iter()
+            .map(|run| {
+                let (kind, observed_runtime_state_hash) = match run.external_pid {
+                    Some(pid) => {
+                        let probe =
+                            LocalProcessRunner::probe_run_health(pid, run.boot_id.as_deref());
+                        let kind = if probe.state.is_alive() {
+                            // A live run reattaches in place only when an
+                            // attachable runtime handle was persisted; a live run
+                            // with no such handle is an unowned orphan.
+                            if run.runtime_process_ref.is_some() {
+                                RunRecoveryKind::Reattached
+                            } else {
+                                RunRecoveryKind::Orphaned
+                            }
+                        } else {
+                            RunRecoveryKind::Exited
+                        };
+                        (kind, probe.observed_state_hash)
+                    }
+                    None => (
+                        // No process was ever spawned: nothing live to reattach.
+                        RunRecoveryKind::Exited,
+                        stable_hash(format!("no-process:{}", run.run_id).as_bytes()),
+                    ),
+                };
+                RunRecoveryObservation {
+                    run_id: run.run_id,
+                    session_id: run.session_id,
+                    previous_status: run.status,
+                    kind,
+                    external_pid: run.external_pid,
+                    runtime_process_ref: run.runtime_process_ref,
+                    observed_runtime_state_hash,
+                }
+            })
+            .collect();
+
+        let recovered = self.state.recover_inflight_runs(
+            &self.project_id,
+            recovery_attempt_id,
+            &observations,
+        )?;
+
+        // SG5/SG9: reclaim any single-writer lease held by a run that did NOT
+        // reattach. A reattached (still-live) run keeps its lease.
+        let dead_run_ids: Vec<RunId> = observations
+            .iter()
+            .filter(|observation| observation.kind != RunRecoveryKind::Reattached)
+            .map(|observation| observation.run_id.clone())
+            .collect();
+        if !dead_run_ids.is_empty() {
+            self.reclaim_stale_workspace_leases(
+                &dead_run_ids,
+                "reclaimed from dead holder during restart recovery",
+            )?;
+        }
+
+        Ok(recovered)
+    }
+
+    /// SG9: the liveness-aware restart-recovery sweep, bracketed as a single
+    /// recovery attempt (the same `begin_recovery`/`complete_recovery` bracket the
+    /// RTL10 [`Self::recover_command`] uses), so it projects into
+    /// `recovery_attempts` identically but reattaches live runs instead of marking
+    /// everything `exited_unknown`.
+    pub fn recover_command_liveness_aware(
+        &self,
+        command: &CommandEnvelope,
+    ) -> StateResult<RecoveryReport> {
+        require_intent(command, CommandIntent::Recover);
+        let recovery_attempt_id = format!(
+            "recovery-{}-after-{}",
+            command.command_id,
+            self.state.last_sequence()?
+        );
+        let started = self.state.begin_recovery(&recovery_attempt_id)?;
+        self.state.rebuild_projections()?;
+        let recovered_runs = self.recover_inflight_runs(&recovery_attempt_id)?;
+        let completed = self.state.complete_recovery(&recovery_attempt_id)?;
+        Ok(RecoveryReport {
+            recovery_attempt_id,
+            started_sequence: started.started_sequence,
+            completed_sequence: completed.completed_sequence.unwrap_or_default(),
+            watermark: self.state.watermark("default")?,
+            recovered_run_count: recovered_runs.len(),
+        })
     }
 
     pub fn register_agent(&self, agent_name: &str) -> StateResult<FakeAgentRegistration> {

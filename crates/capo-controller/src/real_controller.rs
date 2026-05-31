@@ -503,6 +503,36 @@ impl RealBoundaryController {
         self.core.recover_command(command)
     }
 
+    /// SG9: liveness-aware restart recovery -- probes each in-flight run's
+    /// persisted process group, reattaches a still-alive run in place, and marks a
+    /// gone run exited, reclaiming any single-writer lease a dead run held.
+    pub fn recover_command_liveness_aware(
+        &self,
+        command: &CommandEnvelope,
+    ) -> StateResult<RecoveryReport> {
+        self.core.recover_command_liveness_aware(command)
+    }
+
+    /// SG9: probe + classify + reconcile in-flight runs for a single recovery
+    /// attempt. Exposed for deterministic restart-sweep tests.
+    pub fn recover_inflight_runs(
+        &self,
+        recovery_attempt_id: &str,
+    ) -> StateResult<Vec<capo_state::RunProjection>> {
+        self.core.recover_inflight_runs(recovery_attempt_id)
+    }
+
+    /// SG9: reclaim every held workspace lease whose holding run is in
+    /// `dead_run_ids`, freeing a stale lease left by a dead holder on restart.
+    pub fn reclaim_stale_workspace_leases(
+        &self,
+        dead_run_ids: &[capo_core::RunId],
+        reason: &str,
+    ) -> StateResult<Vec<String>> {
+        self.core
+            .reclaim_stale_workspace_leases(dead_run_ids, reason)
+    }
+
     // --- Convenience surface mirroring the fake handle ---------------------
 
     pub fn send_task(

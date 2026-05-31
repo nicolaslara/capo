@@ -1020,6 +1020,68 @@ impl LocalProcessRunner {
         }
     }
 
+    /// SG9: NON-DESTRUCTIVELY probe the liveness/health of a run that was
+    /// in-flight when the controller died, by its persisted PID/process-group.
+    ///
+    /// This is the liveness-aware counterpart to
+    /// [`Self::reap_orphan_process_group`]: the reaper KILLS a live orphan (the
+    /// RTL10 phase-1 behavior), whereas this probe only OBSERVES it (`kill -0`),
+    /// so the recovery layer can REATTACH to a still-alive run in place rather
+    /// than blindly terminating it (SG9 acceptance / `state-model.md` Restart
+    /// Recovery). A run observed alive within the same boot is classified
+    /// [`RuntimeHealthState::Alive`] (reattachable); a run whose group is gone, or
+    /// whose recorded boot id cannot be confirmed against the current boot (a
+    /// recycled PID after a reboot, which must never be trusted as "our" run), is
+    /// classified [`RuntimeHealthState::Exited`].
+    ///
+    /// The returned [`RunHealthProbe`] carries a stable `observed_state_hash`
+    /// (over the PID, recorded boot id, and observed liveness) that the recovery
+    /// layer folds into its idempotency key, so repeated restarts that observe the
+    /// same runtime state never emit a second recovery event.
+    #[cfg(unix)]
+    pub fn probe_run_health(external_pid: u32, recorded_boot_id: Option<&str>) -> RunHealthProbe {
+        let current_boot_id = boot_id();
+        // Only trust a PID within the boot that recorded it: a PID persisted
+        // before a reboot is almost certainly recycled onto an unrelated group
+        // afterwards, so it must never be read as "our run still alive".
+        let same_boot = match (recorded_boot_id, current_boot_id.as_deref()) {
+            (Some(recorded), Some(current)) => recorded == current,
+            _ => false,
+        };
+        let alive = same_boot && process_group_is_alive(external_pid);
+        let state = if alive {
+            RuntimeHealthState::Alive
+        } else {
+            RuntimeHealthState::Exited
+        };
+        RunHealthProbe {
+            external_pid: Some(external_pid),
+            state,
+            observed_state_hash: orphan_state_hash(
+                external_pid,
+                recorded_boot_id,
+                state.observed_state(),
+            ),
+        }
+    }
+
+    /// Non-Unix fallback: with no portable process-group probe, a previously
+    /// in-flight run is conservatively classified as exited (Capo never spawns
+    /// process groups off Unix).
+    #[cfg(not(unix))]
+    pub fn probe_run_health(external_pid: u32, recorded_boot_id: Option<&str>) -> RunHealthProbe {
+        let state = RuntimeHealthState::Exited;
+        RunHealthProbe {
+            external_pid: Some(external_pid),
+            state,
+            observed_state_hash: orphan_state_hash(
+                external_pid,
+                recorded_boot_id,
+                state.observed_state(),
+            ),
+        }
+    }
+
     fn control(
         &self,
         process: &LocalRuntimeProcessRef,
@@ -1331,6 +1393,50 @@ pub struct OrphanReap {
     /// A stable hash over `(external_pid, recorded_boot_id, observed_state)` for
     /// the recovery idempotency key.
     pub observed_runtime_state_hash: String,
+}
+
+/// SG9: how a restart observed a previously in-flight run's persisted
+/// process-group when probing its liveness NON-destructively
+/// ([`LocalProcessRunner::probe_run_health`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeHealthState {
+    /// The process group is still alive within the recording boot, so the run is
+    /// reattachable in place (the recovery layer records `run.recovered`).
+    Alive,
+    /// The process group is gone (or its boot id could not be confirmed against
+    /// the current boot), so the run terminated while Capo was down (the recovery
+    /// layer records a terminal `run.exited`).
+    Exited,
+}
+
+impl RuntimeHealthState {
+    /// Whether the probed run is still alive and reattachable.
+    pub const fn is_alive(self) -> bool {
+        matches!(self, Self::Alive)
+    }
+
+    /// The stable observed-state token folded into the recovery idempotency hash.
+    pub const fn observed_state(self) -> &'static str {
+        match self {
+            Self::Alive => "alive",
+            Self::Exited => "exited",
+        }
+    }
+}
+
+/// SG9: the result of NON-destructively probing a previously in-flight run's
+/// liveness on restart by its persisted PID. See
+/// [`LocalProcessRunner::probe_run_health`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunHealthProbe {
+    /// The PID Capo persisted before the spawn returned, if one was recorded.
+    pub external_pid: Option<u32>,
+    /// Whether the run is still alive (reattachable) or has exited.
+    pub state: RuntimeHealthState,
+    /// A stable hash over `(external_pid, recorded_boot_id, observed_state)` for
+    /// the recovery idempotency key, so a repeated restart observing the same
+    /// runtime state never emits a second recovery event.
+    pub observed_state_hash: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2892,6 +2998,131 @@ mod tests {
         assert!(!is_reapable_pid(0));
         assert!(!is_reapable_pid(1));
         assert!(is_reapable_pid(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_run_health_reports_alive_without_killing_the_process() {
+        // SG9: the liveness-aware probe must OBSERVE a live in-flight run's
+        // process group WITHOUT terminating it (unlike the RTL10 reaper), so the
+        // recovery layer can reattach in place. The backgrounded descendant must
+        // survive the probe and write its marker.
+        let workspace = temp_root("workspace-probe-alive");
+        let artifacts = temp_root("artifacts-probe-alive");
+        fs::create_dir_all(&workspace).unwrap();
+        let marker = workspace.join("probe-survivor.txt");
+        let runner =
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+        let mut running = runner
+            .spawn_process(LocalProcessRequest {
+                run_id: RunId::new("run-probe-alive"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    format!("(sleep 2; printf survived > {}) &", marker.display()),
+                ],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("spawn live group");
+        let pid = running.process.external_pid.expect("pid recorded");
+        let recorded_boot_id = running.process.boot_id.clone();
+        let _ = running.child.wait();
+        thread::sleep(Duration::from_millis(100));
+
+        let probe = LocalProcessRunner::probe_run_health(pid, recorded_boot_id.as_deref());
+        assert_eq!(probe.state, RuntimeHealthState::Alive);
+        assert!(probe.state.is_alive());
+        assert_eq!(probe.external_pid, Some(pid));
+
+        // The probe never signalled, so the descendant survives and writes.
+        thread::sleep(Duration::from_millis(2200));
+        assert!(
+            marker.exists(),
+            "a non-destructive liveness probe must leave the live group running"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_run_health_reports_exited_for_a_dead_pid_and_is_stable() {
+        // SG9: a gone process group classifies as exited, with a stable
+        // observed-state hash so repeated restart probes are idempotent.
+        let workspace = temp_root("workspace-probe-gone");
+        let artifacts = temp_root("artifacts-probe-gone");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner =
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+        let mut running = runner
+            .spawn_process(LocalProcessRequest {
+                run_id: RunId::new("run-probe-gone"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec!["-c".to_string(), "exit 0".to_string()],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("spawn short process");
+        let pid = running.process.external_pid.expect("pid recorded");
+        let recorded_boot_id = running.process.boot_id.clone();
+        let _ = running.child.wait();
+        thread::sleep(Duration::from_millis(100));
+
+        let probe = LocalProcessRunner::probe_run_health(pid, recorded_boot_id.as_deref());
+        assert_eq!(probe.state, RuntimeHealthState::Exited);
+        assert_eq!(
+            probe.observed_state_hash,
+            LocalProcessRunner::probe_run_health(pid, recorded_boot_id.as_deref())
+                .observed_state_hash,
+            "re-probing the same gone PID must hash identically (idempotency)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_run_health_treats_a_recycled_pid_across_reboot_as_exited() {
+        // SG9: a PID observed under a DIFFERENT boot id than was recorded at spawn
+        // is a recycled/unrelated group and must never be trusted as "our run
+        // still alive" -- it classifies as exited (like the reaper declines to
+        // signal it), so recovery never reattaches to an unrelated process.
+        let workspace = temp_root("workspace-probe-reboot");
+        let artifacts = temp_root("artifacts-probe-reboot");
+        fs::create_dir_all(&workspace).unwrap();
+        let marker = workspace.join("probe-reboot-survivor.txt");
+        let runner =
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+        let mut running = runner
+            .spawn_process(LocalProcessRequest {
+                run_id: RunId::new("run-probe-reboot"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    format!("(sleep 2; printf survived > {}) &", marker.display()),
+                ],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("spawn live group");
+        let pid = running.process.external_pid.expect("pid recorded");
+        let _ = running.child.wait();
+        thread::sleep(Duration::from_millis(100));
+
+        let probe =
+            LocalProcessRunner::probe_run_health(pid, Some("linux-btime-000000000-stale-reboot"));
+        assert_eq!(
+            probe.state,
+            RuntimeHealthState::Exited,
+            "a PID under a different boot id must classify as exited (no reattach)"
+        );
+
+        // And it was never signalled: the live descendant is left running.
+        thread::sleep(Duration::from_millis(2200));
+        assert!(
+            marker.exists(),
+            "the probe must not signal a group under a different boot id"
+        );
     }
 
     fn temp_root(name: &str) -> PathBuf {

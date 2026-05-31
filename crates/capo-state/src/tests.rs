@@ -816,6 +816,119 @@ fn reap_orphaned_runs_records_exit_for_an_already_gone_run_without_orphan_event(
     assert!(store.active_looking_runs().unwrap().is_empty());
 }
 
+/// SG9: the LIVENESS-AWARE recovery classifies a still-alive run as REATTACHED
+/// (a single `run.recovered`, NO `run.exited` -- the run keeps running), unlike
+/// the reaper which always terminates and exits a live orphan. Reattach is
+/// idempotent across repeated restarts and rebuilds identically from the log.
+#[test]
+fn recover_inflight_runs_reattaches_a_live_run_without_exiting_it() {
+    let store = temp_store("recover-reattach");
+    let project_id = ProjectId::new("project-capo");
+    let session_id = SessionId::new("session-reattach");
+    let run_id = RunId::new("run-reattach");
+
+    start_running_run(&store, &project_id, &session_id, &run_id);
+    assert_eq!(store.active_looking_runs().unwrap().len(), 1);
+
+    let observation = RunRecoveryObservation {
+        run_id: run_id.clone(),
+        session_id: session_id.clone(),
+        previous_status: "running".to_string(),
+        kind: RunRecoveryKind::Reattached,
+        external_pid: Some(4242),
+        runtime_process_ref: Some("fake-runtime-process-codex".to_string()),
+        observed_runtime_state_hash: "fnv1a64:abc123abc123abc1".to_string(),
+    };
+
+    let recovered = store
+        .recover_inflight_runs(
+            &project_id,
+            "recovery-1",
+            std::slice::from_ref(&observation),
+        )
+        .expect("recover inflight runs");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].status, "recovered");
+
+    // A reattach emits ONLY run.recovered -- the live process is NOT exited.
+    let kinds: Vec<String> = store
+        .recent_events_for_session(&session_id, 16)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.actor == "capo-recovery")
+        .map(|event| event.kind)
+        .collect();
+    assert_eq!(kinds, vec!["run.recovered".to_string()]);
+
+    let event_count_after_first = store.event_count().unwrap();
+
+    // Repeated restart observing the same runtime state appends nothing.
+    store
+        .recover_inflight_runs(
+            &project_id,
+            "recovery-2",
+            std::slice::from_ref(&observation),
+        )
+        .expect("recover again");
+    assert_eq!(store.event_count().unwrap(), event_count_after_first);
+
+    // Rebuild from the event log: the reattached run reconstructs identically.
+    store.rebuild_projections().expect("rebuild projections");
+    assert_eq!(
+        store.run(&run_id).unwrap().expect("run").status,
+        "recovered"
+    );
+}
+
+/// SG9: a gone run is classified `Exited` (terminal `run.exited` then
+/// `run.recovered`), NEVER the blunt `exited_unknown` the old
+/// `mark_active_runs_exited_unknown` path stamped on every live-looking run.
+#[test]
+fn recover_inflight_runs_exits_a_gone_run_not_exited_unknown() {
+    let store = temp_store("recover-exited");
+    let project_id = ProjectId::new("project-capo");
+    let session_id = SessionId::new("session-exited");
+    let run_id = RunId::new("run-exited");
+
+    start_running_run(&store, &project_id, &session_id, &run_id);
+
+    let observation = RunRecoveryObservation {
+        run_id: run_id.clone(),
+        session_id: session_id.clone(),
+        previous_status: "running".to_string(),
+        kind: RunRecoveryKind::Exited,
+        external_pid: Some(9999),
+        runtime_process_ref: None,
+        observed_runtime_state_hash: "fnv1a64:0000000000000009".to_string(),
+    };
+    store
+        .recover_inflight_runs(&project_id, "recovery-1", &[observation])
+        .expect("recover gone run");
+
+    let kinds: Vec<String> = store
+        .recent_events_for_session(&session_id, 16)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.actor == "capo-recovery")
+        .map(|event| event.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["run.exited".to_string(), "run.recovered".to_string()]
+    );
+    // No event ever carries the blunt exited_unknown status payload.
+    let any_exited_unknown = store
+        .recent_events_for_session(&session_id, 16)
+        .unwrap()
+        .into_iter()
+        .any(|event| event.payload_json.contains("exited_unknown"));
+    assert!(
+        !any_exited_unknown,
+        "SG9 recovery never records the blunt exited_unknown status"
+    );
+    assert!(store.active_looking_runs().unwrap().is_empty());
+}
+
 fn start_running_run(
     store: &SqliteStateStore,
     project_id: &ProjectId,

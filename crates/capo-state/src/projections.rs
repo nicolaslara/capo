@@ -145,6 +145,73 @@ pub struct RunReapObservation {
     pub observed_runtime_state_hash: String,
 }
 
+/// SG9: how a restart's LIVENESS-AWARE probe classified a previously in-flight
+/// run, replacing the blunt path that marked every live-looking run
+/// `exited_unknown`.
+///
+/// Unlike [`RunReapKind`] (the RTL10 phase-1 reaper, which KILLS a live orphan),
+/// this classification distinguishes a still-alive REATTACHABLE run (recovered,
+/// left running) from a still-alive non-attachable run (orphaned) and a run that
+/// terminated while Capo was down (exited).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunRecoveryKind {
+    /// The run's process group is still alive AND Capo holds an attachable handle
+    /// for it, so recovery REATTACHES to it in place (the run keeps running). The
+    /// run is recorded `run.recovered`; this is distinct from relaunching a fresh
+    /// run with `recovery_of_run_id`.
+    Reattached,
+    /// The run's process group is still alive but Capo has no attachable handle
+    /// (e.g. the in-flight marker recorded a PID but no runtime process ref), so
+    /// the live process is an unowned orphan. The run is recorded `run.orphaned`.
+    Orphaned,
+    /// The run terminated while Capo was down (the process group is gone, or its
+    /// boot id could not be confirmed against the current boot, or no process was
+    /// ever spawned). The run is recorded with a terminal `run.exited`.
+    Exited,
+}
+
+impl RunRecoveryKind {
+    /// The stable observation kind folded into the recovery idempotency key.
+    pub const fn observation_kind(self) -> &'static str {
+        match self {
+            Self::Reattached => "reattached",
+            Self::Orphaned => "orphaned",
+            Self::Exited => "exited",
+        }
+    }
+
+    /// The terminal/recovered run STATUS the reconciled `Run` projection carries.
+    pub const fn run_status(self) -> &'static str {
+        match self {
+            Self::Reattached => "recovered",
+            Self::Orphaned => "orphaned",
+            Self::Exited => "exited",
+        }
+    }
+}
+
+/// SG9: one run's LIVENESS-AWARE recovery observation, produced by the controller
+/// after it probed the persisted process group via the runtime
+/// (`RuntimeRunner` health probe) WITHOUT killing it, and consumed by
+/// [`crate::SqliteStateStore::recover_inflight_runs`] to emit the
+/// `run.recovered` / `run.orphaned` / `run.exited` events idempotently.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunRecoveryObservation {
+    pub run_id: RunId,
+    pub session_id: SessionId,
+    pub previous_status: String,
+    pub kind: RunRecoveryKind,
+    pub external_pid: Option<u32>,
+    /// The attachable runtime handle the spawn persisted, when one exists. A
+    /// reattached run reattaches by this ref in place; its presence is what
+    /// distinguishes a `Reattached` live run from an `Orphaned` one.
+    pub runtime_process_ref: Option<String>,
+    /// A stable hash over the observed runtime state, part of the recovery
+    /// idempotency key so repeated restarts that observe the same state never
+    /// emit a second recovery event.
+    pub observed_runtime_state_hash: String,
+}
+
 /// A run that looked live at startup, paired with the PID/process-group
 /// reference its spawning side persisted *before* the spawn returned (RTL10).
 ///

@@ -488,6 +488,218 @@ impl SqliteStateStore {
         Ok(recovered)
     }
 
+    /// SG9: LIVENESS-AWARE restart recovery, replacing
+    /// [`Self::mark_active_runs_exited_unknown`] (which blindly marked EVERY
+    /// live-looking run `exited_unknown`) and going beyond
+    /// [`Self::reap_orphaned_runs`] (which always KILLS a live orphan).
+    ///
+    /// The controller probes each in-flight run's persisted process group via the
+    /// runtime's NON-destructive health probe and classifies it
+    /// ([`RunRecoveryKind`]). This records the events the `state-model.md` Restart
+    /// Recovery section prescribes, per run:
+    ///
+    /// - `Reattached` (still alive, an attachable handle held): a single
+    ///   `run.recovered` event reattaches to the run IN PLACE -- the live process
+    ///   keeps running and is NOT terminated, distinct from relaunching a fresh
+    ///   run with `recovery_of_run_id`.
+    /// - `Orphaned` (still alive, no attachable handle): a `run.orphaned` event,
+    ///   then a terminal `run.exited`, then `run.recovered` recovery metadata for
+    ///   the reconciled run.
+    /// - `Exited` (gone / never spawned): a terminal `run.exited` then
+    ///   `run.recovered` recovery metadata.
+    ///
+    /// Every event carries an idempotency key of
+    /// `(run_id, recovery_observation_kind, observed_runtime_state_hash)`
+    /// (intentionally excluding `recovery_attempt_id`), so a repeated restart that
+    /// observes the same runtime state appends nothing. Returns the reconciled
+    /// `Run` projections.
+    pub fn recover_inflight_runs(
+        &self,
+        project_id: &ProjectId,
+        recovery_attempt_id: &str,
+        observations: &[RunRecoveryObservation],
+    ) -> StateResult<Vec<RunProjection>> {
+        let mut recovered = Vec::new();
+        for observation in observations {
+            let RunRecoveryObservation {
+                run_id,
+                session_id,
+                previous_status,
+                kind,
+                external_pid,
+                runtime_process_ref: _,
+                observed_runtime_state_hash,
+            } = observation;
+            let observation_kind = kind.observation_kind();
+
+            match kind {
+                RunRecoveryKind::Reattached => {
+                    // The run is still alive and reattachable: a SINGLE
+                    // `run.recovered` reattaches in place. No `run.exited` is
+                    // emitted -- the process keeps running.
+                    self.append_run_recovery_event(
+                        project_id,
+                        recovery_attempt_id,
+                        EventKind::RunRecovered,
+                        "recovered",
+                        "recovered",
+                        observation,
+                        observation_kind,
+                        observed_runtime_state_hash,
+                        *external_pid,
+                        previous_status,
+                    )?;
+                }
+                RunRecoveryKind::Orphaned => {
+                    // A live but unowned orphan: record it orphaned, then its
+                    // terminal exit, then the reconciled recovery metadata.
+                    self.append_run_recovery_event(
+                        project_id,
+                        recovery_attempt_id,
+                        EventKind::RunOrphaned,
+                        "orphaned",
+                        "orphaned",
+                        observation,
+                        observation_kind,
+                        observed_runtime_state_hash,
+                        *external_pid,
+                        previous_status,
+                    )?;
+                    self.append_run_recovery_event(
+                        project_id,
+                        recovery_attempt_id,
+                        EventKind::RunExited,
+                        "exited",
+                        "exited",
+                        observation,
+                        observation_kind,
+                        observed_runtime_state_hash,
+                        *external_pid,
+                        previous_status,
+                    )?;
+                    self.append_run_recovery_event(
+                        project_id,
+                        recovery_attempt_id,
+                        EventKind::RunRecovered,
+                        "recovered",
+                        "recovered",
+                        observation,
+                        observation_kind,
+                        observed_runtime_state_hash,
+                        *external_pid,
+                        previous_status,
+                    )?;
+                }
+                RunRecoveryKind::Exited => {
+                    // The run terminated while Capo was down: a terminal
+                    // `run.exited` then the reconciled recovery metadata.
+                    self.append_run_recovery_event(
+                        project_id,
+                        recovery_attempt_id,
+                        EventKind::RunExited,
+                        "exited",
+                        "exited",
+                        observation,
+                        observation_kind,
+                        observed_runtime_state_hash,
+                        *external_pid,
+                        previous_status,
+                    )?;
+                    self.append_run_recovery_event(
+                        project_id,
+                        recovery_attempt_id,
+                        EventKind::RunRecovered,
+                        "recovered",
+                        "recovered",
+                        observation,
+                        observation_kind,
+                        observed_runtime_state_hash,
+                        *external_pid,
+                        previous_status,
+                    )?;
+                }
+            }
+
+            recovered.push(RunProjection {
+                run_id: run_id.clone(),
+                session_id: session_id.clone(),
+                status: kind.run_status().to_string(),
+                recovery_of_run_id: None,
+                updated_sequence: 0,
+            });
+        }
+        Ok(recovered)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_run_recovery_event(
+        &self,
+        project_id: &ProjectId,
+        recovery_attempt_id: &str,
+        kind: EventKind,
+        status: &str,
+        event_slug: &str,
+        observation: &RunRecoveryObservation,
+        observation_kind: &str,
+        observed_runtime_state_hash: &str,
+        external_pid: Option<u32>,
+        previous_status: &str,
+    ) -> StateResult<i64> {
+        let run = RunProjection {
+            run_id: observation.run_id.clone(),
+            session_id: observation.session_id.clone(),
+            status: status.to_string(),
+            recovery_of_run_id: None,
+            updated_sequence: 0,
+        };
+        // Idempotency intentionally excludes `recovery_attempt_id`: a repeated
+        // restart that observes the same `(run, observation_kind, state_hash)`
+        // appends nothing.
+        let idempotency_key = format!(
+            "recovery:run:{}:{}:{}:{}",
+            observation.run_id, event_slug, observation_kind, observed_runtime_state_hash
+        );
+        let event_id = format!(
+            "event-recovery-{}-{}-{}-{}",
+            event_slug,
+            observation.run_id,
+            observation_kind,
+            &observed_runtime_state_hash
+                .strip_prefix("fnv1a64:")
+                .unwrap_or(observed_runtime_state_hash)
+        );
+        let payload = serde_json::json!({
+            "recovery_attempt_id": recovery_attempt_id,
+            "previous_status": previous_status,
+            "status": status,
+            "recovery_observation_kind": observation_kind,
+            "observed_runtime_state_hash": observed_runtime_state_hash,
+            "external_pid": external_pid,
+            "runtime_process_ref": observation.runtime_process_ref,
+            "reattached": matches!(kind, EventKind::RunRecovered)
+                && observation.kind == RunRecoveryKind::Reattached,
+        })
+        .to_string();
+        self.append_event(
+            NewEvent {
+                event_id,
+                kind,
+                actor: "capo-recovery".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(observation.session_id.clone()),
+                run_id: Some(observation.run_id.clone()),
+                turn_id: None,
+                item_id: None,
+                payload_json: payload,
+                idempotency_key: Some(idempotency_key),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Run(run)],
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn append_recovery_event(
         &self,

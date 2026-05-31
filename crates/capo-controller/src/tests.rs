@@ -7006,3 +7006,508 @@ fn sg5_distinct_workspace_roots_get_independent_leases() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// SG9: liveness-aware restart recovery
+// ---------------------------------------------------------------------------
+
+/// SG9 helper: seed an active-looking (`running`) in-flight run for `session`/
+/// `run`, plus a `run.started` in-flight marker (the `runtime.start_requested`
+/// shape the live path persists before waiting) carrying `external_pid`,
+/// `boot_id`, and `runtime_process_ref`. This is exactly what
+/// `inflight_runs_for_project` reads on restart.
+fn sg9_seed_inflight_run(
+    controller: &FakeBoundaryController,
+    project_id: &ProjectId,
+    session: &str,
+    run: &str,
+    external_pid: Option<u32>,
+    boot_id: Option<&str>,
+    runtime_process_ref: Option<&str>,
+) {
+    let session_id = SessionId::new(session.to_string());
+    let run_id = RunId::new(run.to_string());
+    let agent_id = AgentId::new(format!("agent-{session}"));
+
+    // The session row (the inflight query joins runs to sessions on project_id).
+    controller
+        .state()
+        .append_event(
+            NewEvent {
+                event_id: format!("event-sg9-session-{session}"),
+                kind: EventKind::SessionStarted,
+                actor: "test".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: Some(agent_id.clone()),
+                session_id: Some(session_id.clone()),
+                run_id: Some(run_id.clone()),
+                turn_id: None,
+                item_id: None,
+                payload_json: "{}".to_string(),
+                idempotency_key: Some(format!("sg9-session:{session}")),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Session(SessionProjection {
+                session_id: session_id.clone(),
+                project_id: project_id.clone(),
+                task_id: None,
+                agent_id: agent_id.clone(),
+                title: format!("SG9 {session}"),
+                status: "running".to_string(),
+                current_goal: "recoverable run".to_string(),
+                latest_summary: None,
+                latest_confidence: None,
+                latest_blocker: None,
+                external_session_ref: None,
+                updated_sequence: 0,
+            })],
+        )
+        .expect("seed session");
+
+    // The in-flight marker: a `run.started` carrying the persisted pid/boot/ref,
+    // leaving the run `running` (the state a crash interrupts).
+    let payload = serde_json::json!({
+        "status": "running",
+        "external_pid": external_pid,
+        "boot_id": boot_id,
+        "runtime_process_ref": runtime_process_ref,
+        "marker": "start_requested_inflight",
+    })
+    .to_string();
+    controller
+        .state()
+        .append_event(
+            NewEvent {
+                event_id: format!("event-sg9-run-started-{run}"),
+                kind: EventKind::RunStarted,
+                actor: "test".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: Some(agent_id),
+                session_id: Some(session_id.clone()),
+                run_id: Some(run_id.clone()),
+                turn_id: Some(format!("turn-{run}")),
+                item_id: runtime_process_ref.map(ToString::to_string),
+                payload_json: payload,
+                idempotency_key: Some(format!("sg9-run-started:{run}")),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Run(RunProjection {
+                run_id,
+                session_id,
+                status: "running".to_string(),
+                recovery_of_run_id: None,
+                updated_sequence: 0,
+            })],
+        )
+        .expect("seed run.started inflight marker");
+}
+
+/// SG9 helper: collect the recovery event kinds emitted for a single run, in
+/// order.
+fn sg9_recovery_event_kinds(controller: &FakeBoundaryController, session: &str) -> Vec<String> {
+    controller
+        .state()
+        .recent_events_for_session(&SessionId::new(session.to_string()), 64)
+        .expect("events")
+        .into_iter()
+        .filter(|event| event.actor == "capo-recovery")
+        .map(|event| event.kind)
+        .collect()
+}
+
+/// SG9: a run that terminated while Capo was down (no live process) classifies as
+/// `Exited` -- a terminal `run.exited` then `run.recovered` -- NOT the blunt
+/// `exited_unknown` the old path stamped on every live-looking run.
+#[test]
+fn sg9_gone_run_classifies_exited_not_exited_unknown() {
+    let project = ProjectId::new("project-capo");
+    let controller =
+        FakeBoundaryController::open(project.clone(), temp_root()).expect("open controller");
+    // A run with NO persisted pid (a deterministic/mock run that crashed before
+    // spawning) has nothing live to reattach -> Exited.
+    sg9_seed_inflight_run(
+        &controller,
+        &project,
+        "session-gone",
+        "run-gone",
+        None,
+        None,
+        None,
+    );
+
+    let recovered = controller
+        .recover_inflight_runs("recovery-sg9-gone")
+        .expect("recover");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(
+        recovered[0].status, "exited",
+        "a gone run is terminal exited"
+    );
+
+    let kinds = sg9_recovery_event_kinds(&controller, "session-gone");
+    assert_eq!(
+        kinds,
+        vec!["run.exited".to_string(), "run.recovered".to_string()],
+        "exited classification emits run.exited then run.recovered (no exited_unknown)"
+    );
+    // The run is reconciled (terminal recovery metadata = `recovered`), and is no
+    // longer marked with the blunt `exited_unknown` status the old path stamped.
+    let final_status = controller
+        .state()
+        .run(&RunId::new("run-gone"))
+        .expect("run")
+        .expect("present")
+        .status;
+    assert_eq!(
+        final_status, "recovered",
+        "the run is reconciled, not exited_unknown"
+    );
+    assert_ne!(
+        final_status, "exited_unknown",
+        "SG9 never stamps the blunt exited_unknown status"
+    );
+}
+
+/// SG9: a still-alive run WITH an attachable runtime handle classifies as
+/// `Reattached` -- a single `run.recovered` that reattaches in place WITHOUT
+/// killing the live process (distinct from the RTL10 reaper, which kills).
+#[cfg(unix)]
+#[test]
+fn sg9_alive_run_with_handle_reattaches_in_place_without_killing() {
+    use capo_runtime::{LocalProcessConfig, LocalProcessRequest, LocalProcessRunner};
+    use std::collections::HashMap;
+
+    let project = ProjectId::new("project-capo");
+    let controller =
+        FakeBoundaryController::open(project.clone(), temp_root()).expect("open controller");
+
+    // Spawn a real, still-running process group to stand in for the live run.
+    let workspace = temp_root();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let marker = workspace.join("reattach-survivor.txt");
+    let runner =
+        LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), temp_root()));
+    let running = runner
+        .spawn_process(LocalProcessRequest {
+            run_id: RunId::new("run-alive"),
+            turn_id: None,
+            program: "/bin/sh".to_string(),
+            argv: vec![
+                "-c".to_string(),
+                format!("(sleep 2; printf survived > {}) &", marker.display()),
+            ],
+            cwd: workspace,
+            env: HashMap::new(),
+        })
+        .expect("spawn live group");
+    let pid = running.process.external_pid.expect("pid recorded");
+    let boot = running.process.boot_id.clone();
+    // The backgrounded descendant keeps the process group alive; the parent shell
+    // exits on its own. We do not own the `Child` here (the runtime does), so we
+    // just give the parent a moment to exit while the group stays live.
+    drop(running);
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    sg9_seed_inflight_run(
+        &controller,
+        &project,
+        "session-alive",
+        "run-alive",
+        Some(pid),
+        boot.as_deref(),
+        Some("fake-runtime-process-codex"),
+    );
+
+    let recovered = controller
+        .recover_inflight_runs("recovery-sg9-alive")
+        .expect("recover");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(
+        recovered[0].status, "recovered",
+        "a still-alive attachable run is recovered (reattached) in place"
+    );
+
+    let kinds = sg9_recovery_event_kinds(&controller, "session-alive");
+    assert_eq!(
+        kinds,
+        vec!["run.recovered".to_string()],
+        "reattach emits ONLY run.recovered -- no run.exited, the process keeps running"
+    );
+
+    // The reattach did NOT signal the live group: its descendant survives.
+    std::thread::sleep(std::time::Duration::from_millis(2200));
+    assert!(
+        marker.exists(),
+        "reattach must leave the live process running (no kill)"
+    );
+}
+
+/// SG9: a still-alive run with NO attachable handle classifies as `Orphaned` --
+/// `run.orphaned` then terminal `run.exited` then `run.recovered`.
+#[cfg(unix)]
+#[test]
+fn sg9_alive_run_without_handle_classifies_orphaned() {
+    use capo_runtime::{LocalProcessConfig, LocalProcessRequest, LocalProcessRunner};
+    use std::collections::HashMap;
+
+    let project = ProjectId::new("project-capo");
+    let controller =
+        FakeBoundaryController::open(project.clone(), temp_root()).expect("open controller");
+
+    let workspace = temp_root();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let runner =
+        LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), temp_root()));
+    let running = runner
+        .spawn_process(LocalProcessRequest {
+            run_id: RunId::new("run-orphan"),
+            turn_id: None,
+            program: "/bin/sh".to_string(),
+            argv: vec!["-c".to_string(), "(sleep 3) &".to_string()],
+            cwd: workspace,
+            env: HashMap::new(),
+        })
+        .expect("spawn live group");
+    let pid = running.process.external_pid.expect("pid recorded");
+    let boot = running.process.boot_id.clone();
+    drop(running);
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    // Live pid, but NO runtime_process_ref persisted -> unowned orphan.
+    sg9_seed_inflight_run(
+        &controller,
+        &project,
+        "session-orphan",
+        "run-orphan",
+        Some(pid),
+        boot.as_deref(),
+        None,
+    );
+
+    let recovered = controller
+        .recover_inflight_runs("recovery-sg9-orphan")
+        .expect("recover");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].status, "orphaned");
+
+    let kinds = sg9_recovery_event_kinds(&controller, "session-orphan");
+    assert_eq!(
+        kinds,
+        vec![
+            "run.orphaned".to_string(),
+            "run.exited".to_string(),
+            "run.recovered".to_string(),
+        ],
+        "an unowned live orphan is recorded orphaned, then exited, then recovered"
+    );
+
+    // Reap the live group so the test process tree does not leak.
+    LocalProcessRunner::reap_orphan_process_group(pid, boot.as_deref());
+}
+
+/// SG9: restart recovery is IDEMPOTENT -- a repeated restart that observes the
+/// same runtime state appends NO second recovery event (keyed on
+/// `(run_id, recovery_observation_kind, observed_runtime_state_hash)`,
+/// intentionally excluding the recovery attempt id).
+#[test]
+fn sg9_repeated_recovery_is_idempotent() {
+    let project = ProjectId::new("project-capo");
+    let state_root = temp_root();
+    let controller =
+        FakeBoundaryController::open(project.clone(), &state_root).expect("open controller");
+    sg9_seed_inflight_run(
+        &controller,
+        &project,
+        "session-idem",
+        "run-idem",
+        None,
+        None,
+        None,
+    );
+
+    // Build the SAME observation a restart would, and feed it to the state-layer
+    // recovery TWICE with DIFFERENT attempt ids: the idempotency key
+    // `(run_id, observation_kind, observed_runtime_state_hash)` excludes the
+    // attempt id, so the second pass over the same observation appends nothing.
+    let observation = RunRecoveryObservation {
+        run_id: RunId::new("run-idem"),
+        session_id: SessionId::new("session-idem"),
+        previous_status: "running".to_string(),
+        kind: RunRecoveryKind::Exited,
+        external_pid: None,
+        runtime_process_ref: None,
+        observed_runtime_state_hash: "fnv1a64:deadbeefdeadbeef".to_string(),
+    };
+
+    let first = controller
+        .state()
+        .recover_inflight_runs(
+            &project,
+            "recovery-attempt-1",
+            std::slice::from_ref(&observation),
+        )
+        .expect("first recover");
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        first[0].status, "exited",
+        "the classification verdict is exited"
+    );
+    let after_first = sg9_recovery_event_kinds(&controller, "session-idem");
+    assert_eq!(
+        after_first,
+        vec!["run.exited".to_string(), "run.recovered".to_string()]
+    );
+    let watermark_after_first = controller.state().last_sequence().expect("seq");
+
+    // A second restart with a DIFFERENT attempt id observes the same runtime
+    // state -> no new events.
+    controller
+        .state()
+        .recover_inflight_runs(&project, "recovery-attempt-2", &[observation])
+        .expect("second recover");
+    let after_second = sg9_recovery_event_kinds(&controller, "session-idem");
+    assert_eq!(
+        after_second, after_first,
+        "a repeated restart appends no second recovery event"
+    );
+    assert_eq!(
+        controller.state().last_sequence().expect("seq"),
+        watermark_after_first,
+        "the event log did not grow on the repeated recovery"
+    );
+
+    // The controller-level sweep is also naturally idempotent: after recovery the
+    // run is no longer active-looking, so a second sweep reconciles nothing.
+    let sweep = controller
+        .recover_inflight_runs("recovery-attempt-3")
+        .expect("third recover");
+    assert!(
+        sweep.is_empty(),
+        "a reconciled run is no longer active-looking, so a repeat sweep is a no-op"
+    );
+
+    // And it rebuilds identically from the event log (replay parity).
+    controller.state().rebuild_projections().expect("rebuild");
+    assert_eq!(
+        controller
+            .state()
+            .run(&RunId::new("run-idem"))
+            .expect("run")
+            .expect("present")
+            .status,
+        "recovered",
+        "reconciled run status rebuilds identically from the event log"
+    );
+}
+
+/// SG9: a single-writer workspace lease (SG5) held by a DEAD run is RECLAIMED
+/// during recovery, so a dead holder no longer blocks the next writer; a lease
+/// held by a still-alive (reattached) run is left untouched.
+#[test]
+fn sg9_recovery_reclaims_stale_lease_from_dead_holder() {
+    let project = ProjectId::new("project-capo");
+    let controller =
+        RealBoundaryController::open(project.clone(), temp_root()).expect("open controller");
+    let workspace = "/workspace/capo";
+
+    // A run takes the write lease, then crashes (it is gone on restart).
+    let dead_holder = sg9_lease_scope("session-dead", "run-dead", workspace);
+    let acquired = controller
+        .acquire_workspace_write_lease(&dead_holder)
+        .expect("acquire");
+    assert!(acquired.may_write());
+
+    // The dead run's lease is reclaimed.
+    let reclaimed = controller
+        .reclaim_stale_workspace_leases(&[RunId::new("run-dead")], "dead holder")
+        .expect("reclaim");
+    assert_eq!(reclaimed.len(), 1, "the dead holder's lease is reclaimed");
+    assert!(
+        controller
+            .workspace_lease_holder(&dead_holder)
+            .expect("holder lookup")
+            .is_none(),
+        "the reclaimed lease is now free"
+    );
+
+    // A NEW writer can now take the lease.
+    let next = sg9_lease_scope("session-next", "run-next", workspace);
+    let now = controller
+        .acquire_workspace_write_lease(&next)
+        .expect("next acquire");
+    assert!(now.may_write(), "the next writer acquires the freed lease");
+
+    // A lease whose holder is NOT in the dead set is left untouched.
+    let reclaimed_again = controller
+        .reclaim_stale_workspace_leases(&[RunId::new("run-dead")], "dead holder")
+        .expect("reclaim again");
+    assert!(
+        reclaimed_again.is_empty(),
+        "a live holder's lease is not reclaimed, and the reclaim is idempotent"
+    );
+    assert_eq!(
+        controller
+            .workspace_lease_holder(&next)
+            .expect("holder")
+            .expect("held")
+            .holder_session_id,
+        SessionId::new("session-next"),
+        "the live next-writer keeps its lease"
+    );
+}
+
+/// SG9: full recovery sweep wires lease reclaim into the run classification --
+/// a gone run's lease is reclaimed by `recover_inflight_runs`.
+#[test]
+fn sg9_recover_inflight_runs_reclaims_lease_of_gone_run() {
+    let project = ProjectId::new("project-capo");
+    let controller =
+        FakeBoundaryController::open(project.clone(), temp_root()).expect("open controller");
+
+    // A gone in-flight run that also held the workspace lease.
+    sg9_seed_inflight_run(
+        &controller,
+        &project,
+        "session-locked",
+        "run-locked",
+        None,
+        None,
+        None,
+    );
+    let holder = sg9_lease_scope("session-locked", "run-locked", "/workspace/capo");
+    controller
+        .acquire_workspace_write_lease(&holder)
+        .expect("acquire");
+    assert!(
+        controller
+            .workspace_lease_holder(&holder)
+            .expect("holder")
+            .is_some(),
+        "the run holds the lease before recovery"
+    );
+
+    controller
+        .recover_inflight_runs("recovery-sg9-locked")
+        .expect("recover");
+
+    assert!(
+        controller
+            .workspace_lease_holder(&holder)
+            .expect("holder")
+            .is_none(),
+        "recovery reclaimed the dead run's stale lease"
+    );
+}
+
+fn sg9_lease_scope(session: &str, run: &str, workspace_root: &str) -> crate::WorkspaceLeaseScope {
+    crate::WorkspaceLeaseScope {
+        task_id: TaskId::new("task-sg9"),
+        agent_id: AgentId::new(format!("agent-{session}")),
+        session_id: SessionId::new(session.to_string()),
+        run_id: RunId::new(run.to_string()),
+        turn_id: TurnId::new(format!("turn-{session}")),
+        workspace_root: workspace_root.to_string(),
+    }
+}

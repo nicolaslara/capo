@@ -820,7 +820,7 @@ Evidence:
 
 ## SG9 - Liveness-Aware Restart Recovery Replacing exited_unknown
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -845,6 +845,77 @@ Verification:
   probing) covering recovered, orphaned, and exited classifications.
 - Restart/replay test proving recovery idempotency on repeated restart.
 - `cargo fmt`.
+
+Evidence:
+
+- `start_requested` (pid/process-group/boot-id) is ALREADY persisted before the
+  run is waited on by the RTL10 in-flight marker
+  (`capo-server::dispatch::append_run_started_inflight`: a `run.started` carrying
+  `external_pid`/`boot_id`/`runtime_process_ref` +
+  `marker = start_requested_inflight`), and `inflight_runs_for_project`
+  (`capo-state/src/queries.rs`) reads it back on restart. SG9 consumes that
+  durable handle; it did not need a new persist path.
+- NON-destructive liveness probe (the `RuntimeRunner.health` probe SG9 needs):
+  new `LocalProcessRunner::probe_run_health(external_pid, recorded_boot_id) ->
+  RunHealthProbe` in `crates/capo-runtime/src/lib.rs`, with a new
+  `RuntimeHealthState` (`Alive`/`Exited`). Unlike `reap_orphan_process_group`
+  (which KILLS a live orphan), this only OBSERVES (`kill -0 -<pgid>`) so a live
+  run can be reattached in place. It respects the same boot-id guard (a PID under
+  a different boot id classifies `Exited`, never trusted as "our run"), and
+  carries a stable `observed_state_hash` for idempotency. A non-Unix fallback
+  classifies `Exited`.
+- Liveness-aware classification + events: new
+  `SqliteStateStore::recover_inflight_runs(project, attempt, &[RunRecoveryObservation])`
+  (`crates/capo-state/src/lib.rs`) replacing the blunt
+  `mark_active_runs_exited_unknown` path. New `RunRecoveryKind`
+  (`Reattached`/`Orphaned`/`Exited`) + `RunRecoveryObservation`
+  (`crates/capo-state/src/projections.rs`). It emits, per run:
+  `Reattached` -> a SINGLE `run.recovered` reattaching in place (NO `run.exited`,
+  the process keeps running -- distinct from relaunch with `recovery_of_run_id`,
+  which stays `None`); `Orphaned` -> `run.orphaned` then terminal `run.exited`
+  then `run.recovered`; `Exited` -> terminal `run.exited` then `run.recovered`.
+  No path ever stamps `exited_unknown`. Idempotency key is
+  `(run_id, recovery_observation_kind, observed_runtime_state_hash)` (excludes the
+  attempt id) via the shared `append_run_recovery_event` writer.
+- Controller sweep + stale-lease reclaim:
+  `FakeBoundaryController::recover_inflight_runs(attempt)`
+  (`crates/capo-controller/src/lib.rs`) probes each in-flight run via
+  `LocalProcessRunner::probe_run_health`, classifies (a live run with an
+  attachable `runtime_process_ref` -> `Reattached`; live without a handle ->
+  `Orphaned`; gone/never-spawned -> `Exited`), records the events, then RECLAIMS
+  (SG5) any workspace lease held by a run that did NOT reattach via the new
+  `FakeBoundaryController::reclaim_stale_workspace_leases(dead_run_ids, reason)`
+  (`crates/capo-controller/src/workspace_lock.rs`, event-sourced
+  `workspace.lease_released` with a recovery reason, idempotent). A live
+  (reattached) holder's lease is left untouched.
+  `recover_command_liveness_aware` brackets the sweep in the same
+  `begin_recovery`/`complete_recovery` recovery-attempt frame the RTL10
+  `recover_command` uses. All re-exported on `RealBoundaryController`
+  (`real_controller.rs`); new public types `RunHealthProbe`/`RuntimeHealthState`
+  (capo-runtime) and `RunRecoveryKind`/`RunRecoveryObservation` (capo-state).
+- Tests (deterministic, scripted -- no live providers): `capo-runtime` (3) --
+  `probe_run_health` reports Alive WITHOUT killing the live group, Exited+stable
+  for a dead pid, and Exited (no signal) for a recycled pid across a reboot
+  boundary. `capo-controller` (6 `sg9_*`) -- gone run classifies Exited (not
+  `exited_unknown`); a still-alive run with a handle REATTACHES in place (only
+  `run.recovered`, the live descendant survives the sweep); a still-alive run
+  without a handle classifies Orphaned (orphaned->exited->recovered); repeated
+  recovery is idempotent (same observation -> no second event + replay parity);
+  dead-holder lease reclaim frees the lock for the next writer (and is idempotent
+  / leaves a live holder's lease); the full sweep reclaims a gone run's lease.
+  `capo-state` (2) -- reattach emits only `run.recovered` and rebuilds
+  identically; a gone run exits (never `exited_unknown`).
+- Commands run (from `/Users/nicolas/devel/capo-wt/safety-gates`):
+  `cargo test -p capo-runtime probe_run_health` (3 passed),
+  `cargo test -p capo-controller sg9` (6 passed),
+  `cargo test -p capo-state recover_inflight_runs` (2 passed),
+  `cargo fmt --check` (exit 0 after `cargo fmt`),
+  `cargo clippy --all-targets --all-features -- -D warnings` (exit 0, no
+  warnings), `cargo test --workspace` (exit 0; 0 failed workspace-wide;
+  capo-controller 104 passed/0 failed/1 ignored, capo-runtime 44 passed/0 failed,
+  capo-state 58 passed/0 failed). `git diff --check` clean. Acceptance met. No
+  live Codex smoke required (SG9 verification is deterministic liveness-probe +
+  classification + lease-reclaim + replay only).
 
 ## SG10 - Deterministic Safety Test Suite Plus Restart/Replay
 
