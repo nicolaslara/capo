@@ -13,7 +13,7 @@ use crate::{
     RunProjection, RuntimeTargetProjection, SessionProjection, SourceBindingProjection, StateError,
     StateResult, TaskOutcomeReportProjection, TaskProjection, ToolCallProjection,
     ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection,
-    WorkpadIndexResetProjection, WorkpadTaskProjection, optional_id,
+    WorkpadIndexResetProjection, WorkpadTaskProjection, WorkspaceLeaseProjection, optional_id,
 };
 
 #[derive(Debug)]
@@ -143,6 +143,27 @@ pub(crate) fn projection_record_from_row(
                 },
             ))
         }
+        "workspace_lease" => Ok(ProjectionRecord::WorkspaceLease(WorkspaceLeaseProjection {
+            workspace_lease_id: record_id,
+            project_id: ProjectId::new(required_field(
+                &projection_kind,
+                "workspace_lease",
+                a,
+                "project_id",
+            )?),
+            holder_session_id: SessionId::new(required_field(
+                &projection_kind,
+                "workspace_lease",
+                b,
+                "holder_session_id",
+            )?),
+            holder_run_id: optional_id(c),
+            status: required_field(&projection_kind, "workspace_lease", d, "status")?,
+            acquired_at: e,
+            released_at: f,
+            release_reason: g.unwrap_or_default(),
+            updated_sequence: 0,
+        })),
         "permission_approval" => {
             let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
             Ok(ProjectionRecord::PermissionApproval(

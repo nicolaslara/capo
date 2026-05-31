@@ -106,6 +106,19 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             })
             .to_string(),
         },
+        ProjectionRecord::WorkspaceLease(lease) => ProjectionRecordRow {
+            kind: "workspace_lease",
+            record_id: lease.workspace_lease_id.clone(),
+            a: Some(lease.project_id.to_string()),
+            b: Some(lease.holder_session_id.to_string()),
+            c: lease.holder_run_id.as_ref().map(ToString::to_string),
+            d: Some(lease.status.clone()),
+            e: lease.acquired_at.clone(),
+            f: lease.released_at.clone(),
+            g: Some(lease.release_reason.clone()),
+            h: None,
+            payload_json: "{}".to_string(),
+        },
         ProjectionRecord::PermissionApproval(approval) => ProjectionRecordRow {
             kind: "permission_approval",
             record_id: approval.approval_id.clone(),

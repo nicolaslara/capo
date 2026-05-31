@@ -365,6 +365,43 @@ impl RealBoundaryController {
             .revoke_capability_grant(scope, capability_grant_id, reason)
     }
 
+    /// SG5: acquire the single-writer workspace write lease for the scope's
+    /// session; rejects a second concurrent writer with a typed conflict.
+    pub fn acquire_workspace_write_lease(
+        &self,
+        scope: &crate::WorkspaceLeaseScope,
+    ) -> StateResult<crate::WorkspaceWriteLeaseOutcome> {
+        self.core.acquire_workspace_write_lease(scope)
+    }
+
+    /// SG5: release the workspace write lease the scope's session holds, freeing
+    /// it for the next writer; records `reason`.
+    pub fn release_workspace_write_lease(
+        &self,
+        scope: &crate::WorkspaceLeaseScope,
+        reason: &str,
+    ) -> StateResult<crate::WorkspaceWriteLeaseOutcome> {
+        self.core.release_workspace_write_lease(scope, reason)
+    }
+
+    /// SG5: gate one tool/workspace operation through the single-writer lock.
+    /// Reads pass through; a write is allowed only for the lease holder.
+    pub fn gate_workspace_write(
+        &self,
+        scope: &crate::WorkspaceLeaseScope,
+        is_write: bool,
+    ) -> StateResult<crate::WorkspaceWriteGate> {
+        self.core.gate_workspace_write(scope, is_write)
+    }
+
+    /// SG5: the current holder of the workspace write lease, or `None` when free.
+    pub fn workspace_lease_holder(
+        &self,
+        scope: &crate::WorkspaceLeaseScope,
+    ) -> StateResult<Option<capo_state::WorkspaceLeaseProjection>> {
+        self.core.workspace_lease_holder(scope)
+    }
+
     /// Borrow the Capo registry behind the real exposure, for callers that need
     /// the tool definitions (schemas/scopes) directly.
     pub fn capo_registry(&self) -> Option<&CapoToolRegistry> {

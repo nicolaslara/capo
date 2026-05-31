@@ -6599,3 +6599,226 @@ fn sg3_re_grant_after_revoke_does_not_un_revoke_under_permissive_policy() {
         "the prior revocation timestamp is preserved verbatim"
     );
 }
+
+// ----- SG5: single-writer workspace lock / session-scoped write lease --------
+
+/// Build a workspace-lease scope for a given session/run over a shared workspace
+/// root, so two scopes built with the SAME `workspace_root` contend for the same
+/// single-writer lease.
+fn sg5_lease_scope(session: &str, run: &str, workspace_root: &str) -> crate::WorkspaceLeaseScope {
+    crate::WorkspaceLeaseScope {
+        task_id: TaskId::new("task-sg5"),
+        agent_id: AgentId::new(format!("agent-{session}")),
+        session_id: SessionId::new(session.to_string()),
+        run_id: RunId::new(run.to_string()),
+        turn_id: TurnId::new(format!("turn-{session}")),
+        workspace_root: workspace_root.to_string(),
+    }
+}
+
+/// SG5 contention: one holder takes the write lease, a second session's write is
+/// REJECTED with a typed conflict (never interleaved), the holder releases, and
+/// the second session's write then succeeds.
+#[test]
+fn sg5_workspace_lock_rejects_second_writer_until_holder_releases() {
+    let controller =
+        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+    let workspace = "/workspace/capo";
+    let holder = sg5_lease_scope("session-holder", "run-holder", workspace);
+    let challenger = sg5_lease_scope("session-challenger", "run-challenger", workspace);
+
+    // Holder acquires the lease.
+    let acquired = controller
+        .acquire_workspace_write_lease(&holder)
+        .expect("acquire");
+    assert!(acquired.may_write(), "holder acquires the free lease");
+    assert!(matches!(
+        acquired,
+        crate::WorkspaceWriteLeaseOutcome::Acquired { .. }
+    ));
+
+    // A second session's write is rejected with a typed conflict, not queued.
+    let denied = controller
+        .gate_workspace_write(&challenger, true)
+        .expect("gate challenger write");
+    assert!(!denied.allowed(), "second concurrent writer is rejected");
+    let conflict = denied.conflict().expect("conflict surfaced");
+    assert_eq!(
+        conflict.held_by_session_id,
+        SessionId::new("session-holder")
+    );
+    assert!(
+        conflict.agent_message().contains("single-writer"),
+        "conflict carries an agent-readable single-writer message"
+    );
+
+    // The challenger acquiring directly also conflicts (no silent interleave).
+    let direct = controller
+        .acquire_workspace_write_lease(&challenger)
+        .expect("challenger acquire");
+    assert!(direct.conflict().is_some(), "direct acquire also conflicts");
+
+    // The holder releases the lease with a reason.
+    let released = controller
+        .release_workspace_write_lease(&holder, "turn complete")
+        .expect("release");
+    assert!(released.may_write());
+
+    // Now the second session's write succeeds.
+    let now_allowed = controller
+        .gate_workspace_write(&challenger, true)
+        .expect("gate after release");
+    assert!(
+        now_allowed.allowed(),
+        "after release the second writer succeeds"
+    );
+    let holder_now = controller
+        .workspace_lease_holder(&challenger)
+        .expect("holder lookup")
+        .expect("lease held");
+    assert_eq!(
+        holder_now.holder_session_id,
+        SessionId::new("session-challenger"),
+        "the challenger now holds the lease"
+    );
+}
+
+/// SG5: read-only tools/reads are NOT blocked by the write lease. While the
+/// holder owns the write lease, another session's READ is allowed and the
+/// holder's own read is allowed too.
+#[test]
+fn sg5_reads_are_not_blocked_by_the_write_lease() {
+    let controller =
+        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+    let workspace = "/workspace/capo";
+    let holder = sg5_lease_scope("session-holder", "run-holder", workspace);
+    let reader = sg5_lease_scope("session-reader", "run-reader", workspace);
+
+    controller
+        .acquire_workspace_write_lease(&holder)
+        .expect("acquire");
+
+    // Another session's read passes through even though the holder owns the lease.
+    let other_read = controller
+        .gate_workspace_write(&reader, false)
+        .expect("gate other read");
+    assert_eq!(other_read, crate::WorkspaceWriteGate::ReadAllowed);
+    assert!(other_read.allowed());
+
+    // The holder's own read is allowed too.
+    let holder_read = controller
+        .gate_workspace_write(&holder, false)
+        .expect("gate holder read");
+    assert_eq!(holder_read, crate::WorkspaceWriteGate::ReadAllowed);
+
+    // The reader gating a read never took the lease away from the holder.
+    let still_held = controller
+        .workspace_lease_holder(&holder)
+        .expect("holder lookup")
+        .expect("still held");
+    assert_eq!(
+        still_held.holder_session_id,
+        SessionId::new("session-holder")
+    );
+}
+
+/// SG5 restart/replay: the lease state (held, then released, then re-acquired by
+/// another session) rebuilds IDENTICALLY from the event log -- a rebuild yields
+/// the same single-writer holder, and the lock still rejects a stale contender.
+#[test]
+fn sg5_lease_state_rebuilds_from_the_event_log() {
+    let root = temp_root();
+    let workspace = "/workspace/capo";
+    let holder = sg5_lease_scope("session-holder", "run-holder", workspace);
+    let challenger = sg5_lease_scope("session-challenger", "run-challenger", workspace);
+
+    {
+        let controller =
+            RealBoundaryController::open(ProjectId::new("project-capo"), &root).expect("open");
+        // Holder acquires, releases; challenger then acquires and keeps the lease.
+        controller
+            .acquire_workspace_write_lease(&holder)
+            .expect("acquire");
+        controller
+            .release_workspace_write_lease(&holder, "turn complete")
+            .expect("release");
+        controller
+            .acquire_workspace_write_lease(&challenger)
+            .expect("challenger acquire");
+    }
+
+    // Reopen over the same state root and rebuild projections purely from events.
+    let reopened =
+        RealBoundaryController::open(ProjectId::new("project-capo"), &root).expect("reopen");
+    let before_rebuild = reopened
+        .state()
+        .workspace_leases(&ProjectId::new("project-capo"))
+        .expect("leases before");
+    reopened
+        .state()
+        .rebuild_projections()
+        .expect("rebuild projections");
+    let after_rebuild = reopened
+        .state()
+        .workspace_leases(&ProjectId::new("project-capo"))
+        .expect("leases after");
+    assert_eq!(
+        before_rebuild, after_rebuild,
+        "lease projection rebuilds identically from the event log"
+    );
+
+    // The rebuilt lease names the challenger as the single live holder.
+    let live: Vec<_> = after_rebuild.iter().filter(|l| l.is_held()).collect();
+    assert_eq!(live.len(), 1, "exactly one live lease after rebuild");
+    assert_eq!(
+        live[0].holder_session_id,
+        SessionId::new("session-challenger")
+    );
+
+    // The lock still enforces single-writer after the rebuild: the holder that
+    // released earlier is now a stale contender and is rejected.
+    let stale = reopened
+        .gate_workspace_write(&holder, true)
+        .expect("gate stale writer");
+    assert!(
+        !stale.allowed(),
+        "after rebuild the lock still rejects a second writer"
+    );
+    assert_eq!(
+        stale.conflict().expect("conflict").held_by_session_id,
+        SessionId::new("session-challenger")
+    );
+}
+
+/// SG5: re-acquiring the lease you already hold is idempotent (no new event, no
+/// conflict), so a holder writing twice in a turn does not spuriously deny
+/// itself.
+#[test]
+fn sg5_holder_re_acquire_is_idempotent() {
+    let controller =
+        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+    let holder = sg5_lease_scope("session-holder", "run-holder", "/workspace/capo");
+
+    let first = controller
+        .acquire_workspace_write_lease(&holder)
+        .expect("first acquire");
+    assert!(matches!(
+        first,
+        crate::WorkspaceWriteLeaseOutcome::Acquired { .. }
+    ));
+    let events_after_first = controller.state().event_count().expect("count");
+
+    let second = controller
+        .acquire_workspace_write_lease(&holder)
+        .expect("second acquire");
+    assert!(matches!(
+        second,
+        crate::WorkspaceWriteLeaseOutcome::AlreadyHeldBySelf { .. }
+    ));
+    assert!(second.may_write(), "the holder may still write");
+    assert_eq!(
+        controller.state().event_count().expect("count"),
+        events_after_first,
+        "re-acquiring an already-held lease emits no new event"
+    );
+}

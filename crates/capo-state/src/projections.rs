@@ -12,6 +12,7 @@ pub enum ProjectionRecord {
     Session(SessionProjection),
     Run(RunProjection),
     CapabilityGrant(CapabilityGrantProjection),
+    WorkspaceLease(WorkspaceLeaseProjection),
     PermissionApproval(PermissionApprovalProjection),
     ConnectivityExposure(ConnectivityExposureProjection),
     RuntimeTarget(RuntimeTargetProjection),
@@ -220,6 +221,59 @@ impl CapabilityGrantProjection {
             },
             None => false,
         }
+    }
+}
+
+/// SG5: the controller-owned single-writer workspace lock, projected from the
+/// `workspace.lease_acquired` / `workspace.lease_released` event pair.
+///
+/// One lease row per workspace key (the canonicalized workspace root): while a
+/// lease is `held`, only its holder session may write the workspace. A second
+/// session/run requesting the write lease for the same key is rejected with a
+/// typed conflict rather than interleaved. Acquire/release is event-sourced, so
+/// the lease rebuilds from the log (`is_held`/`holder_session_id` survive
+/// restart) and a stale lease from a dead holder is reclaimable through the
+/// liveness-aware recovery path (SG9).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceLeaseProjection {
+    /// Stable per-workspace key (the canonicalized workspace root). One lease
+    /// row exists per key; re-acquire/release update this same row in place.
+    pub workspace_lease_id: String,
+    pub project_id: ProjectId,
+    /// The session holding (or that last held) the lease.
+    pub holder_session_id: SessionId,
+    /// The run holding (or that last held) the lease, when one is associated.
+    pub holder_run_id: Option<RunId>,
+    /// `held` while a writer owns the lease, `released` once it is freed.
+    pub status: String,
+    /// When the current/last holder acquired the lease (epoch-millis string).
+    pub acquired_at: Option<String>,
+    /// When the lease was released, set by `workspace.lease_released`.
+    pub released_at: Option<String>,
+    /// Why the lease was released (explicit release, reclaimed from a dead
+    /// holder during recovery, etc.). Empty while the lease is held.
+    pub release_reason: String,
+    pub updated_sequence: i64,
+}
+
+impl WorkspaceLeaseProjection {
+    /// The `held` status string a live (un-released) lease carries.
+    pub const HELD: &'static str = "held";
+    /// The `released` status string a freed lease carries.
+    pub const RELEASED: &'static str = "released";
+
+    /// SG5: whether this lease is currently held by a writer.
+    ///
+    /// A lease is held when its status is `held` and it has not been released.
+    /// A released lease (explicit release OR reclaimed from a dead holder) reads
+    /// as free, so the next writer's acquire succeeds.
+    pub fn is_held(&self) -> bool {
+        self.status == Self::HELD && self.released_at.is_none()
+    }
+
+    /// SG5: whether `session_id` is the session currently holding this lease.
+    pub fn is_held_by(&self, session_id: &SessionId) -> bool {
+        self.is_held() && &self.holder_session_id == session_id
     }
 }
 

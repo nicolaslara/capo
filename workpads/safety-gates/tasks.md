@@ -419,7 +419,7 @@ Evidence:
 
 ## SG5 - Single-Writer Workspace Lock / Session-Scoped Write Lease
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -446,6 +446,56 @@ Verification:
 Must not do:
 
 - Do not interleave concurrent writers or silently queue them; reject explicitly.
+
+Evidence:
+
+- New event kinds: `WorkspaceLeaseAcquired` (`workspace.lease_acquired`) and
+  `WorkspaceLeaseReleased` (`workspace.lease_released`) added to
+  `crates/capo-state/src/event.rs` (enum variant, `as_str`, and the `from_wire`
+  `ALL` list so they round-trip).
+- New event-sourced projection: `WorkspaceLeaseProjection` added to
+  `crates/capo-state/src/projections.rs` (one lease row per workspace key, with
+  `holder_session_id`/`holder_run_id`/`status`/`acquired_at`/`released_at`/
+  `release_reason` and `is_held`/`is_held_by` helpers), threaded through the
+  schema (`schema.rs`: `workspace_leases` table + clear-list), apply
+  INSERT/UPDATE (`apply.rs`), the `workspace_lease_by_id`/`workspace_leases`
+  queries (`queries.rs`), and the codec round-trip
+  (`codec.rs`/`codec_encode.rs`), so the lease rebuilds identically from the
+  event log via `rebuild_projections`.
+- Controller-owned single-writer lock: new
+  `crates/capo-controller/src/workspace_lock.rs` adds `WorkspaceLeaseScope`
+  (keys the lease on the canonicalized workspace root, project-scoped) and the
+  typed `acquire_workspace_write_lease` (read-back FIRST: a held lease owned by
+  ANOTHER session is REJECTED with a typed `WorkspaceLockConflict` carrying an
+  agent-readable message; the SAME session re-acquire is idempotent with no new
+  event; otherwise emit `workspace.lease_acquired`), `release_workspace_write_lease`
+  (emit `workspace.lease_released` with a reason; releasing another session's
+  lease conflicts), `gate_workspace_write(is_write)` (reads pass through
+  un-gated; a write is allowed only for the lease holder, acquiring it if free),
+  and `workspace_lease_holder` (read-back for SG9 stale-lease reclaim). Typed
+  outcomes `WorkspaceWriteLeaseOutcome` / `WorkspaceWriteGate` are surfaced to
+  the loop (decide-style, not errors), re-exported from `lib.rs` and on
+  `RealBoundaryController` (`real_controller.rs`). The GO8 "no conflicting
+  workspace lock" continuation-precondition contract is recorded in
+  `knowledge.md`.
+- Tests: `crates/capo-state/src/tests.rs` adds two `sg5_*` tests (event-kind
+  wire round-trip; lease projection persists + rebuilds identically across a
+  restart for acquire->release). `crates/capo-controller/src/tests.rs` adds four
+  `sg5_*` tests: lock contention (holder acquires, second writer rejected with a
+  typed conflict via both `gate_workspace_write` and a direct acquire, holder
+  releases, second writer then succeeds), reads-not-blocked (another session's
+  read and the holder's own read pass while the write lease is held),
+  restart/replay (acquire->release->re-acquire-by-another rebuilds identically
+  from the event log and the lock still rejects a stale contender after
+  rebuild), and idempotent self re-acquire (no new event).
+- Commands run (from `/Users/nicolas/devel/capo-wt/safety-gates`):
+  `cargo test -p capo-state sg5` (2 passed), `cargo test -p capo-controller sg5`
+  (4 passed), `cargo fmt --check` (exit 0 after `cargo fmt`),
+  `cargo clippy --all-targets --all-features -- -D warnings` (exit 0, no
+  warnings), `cargo test --workspace` (exit 0; 0 failed workspace-wide;
+  capo-controller 74 passed/0 failed/1 ignored, capo-state 52 passed/0 failed).
+  `git diff --check` clean. Acceptance met. No live Codex smoke required for this
+  task (SG5 verification is deterministic lock-contention + replay only).
 
 ## SG6 - VerificationRunner: Run Check/Lint/Test And Emit Real Pass/Fail Evidence
 

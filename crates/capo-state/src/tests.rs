@@ -3125,3 +3125,98 @@ fn session_thread_rebuilds_identically_from_the_persisted_log_on_restart() {
     assert_eq!(tail.turns.len(), 1);
     assert_eq!(tail.turns[0].turn_id, "turn-b");
 }
+
+#[test]
+fn sg5_workspace_lease_event_kinds_round_trip() {
+    // SG5: the single-writer workspace-lock event kinds have stable wire strings
+    // and round-trip through `as_str`/`from_wire`.
+    assert_eq!(
+        EventKind::WorkspaceLeaseAcquired.as_str(),
+        "workspace.lease_acquired"
+    );
+    assert_eq!(
+        EventKind::WorkspaceLeaseReleased.as_str(),
+        "workspace.lease_released"
+    );
+    assert_eq!(
+        EventKind::from_wire("workspace.lease_acquired"),
+        Some(EventKind::WorkspaceLeaseAcquired)
+    );
+    assert_eq!(
+        EventKind::from_wire("workspace.lease_released"),
+        Some(EventKind::WorkspaceLeaseReleased)
+    );
+}
+
+#[test]
+fn sg5_workspace_lease_projection_persists_and_rebuilds_identically() {
+    // SG5: a WorkspaceLease projection persists to the `workspace_leases` table
+    // AND rebuilds identically from the durable projection_records log on
+    // restart, so the single-writer lock survives a server restart.
+    let store = temp_store("sg5-lease-columns");
+    let project_id = ProjectId::new("project-capo");
+
+    // Acquire: held by session-holder.
+    let held = WorkspaceLeaseProjection {
+        workspace_lease_id: "workspace-lease-capo".to_string(),
+        project_id: project_id.clone(),
+        holder_session_id: SessionId::new("session-holder"),
+        holder_run_id: Some(RunId::new("run-holder")),
+        status: WorkspaceLeaseProjection::HELD.to_string(),
+        acquired_at: Some("1700000000000".to_string()),
+        released_at: None,
+        release_reason: String::new(),
+        updated_sequence: 0,
+    };
+    store
+        .append_event(
+            NewEvent::new(
+                "event-sg5-acquire",
+                EventKind::WorkspaceLeaseAcquired,
+                "test",
+            ),
+            &[ProjectionRecord::WorkspaceLease(held.clone())],
+        )
+        .expect("append acquire");
+
+    let live = store.workspace_leases(&project_id).expect("leases");
+    assert_eq!(live.len(), 1);
+    assert!(live[0].is_held());
+    assert!(live[0].is_held_by(&SessionId::new("session-holder")));
+    assert!(!live[0].is_held_by(&SessionId::new("session-other")));
+
+    // Single-lease accessor returns the same row.
+    let by_id = store
+        .workspace_lease_by_id("workspace-lease-capo")
+        .expect("by id")
+        .expect("present");
+    assert_eq!(by_id, live[0]);
+
+    // Release: re-emit the SAME row with released_at + reason stamped.
+    let mut released = held.clone();
+    released.status = WorkspaceLeaseProjection::RELEASED.to_string();
+    released.released_at = Some("1700000500000".to_string());
+    released.release_reason = "turn complete".to_string();
+    store
+        .append_event(
+            NewEvent::new(
+                "event-sg5-release",
+                EventKind::WorkspaceLeaseReleased,
+                "test",
+            ),
+            &[ProjectionRecord::WorkspaceLease(released.clone())],
+        )
+        .expect("append release");
+
+    let after_release = store.workspace_leases(&project_id).expect("leases");
+    assert_eq!(after_release.len(), 1);
+    assert!(!after_release[0].is_held(), "released lease reads as free");
+    assert_eq!(after_release[0].release_reason, "turn complete");
+
+    // Restart/replay: a rebuild reconstructs the lease state identically from the
+    // event log (the acquire + release events yield the same released lease).
+    store.rebuild_projections().expect("rebuild");
+    let rebuilt = store.workspace_leases(&project_id).expect("leases rebuilt");
+    assert_eq!(rebuilt, after_release);
+    assert!(!rebuilt[0].is_held());
+}

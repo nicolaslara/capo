@@ -118,6 +118,17 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             revoked_at TEXT,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS workspace_leases (
+            workspace_lease_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            holder_session_id TEXT NOT NULL,
+            holder_run_id TEXT,
+            status TEXT NOT NULL,
+            acquired_at TEXT,
+            released_at TEXT,
+            release_reason TEXT NOT NULL DEFAULT '',
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS permission_approvals (
             approval_id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -533,6 +544,7 @@ pub(crate) fn clear_projection_tables(transaction: &Transaction<'_>) -> StateRes
         "sessions",
         "runs",
         "capability_grants",
+        "workspace_leases",
         "permission_approvals",
         "connectivity_exposures",
         "runtime_targets",

@@ -40,6 +40,7 @@ mod resource_ceiling;
 mod session_control;
 mod tool_dispatch;
 mod turn_loop;
+mod workspace_lock;
 
 pub use grant_lifecycle::{
     GrantReadBackDecision, GrantReadBackSource, GrantRevocation, GrantRevocationScope,
@@ -58,6 +59,9 @@ pub use tool_dispatch::{
     PermissionDecideOutcome, ToolDispatchOutcome, ToolDispatchScope, ToolRefusal,
 };
 pub use turn_loop::{TurnFinished, TurnStopReason};
+pub use workspace_lock::{
+    WorkspaceLeaseScope, WorkspaceLockConflict, WorkspaceWriteGate, WorkspaceWriteLeaseOutcome,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FakeBoundaryController {

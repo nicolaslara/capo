@@ -14,7 +14,7 @@ use crate::{
     RuntimeTargetProjection, SessionProjection, SourceBindingProjection, SqliteStateStore,
     StateError, StateResult, TaskOutcomeReportProjection, TaskProjection, ToolCallProjection,
     ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection, WorkpadTaskProjection,
-    optional_id,
+    WorkspaceLeaseProjection, optional_id,
 };
 
 impl SqliteStateStore {
@@ -367,6 +367,72 @@ impl SqliteStateStore {
             })
             .optional()?;
         Ok(grant)
+    }
+
+    /// SG5: read a single workspace lease by its key (the canonicalized
+    /// workspace root), or `None` if no lease was ever acquired for that key.
+    ///
+    /// The single-writer lock consults this BEFORE granting a write lease: a row
+    /// whose `status` is `held` (and `released_at` is null) means a writer
+    /// already owns the workspace, so a second writer is rejected. Acquire and
+    /// release both upsert this same row, so it rebuilds from the event log.
+    pub fn workspace_lease_by_id(
+        &self,
+        workspace_lease_id: &str,
+    ) -> StateResult<Option<WorkspaceLeaseProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT workspace_lease_id, project_id, holder_session_id, holder_run_id,
+                    status, acquired_at, released_at, release_reason, updated_sequence
+             FROM workspace_leases
+             WHERE workspace_lease_id = ?1",
+        )?;
+        let lease = statement
+            .query_row(params![workspace_lease_id], |row| {
+                Ok(WorkspaceLeaseProjection {
+                    workspace_lease_id: row.get(0)?,
+                    project_id: ProjectId::new(row.get::<_, String>(1)?),
+                    holder_session_id: SessionId::new(row.get::<_, String>(2)?),
+                    holder_run_id: optional_id(row.get::<_, Option<String>>(3)?),
+                    status: row.get(4)?,
+                    acquired_at: row.get(5)?,
+                    released_at: row.get(6)?,
+                    release_reason: row.get(7)?,
+                    updated_sequence: row.get(8)?,
+                })
+            })
+            .optional()?;
+        Ok(lease)
+    }
+
+    /// SG5: every workspace lease row for a project, oldest first.
+    pub fn workspace_leases(
+        &self,
+        project_id: &ProjectId,
+    ) -> StateResult<Vec<WorkspaceLeaseProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT workspace_lease_id, project_id, holder_session_id, holder_run_id,
+                    status, acquired_at, released_at, release_reason, updated_sequence
+             FROM workspace_leases
+             WHERE project_id = ?1
+             ORDER BY updated_sequence ASC, workspace_lease_id ASC",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str()], |row| {
+            Ok(WorkspaceLeaseProjection {
+                workspace_lease_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                holder_session_id: SessionId::new(row.get::<_, String>(2)?),
+                holder_run_id: optional_id(row.get::<_, Option<String>>(3)?),
+                status: row.get(4)?,
+                acquired_at: row.get(5)?,
+                released_at: row.get(6)?,
+                release_reason: row.get(7)?,
+                updated_sequence: row.get(8)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
     }
 
     pub fn permission_approvals(

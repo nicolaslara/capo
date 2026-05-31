@@ -176,6 +176,32 @@ pub(crate) fn apply_projection_record(
             ],
             )?
         }
+        ProjectionRecord::WorkspaceLease(lease) => transaction.execute(
+            "INSERT INTO workspace_leases(
+                workspace_lease_id, project_id, holder_session_id, holder_run_id,
+                status, acquired_at, released_at, release_reason, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(workspace_lease_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                holder_session_id = excluded.holder_session_id,
+                holder_run_id = excluded.holder_run_id,
+                status = excluded.status,
+                acquired_at = excluded.acquired_at,
+                released_at = excluded.released_at,
+                release_reason = excluded.release_reason,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                lease.workspace_lease_id,
+                lease.project_id.as_str(),
+                lease.holder_session_id.as_str(),
+                lease.holder_run_id.as_ref().map(RunId::as_str),
+                lease.status,
+                lease.acquired_at,
+                lease.released_at,
+                lease.release_reason,
+                sequence,
+            ],
+        )?,
         ProjectionRecord::PermissionApproval(approval) => {
             validate_projection_json(
                 "permission_approval",
