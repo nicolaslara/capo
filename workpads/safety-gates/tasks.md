@@ -138,6 +138,23 @@ Evidence:
   `cargo clippy --all-targets --all-features -- -D warnings` (exit 0, no
   warnings), `cargo test -p capo-controller` (50 passed, 0 failed, 1 ignored),
   `cargo test --workspace` (all crates ok, 0 failed). `git diff --check` clean.
+- Gate fix (2026-05-31): the objective gate failed on
+  `sg1_denied_request_blocks_invocation_with_structured_refusal` because the test
+  asserted a `reject_once` deny (the `StaticPolicy` rejection, `effect="deny"`,
+  `persistence="once"`) materialized a durable deny grant
+  (`outcome.decide.grant_created` and an `effect="deny"` grant row). That
+  contradicted the implementation AND the design this workpad implements
+  (`capability-permissions.md:387`: `reject_once` -> "No grant; record rejection
+  for this request"; only `reject_always` creates a durable deny grant). The
+  implementation (`decision_creates_grant` in `tool_dispatch.rs`) was already
+  correct; the test assertions were wrong. Fixed the test in
+  `crates/capo-controller/src/tests.rs` to assert the documented behavior: the
+  deny still emits `permission.requested`/`permission.decided` with a structured
+  refusal, but creates NO `capability.grant_created` event and NO grant-store row.
+  Re-ran the full gate from `/Users/nicolas/devel/capo-wt/safety-gates`:
+  `cargo fmt --check` (exit 0), `cargo clippy --all-targets --all-features -- -D
+  warnings` (exit 0), `cargo test --workspace` (exit 0; capo-controller 50 passed
+  / 0 failed / 1 ignored; 0 failed workspace-wide). `git diff --check` clean.
 
 ## SG2 - AgentAdapter Permission Round-Trip And ACP Option Mapping Against Fakes
 

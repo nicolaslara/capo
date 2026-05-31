@@ -5077,7 +5077,11 @@ fn sg1_denied_request_blocks_invocation_with_structured_refusal() {
     }
 
     // The decide step still recorded the decision (requested + decided) so the
-    // audit trail is complete; the deny also materialized a deny grant.
+    // audit trail is complete. The static policy denies with `persistence="once"`
+    // (a `reject_once`), which per the ACP option-mapping table
+    // (`capability-permissions.md:387`) records the rejection for THIS request and
+    // creates NO grant -- only a `reject_always` (durable) deny materializes a
+    // standing deny grant. So no `capability.grant_created` is emitted here.
     assert!(
         outcome
             .observed_event_kinds
@@ -5090,7 +5094,14 @@ fn sg1_denied_request_blocks_invocation_with_structured_refusal() {
             .iter()
             .any(|kind| kind == "permission.decided")
     );
-    assert!(outcome.decide.grant_created);
+    assert!(!outcome.decide.grant_created);
+    assert!(
+        !outcome
+            .observed_event_kinds
+            .iter()
+            .any(|kind| kind == "capability.grant_created"),
+        "a reject_once deny records the rejection but creates no durable deny grant",
+    );
 
     let turn_events = controller
         .state()
@@ -5127,9 +5138,14 @@ fn sg1_denied_request_blocks_invocation_with_structured_refusal() {
     assert_eq!(projection.status, "denied");
     assert_eq!(projection.output_artifact_id, None);
 
-    // The deny grant is durable and read-backable, with effect=deny.
+    // A `reject_once` deny creates NO durable grant: the grant store has no row
+    // for this decision's grant id (the rejection is recorded on the
+    // permission.decided event, not as a standing deny rule). A durable deny grant
+    // is reserved for a future `reject_always` policy.
     let grants = controller.state().capability_grants().expect("grants");
-    assert!(grants.iter().any(|grant| {
-        grant.capability_grant_id == outcome.decide.capability_grant_id && grant.effect == "deny"
-    }));
+    assert!(
+        !grants
+            .iter()
+            .any(|grant| { grant.capability_grant_id == outcome.decide.capability_grant_id })
+    );
 }

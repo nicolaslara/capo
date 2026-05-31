@@ -447,14 +447,38 @@ impl FakeBoundaryController {
 /// SG1: whether a recorded permission decision materializes a durable
 /// `CapabilityGrant` (lifecycle step 5).
 ///
-/// A grant is created for any decision whose persistence is NOT purely
-/// observational and that issued a grant id. Every persistence value the
-/// prototype policies emit today (`once`, `until_turn_end`, `until_session_end`,
-/// `until_revoked`, `until_time`) is non-observational and creates a grant
-/// (an allow grant authorizes a later request; a `reject_always` deny grant
-/// blocks one); a future `observational` persistence would skip grant creation.
+/// This follows the documented lifecycle and ACP option-mapping table in
+/// `capability-permissions.md` (step 5 + lines 385-388), which are EFFECT- and
+/// PERSISTENCE-sensitive, not merely "non-observational":
+///
+/// - An `allow` with non-observational persistence creates the durable grant
+///   that authorizes a later request (lifecycle step 5; `allow_once` /
+///   `allow_always`).
+/// - A `deny` creates a durable deny grant ONLY when its persistence is durable
+///   (`reject_always`: `until_revoked` / profile-defined expiry like
+///   `until_time`). A transient `deny` (`reject_once`: `once` /
+///   `until_turn_end`) records the rejection for THIS request and creates NO
+///   grant -- it must not become a standing deny rule that grant read-back
+///   (SG3) would later misread as a permanent denial.
+///
+/// All prototype policies emit `effect="deny", persistence="once"` for their
+/// rejections (`StaticPolicy::decide`), i.e. a `reject_once`, so today no deny
+/// path creates a grant; the durable-deny arm exists for a future
+/// `reject_always` policy. A purely observational persistence
+/// (`observational`/`none`) never creates a grant for either effect.
 fn decision_creates_grant(decision: &PermissionDecision, grant_id: &Option<String>) -> bool {
-    grant_id.is_some() && !persistence_is_observational(&decision.persistence)
+    if grant_id.is_none() || persistence_is_observational(&decision.persistence) {
+        return false;
+    }
+    match decision.effect.as_str() {
+        // Allow with non-observational persistence creates the authorizing grant.
+        "allow" => true,
+        // Deny creates a durable deny grant only for `reject_always`-style
+        // (durable) persistence; a `reject_once` (transient) deny creates none.
+        "deny" => persistence_is_durable(&decision.persistence),
+        // Any other effect (e.g. `cancel`) creates no grant.
+        _ => false,
+    }
 }
 
 /// Whether a persistence value is purely observational (records a decision but
@@ -462,6 +486,15 @@ fn decision_creates_grant(decision: &PermissionDecision, grant_id: &Option<Strin
 /// observational" condition for emitting `capability.grant_created`.
 fn persistence_is_observational(persistence: &str) -> bool {
     matches!(persistence, "observational" | "none")
+}
+
+/// Whether a persistence value is durable in the `reject_always` sense from the
+/// ACP option-mapping table (`capability-permissions.md:388`): a deny with this
+/// persistence becomes a scoped durable deny grant, whereas a transient `once` /
+/// `until_turn_end` deny (`reject_once`) records the rejection only and creates
+/// no grant.
+fn persistence_is_durable(persistence: &str) -> bool {
+    matches!(persistence, "until_revoked" | "until_time")
 }
 
 /// The stable correlation id for one tool dispatch (ACI7): a turn-scoped value
