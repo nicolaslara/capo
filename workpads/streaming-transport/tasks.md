@@ -711,7 +711,7 @@ Evidence:
 
 ## ST12 - Live Opt-In Streaming Smoke Paired With Deterministic Assertions
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -738,3 +738,49 @@ Verification:
 Must not do:
 
 - Do not let a live smoke stand as the only evidence for any task.
+
+Evidence:
+
+- New `crates/capo-server/src/tests/e2e_gate.rs` (module registered in
+  `crates/capo-server/src/tests.rs`) delivers both halves of ST12 sharing ONE
+  shape-assertion helper (`assert_streamed_turn_shape`), so the live smoke is a
+  true pairing and never operator-attested:
+  - `streaming_e2e_gate_covers_the_full_contract` -- the always-on deterministic
+    E2E gate, run over the REAL production transport (`serve_tcp` +
+    `send_tcp` + `subscribe_tcp` on a loopback listener, bounded accept loop sized
+    to the exact connection count). It opens a live `subscribe_tcp` tail BEFORE
+    the turn; drives ONE real turn through the production write path
+    (`ServerCommand::ReplayAdapterFixture` over the wire, the codex-exec fixture
+    -> `session.summary_updated` incremental output, observed `exec_command`
+    tool round-trip, and a terminal `evidence.recorded` = `TurnFinished`); observes
+    the deltas LIVE over the socket with no gap/dup/reorder (strictly increasing
+    sequence) and every frame a well-formed JSON-RPC `event` notification; asserts
+    the projected multi-turn thread read model renders the streamed turn
+    (`ReadThread`); proves redaction-on-emit on the real wire egress (a seeded
+    `ContainsSensitive` event's body is WITHHELD with the
+    `[REDACTED:withheld]` placeholder and downgraded to `redacted` in a
+    reconnecting subscriber's backlog -- the secret cleartext never crosses the
+    socket); fires a typed mid-turn `send_interrupt` over the persistent connection
+    and asserts the thread projects an `interrupted` turn (the durable
+    `session.interrupted` event); proves restart-resume (reopening the store on the
+    same root rebuilds the thread projection byte-identically and a `from_sequence`
+    subscriber replays the same events strictly after the watermark); and pins the
+    `capo-web` SSE re-exposure shape via `contract::sse_frame` over the same
+    committed events (the SSE `data:` line is the verbatim JSON-RPC `event`
+    notification, and redaction holds on the SSE path too).
+  - `live_streaming_smoke` -- `#[ignore]`d AND gated behind the explicit opt-in env
+    var `CAPO_SERVER_RUN_STREAMING_LIVE` (mirroring the `CAPO_SERVER_RUN_CODEX_LIVE`
+    convention; it also skips cleanly when unset, so it never fails for non-opted-in
+    runs). It connects a live socket client (`subscribe_tcp`) to the loopback
+    JSON-RPC server, `Subscribe`-s a session, drives ONE real turn, observes the
+    live incremental deltas + terminal `TurnFinished` over the wire, prints a
+    secrets-stripped transcript an operator can attach, and asserts the IDENTICAL
+    shape via `assert_streamed_turn_shape` (secrets-stripped over the live wire).
+    Run with `CAPO_SERVER_RUN_STREAMING_LIVE=1 cargo test -p capo-server --
+    --ignored live_streaming_smoke`; verified passing opted-in (1 passed) with the
+    live transcript emitted, and ignored in ordinary runs.
+- Objective gate run from `/Users/nicolas/devel/capo-wt/streaming-transport`:
+  `cargo fmt --check` ok; `cargo clippy --all-targets --all-features -- -D warnings`
+  ok; `cargo test --workspace` ok (0 failures workspace-wide; capo-server includes
+  the new always-on `streaming_e2e_gate_covers_the_full_contract` case and the
+  `#[ignore]`d `live_streaming_smoke`). `git diff --check` clean.

@@ -19,6 +19,7 @@ mod contract;
 mod controller_routing;
 mod crash_recovery;
 mod dispatch;
+mod e2e_gate;
 mod event_tail;
 mod foundation;
 mod live_provider;
