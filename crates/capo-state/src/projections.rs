@@ -227,7 +227,8 @@ impl CapabilityGrantProjection {
 /// SG5: the controller-owned single-writer workspace lock, projected from the
 /// `workspace.lease_acquired` / `workspace.lease_released` event pair.
 ///
-/// One lease row per workspace key (the canonicalized workspace root): while a
+/// One lease row per workspace key (a collision-free encoding of the normalized
+/// workspace root, derived controller-side): while a
 /// lease is `held`, only its holder session may write the workspace. A second
 /// session/run requesting the write lease for the same key is rejected with a
 /// typed conflict rather than interleaved. Acquire/release is event-sourced, so
@@ -236,8 +237,9 @@ impl CapabilityGrantProjection {
 /// liveness-aware recovery path (SG9).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceLeaseProjection {
-    /// Stable per-workspace key (the canonicalized workspace root). One lease
-    /// row exists per key; re-acquire/release update this same row in place.
+    /// Stable per-workspace key (a collision-free encoding of the normalized
+    /// workspace root). One lease row exists per key; re-acquire/release update
+    /// this same row in place.
     pub workspace_lease_id: String,
     pub project_id: ProjectId,
     /// The session holding (or that last held) the lease.

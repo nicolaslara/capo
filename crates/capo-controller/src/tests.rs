@@ -6822,3 +6822,187 @@ fn sg5_holder_re_acquire_is_idempotent() {
         "re-acquiring an already-held lease emits no new event"
     );
 }
+
+/// SG5 review-fix regression: a session releasing its OWN lease and then
+/// re-acquiring it must actually re-hold the lease and append a NEW event.
+///
+/// This is the same-session acquire -> release -> re-acquire path. Before the
+/// fix it was silently deduped by the event idempotency layer (the acquire
+/// event id was deterministic per (lease, session)), so the re-acquire returned
+/// `Acquired` while the projection stayed `released` -- a phantom acquire that
+/// let a second session also "acquire" the workspace, breaking single-writer.
+#[test]
+fn sg5_same_session_reacquire_after_release_re_holds() {
+    let controller =
+        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+    let holder = sg5_lease_scope("session-holder", "run-holder", "/workspace/capo");
+
+    controller
+        .acquire_workspace_write_lease(&holder)
+        .expect("first acquire");
+    controller
+        .release_workspace_write_lease(&holder, "turn complete")
+        .expect("release");
+    let events_after_release = controller.state().event_count().expect("count");
+
+    // Re-acquire with the SAME session after the release.
+    let reacquired = controller
+        .acquire_workspace_write_lease(&holder)
+        .expect("re-acquire");
+    assert!(
+        matches!(
+            reacquired,
+            crate::WorkspaceWriteLeaseOutcome::Acquired { .. }
+        ),
+        "the re-acquire takes the freed lease afresh"
+    );
+
+    // The lease projection now reads HELD by the re-acquiring session...
+    let held = controller
+        .workspace_lease_holder(&holder)
+        .expect("holder lookup")
+        .expect("lease re-held after re-acquire");
+    assert_eq!(held.holder_session_id, SessionId::new("session-holder"));
+
+    // ...and a NEW `workspace.lease_acquired` event was appended (not deduped).
+    assert!(
+        controller.state().event_count().expect("count") > events_after_release,
+        "the re-acquire appends a new event rather than being silently deduped"
+    );
+
+    // A second session is now correctly blocked, proving single-writer holds.
+    let challenger = sg5_lease_scope("session-challenger", "run-challenger", "/workspace/capo");
+    let denied = controller
+        .gate_workspace_write(&challenger, true)
+        .expect("gate challenger");
+    assert!(
+        !denied.allowed(),
+        "after a same-session re-acquire a second writer is still rejected"
+    );
+}
+
+/// SG5 review-fix: releasing a lease held by a DIFFERENT session is rejected
+/// with a typed conflict and leaves the original holder in place (a session
+/// cannot steal the single-writer lock by releasing someone else's lease).
+#[test]
+fn sg5_cross_session_release_conflicts_and_leaves_holder() {
+    let controller =
+        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+    let holder = sg5_lease_scope("session-holder", "run-holder", "/workspace/capo");
+    let other = sg5_lease_scope("session-other", "run-other", "/workspace/capo");
+
+    controller
+        .acquire_workspace_write_lease(&holder)
+        .expect("acquire");
+    let events_after_acquire = controller.state().event_count().expect("count");
+
+    // A different session trying to release the holder's lease conflicts.
+    let release = controller
+        .release_workspace_write_lease(&other, "not my lease")
+        .expect("cross-session release");
+    let conflict = release
+        .conflict()
+        .expect("cross-session release is a conflict");
+    assert_eq!(
+        conflict.held_by_session_id,
+        SessionId::new("session-holder")
+    );
+
+    // No event was appended, and the original holder still holds the lease.
+    assert_eq!(
+        controller.state().event_count().expect("count"),
+        events_after_acquire,
+        "a rejected cross-session release emits no event"
+    );
+    let still_held = controller
+        .workspace_lease_holder(&holder)
+        .expect("holder lookup")
+        .expect("still held by original holder");
+    assert_eq!(
+        still_held.holder_session_id,
+        SessionId::new("session-holder")
+    );
+}
+
+/// SG5 review-fix: releasing a free/never-acquired lease is a no-op that emits
+/// no event.
+#[test]
+fn sg5_release_of_free_lease_is_a_no_op() {
+    let controller =
+        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+    let scope = sg5_lease_scope("session-holder", "run-holder", "/workspace/capo");
+    let events_before = controller.state().event_count().expect("count");
+
+    let release = controller
+        .release_workspace_write_lease(&scope, "nothing held")
+        .expect("release of free lease");
+    // Modeled as `AlreadyHeldBySelf` (no conflict, nothing to release).
+    assert!(
+        release.conflict().is_none(),
+        "no-op release is not a conflict"
+    );
+    assert_eq!(
+        controller.state().event_count().expect("count"),
+        events_before,
+        "releasing a free/never-acquired lease emits no event"
+    );
+    assert!(
+        controller
+            .workspace_lease_holder(&scope)
+            .expect("holder lookup")
+            .is_none(),
+        "the lease is still free after a no-op release"
+    );
+}
+
+/// SG5 review-fix: two genuinely DISTINCT workspace roots get INDEPENDENT
+/// leases (a write under root B is not blocked by a held lease on root A), and
+/// the SAME root spelled differently (trailing slash, `.`/`..`) shares ONE
+/// lease. This proves the lease key is keyed on a collision-free encoding of the
+/// normalized path, not the lossy slug that collapsed `/srv/a/b` and `/srv/ab`.
+#[test]
+fn sg5_distinct_workspace_roots_get_independent_leases() {
+    let controller =
+        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+    // Roots that the old separator-stripping slug collapsed to one key.
+    let root_a = sg5_lease_scope("session-a", "run-a", "/srv/a/b");
+    let root_b = sg5_lease_scope("session-b", "run-b", "/srv/ab");
+
+    controller
+        .acquire_workspace_write_lease(&root_a)
+        .expect("acquire A");
+    // A write under the unrelated root B is NOT blocked by A's held lease.
+    let gate_b = controller
+        .gate_workspace_write(&root_b, true)
+        .expect("gate B");
+    assert!(
+        gate_b.allowed(),
+        "a held lease on /srv/a/b must not block a writer on /srv/ab"
+    );
+    assert!(
+        controller
+            .workspace_lease_holder(&root_b)
+            .expect("holder B")
+            .is_some(),
+        "root B now holds its own independent lease"
+    );
+
+    // The SAME root spelled differently shares ONE lease: a different session
+    // requesting `/srv/a/b/` (trailing slash) and `/srv/x/../a/b` contends with
+    // the holder of `/srv/a/b`.
+    for alias in ["/srv/a/b/", "/srv/x/../a/b", "/srv/./a/b"] {
+        let aliased = sg5_lease_scope("session-alias", "run-alias", alias);
+        let conflict = controller
+            .gate_workspace_write(&aliased, true)
+            .expect("gate alias");
+        assert!(
+            !conflict.allowed(),
+            "alias {alias} normalizes to the same lease and must conflict with the holder"
+        );
+        assert_eq!(
+            conflict.conflict().expect("conflict").held_by_session_id,
+            SessionId::new("session-a"),
+            "alias {alias} conflicts with the /srv/a/b holder"
+        );
+    }
+}

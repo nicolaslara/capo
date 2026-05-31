@@ -1,23 +1,34 @@
 //! SG5: the controller-owned single-writer workspace lock (a session-scoped
-//! write lease) that gates every tool write and workspace mutation in the real
-//! loop.
+//! write lease) -- the primitive + decide-style gate the real loop's write path
+//! drives. SG5 builds the lock and its gate seam ([`FakeBoundaryController::
+//! gate_workspace_write`]); `goal-autonomy` `GO8` is the consumer that wires it
+//! as its "no conflicting workspace lock" continuation precondition. The
+//! server's process-global `WriteSerializer` (`capo-server::transport`) remains
+//! the ACTIVE in-process write serializer; this session-scoped lease is the
+//! finer-grained primitive that path can later subsume, not a second serializer
+//! running today.
 //!
 //! Three behaviors land here:
 //!
 //! 1. ACQUIRE ([`FakeBoundaryController::acquire_workspace_write_lease`]): a
-//!    session takes the write lease for a workspace key (the canonicalized
-//!    workspace root). While no one holds it, the acquire succeeds and emits
+//!    session takes the write lease for a workspace key (a collision-free
+//!    encoding of the NORMALIZED workspace root -- see [`lease_key_segment`]).
+//!    While no one holds it, the acquire succeeds and emits
 //!    `workspace.lease_acquired`. While the SAME session already holds it, the
 //!    re-acquire is idempotent. While ANOTHER session holds it, the acquire is
 //!    REJECTED with a typed [`WorkspaceLockConflict`] -- it is never interleaved
 //!    or silently queued.
 //!
-//! 2. GATE ([`FakeBoundaryController::gate_workspace_write`]): the loop calls
-//!    this before any tool write/workspace mutation proceeds. A write is allowed
+//! 2. GATE ([`FakeBoundaryController::gate_workspace_write`]): the decide-style
+//!    seam a write path calls before a tool write/workspace mutation proceeds. A
+//!    write is allowed
 //!    only when the requesting session holds the lease (acquiring it first if
 //!    free); a write from a session that is not the holder is denied with the
 //!    same typed conflict. READS are not gated -- read-only tools pass through
-//!    untouched, even while another session holds the write lease.
+//!    untouched, even while another session holds the write lease. SG5 builds
+//!    and exercises this gate; `GO8` is the consumer that drives it from the
+//!    live loop's write classification (SG5 does not itself rewrite
+//!    `dispatch_tool_call`).
 //!
 //! 3. RELEASE ([`FakeBoundaryController::release_workspace_write_lease`]): the
 //!    holder frees the lease, emitting `workspace.lease_released`; the next
@@ -31,6 +42,8 @@
 //! `goal-autonomy` `GO8` consumes as its "no conflicting workspace lock"
 //! continuation precondition: `GO8` names the lock, `safety-gates` builds it.
 
+use std::fmt::Write as _;
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use capo_state::WorkspaceLeaseProjection;
@@ -58,9 +71,18 @@ pub struct WorkspaceLeaseScope {
     pub session_id: SessionId,
     pub run_id: RunId,
     pub turn_id: TurnId,
-    /// The canonicalized workspace root the lease is keyed on. One single-writer
-    /// lease exists per workspace key; two sessions over the same workspace
-    /// contend for the same lease.
+    /// The workspace root the lease is keyed on. It is NORMALIZED (lexically:
+    /// `.`/`..`/`//`/trailing-separator resolved) and then encoded
+    /// collision-free into the lease key via [`lease_key_segment`], so the SAME
+    /// directory spelled two ways (`/w/capo` vs `/w/x/../capo` vs `/w/capo/`)
+    /// keys the SAME lease, and two genuinely distinct roots NEVER collide to
+    /// one key. One single-writer lease exists per workspace key; two sessions
+    /// over the same workspace contend for the same lease.
+    ///
+    /// Normalization is lexical, not `fs::canonicalize`: it does not resolve
+    /// symlinks or require the path to exist on disk (the controller keys the
+    /// lease before any write touches the filesystem). A caller that wants
+    /// symlink identity should canonicalize before constructing the scope.
     pub workspace_root: String,
 }
 
@@ -70,9 +92,64 @@ impl WorkspaceLeaseScope {
     fn lease_id(&self, project_id: &ProjectId) -> String {
         format!(
             "workspace-lease-{project_id}-{}",
-            slug(&self.workspace_root)
+            lease_key_segment(&self.workspace_root)
         )
     }
+}
+
+/// Lexically normalize a workspace-root path: resolve `.`/`..`/`//` and strip a
+/// trailing separator, WITHOUT touching the filesystem. So `/w/capo`,
+/// `/w/capo/`, `/w/x/../capo`, and `/w/./capo` all normalize to `/w/capo`. A
+/// leading `..` that would escape the root is kept verbatim (there is nothing to
+/// pop), and a relative path stays relative.
+fn normalize_workspace_root(workspace_root: &str) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in Path::new(workspace_root).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Pop the last NORMAL segment; keep `..` if there is nothing to
+                // pop (a relative path that climbs above its start) or if the
+                // prefix/root is all that precedes it.
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    normalized.pop();
+                } else {
+                    normalized.push(component);
+                }
+            }
+            other => normalized.push(other),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        normalized.push(".");
+    }
+    normalized
+}
+
+/// Derive the COLLISION-FREE lease-key segment for a workspace root.
+///
+/// SG5 review-fix: the previous `slug(workspace_root)` was wrong for a security
+/// boundary key -- `slug` is built for human-readable registration labels and
+/// DROPS every non-alphanumeric char including the `/` separator, so
+/// `/srv/a/b`, `/srv/ab`, and `/work/space/capo` all collapsed to one key
+/// (false single-writer scoping / spurious conflicts), while the same root
+/// spelled differently produced different keys. Here we instead lower-hex the
+/// raw bytes of the normalized path, which is injective: two roots produce the
+/// same segment IFF their normalized paths are byte-identical. The result is
+/// ASCII-only (safe in the event id / DB key) and reversible, with no extra
+/// dependency.
+fn lease_key_segment(workspace_root: &str) -> String {
+    let normalized = normalize_workspace_root(workspace_root);
+    let bytes = normalized.as_os_str().as_encoded_bytes();
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        // Infallible: writing to a String never errors.
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
 }
 
 /// SG5: a typed rejection when a write is requested while another session holds
@@ -170,6 +247,15 @@ impl FakeBoundaryController {
     /// acquired) the lease is taken: a `workspace.lease_acquired` event is
     /// appended and the lease projection upserts to `held` with the holder/
     /// acquired_at stamped.
+    ///
+    /// CONCURRENCY: this read-then-write is NOT atomic at the DB level -- the
+    /// read-back and the `append_event` write run on separate connections with
+    /// no `BEGIN IMMEDIATE` and no `status='held'` uniqueness constraint. It is
+    /// safe ONLY because the transport serializes writers in-process (one
+    /// handler call at a time -- see `capo-state::Store::connect`). Across
+    /// independent processes this lock is NOT a hard mutual-exclusion guarantee;
+    /// the SG9 liveness-aware recovery path is what reclaims a stale lease from a
+    /// dead holder. Until that lands, treat this as in-process-serialized only.
     pub fn acquire_workspace_write_lease(
         &self,
         scope: &WorkspaceLeaseScope,
@@ -212,7 +298,20 @@ impl FakeBoundaryController {
 
         self.state.append_event(
             scoped_event(
-                &format!("event-lease-acquired-{}-{}", lease_id, scope.session_id),
+                // SG5 review-fix: the event id MUST be unique per acquisition.
+                // It previously was `event-lease-acquired-{lease}-{session}`,
+                // deterministic per (lease, session) -- so an acquire -> release
+                // -> re-acquire by the SAME session produced the identical
+                // idempotency_key as the first acquire, and `append_event` hit
+                // its idempotency early-return: it committed nothing, the HELD
+                // projection was NOT re-applied, yet this function still returned
+                // `Acquired` (phantom acquire breaking single-writer). Including
+                // `acquired_at` (mirroring the release event id) makes each
+                // acquisition's id distinct so the re-acquire actually re-holds.
+                &format!(
+                    "event-lease-acquired-{}-{}-{}",
+                    lease_id, scope.session_id, acquired_at
+                ),
                 EventKind::WorkspaceLeaseAcquired,
                 &self.project_id,
                 &scope.task_id,

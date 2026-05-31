@@ -424,7 +424,11 @@ Status: done.
 Acceptance:
 
 - Add a controller-owned single-writer workspace lock (a session-scoped write
-  lease) that gates all tool writes and workspace mutations in the real loop.
+  lease) plus the decide-style gate seam (`gate_workspace_write`) the real
+  loop's write path drives. SG5 builds and proves the lock + seam; `goal-autonomy`
+  `GO8` is the consumer that wires the gate onto the live write classification
+  (SG5 does not itself rewrite `dispatch_tool_call`, and it does not replace the
+  server's `WriteSerializer`, which stays the active in-process serializer).
 - The lock REJECTS a second concurrent writer rather than interleaving: while a
   session holds the lease, a write request from another session/run is denied
   with a typed conflict outcome.
@@ -464,7 +468,9 @@ Evidence:
   event log via `rebuild_projections`.
 - Controller-owned single-writer lock: new
   `crates/capo-controller/src/workspace_lock.rs` adds `WorkspaceLeaseScope`
-  (keys the lease on the canonicalized workspace root, project-scoped) and the
+  (keys the lease on a COLLISION-FREE lower-hex encoding of the lexically
+  NORMALIZED workspace root, project-scoped -- not the lossy `slug`, which
+  dropped path separators and collapsed distinct roots) and the
   typed `acquire_workspace_write_lease` (read-back FIRST: a held lease owned by
   ANOTHER session is REJECTED with a typed `WorkspaceLockConflict` carrying an
   agent-readable message; the SAME session re-acquire is idempotent with no new
@@ -480,14 +486,20 @@ Evidence:
   `knowledge.md`.
 - Tests: `crates/capo-state/src/tests.rs` adds two `sg5_*` tests (event-kind
   wire round-trip; lease projection persists + rebuilds identically across a
-  restart for acquire->release). `crates/capo-controller/src/tests.rs` adds four
+  restart for acquire->release). `crates/capo-controller/src/tests.rs` adds eight
   `sg5_*` tests: lock contention (holder acquires, second writer rejected with a
   typed conflict via both `gate_workspace_write` and a direct acquire, holder
   releases, second writer then succeeds), reads-not-blocked (another session's
   read and the holder's own read pass while the write lease is held),
   restart/replay (acquire->release->re-acquire-by-another rebuilds identically
   from the event log and the lock still rejects a stale contender after
-  rebuild), and idempotent self re-acquire (no new event).
+  rebuild), idempotent self re-acquire (no new event), and the review-fix
+  regressions: same-session acquire->release->re-acquire actually re-holds and
+  appends a new event (was a phantom acquire silently deduped by the event
+  idempotency layer); cross-session release conflicts and leaves the original
+  holder; release of a free lease is a no-op emitting no event; and two distinct
+  workspace roots (`/srv/a/b` vs `/srv/ab`) get independent leases while the same
+  root spelled with `.`/`..`/trailing-slash shares one lease (collision-free key).
 - Commands run (from `/Users/nicolas/devel/capo-wt/safety-gates`):
   `cargo test -p capo-state sg5` (2 passed), `cargo test -p capo-controller sg5`
   (4 passed), `cargo fmt --check` (exit 0 after `cargo fmt`),

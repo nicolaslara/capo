@@ -205,8 +205,8 @@ also participate: a deny grant blocks even non-critical scopes.
 
 ## Single-Writer Workspace Lock (SG5)
 
-A controller-owned single-writer workspace lock (a session-scoped write lease)
-gates all tool writes and workspace mutations in the real loop. It REJECTS a
+A controller-owned single-writer workspace lock (a session-scoped write lease) +
+its decide-style gate seam (`gate_workspace_write`). It REJECTS a
 second concurrent writer rather than interleaving: while a session holds the
 lease, a write request from another session/run is denied with a typed conflict
 outcome. Acquire/release is event-sourced so the lock survives restart and
@@ -216,6 +216,30 @@ blocked. This is necessary because `streaming-transport` delivers a multi-client
 broadcast surface and `tools-aci` delivers `file_write`/edit/patch, so two
 clients or a client plus a continuation can drive concurrent writes; without the
 lock those interleave silently.
+
+SCOPE (corrected after review): SG5 builds the lock primitive and its gate seam
+and proves both with contention/replay/regression tests. SG5 does NOT itself
+rewrite `dispatch_tool_call` to call `gate_workspace_write` on every write tool,
+and it does NOT replace the server's process-global `WriteSerializer`
+(`capo-server::transport`), which remains the ACTIVE in-process write serializer
+that today defends the multi-client concurrent-writer scenario above. The
+session-scoped lease is the finer-grained primitive the `WriteSerializer`
+placeholder anticipated and that `goal-autonomy` `GO8` drives from the live
+loop's write classification; the actual loop/transport wiring lands with that
+consumer, not in SG5.
+
+Lease key (corrected after review): the lease is keyed on a COLLISION-FREE
+lower-hex encoding of the LEXICALLY-NORMALIZED workspace root (`.`/`..`/`//`/
+trailing-separator resolved), not the human-readable `slug` (which dropped path
+separators and collapsed distinct roots like `/srv/a/b` and `/srv/ab` to one
+key). The same root spelled differently keys one lease; distinct roots never
+collide. Normalization is lexical, not `fs::canonicalize` (no symlink
+resolution, no on-disk existence required).
+
+Concurrency caveat: acquire is a read-then-write across two connections (no
+`BEGIN IMMEDIATE`, no DB uniqueness on `status='held'`), so the single-writer
+guarantee relies on the transport serializing writers in-process; it is not a
+hard cross-process mutex until SG9's liveness-aware reclaim lands.
 
 Contract for `goal-autonomy`: this is the primitive `GO8` consumes as its "no
 conflicting workspace lock" continuation precondition. `GO8` names the lock but
