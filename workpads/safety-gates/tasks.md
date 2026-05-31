@@ -341,7 +341,7 @@ Evidence:
 
 ## SG4 - Fix TrustedLocal Critical-Scope Exclusion
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -372,6 +372,50 @@ Verification:
 - Focused `cargo test -p capo-tools` asserting that with an explicit grant
   present, the same critical-scope request allows.
 - `cargo fmt`.
+
+Evidence:
+
+- Critical-scope enumeration + classifier: `crates/capo-tools/src/permission.rs`
+  adds a pure `critical_scope_kind(scope) -> Option<CriticalScope>` classifier
+  matching the four enumerated critical scopes from `capability-permissions.md`:
+  source-write outside the workspace (`filesystem:write:path`), network egress
+  (`network:connect:internet`, `network:expose:public`), secret/credential read
+  (`secret:read:credential_material`), and arbitrary shell (`shell:execute:path`).
+  Every other scope (workspace read/write, `git:status`/`git:diff`,
+  `shell:execute:workspace`, `filesystem:write:workspace`, `secret:read:provider_metadata`,
+  Capo tool invocation) classifies as non-critical, so the TrustedLocal audit-only
+  allow is unchanged for ordinary local work.
+- TrustedLocal fix: `AllowTrustedLocalProfilePolicy` was a unit struct returning a
+  literal `effect = "allow"` for every request. It now carries a
+  `granted_critical_scopes: Vec<String>` set (empty by default --
+  `PermissionPolicy::allow_trusted_local()` is unchanged and grants NO critical
+  scope). `decide()` parses the request's scope array and DENIES
+  (`effect = "deny"`, `decision_source = "allow_trusted_local_profile"`,
+  `persistence = "once"`, deny-keyed `capability_grant_id`, explanation naming the
+  scope) when any requested scope is critical and not explicitly granted. A request
+  bundling a non-critical scope with an un-granted critical scope is denied as a
+  whole (no laundering), and malformed scope json fails closed (deny). When an
+  explicit grant is present (new `PermissionPolicy::allow_trusted_local_with_grants(..)`
+  constructor re-admitting named critical scopes), the SAME critical-scope request
+  allows with the prior `until_session_end` audit-allow shape. `allow_trusted_local()`
+  stays the controller default (`crates/capo-controller/src/lib.rs:79`), now no
+  longer blanket-allow on critical scopes. (The SG3 controller grant read-back path
+  already authorizes a durable-store allow grant BEFORE the policy, so a durable
+  explicit grant also re-admits a critical scope through the loop.)
+- Tests: `crates/capo-tools/src/tests.rs` adds six SG4 tests --
+  `sg4_trusted_local_denies_each_ungranted_critical_scope` (one assertion per
+  enumerated critical scope), `sg4_critical_scope_classifier_covers_enumerated_scopes`,
+  `sg4_trusted_local_still_allows_non_critical_workspace_request`,
+  `sg4_trusted_local_denies_when_critical_mixed_with_non_critical`,
+  `sg4_explicit_grant_re_admits_critical_scope` (per-scope: grant allows it, a
+  different un-granted critical scope still denies), and
+  `sg4_trusted_local_fails_closed_on_malformed_scope_json`.
+- Commands run (from `/Users/nicolas/devel/capo-wt/safety-gates`):
+  `cargo test -p capo-tools sg4` (6 passed), `cargo fmt --check` (exit 0 after
+  `cargo fmt`), `cargo clippy --all-targets --all-features -- -D warnings` (exit 0,
+  no warnings), `cargo test --workspace` (exit 0; 0 failed workspace-wide;
+  capo-tools 113 passed/0 failed/0 ignored). Acceptance met. No live Codex smoke
+  required for this task.
 
 ## SG5 - Single-Writer Workspace Lock / Session-Scoped Write Lease
 

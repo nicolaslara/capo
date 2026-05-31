@@ -1007,6 +1007,185 @@ fn grant_ids_include_scope_identity() {
     );
 }
 
+// --- SG4: TrustedLocal critical-scope exclusion ----------------------------
+
+/// SG4: the enumerated critical scopes from `capability-permissions.md` that
+/// TrustedLocal must DENY without an explicit grant: source-write outside the
+/// workspace, network egress (connect + public expose), secret/credential read,
+/// and arbitrary shell.
+const SG4_CRITICAL_SCOPES: &[&str] = &[
+    "filesystem:write:path",
+    "network:connect:internet",
+    "network:expose:public",
+    "secret:read:credential_material",
+    "shell:execute:path",
+];
+
+fn sg4_trusted_local_decision(policy: &PermissionPolicy, scope: &str) -> PermissionDecision {
+    policy.decide(PermissionRequest {
+        session_id: SessionId::new("session-sg4"),
+        capability_profile_id: "trusted-local-dev".to_string(),
+        scope_json: json_array(vec![scope]),
+    })
+}
+
+#[test]
+fn sg4_trusted_local_denies_each_ungranted_critical_scope() {
+    // SG4: under the default TrustedLocal policy (no explicit critical grants),
+    // EVERY enumerated critical scope is denied -- one assertion per scope.
+    let policy = PermissionPolicy::allow_trusted_local();
+    for scope in SG4_CRITICAL_SCOPES {
+        let decision = sg4_trusted_local_decision(&policy, scope);
+        assert_eq!(
+            decision.effect, "deny",
+            "critical scope `{scope}` must be denied under default TrustedLocal"
+        );
+        assert_eq!(decision.decision_source, "allow_trusted_local_profile");
+        assert_eq!(decision.persistence, "once");
+        assert!(
+            decision.explanation.contains(scope),
+            "denial explanation should name the critical scope `{scope}`, got: {}",
+            decision.explanation
+        );
+        assert!(
+            decision
+                .capability_grant_id
+                .starts_with("grant-session-sg4-deny-"),
+            "deny decision should mint a deny-keyed grant id, got: {}",
+            decision.capability_grant_id
+        );
+    }
+}
+
+#[test]
+fn sg4_critical_scope_classifier_covers_enumerated_scopes() {
+    // SG4: the classifier flags exactly the enumerated critical scopes and treats
+    // the workspace-scoped variants as non-critical.
+    assert_eq!(
+        critical_scope_kind("filesystem:write:path"),
+        Some(CriticalScope::SourceWriteOutsideWorkspace)
+    );
+    assert_eq!(
+        critical_scope_kind("network:connect:internet"),
+        Some(CriticalScope::NetworkEgress)
+    );
+    assert_eq!(
+        critical_scope_kind("network:expose:public"),
+        Some(CriticalScope::NetworkEgress)
+    );
+    assert_eq!(
+        critical_scope_kind("secret:read:credential_material"),
+        Some(CriticalScope::SecretRead)
+    );
+    assert_eq!(
+        critical_scope_kind("shell:execute:path"),
+        Some(CriticalScope::ArbitraryShell)
+    );
+    // Non-critical: workspace-scoped writes/shell, git, secret metadata, tool calls.
+    for non_critical in [
+        "filesystem:write:workspace",
+        "filesystem:read:workspace",
+        "shell:execute:workspace",
+        "git:status:workspace",
+        "git:diff:workspace",
+        "network:connect:localhost",
+        "secret:read:provider_metadata",
+        "tool:invoke:capo.file_write",
+    ] {
+        assert_eq!(
+            critical_scope_kind(non_critical),
+            None,
+            "`{non_critical}` must be treated as non-critical"
+        );
+    }
+}
+
+#[test]
+fn sg4_trusted_local_still_allows_non_critical_workspace_request() {
+    // SG4: ordinary local work (workspace write, git diff, Capo tool invocation)
+    // keeps the audit-only allow with the SAME durable decision shape.
+    let policy = PermissionPolicy::allow_trusted_local();
+    let decision = policy.decide(PermissionRequest {
+        session_id: SessionId::new("session-sg4"),
+        capability_profile_id: "trusted-local-dev".to_string(),
+        scope_json: json_array(vec![
+            "tool:invoke:capo.file_write",
+            "filesystem:write:workspace",
+            "git:diff:workspace",
+        ]),
+    });
+    assert_eq!(decision.effect, "allow");
+    assert_eq!(decision.decision_source, "allow_trusted_local_profile");
+    assert_eq!(decision.persistence, "until_session_end");
+    assert!(
+        decision
+            .capability_grant_id
+            .starts_with("grant-session-sg4-allow-")
+    );
+    assert!(decision.explanation.contains("audited local prototype"));
+}
+
+#[test]
+fn sg4_trusted_local_denies_when_critical_mixed_with_non_critical() {
+    // SG4: a request that bundles a non-critical scope with an un-granted critical
+    // scope is denied as a whole -- the critical scope is not laundered through.
+    let policy = PermissionPolicy::allow_trusted_local();
+    let decision = policy.decide(PermissionRequest {
+        session_id: SessionId::new("session-sg4"),
+        capability_profile_id: "trusted-local-dev".to_string(),
+        scope_json: json_array(vec![
+            "filesystem:read:workspace",
+            "network:connect:internet",
+        ]),
+    });
+    assert_eq!(decision.effect, "deny");
+    assert!(decision.explanation.contains("network:connect:internet"));
+}
+
+#[test]
+fn sg4_explicit_grant_re_admits_critical_scope() {
+    // SG4: with an explicit grant present, the SAME critical-scope request that the
+    // default policy denies now ALLOWS -- one assertion per enumerated scope. A
+    // critical scope NOT in the grant set is still denied.
+    for scope in SG4_CRITICAL_SCOPES {
+        let granted = PermissionPolicy::allow_trusted_local_with_grants([scope.to_string()]);
+        let allowed = sg4_trusted_local_decision(&granted, scope);
+        assert_eq!(
+            allowed.effect, "allow",
+            "explicitly granted critical scope `{scope}` must allow"
+        );
+        assert_eq!(allowed.decision_source, "allow_trusted_local_profile");
+        assert_eq!(allowed.persistence, "until_session_end");
+
+        // A different critical scope, not in this grant set, stays denied.
+        let other = SG4_CRITICAL_SCOPES
+            .iter()
+            .find(|candidate| {
+                **candidate != *scope
+                    && critical_scope_kind(candidate) != critical_scope_kind(scope)
+            })
+            .expect("another critical scope of a different category exists");
+        let still_denied = sg4_trusted_local_decision(&granted, other);
+        assert_eq!(
+            still_denied.effect, "deny",
+            "un-granted critical scope `{other}` must stay denied when only `{scope}` is granted"
+        );
+    }
+}
+
+#[test]
+fn sg4_trusted_local_fails_closed_on_malformed_scope_json() {
+    // SG4: malformed scope json is a deny (fail-closed), not a blanket allow.
+    let policy = PermissionPolicy::allow_trusted_local();
+    let decision = policy.decide(PermissionRequest {
+        session_id: SessionId::new("session-sg4"),
+        capability_profile_id: "trusted-local-dev".to_string(),
+        scope_json: "{\"filesystem:write:path\":true}".to_string(),
+    });
+    assert_eq!(decision.effect, "deny");
+    assert_eq!(decision.decision_source, "allow_trusted_local_profile");
+}
+
 // --- ACI3: narrow typed wrapper output + tightened file_write ---------------
 
 #[test]
