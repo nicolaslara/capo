@@ -530,7 +530,7 @@ Must not do:
 
 ## ST9 - Publish The JSON-RPC/SSE Schema And Checked-In Wire Snapshots
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -551,6 +551,49 @@ Verification:
 - Snapshot tests over the checked-in wire fixtures (regenerate-and-diff).
 - `cargo fmt` and focused `cargo test -p capo-server`.
 - `git diff --check`.
+
+Evidence:
+
+- The contract is published from one in-code source,
+  `crates/capo-server/src/transport/contract.rs` (re-exported as
+  `capo_server::contract`): `wire_samples()` builds every frame through the
+  SAME `jsonrpc`/`codec`/`EventNotification` path the live transport uses (never
+  hand-typed JSON), `contract_schema()` is the language-neutral schema, and
+  `sse_frame()` is the canonical SSE `event:`/`data:` block whose data line is
+  the verbatim JSON-RPC `event` notification (so SSE and the raw socket carry one
+  wire shape; `capo-web`/ST8 is not in this worktree, so the SSE shape is pinned
+  here at the contract level and ST8 reuses `contract::sse_frame`).
+- Checked-in artifacts under `crates/capo-server/contract/`:
+  `jsonrpc-schema.json` (described schema), `snapshots/*.json` (11 enforced wire
+  frames -- requests `list_agents`/`subscribe`/`read_thread`, responses
+  `agents`/`subscribed`, the `cancelled` error frame pinning
+  `error.code=-32603` + `error.data.kind`, the server `event` tail and client
+  `cancel`/`interrupt` notifications, and the `sse-event-tail` block),
+  `capo-wire.d.ts` (the OPTIONAL downstream TypeScript types, explicitly
+  generated FROM the schema and owned web-side -- not the contract), and
+  `README.md` (the cross-team handoff + regeneration workflow).
+- Schema-representation decision recorded in `knowledge.md`
+  ("Schema-representation decision", resolving the second open question):
+  hand-authored JSON-Schema-shaped definitions checked by snapshot, with the
+  real serialized snapshots as the enforced source of truth (rejecting derived
+  JSON Schema and an IDL, with reasons). The snapshots cannot drift silently:
+  `tests::contract::wire_snapshots_match_the_checked_in_contract` and
+  `jsonrpc_schema_matches_the_checked_in_contract` assert byte-equality against
+  the checked-in files (regenerate-and-diff via `CAPO_REGENERATE_WIRE_SNAPSHOTS=1`;
+  the default run only reads and asserts). The described schema cannot lag the
+  code either: `schema_enumerations_cover_every_wire_variant` uses
+  compile-enforced exhaustive `match`es over every
+  `ServerCommand`/`ServerResponsePayload`/`ServerError` variant, so a new variant
+  is a build error until its wire tag is added to the published schema.
+  `every_snapshot_frame_is_valid_json_rpc_2_0` and
+  `schema_method_and_notification_names_are_covered_by_snapshots` keep the two
+  halves consistent. All verified WITHOUT any web client (frames built from typed
+  values through the production codec).
+- Objective gate run from `/Users/nicolas/devel/capo-wt/streaming-transport`:
+  `cargo fmt --check` ok; `cargo clippy --all-targets --all-features -- -D
+  warnings` ok; `cargo test --workspace` ok (0 failures workspace-wide;
+  capo-server 82 passed/1 ignored including the 5 new `tests::contract` cases).
+  `git diff --check` clean.
 
 ## ST10 - Cross-Team Handoff For The Web Agent
 

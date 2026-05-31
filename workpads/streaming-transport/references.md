@@ -62,6 +62,20 @@ workpad. Dated claims reflect the observed state on 2026-05-29.
     There is no JSON-RPC `id`, no notification shape, and no method dispatch;
     this is the codec layer JSON-RPC 2.0 framing replaces while preserving
     `request_id`/origin propagation.
+- `crates/capo-server/src/transport/contract.rs` and
+  `crates/capo-server/contract/` -- the published wire contract (ST9)
+  - Key facts: `contract.rs` (re-exported as `capo_server::contract`) is the
+    single in-code source for the published contract -- `wire_samples()` emits
+    real frames through the live `jsonrpc`/`codec`/`EventNotification` path,
+    `contract_schema()` is the language-neutral schema, and `sse_frame()` is the
+    canonical SSE block. The checked-in `contract/` dir holds
+    `jsonrpc-schema.json` (described schema), `snapshots/*.json` (11 enforced
+    wire frames), `capo-wire.d.ts` (optional downstream TS types from the
+    schema), and `README.md` (cross-team handoff). The regenerate-and-diff
+    `tests::contract` cases (run `CAPO_REGENERATE_WIRE_SNAPSHOTS=1` to rewrite)
+    fail on any byte-level wire drift, and a compile-enforced exhaustive `match`
+    over the command/payload/error enums keeps the schema from lagging the code.
+    All verified without a web client.
 - `crates/capo-server/src/types.rs` -- `ServerCommand` and `ServerResponsePayload`
   - Key facts: `ServerCommand` is a closed enum (`SteerAgent`, `StopAgent`,
     `Dashboard { recent_event_limit }`, `PlanDispatch`/`GateDispatch`/

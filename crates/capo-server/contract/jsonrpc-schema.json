@@ -1,0 +1,352 @@
+{
+  "$id": "https://capo.local/contract/jsonrpc-event-stream/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "components": {
+    "event": {
+      "description": "One committed event, identical in the Subscribed backlog and the live `event` notification.",
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event_id": {
+          "type": "string"
+        },
+        "item_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "payload_json": {
+          "description": "The event body, already redacted on egress (ST7).",
+          "type": "string"
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "redaction_state": {
+          "description": "Egress classification; a withheld/sensitive body is downgraded to `redacted`.",
+          "type": "string"
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sequence": {
+          "description": "Monotonic commit watermark; resume a Subscribe from here.",
+          "type": "integer"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "sequence",
+        "event_id",
+        "kind",
+        "actor",
+        "payload_json",
+        "redaction_state"
+      ],
+      "type": "object"
+    },
+    "input_origin": {
+      "enum": [
+        "cli",
+        "dashboard",
+        "mobile",
+        "voice",
+        "api",
+        "system"
+      ],
+      "type": "string"
+    },
+    "origin": {
+      "properties": {
+        "actor_id": {
+          "type": "string"
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "input_origin": {
+          "$ref": "#/components/input_origin"
+        }
+      },
+      "required": [
+        "client_id",
+        "actor_id",
+        "input_origin"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "The authoritative, web-client-independent wire contract for the Capo server transport: JSON-RPC 2.0 request/response framing over a persistent bidirectional connection, a server-initiated notification variant carrying the live event tail, client-initiated cancel/interrupt notifications, and the SSE re-exposure a browser bridge consumes. Checked-in wire snapshots under contract/snapshots/ are the enforced source of truth; this schema is the described companion. TypeScript types under contract/ are an optional downstream convenience generated from this schema, not the contract itself.",
+  "envelope": {
+    "error_response": {
+      "description": "Server -> client. id is null when the request could not be parsed.",
+      "properties": {
+        "error": {
+          "properties": {
+            "code": {
+              "const": -32603,
+              "description": "Always JSON-RPC Internal error; the precise kind is in data.kind."
+            },
+            "data": {
+              "properties": {
+                "kind": {
+                  "description": "Machine-readable Capo error kind clients branch on.",
+                  "enum": [
+                    "io",
+                    "json",
+                    "protocol",
+                    "state",
+                    "adapter_fixture",
+                    "unknown_agent",
+                    "agent_has_no_active_session",
+                    "agent_already_has_session",
+                    "session_already_exists",
+                    "run_already_exists",
+                    "unknown_dispatch_plan",
+                    "unknown_session",
+                    "run_session_mismatch",
+                    "adapter_session_mismatch",
+                    "remote",
+                    "cancelled",
+                    "interrupted"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "data"
+          ],
+          "type": "object"
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "jsonrpc": {
+          "const": "2.0"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "error"
+      ]
+    },
+    "jsonrpc": {
+      "const": "2.0",
+      "description": "Every frame on the connection (and inside an SSE data line) is JSON-RPC 2.0."
+    },
+    "notification": {
+      "description": "No id. Server-initiated (the live event tail) or client-initiated (cancel/interrupt).",
+      "properties": {
+        "id": {
+          "description": "A notification MUST NOT carry an id.",
+          "not": {}
+        },
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "method": {
+          "enum": [
+            "event",
+            "cancel",
+            "interrupt"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "method",
+        "params"
+      ]
+    },
+    "request": {
+      "description": "Client -> server. The JSON-RPC id mirrors the existing request_id (idempotency key).",
+      "properties": {
+        "id": {
+          "description": "The request_id; echoed on the matching response.",
+          "type": "string"
+        },
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "method": {
+          "description": "The ServerCommand discriminant (snake_case type tag).",
+          "enum": [
+            "register_agent",
+            "send_task",
+            "steer_agent",
+            "interrupt_agent",
+            "stop_agent",
+            "list_agents",
+            "agent_status",
+            "dashboard",
+            "start_session",
+            "replay_adapter_fixture",
+            "plan_dispatch",
+            "preflight_live_provider",
+            "gate_dispatch",
+            "run_dispatch_local",
+            "run_live_provider_local",
+            "recover",
+            "subscribe",
+            "read_thread"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "description": "The command fields plus a reserved `origin` object.",
+          "properties": {
+            "origin": {
+              "$ref": "#/components/origin"
+            }
+          },
+          "required": [
+            "origin"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "sse": {
+      "data_is": "the JSON-RPC `event` notification frame, verbatim",
+      "description": "A browser bridge re-exposes each `event` notification over Server-Sent Events as `event: <name>\\ndata: <json-rpc notification frame>\\n\\n`. The data line is byte-for-byte the JSON-RPC notification, so SSE and the raw socket carry the same wire shape.",
+      "event_name": "event"
+    },
+    "success_response": {
+      "description": "Server -> client. Carries the matching id and a typed result.payload.",
+      "properties": {
+        "id": {
+          "description": "Mirrors the request id.",
+          "type": "string"
+        },
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "result": {
+          "properties": {
+            "actor_id": {
+              "type": "string"
+            },
+            "client_id": {
+              "type": "string"
+            },
+            "input_origin": {
+              "$ref": "#/components/input_origin"
+            },
+            "payload": {
+              "description": "Tagged by `type`; one of the ServerResponsePayload variants.",
+              "properties": {
+                "type": {
+                  "enum": [
+                    "agent_registered",
+                    "task_sent",
+                    "agents",
+                    "agent_status",
+                    "dashboard",
+                    "session_started",
+                    "adapter_fixture_replayed",
+                    "dispatch_planned",
+                    "live_provider_preflighted",
+                    "dispatch_gated",
+                    "dispatch_run",
+                    "recovery",
+                    "subscribed",
+                    "thread"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "client_id",
+            "actor_id",
+            "input_origin",
+            "payload"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "result"
+      ]
+    }
+  },
+  "methods": {
+    "_note": "Every ServerCommand maps 1:1 onto a method; see envelope.request.method.enum for the full set.",
+    "list_agents": "List registered agents. No params beyond origin.",
+    "read_thread": "Read a session's projected multi-turn thread incrementally from from_sequence.",
+    "subscribe": "Open the event tail: catch-up backlog strictly after from_sequence, then live `event` notifications."
+  },
+  "notifications": {
+    "cancel": "Client -> server. Abort one in-flight request by params.request_id (request-id-scoped).",
+    "event": "Server -> client. One committed event on the live tail; params.event is the shared event shape.",
+    "interrupt": "Client -> server. Typed mid-turn interrupt of params.session_id with params.reason (session-scoped)."
+  },
+  "title": "Capo JSON-RPC 2.0 + event-stream wire contract",
+  "version": "1"
+}

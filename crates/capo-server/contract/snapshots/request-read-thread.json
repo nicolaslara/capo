@@ -1,0 +1,1 @@
+{"id":"req-read-thread-1","jsonrpc":"2.0","method":"read_thread","params":{"from_sequence":7,"origin":{"actor_id":"local-user","client_id":"local-cli","input_origin":"cli"},"session_id":"session-demo"}}

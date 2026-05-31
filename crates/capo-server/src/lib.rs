@@ -33,6 +33,7 @@ pub use safety_floor::{
     LIVE_WRITE_OPT_IN_ENV, RunTurnRef, WorkspaceCheckpoint, WorkspaceWriteOutcome,
     WorkspaceWriteRequest, WriteMode, resolve_write_mode, resolve_write_mode_with_env,
 };
+pub use transport::contract;
 pub use transport::{
     CancellationToken, EVENT_TAIL_METHOD, EventNotification, TransportError, interrupt_frame,
     send_interrupt, send_tcp, serve_tcp,

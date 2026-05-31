@@ -87,6 +87,7 @@ use capo_core::ProjectId;
 use serde_json::Value;
 
 mod codec;
+pub mod contract;
 mod jsonrpc;
 mod wire;
 

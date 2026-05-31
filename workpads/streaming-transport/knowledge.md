@@ -246,10 +246,63 @@ The authoritative web contract is a language-neutral JSON-RPC/SSE schema plus
 checked-in wire snapshots (request, response, notification, and SSE-frame
 samples) generated from real serialization and verified without any web client.
 Snapshot tests fail on an unintended wire-shape change so the contract cannot
-drift silently. The schema-representation choice (JSON Schema vs an IDL vs
-hand-authored typed definitions checked by snapshot) is the second open
-question; whichever is chosen, the checked-in snapshots remain the enforced
-source of truth.
+drift silently.
+
+### Schema-representation decision (ST9, resolves the second open question)
+
+Choice: **hand-authored, JSON-Schema-shaped definitions checked by snapshot**,
+with the checked-in wire snapshots as the *enforced* source of truth and the
+schema as the *described* companion. Rejected alternatives:
+
+- **Pure JSON Schema generated from the Rust types** (e.g. `schemars`): the wire
+  shape is produced by a hand-written codec (`transport/codec.rs`,
+  `transport/jsonrpc.rs`), not by `#[derive(Serialize)]` on the domain types
+  (the JSON-RPC `id`/`origin`/`params` envelope is assembled by hand, and
+  `payload_json` is an opaque string). A derived schema would describe the Rust
+  structs, not the actual frames, so it could pass while the wire drifted. It
+  also pulls a derive dependency into the domain crate purely for docs.
+- **An IDL (protobuf / OpenRPC / Smithy)**: heavier toolchain, a build step, and
+  a second source of truth to keep in sync, for a loopback JSON-RPC contract
+  whose real risk is *frame drift*, not multi-language codegen. Codegen is a
+  web-side convenience, not the contract.
+
+Why snapshots are the source of truth: the only thing that can silently break a
+client is a byte-level change to an emitted frame. So the enforced artifact is a
+set of *real serialized frames* produced by the **same** `jsonrpc`/`codec`/
+`EventNotification` path the live transport uses (never hand-typed JSON), stored
+under `crates/capo-server/contract/snapshots/` and asserted byte-for-byte by a
+regenerate-and-diff test (`CAPO_REGENERATE_WIRE_SNAPSHOTS=1` rewrites them; the
+default run only reads and asserts, so CI fails on unintended drift). The
+hand-authored schema (`contract/jsonrpc-schema.json`) documents the envelope
+grammar, the method/payload/error-kind vocabularies, the notification variant,
+and the SSE framing; a compile-enforced exhaustive `match` over every
+`ServerCommand`/`ServerResponsePayload`/`ServerError` variant in the contract
+test makes a new variant a build error until its wire tag is added to the
+schema, so the described schema cannot silently lag the code.
+
+### What is published (ST9)
+
+- `crates/capo-server/src/transport/contract.rs` -- the single in-code source:
+  `wire_samples()` (real frames), `contract_schema()` (the schema), and
+  `sse_frame()` (the canonical SSE `event:`/`data:` block; the data line is the
+  verbatim JSON-RPC `event` notification, so SSE and the raw socket carry one
+  wire shape). Re-exported as `capo_server::contract`.
+- `crates/capo-server/contract/jsonrpc-schema.json` -- the checked-in schema.
+- `crates/capo-server/contract/snapshots/*.json` -- 11 checked-in frames:
+  three request frames (`list_agents`, `subscribe`, `read_thread`), two success
+  responses (`agents`, `subscribed`), one error response (`cancelled`, pinning
+  `error.code=-32603` + `error.data.kind`), three notifications (server `event`
+  tail, client `cancel`, client `interrupt`), and the SSE re-exposure.
+- `crates/capo-server/contract/capo-wire.d.ts` -- the **optional** downstream
+  TypeScript types, explicitly generated FROM the schema and owned web-side;
+  not the contract. `contract/README.md` documents the cross-team handoff
+  (subscribe -> backlog -> live tail / SSE, advancing the `from_sequence`
+  watermark) and the regeneration workflow.
+
+SSE note: `capo-web` is not built in this worktree (ST8 is pending), so the SSE
+framing is pinned at the contract level by the `sse-event-tail` snapshot rather
+than by a live `capo-web` test; ST8 reuses `contract::sse_frame` so the bridge
+cannot invent a divergent SSE shape.
 
 ## Non-Goals
 
@@ -275,8 +328,11 @@ source of truth.
   server `Send`, or wrap it in an actor/channel handle? `capo-web` currently
   works around it via per-request `spawn_blocking`, which cannot hold a
   long-lived tail.
-- Does the JSON-RPC schema get published as JSON Schema, an IDL, or
-  hand-authored typed definitions checked by snapshot tests?
+- RESOLVED (ST9): the JSON-RPC schema is published as hand-authored,
+  JSON-Schema-shaped definitions (`contract/jsonrpc-schema.json`) with the
+  checked-in wire snapshots (`contract/snapshots/*.json`) as the enforced source
+  of truth, not generated JSON Schema or an IDL. See "Schema-representation
+  decision" above.
 - Where exactly is the broadcast channel fed from so a committed event is never
   fanned out before it is durably appended (avoiding a live event ahead of the
   watermark a reconnecting subscriber would later miss)?

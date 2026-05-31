@@ -1,0 +1,1 @@
+{"error":{"code":-32603,"data":{"kind":"cancelled"},"message":"request req-subscribe-1 cancelled by in-band cancel"},"id":"req-subscribe-1","jsonrpc":"2.0"}

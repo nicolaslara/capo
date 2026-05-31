@@ -1,0 +1,4 @@
+event: event
+data: {"jsonrpc":"2.0","method":"event","params":{"event":{"actor":"local-user","agent_id":"agent-demo","event_id":"event-0000000044","item_id":"item-7","kind":"session.summary_updated","payload_json":"{\"summary\":\"inspected workspace state\"}","project_id":"project-capo","redaction_state":"safe","run_id":"run-demo","sequence":44,"session_id":"session-demo","task_id":"task-demo","turn_id":"turn-2"}}}
+
+
