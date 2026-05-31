@@ -9,6 +9,7 @@ mod adapter;
 mod codex_live;
 mod event;
 mod local_subscription;
+mod permission_request;
 mod provider_parsers;
 mod scripted_mock_agent;
 
@@ -29,6 +30,11 @@ pub use event::{
 pub use local_subscription::{
     LocalAdapterLaunchPlan, LocalAdapterSmokeError, LocalAdapterSmokePlan, LocalAdapterSmokeResult,
     LocalAdapterSmokeRunner, scan_artifacts_for_sensitive_markers,
+};
+pub use permission_request::{
+    AcpOptionMapping, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionOutcome,
+    AdapterPermissionCancelReason, AdapterPermissionRequest, AdapterPermissionResponse,
+    map_acp_options_trusted_local,
 };
 pub use provider_parsers::{AcpAdapter, ClaudeCodeAdapter, CodexExecAdapter};
 pub use scripted_mock_agent::{ScriptedMockAgent, ScriptedMockEvent, ScriptedMockTurn};

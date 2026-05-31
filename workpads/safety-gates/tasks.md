@@ -158,7 +158,7 @@ Evidence:
 
 ## SG2 - AgentAdapter Permission Round-Trip And ACP Option Mapping Against Fakes
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -192,6 +192,50 @@ Must not do:
 
 - Do not implement or depend on a live ACP JSON-RPC adapter; this task is
   fixture and option-mapping only.
+
+Evidence:
+
+- Provider-neutral round-trip types added in `capo-adapters` (NOT `Fake*`-named):
+  `crates/capo-adapters/src/permission_request.rs` defines
+  `AdapterPermissionRequest` (carrying the ACP `PermissionOption[]` --
+  `AcpPermissionOption`/`AcpPermissionOptionKind`), `AdapterPermissionResponse`
+  (the ACP `AcpPermissionOutcome` `selected{option_id}`/`cancelled` plus the Capo
+  decision/grant identity), and the pure `map_acp_options_trusted_local` mapping
+  implementing the `capability-permissions.md` table (lines 383-397):
+  `allow_once` -> allow `until_turn_end`; `allow_always` alone -> allow
+  DOWNSCOPED to `until_session_end` under TrustedLocal; `reject_once` -> transient
+  reject (no grant); `reject_always` -> durable `until_revoked` deny grant; no
+  options -> adapter-error cancel. The `AgentAdapter` trait gains a
+  `scripted_permission_request` raise seam (`crates/capo-adapters/src/adapter.rs`),
+  scripted via `ScriptedMockAgent::with_permission_request`
+  (`crates/capo-adapters/src/scripted_mock_agent.rs`).
+- Controller owns decide + persistence:
+  `crates/capo-controller/src/permission_round_trip.rs` adds
+  `FakeBoundaryController::decide_adapter_permission` and
+  `cancel_adapter_permission` (re-exported on `RealBoundaryController` in
+  `crates/capo-controller/src/real_controller.rs`; `PermissionRoundTripScope` /
+  `PermissionCancellation` exported from `lib.rs`). It runs
+  `PermissionPolicy::decide` over the requested scope (the POLICY is the
+  authority: a policy deny over-rules an adapter allow option), applies the ACP
+  mapping, persists `permission.requested` -> `permission.decided` with the
+  offered `adapter_options` and chosen `adapter_response` on the decision payload,
+  and materializes the durable grant on an allow (or durable `reject_always`
+  deny). No-selectable-option records `cancel` and flags `adapter_error` (fails
+  the adapter request) rather than inventing an outcome.
+- Tests: 6 mapping unit tests in `permission_request.rs` (one per option kind +
+  no-option + operator-cancel) and 8 controller fixture tests in
+  `crates/capo-controller/src/tests.rs` (`sg2_*`): allow_once turn-scoped,
+  allow_always downscoped to session-end, reject_once (no grant), reject_always
+  (durable deny grant), operator cancellation, no-selectable-option adapter error,
+  policy-deny over-rules adapter allow, and a restart/replay test proving the
+  round-trip grant rebuilds identically from the event log.
+- Commands run (from `/Users/nicolas/devel/capo-wt/safety-gates`):
+  `cargo fmt --check` (exit 0 after `cargo fmt`),
+  `cargo clippy --all-targets --all-features -- -D warnings` (exit 0, no
+  warnings), `cargo test -p capo-controller sg2` (8 passed), `cargo test
+  --workspace` (all crates ok, 0 failed; capo-controller 58 passed/0 failed/1
+  ignored, capo-adapters 36 passed/0 failed/2 ignored). `git diff --check` clean.
+  Acceptance met; live ACP JSON-RPC wire stays out of scope (depth).
 
 ## SG3 - Grant Read-Back, Revoke/Expire Events, Projection Columns, And Revoke Command
 

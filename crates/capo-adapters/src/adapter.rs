@@ -1,7 +1,7 @@
 use capo_core::{BoundaryBinding, BoundaryKind, SessionId, TurnId};
 
 use crate::codex_live::{CodexLiveAdapter, CodexLiveChatError};
-use crate::{NormalizedAdapterEvent, ScriptedMockAgent};
+use crate::{AdapterPermissionRequest, NormalizedAdapterEvent, ScriptedMockAgent};
 
 /// Provider-neutral seam every agent provider implements.
 ///
@@ -58,6 +58,19 @@ pub trait AgentAdapter {
     /// replay deterministic fixtures. Defaults to `None` for adapters that do
     /// not script turns.
     fn scripted_turn_events(&self, _turn_ref: &str) -> Option<Vec<NormalizedAdapterEvent>> {
+        None
+    }
+
+    /// SG2: the adapter permission round-trip raise side.
+    ///
+    /// An interactive provider (ACP, and the fake/scripted adapters that stand in
+    /// for it) raises a permission request -- the requested scope plus the ACP
+    /// `PermissionOption[]` it is offering -- which the controller decides and
+    /// answers with an [`crate::AdapterPermissionResponse`] (the chosen `optionId`
+    /// or `cancelled`). Adapters that never prompt for permission default to
+    /// `None`. This is fixture/option-mapping only: it does NOT speak the live ACP
+    /// JSON-RPC wire (that is the depth workpad).
+    fn scripted_permission_request(&self, _request_ref: &str) -> Option<AdapterPermissionRequest> {
         None
     }
 }
@@ -147,6 +160,10 @@ impl AgentAdapter for AgentAdapterHandle {
 
     fn scripted_turn_events(&self, turn_ref: &str) -> Option<Vec<NormalizedAdapterEvent>> {
         self.as_adapter().scripted_turn_events(turn_ref)
+    }
+
+    fn scripted_permission_request(&self, request_ref: &str) -> Option<AdapterPermissionRequest> {
+        self.as_adapter().scripted_permission_request(request_ref)
     }
 }
 

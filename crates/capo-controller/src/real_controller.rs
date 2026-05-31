@@ -46,9 +46,12 @@ use capo_tools::{
     CapoToolRegistry, PermissionPolicy, RuntimeToolConfig, ToolExposure, ToolExposureRequest,
 };
 
+use capo_adapters::{AdapterPermissionRequest, AdapterPermissionResponse};
+
 use crate::{
     ControllerInit, FakeAgentRegistration, FakeBoundaryController, FakeReadModelObservation,
-    FakeRunRefs, ProjectId, RecoveryReport, ToolDispatchOutcome, ToolDispatchScope, TurnFinished,
+    FakeRunRefs, PermissionCancellation, PermissionRoundTripScope, ProjectId, RecoveryReport,
+    ToolDispatchOutcome, ToolDispatchScope, TurnFinished,
 };
 
 /// Run references returned by the real controller. Alias of [`FakeRunRefs`] so
@@ -299,6 +302,34 @@ impl RealBoundaryController {
             ),
         };
         self.core.dispatch_tool_call(exposure, scope, request)
+    }
+
+    /// SG2: decide one adapter permission round-trip and return the ACP outcome.
+    ///
+    /// Drives the SAME orchestration core as the fake handle: the adapter raises
+    /// the request, the controller decides it through `PermissionPolicy` + the
+    /// ACP option mapping, persists the lifecycle, and returns the chosen
+    /// `optionId` (or `cancelled`) to the adapter. Fixture/option-mapping only;
+    /// the live ACP JSON-RPC wire is the depth workpad.
+    pub fn decide_adapter_permission(
+        &self,
+        scope: &PermissionRoundTripScope,
+        request: &AdapterPermissionRequest,
+    ) -> StateResult<AdapterPermissionResponse> {
+        self.core.decide_adapter_permission(scope, request)
+    }
+
+    /// SG2: cancel a pending adapter permission round-trip (operator cancel),
+    /// recording `permission.decided` with `decision = cancel` and returning the
+    /// ACP `cancelled` outcome.
+    pub fn cancel_adapter_permission(
+        &self,
+        scope: &PermissionRoundTripScope,
+        request: &AdapterPermissionRequest,
+        cancellation: PermissionCancellation,
+    ) -> StateResult<AdapterPermissionResponse> {
+        self.core
+            .cancel_adapter_permission(scope, request, cancellation)
     }
 
     /// Borrow the Capo registry behind the real exposure, for callers that need

@@ -2,8 +2,8 @@ use capo_core::{BoundaryBinding, BoundaryKind, SessionId, TurnId};
 use serde_json::json;
 
 use crate::{
-    AdapterSession, AdapterSessionRequest, AdapterTimelineConfidence, AgentAdapter,
-    NormalizedAdapterEvent, NormalizedAdapterKind, TurnOutput, TurnRequest,
+    AdapterPermissionRequest, AdapterSession, AdapterSessionRequest, AdapterTimelineConfidence,
+    AgentAdapter, NormalizedAdapterEvent, NormalizedAdapterKind, TurnOutput, TurnRequest,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -14,6 +14,9 @@ pub struct ScriptedMockAgent {
     provider_event_prefix: String,
     adapter_capability: String,
     turns: Vec<ScriptedMockTurn>,
+    /// SG2: scripted permission round-trips this adapter can raise, keyed by a
+    /// `request_ref`. The controller decides each and answers the adapter.
+    permission_requests: Vec<(String, AdapterPermissionRequest)>,
 }
 
 impl ScriptedMockAgent {
@@ -25,6 +28,7 @@ impl ScriptedMockAgent {
             provider_event_prefix: "mock".to_string(),
             adapter_capability: "scripted-mock-events".to_string(),
             turns: Vec::new(),
+            permission_requests: Vec::new(),
         }
     }
 
@@ -36,11 +40,24 @@ impl ScriptedMockAgent {
             provider_event_prefix: "acp.mock".to_string(),
             adapter_capability: "scripted-acp-shaped-events".to_string(),
             turns: Vec::new(),
+            permission_requests: Vec::new(),
         }
     }
 
     pub fn with_turn(mut self, turn: ScriptedMockTurn) -> Self {
         self.turns.push(turn);
+        self
+    }
+
+    /// SG2: script a permission round-trip this adapter raises, keyed by
+    /// `request_ref`. Drives the fixture-only permission-request seam the
+    /// controller decides through [`AgentAdapter::scripted_permission_request`].
+    pub fn with_permission_request(
+        mut self,
+        request_ref: impl Into<String>,
+        request: AdapterPermissionRequest,
+    ) -> Self {
+        self.permission_requests.push((request_ref.into(), request));
         self
     }
 
@@ -155,6 +172,13 @@ impl AgentAdapter for ScriptedMockAgent {
 
     fn scripted_turn_events(&self, turn_ref: &str) -> Option<Vec<NormalizedAdapterEvent>> {
         self.turn_events(turn_ref)
+    }
+
+    fn scripted_permission_request(&self, request_ref: &str) -> Option<AdapterPermissionRequest> {
+        self.permission_requests
+            .iter()
+            .find(|(candidate, _)| candidate == request_ref)
+            .map(|(_, request)| request.clone())
     }
 }
 

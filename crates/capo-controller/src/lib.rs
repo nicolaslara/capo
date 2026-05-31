@@ -33,6 +33,7 @@ use capo_tools::{
 mod adapter_replay;
 mod fake_session;
 mod local_dispatch;
+mod permission_round_trip;
 mod real_controller;
 mod resource_ceiling;
 mod session_control;
@@ -40,6 +41,7 @@ mod tool_dispatch;
 mod turn_loop;
 
 pub use local_dispatch::LocalAdapterDispatchRunStart;
+pub use permission_round_trip::{PermissionCancellation, PermissionRoundTripScope};
 pub use real_controller::{
     RealAgentRegistration, RealBoundaryController, RealReadModelObservation, RealRunRefs,
 };

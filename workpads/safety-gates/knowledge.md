@@ -116,6 +116,25 @@ with `cancel` and fail the adapter request rather than inventing an ACP outcome.
 The live ACP JSON-RPC wire round-trip is explicitly out of scope; it lands in
 the depth workpad.
 
+Fixture-only verification standard (SG2): SG2 is verified ENTIRELY against
+scripted/fake adapters and asserted option mappings -- never the live ACP
+JSON-RPC wire. The provider-neutral types live in `capo-adapters`
+(`AdapterPermissionRequest` carrying the ACP `PermissionOption[]`,
+`AdapterPermissionResponse` carrying the chosen `optionId` / `cancelled`
+outcome, and the pure `map_acp_options_trusted_local` mapping function); the
+`AgentAdapter` trait gains a `scripted_permission_request` raise seam that
+`ScriptedMockAgent::with_permission_request` scripts. The controller owns the
+decide + persistence (`FakeBoundaryController::decide_adapter_permission` /
+`cancel_adapter_permission`, re-exported on `RealBoundaryController`): it runs
+`PermissionPolicy::decide` over the requested scope (the policy is the authority
+-- a policy deny over-rules an adapter allow option), applies the ACP mapping,
+persists `permission.requested` -> `permission.decided` with the offered
+`adapter_options` and the chosen `adapter_response` on the decision payload, and
+materializes the durable grant on an allow (or a durable `reject_always` deny).
+Each ACP option kind is covered by a deterministic controller test plus a replay
+test proving the round-trip grant rebuilds identically from the event log. The
+live wire round-trip stays in depth.
+
 ## Grant Lifecycle: Read-Back, Revoke, Expiry (SG3)
 
 Grants must authorize, not just record. Today the grant store is write-only: the

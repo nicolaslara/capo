@@ -1,6 +1,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use capo_adapters::{
+    AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionOutcome, AdapterPermissionRequest,
+};
+
 use super::*;
 
 static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -5147,5 +5151,466 @@ fn sg1_denied_request_blocks_invocation_with_structured_refusal() {
         !grants
             .iter()
             .any(|grant| { grant.capability_grant_id == outcome.decide.capability_grant_id })
+    );
+}
+
+// --- SG2: AgentAdapter permission round-trip + ACP option mapping (fixtures) -
+//
+// A fake/scripted adapter raises an `AdapterPermissionRequest` carrying the ACP
+// `PermissionOption[]`, the controller decides it through `PermissionPolicy` +
+// the `capability-permissions.md` ACP option-mapping table, and the chosen
+// outcome (the selected `optionId` or `cancelled`) is returned to the adapter
+// using the provider-neutral adapter types. The ACP option list + chosen option
+// id are persisted as `adapter_options`/`adapter_response` on the decision
+// record. Fixture/option-mapping only -- NO live ACP JSON-RPC wire.
+
+/// Build the controller + a scripted ACP-shaped adapter that raises one scripted
+/// permission round-trip, and return (controller, refs, scope) for a round-trip.
+fn sg2_round_trip_setup(
+    label: &str,
+    policy: PermissionPolicy,
+    request: AdapterPermissionRequest,
+) -> (
+    RealBoundaryController,
+    RealRunRefs,
+    crate::PermissionRoundTripScope,
+    AdapterPermissionRequest,
+) {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+
+    let request_ref = format!("perm-{label}");
+    let scripted = AgentAdapterHandle::scripted_mock(
+        ScriptedMockAgent::acp_shaped(format!("sg2-{label}-session"))
+            .with_permission_request(&request_ref, request.clone()),
+    );
+    let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        policy,
+        scripted.clone(),
+    )
+    .expect("open real controller");
+    let registration = controller
+        .register_agent(&format!("sg2-{label}-worker"))
+        .expect("agent");
+    let refs = controller
+        .send_task(
+            &registration,
+            &format!("Drive an ACP permission round-trip ({label})"),
+        )
+        .expect("send task");
+
+    // The adapter raises the scripted permission request through the
+    // provider-neutral `AgentAdapter` boundary (not a `Fake*` struct).
+    let raised = scripted
+        .scripted_permission_request(&request_ref)
+        .expect("adapter raises scripted permission request");
+    assert_eq!(raised, request);
+
+    let scope = crate::PermissionRoundTripScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new(format!("turn-sg2-{label}")),
+        request_ref,
+    };
+    (controller, refs, scope, raised)
+}
+
+fn sg2_options(kinds: &[AcpPermissionOptionKind]) -> Vec<AcpPermissionOption> {
+    kinds
+        .iter()
+        .map(|kind| {
+            AcpPermissionOption::new(format!("opt-{}", kind.as_str()), kind.as_str(), *kind)
+        })
+        .collect()
+}
+
+fn sg2_decided_event(
+    controller: &RealBoundaryController,
+    refs: &RealRunRefs,
+    turn_id: &str,
+) -> capo_state::EventRecord {
+    controller
+        .state()
+        .events_for_session_turn(&refs.session_id, turn_id)
+        .expect("turn events")
+        .into_iter()
+        .find(|event| event.kind == "permission.decided")
+        .expect("permission.decided persisted")
+}
+
+/// SG2 allow_once: maps to an allow once/turn-scoped grant and returns the
+/// matching ACP `optionId`. The lifecycle (requested -> decided -> grant-created)
+/// is persisted, and the decided event records adapter_options/adapter_response.
+#[test]
+fn sg2_allow_once_round_trip_allows_turn_scoped_and_returns_option_id() {
+    let request = AdapterPermissionRequest::new(
+        "capo.file_write",
+        "filesystem:write:workspace",
+        "trusted-local-dev",
+        sg2_options(&[
+            AcpPermissionOptionKind::AllowOnce,
+            AcpPermissionOptionKind::AllowAlways,
+            AcpPermissionOptionKind::RejectOnce,
+        ]),
+    );
+    let (controller, refs, scope, raised) = sg2_round_trip_setup(
+        "allow-once",
+        PermissionPolicy::allow_trusted_local(),
+        request,
+    );
+
+    let response = controller
+        .decide_adapter_permission(&scope, &raised)
+        .expect("decide round-trip");
+
+    // The chosen outcome returned to the adapter: the allow_once optionId.
+    assert!(response.allowed());
+    assert_eq!(response.capo_decision, "allow");
+    assert_eq!(response.outcome.option_id(), Some("opt-allow_once"));
+    assert_eq!(response.capo_persistence.as_deref(), Some("until_turn_end"));
+    assert!(!response.adapter_error);
+    let grant_id = response
+        .capability_grant_id
+        .as_ref()
+        .expect("allow_once creates a turn-scoped grant");
+
+    // The decided event records the chosen option id and the offered option list.
+    let decided = sg2_decided_event(&controller, &refs, "turn-sg2-allow-once");
+    assert!(decided.payload_json.contains("\"decision\":\"allow\""));
+    assert!(
+        decided
+            .payload_json
+            .contains("\"option_id\":\"opt-allow_once\"")
+    );
+    assert!(decided.payload_json.contains("\"outcome\":\"selected\""));
+    assert!(decided.payload_json.contains("opt-allow_always"));
+    assert!(
+        decided
+            .payload_json
+            .contains("\"persistence\":\"until_turn_end\"")
+    );
+
+    // A durable grant projection was created and is read-backable.
+    let grants = controller.state().capability_grants().expect("grants");
+    let grant = grants
+        .iter()
+        .find(|grant| &grant.capability_grant_id == grant_id)
+        .expect("turn-scoped grant projection");
+    assert_eq!(grant.effect, "allow");
+    assert_eq!(grant.persistence, "until_turn_end");
+}
+
+/// SG2 allow_always (alone, under TrustedLocal): chosen but DOWNSCOPED to
+/// `until_session_end` (never a durable remembered grant without profile opt-in),
+/// returning the allow_always optionId.
+#[test]
+fn sg2_allow_always_round_trip_downscopes_to_session_end() {
+    let request = AdapterPermissionRequest::new(
+        "capo.file_write",
+        "filesystem:write:workspace",
+        "trusted-local-dev",
+        sg2_options(&[
+            AcpPermissionOptionKind::AllowAlways,
+            AcpPermissionOptionKind::RejectAlways,
+        ]),
+    );
+    let (controller, refs, scope, raised) = sg2_round_trip_setup(
+        "allow-always",
+        PermissionPolicy::allow_trusted_local(),
+        request,
+    );
+
+    let response = controller
+        .decide_adapter_permission(&scope, &raised)
+        .expect("decide round-trip");
+
+    assert!(response.allowed());
+    assert_eq!(response.outcome.option_id(), Some("opt-allow_always"));
+    // TrustedLocal downscope: NOT `until_revoked`.
+    assert_eq!(
+        response.capo_persistence.as_deref(),
+        Some("until_session_end")
+    );
+    let grant_id = response
+        .capability_grant_id
+        .as_ref()
+        .expect("allow_always creates a session-scoped grant");
+    let grants = controller.state().capability_grants().expect("grants");
+    let grant = grants
+        .iter()
+        .find(|grant| &grant.capability_grant_id == grant_id)
+        .expect("session-scoped grant projection");
+    assert_eq!(grant.persistence, "until_session_end");
+
+    let decided = sg2_decided_event(&controller, &refs, "turn-sg2-allow-always");
+    assert!(
+        decided
+            .payload_json
+            .contains("\"option_id\":\"opt-allow_always\"")
+    );
+    assert!(
+        decided
+            .payload_json
+            .contains("\"persistence\":\"until_session_end\"")
+    );
+}
+
+/// SG2 reject_once: rejects with the correct returned `optionId`, records a Capo
+/// reject, and creates NO grant (transient rejection).
+#[test]
+fn sg2_reject_once_round_trip_rejects_with_no_grant() {
+    let request = AdapterPermissionRequest::new(
+        "capo.file_write",
+        "filesystem:write:workspace",
+        "trusted-local-dev",
+        sg2_options(&[AcpPermissionOptionKind::RejectOnce]),
+    );
+    let (controller, refs, scope, raised) = sg2_round_trip_setup(
+        "reject-once",
+        PermissionPolicy::allow_trusted_local(),
+        request,
+    );
+
+    let response = controller
+        .decide_adapter_permission(&scope, &raised)
+        .expect("decide round-trip");
+
+    assert!(!response.allowed());
+    assert_eq!(response.capo_decision, "deny");
+    assert_eq!(response.outcome.option_id(), Some("opt-reject_once"));
+    assert!(!response.adapter_error);
+    // A `reject_once` is transient: no durable grant for THIS round-trip (the
+    // grant store may already hold the per-turn summary tool's allow grant).
+    assert_eq!(response.capability_grant_id, None);
+    let grants = controller.state().capability_grants().expect("grants");
+    assert!(
+        !grants
+            .iter()
+            .any(|grant| grant.capability_grant_id.contains("round-trip")),
+        "a reject_once round-trip creates no durable grant",
+    );
+
+    let decided = sg2_decided_event(&controller, &refs, "turn-sg2-reject-once");
+    assert!(decided.payload_json.contains("\"decision\":\"reject\""));
+    assert!(
+        decided
+            .payload_json
+            .contains("\"option_id\":\"opt-reject_once\"")
+    );
+}
+
+/// SG2 reject_always: rejects with the correct returned `optionId` AND creates a
+/// scoped durable deny grant (`effect = deny`, `until_revoked`).
+#[test]
+fn sg2_reject_always_round_trip_creates_durable_deny_grant() {
+    let request = AdapterPermissionRequest::new(
+        "capo.file_write",
+        "filesystem:write:workspace",
+        "trusted-local-dev",
+        sg2_options(&[AcpPermissionOptionKind::RejectAlways]),
+    );
+    let (controller, refs, scope, raised) = sg2_round_trip_setup(
+        "reject-always",
+        PermissionPolicy::allow_trusted_local(),
+        request,
+    );
+
+    let response = controller
+        .decide_adapter_permission(&scope, &raised)
+        .expect("decide round-trip");
+
+    assert!(!response.allowed());
+    assert_eq!(response.capo_decision, "deny");
+    assert_eq!(response.outcome.option_id(), Some("opt-reject_always"));
+    assert_eq!(response.capo_persistence.as_deref(), Some("until_revoked"));
+    let grant_id = response
+        .capability_grant_id
+        .as_ref()
+        .expect("reject_always creates a durable deny grant");
+    let grants = controller.state().capability_grants().expect("grants");
+    let grant = grants
+        .iter()
+        .find(|grant| &grant.capability_grant_id == grant_id)
+        .expect("durable deny grant projection");
+    assert_eq!(grant.effect, "deny");
+    assert_eq!(grant.persistence, "until_revoked");
+
+    let decided = sg2_decided_event(&controller, &refs, "turn-sg2-reject-always");
+    assert!(decided.payload_json.contains("\"decision\":\"reject\""));
+    assert!(
+        decided
+            .payload_json
+            .contains("\"option_id\":\"opt-reject_always\"")
+    );
+}
+
+/// SG2 cancellation: an explicit operator cancel returns the ACP `cancelled`
+/// outcome and records `permission.decided` with `decision = cancel`. No grant.
+#[test]
+fn sg2_cancellation_round_trip_returns_cancelled_and_records_cancel() {
+    let request = AdapterPermissionRequest::new(
+        "capo.file_write",
+        "filesystem:write:workspace",
+        "trusted-local-dev",
+        sg2_options(&[AcpPermissionOptionKind::AllowOnce]),
+    );
+    let (controller, refs, scope, raised) =
+        sg2_round_trip_setup("cancel", PermissionPolicy::allow_trusted_local(), request);
+
+    let response = controller
+        .cancel_adapter_permission(
+            &scope,
+            &raised,
+            crate::PermissionCancellation::OperatorCancelled,
+        )
+        .expect("cancel round-trip");
+
+    assert_eq!(response.capo_decision, "cancel");
+    assert_eq!(response.outcome, AcpPermissionOutcome::Cancelled);
+    assert_eq!(response.outcome.kind(), "cancelled");
+    assert_eq!(response.capability_grant_id, None);
+    // An operator cancel is NOT an adapter error.
+    assert!(!response.adapter_error);
+    let grants = controller.state().capability_grants().expect("grants");
+    assert!(
+        !grants
+            .iter()
+            .any(|grant| grant.capability_grant_id.contains("round-trip")),
+        "a canceled round-trip creates no durable grant",
+    );
+
+    let decided = sg2_decided_event(&controller, &refs, "turn-sg2-cancel");
+    assert!(decided.payload_json.contains("\"decision\":\"cancel\""));
+    assert!(decided.payload_json.contains("\"outcome\":\"cancelled\""));
+}
+
+/// SG2 no-selectable-option: an empty ACP option list is an adapter error.
+/// Records `permission.decided` with `cancel`, returns `cancelled`, and flags the
+/// adapter request as failed (`adapter_error`) rather than inventing an outcome.
+#[test]
+fn sg2_no_selectable_option_is_adapter_error_cancel() {
+    let request = AdapterPermissionRequest::new(
+        "capo.file_write",
+        "filesystem:write:workspace",
+        "trusted-local-dev",
+        Vec::new(),
+    );
+    let (controller, refs, scope, raised) = sg2_round_trip_setup(
+        "no-option",
+        PermissionPolicy::allow_trusted_local(),
+        request,
+    );
+
+    let response = controller
+        .decide_adapter_permission(&scope, &raised)
+        .expect("decide round-trip");
+
+    assert_eq!(response.capo_decision, "cancel");
+    assert_eq!(response.outcome, AcpPermissionOutcome::Cancelled);
+    // The adapter request must be FAILED, not satisfied with an invented outcome.
+    assert!(response.adapter_error);
+    assert_eq!(response.capability_grant_id, None);
+
+    let decided = sg2_decided_event(&controller, &refs, "turn-sg2-no-option");
+    assert!(decided.payload_json.contains("\"decision\":\"cancel\""));
+    assert!(decided.payload_json.contains("no_selectable_option"));
+}
+
+/// SG2 policy authority: an adapter offering an allow option CANNOT over-rule a
+/// policy that denies the scope. The Static read-only policy denies a write
+/// scope, so the round-trip reflects a Capo reject even though `allow_once` was
+/// offered -- no allow, no grant.
+#[test]
+fn sg2_policy_deny_overrules_adapter_allow_option() {
+    let request = AdapterPermissionRequest::new(
+        "capo.file_write",
+        // A write scope the read-only static policy does not include.
+        "filesystem:write:workspace",
+        "read-only-local",
+        sg2_options(&[AcpPermissionOptionKind::AllowOnce]),
+    );
+    let (controller, refs, scope, raised) = sg2_round_trip_setup(
+        "policy-deny",
+        PermissionPolicy::static_read_only_local(),
+        request,
+    );
+
+    let response = controller
+        .decide_adapter_permission(&scope, &raised)
+        .expect("decide round-trip");
+
+    // The adapter offered allow_once, but the policy denies the scope: deny wins.
+    assert!(!response.allowed());
+    assert_eq!(response.capo_decision, "deny");
+    assert_eq!(response.capability_grant_id, None);
+    let grants = controller.state().capability_grants().expect("grants");
+    assert!(
+        !grants
+            .iter()
+            .any(|grant| grant.capability_grant_id.contains("round-trip")),
+        "a policy-denied round-trip creates no durable grant",
+    );
+
+    let decided = sg2_decided_event(&controller, &refs, "turn-sg2-policy-deny");
+    assert!(decided.payload_json.contains("\"decision\":\"reject\""));
+    assert!(
+        decided
+            .payload_json
+            .contains("\"decision_source\":\"static_policy:read-only-local\"")
+    );
+}
+
+/// SG2 round-trip lifecycle + restart/replay: the requested -> decided ->
+/// grant-created sequence is persisted in order, and the durable grant rebuilds
+/// identically from the event log (honoring the SG0 invariant).
+#[test]
+fn sg2_round_trip_lifecycle_rebuilds_from_event_log() {
+    let request = AdapterPermissionRequest::new(
+        "capo.file_write",
+        "filesystem:write:workspace",
+        "trusted-local-dev",
+        sg2_options(&[AcpPermissionOptionKind::AllowOnce]),
+    );
+    let (controller, refs, scope, raised) =
+        sg2_round_trip_setup("replay", PermissionPolicy::allow_trusted_local(), request);
+
+    let response = controller
+        .decide_adapter_permission(&scope, &raised)
+        .expect("decide round-trip");
+    let grant_id = response.capability_grant_id.clone().expect("grant id");
+
+    let turn_events = controller
+        .state()
+        .events_for_session_turn(&refs.session_id, "turn-sg2-replay")
+        .expect("turn events");
+    let position = |kind: &str| {
+        turn_events
+            .iter()
+            .position(|event| event.kind == kind)
+            .unwrap_or_else(|| panic!("{kind} present"))
+    };
+    let requested = position("permission.requested");
+    let decided = position("permission.decided");
+    let grant_created = position("capability.grant_created");
+    assert!(requested < decided, "requested precedes decided");
+    assert!(decided < grant_created, "decided precedes grant-created");
+
+    // Rebuild the projections from the event log; the grant reconstructs
+    // identically.
+    let before = controller.state().capability_grants().expect("grants");
+    controller
+        .state()
+        .rebuild_projections()
+        .expect("rebuild projections");
+    let after = controller.state().capability_grants().expect("grants");
+    assert_eq!(before, after, "grant projection rebuilds identically");
+    assert!(
+        after
+            .iter()
+            .any(|grant| grant.capability_grant_id == grant_id),
+        "the round-trip grant survives a projection rebuild",
     );
 }
