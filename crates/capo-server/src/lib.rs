@@ -1115,6 +1115,14 @@ impl CapoServer {
         }
     }
 
+    /// Test-only access to the underlying event store, so a test can append a
+    /// seeded event through the *same* broadcaster the server's `subscribe`
+    /// reads from (a separately-opened store would have its own broadcast hub).
+    #[cfg(test)]
+    pub(crate) fn state_for_test(&self) -> &capo_state::SqliteStateStore {
+        self.controller.state()
+    }
+
     /// Open an event tail (ST4): the catch-up backlog plus a live [`EventStream`]
     /// over newly-committed events.
     ///

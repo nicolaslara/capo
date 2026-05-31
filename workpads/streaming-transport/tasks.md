@@ -420,7 +420,7 @@ Evidence:
 
 ## ST7 - Redaction-On-Emit On The Broadcast/SSE Egress Path
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -441,6 +441,55 @@ Verification:
 - Deterministic test asserting an `Unknown`/`ContainsSensitive`-classified
   artifact frame is withheld or referenced, not emitted raw.
 - `cargo fmt` and focused `cargo test -p capo-server -p capo-state`.
+
+Evidence:
+
+- Delta path (the ST1 review finding): the tokio runner already redacts each
+  `runtime.output_delta` BEFORE `tx.send` rather than the old raw
+  `String::from_utf8_lossy(chunk)`. `send_redacted_delta`
+  (`crates/capo-runtime/src/async_runner.rs`) applies the run's `RedactionPolicy`
+  to every emitted prefix; `take_emittable_prefix` holds the trailing partial
+  token across read boundaries so a secret split across a chunk is still scanned
+  whole, and the per-chunk redaction is carried into the event detail. The
+  durable artifact is independently re-redacted at `wait()` time and its
+  `redaction_state` is propagated onto `process.redaction_state`. Covered by
+  `streamed_deltas_and_artifact_redact_an_unnamed_secret` and
+  `secret_split_across_a_chunk_boundary_is_still_redacted` (a child prints a
+  known secret -> the cleartext is in NO delta detail, the artifact is redacted
+  with `redaction_state = "redacted"`).
+- Broadcast/Subscribe egress guard (ST4 egress path): the `RedactionState` guard
+  now runs at the single egress funnel `ServerEvent::from_record`
+  (`crates/capo-server/src/types.rs`), which both the catch-up backlog
+  (`CapoServer::read_subscription_backlog`) and every live broadcast
+  notification (`EventStream::next_batch` ->
+  `EventNotification::for_event`) build their events through, so no frame leaves
+  the process before redaction. `ServerEvent::redacted_for_egress` has two
+  layers: (1) an event whose stored `redaction_state` is not persistable-safe
+  (`ContainsSensitive` / `Unknown` / unrecognized, via new
+  `RedactionState::from_wire` in `crates/capo-state/src/event.rs`) has its raw
+  body WITHHELD and replaced with a redacted reference
+  (`WITHHELD_PAYLOAD_PLACEHOLDER` + event id + original classification), egress
+  state downgraded to `redacted` -- the frame still crosses the boundary (no
+  gap) but never the sensitive content; (2) a safe/redacted-labeled event has
+  `capo_runtime::RedactionPolicy`'s credential-shape scan run over its payload as
+  a backstop, so a secret that slipped into a `safe`-labeled body is scrubbed
+  before egress and the state is upgraded to `redacted`. This reuses the
+  runner's scanner rather than a bespoke one.
+- Tests (`crates/capo-server/src/tests/event_tail.rs`, deterministic, secrets
+  seeded directly into the server's own store via a `#[cfg(test)] state_for_test`
+  seam so the live broadcast subscriber sees them):
+  `subscribe_backlog_withholds_sensitive_event_bodies_and_never_emits_a_secret_raw`
+  (a `ContainsSensitive`/`Unknown` event with a raw AWS-key secret is withheld --
+  the secret cleartext is on NO backlog wire frame, the body is the withheld
+  reference, egress state `redacted`) and
+  `live_event_tail_redacts_a_credential_in_a_safe_labeled_payload_before_the_wire`
+  (a mislabeled-`safe` event carrying a `ghp_...` token travels the live
+  broadcast tail; the actual `to_wire_frame()` JSON-RPC notification never
+  contains the secret, the credential placeholder is present, and egress state is
+  upgraded to `redacted`).
+- Objective gate run from `/Users/nicolas/devel/capo-wt/streaming-transport`:
+  `cargo fmt --check` ok; `cargo clippy --all-targets --all-features -- -D
+  warnings` ok; `cargo test --workspace` ok (0 failures workspace-wide).
 
 ## ST8 - Evolve capo-web From Poll-SSE To Broadcast Event Tail
 

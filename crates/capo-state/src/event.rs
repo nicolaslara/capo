@@ -266,6 +266,19 @@ impl RedactionState {
         }
     }
 
+    /// Parse a stored/wire `redaction_state` string back into the enum, the
+    /// inverse of [`Self::as_str`]. Returns `None` for an unrecognized value so
+    /// the egress guard can treat an unknown classification as not-safe.
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "safe" => Some(Self::Safe),
+            "redacted" => Some(Self::Redacted),
+            "unknown" => Some(Self::Unknown),
+            "contains_sensitive" => Some(Self::ContainsSensitive),
+            _ => None,
+        }
+    }
+
     pub const fn is_persistable_artifact(self) -> bool {
         matches!(self, Self::Safe | Self::Redacted)
     }

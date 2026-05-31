@@ -460,3 +460,168 @@ fn live_event_notification_frame_round_trips() {
     let decoded = EventNotification::from_wire_frame(&frame).expect("decode notification");
     assert_eq!(decoded.decode_event().expect("decode event"), event);
 }
+
+// --- ST7: redaction-on-emit on the broadcast/Subscribe egress path ---
+
+use capo_state::{EventKind, NewEvent, RedactionState};
+
+/// Append `payload` as a committed event with a chosen `redaction_state`,
+/// through the server's OWN store so the broadcast subscriber sees it live.
+fn seed_event(
+    server: &CapoServer,
+    event_id: &str,
+    payload: &str,
+    redaction_state: RedactionState,
+) -> i64 {
+    let mut event = NewEvent::new(event_id, EventKind::SessionSummaryUpdated, "controller");
+    event.project_id = Some(ProjectId::new("project-capo"));
+    event.session_id = Some(SessionId::new("session-egress"));
+    event.payload_json = payload.to_string();
+    event.redaction_state = redaction_state;
+    server
+        .state_for_test()
+        .append_event(event, &[])
+        .expect("append seeded event")
+}
+
+#[test]
+fn subscribe_backlog_withholds_sensitive_event_bodies_and_never_emits_a_secret_raw() {
+    // ST7 (a): a known secret seeded into an event whose classification is NOT
+    // persistable-safe (`ContainsSensitive` / `Unknown`) must never reach the
+    // Subscribe wire raw -- the egress guard withholds the body and replaces it
+    // with a redacted reference, while the event still crosses the boundary so a
+    // subscriber sees that it happened and at what sequence.
+    let secret = "AKIAIOSFODNN7EXAMPLE";
+    let root = temp_root();
+    let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
+
+    seed_event(
+        &server,
+        "event-sensitive",
+        &format!("{{\"key\":\"{secret}\"}}"),
+        RedactionState::ContainsSensitive,
+    );
+    seed_event(
+        &server,
+        "event-unknown",
+        &format!("{{\"key\":\"{secret}\"}}"),
+        RedactionState::Unknown,
+    );
+
+    let (backlog, _stream) = server.subscribe(None, 0).expect("subscribe from 0");
+
+    // Serialize the ENTIRE backlog the way it crosses the wire (the catch-up
+    // page is delivered as a `subscribed` response) and assert the secret
+    // cleartext appears NOWHERE on it.
+    let event = backlog
+        .events
+        .iter()
+        .find(|e| e.event_id == "event-sensitive")
+        .expect("sensitive event in backlog");
+    let wire = EventNotification::for_event(event).to_wire_frame();
+    assert!(
+        !wire.contains(secret),
+        "secret leaked to the Subscribe backlog wire: {wire}"
+    );
+    // The frame is still emitted (no gap), but the body is a withheld reference
+    // and the egress classification is `redacted`, not the raw sensitive state.
+    assert!(
+        event
+            .payload_json
+            .contains(crate::WITHHELD_PAYLOAD_PLACEHOLDER),
+        "sensitive body should be a withheld reference: {}",
+        event.payload_json
+    );
+    assert!(
+        event.payload_json.contains("contains_sensitive"),
+        "withheld reference should record the original classification: {}",
+        event.payload_json
+    );
+    assert_eq!(event.redaction_state, "redacted");
+
+    // The `Unknown`-classified event is withheld the same way (not emitted raw).
+    let unknown = backlog
+        .events
+        .iter()
+        .find(|e| e.event_id == "event-unknown")
+        .expect("unknown event in backlog");
+    assert!(!unknown.payload_json.contains(secret));
+    assert!(
+        unknown
+            .payload_json
+            .contains(crate::WITHHELD_PAYLOAD_PLACEHOLDER)
+    );
+    assert_eq!(unknown.redaction_state, "redacted");
+
+    // Defense in depth: the secret is absent from EVERY backlog frame, not just
+    // the two seeded ones.
+    for e in &backlog.events {
+        let frame = EventNotification::for_event(e).to_wire_frame();
+        assert!(
+            !frame.contains(secret),
+            "secret on a backlog frame: {frame}"
+        );
+    }
+}
+
+#[test]
+fn live_event_tail_redacts_a_credential_in_a_safe_labeled_payload_before_the_wire() {
+    // ST7 (b): a known secret must never appear on the broadcast/Subscribe wire,
+    // even when the seeded event is mislabeled `safe`. The egress guard runs the
+    // same `capo-runtime` credential-shape scan over the payload at emit time, so
+    // a secret that slipped into a safe-labeled body is scrubbed BEFORE the live
+    // notification frame is written.
+    let secret = "ghp_abcdEFGH1234ijklMNOP5678qrst";
+    let root = temp_root();
+    let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
+
+    // Subscribe FIRST so the seeded event travels the live broadcast tail, not
+    // just the backlog (this is the broadcast egress path the frame leaves on).
+    let (_backlog, mut stream) = server.subscribe(None, 0).expect("subscribe");
+
+    seed_event(
+        &server,
+        "event-live-secret",
+        &format!("{{\"token\":\"{secret}\"}}"),
+        // Deliberately mislabeled safe: the backstop scan must still catch it.
+        RedactionState::Safe,
+    );
+
+    let live = stream.next_batch();
+    let event = live
+        .iter()
+        .find(|e| e.event_id == "event-live-secret")
+        .expect("seeded event arrived on the live tail");
+
+    // Build the ACTUAL JSON-RPC notification frame that leaves the process and
+    // assert the secret cleartext is nowhere on the wire.
+    let frame = EventNotification::for_event(event).to_wire_frame();
+    assert!(
+        !frame.contains(secret),
+        "secret leaked to the live broadcast wire: {frame}"
+    );
+    assert!(
+        !event.payload_json.contains(secret),
+        "secret leaked into the egress payload: {}",
+        event.payload_json
+    );
+    // The credential token is replaced with the runtime placeholder and the
+    // egress classification is upgraded from the mislabeled `safe` to `redacted`.
+    assert!(
+        event
+            .payload_json
+            .contains(capo_runtime::CREDENTIAL_REDACTION_PLACEHOLDER),
+        "expected the credential placeholder in the egress payload: {}",
+        event.payload_json
+    );
+    assert_eq!(event.redaction_state, "redacted");
+
+    // The frame still round-trips as a valid event notification (no gap): the
+    // event crossed the boundary, only its secret content was scrubbed.
+    let decoded = EventNotification::from_wire_frame(&frame)
+        .expect("frame is a notification")
+        .decode_event()
+        .expect("decode event");
+    assert_eq!(decoded.event_id, "event-live-secret");
+    assert!(!decoded.payload_json.contains(secret));
+}

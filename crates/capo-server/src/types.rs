@@ -248,9 +248,23 @@ pub struct ServerEvent {
     pub redaction_state: String,
 }
 
+/// The payload a frame carries once its raw body has been withheld because the
+/// event is classified `ContainsSensitive`/`Unknown` (ST7). The frame still
+/// crosses the boundary -- a subscriber must see that the event happened and at
+/// what sequence -- but the body is a redacted reference, never the raw content.
+pub const WITHHELD_PAYLOAD_PLACEHOLDER: &str = "[REDACTED:withheld]";
+
 impl ServerEvent {
+    /// Build the egress wire shape of a committed event, applying the
+    /// redaction-on-emit guard (ST7) so no frame leaves the process unredacted.
+    ///
+    /// This is the single funnel for every `ServerEvent` that crosses the
+    /// transport boundary -- the catch-up backlog (`CapoServer::subscribe`) and
+    /// each live broadcast notification (`EventStream::next_batch`) both build
+    /// their events here -- so the guard runs at the egress point, not only at
+    /// the tool/ACI boundary where the artifact was redacted at persist time.
     pub(crate) fn from_record(record: capo_state::EventRecord) -> Self {
-        Self {
+        let event = Self {
             sequence: record.sequence,
             event_id: record.event_id,
             kind: record.kind,
@@ -264,7 +278,55 @@ impl ServerEvent {
             item_id: record.item_id,
             payload_json: record.payload_json,
             redaction_state: record.redaction_state,
+        };
+        event.redacted_for_egress()
+    }
+
+    /// Apply the [`RedactionState`](capo_state::RedactionState) guard to this
+    /// event's payload before it is written to any JSON-RPC notification or SSE
+    /// `Event` frame (ST7).
+    ///
+    /// Two layers, both at the egress point:
+    ///
+    /// 1. **Classification guard.** An event whose stored `redaction_state` is
+    ///    not a persistable-safe state (`ContainsSensitive` / `Unknown`, or any
+    ///    unrecognized state) is NOT streamed with its raw body: the payload is
+    ///    replaced with a redacted reference ([`WITHHELD_PAYLOAD_PLACEHOLDER`]
+    ///    plus the event id and the original classification) and the egress
+    ///    `redaction_state` becomes `redacted`. The frame still crosses the
+    ///    boundary so a subscriber sees the event and its sequence, but never the
+    ///    sensitive content.
+    /// 2. **Defense-in-depth credential scan.** For an event already labeled
+    ///    safe/redacted, the same `capo-runtime` credential-shape scanner the
+    ///    runner uses on process output is run over the payload as a backstop, so
+    ///    a secret that slipped into a `safe`-labeled payload is scrubbed before
+    ///    egress rather than streamed raw. If it scrubs anything, the egress
+    ///    `redaction_state` is upgraded to `redacted`.
+    fn redacted_for_egress(mut self) -> Self {
+        let classification = capo_state::RedactionState::from_wire(&self.redaction_state);
+        let persistable = classification
+            .map(capo_state::RedactionState::is_persistable_artifact)
+            .unwrap_or(false);
+        if !persistable {
+            // ContainsSensitive / Unknown / unrecognized: withhold the raw body.
+            self.payload_json = serde_json::json!({
+                "redacted": true,
+                "reason": WITHHELD_PAYLOAD_PLACEHOLDER,
+                "event_id": self.event_id,
+                "classification": self.redaction_state,
+            })
+            .to_string();
+            self.redaction_state = capo_state::RedactionState::Redacted.as_str().to_string();
+            return self;
         }
+        // Safe / Redacted: backstop credential scan over the payload at egress.
+        let (scanned, state) =
+            capo_runtime::RedactionPolicy::new(Vec::new()).apply(self.payload_json.as_bytes());
+        if state == capo_state::RedactionState::Redacted.as_str() {
+            self.payload_json = String::from_utf8_lossy(&scanned).to_string();
+            self.redaction_state = capo_state::RedactionState::Redacted.as_str().to_string();
+        }
+        self
     }
 }
 
