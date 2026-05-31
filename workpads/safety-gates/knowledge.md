@@ -332,8 +332,18 @@ state-model.md:1179).
   chosen mechanism must be restorable per-turn and survive a server restart;
   resolve in SG8.
 - Does `score_run` live in `capo-eval` (currently a stub at
-  `crates/capo-eval/src/lib.rs`) or in `capo-server`? The `VerificationRunner`
-  placement is the same decision; resolve in SG6/SG7.
+  `crates/capo-eval/src/lib.rs`) or in `capo-server`? RESOLVED for the
+  `VerificationRunner` half (SG6): the verification GATE lives in
+  `capo-controller` (`crates/capo-controller/src/verification.rs`), beside the
+  other safety gates SG1-SG5, because the LOOP owner is what decides whether a
+  run passed and so must own the gate that derives that verdict from real exit
+  status. The tokio runtime + spawn/drain/wait bridging stay BEHIND the
+  `capo-runtime` seam (`AsyncLocalProcessRunner::run_to_completion`), so the
+  controller calls one synchronous method and process execution does not leak
+  into the loop owner. `capo-eval` is the descriptive reporting layer and
+  `capo-server` is transport; neither produces the verdict. `score_run` (SG7)
+  CONSUMES the observed `evidence.recorded(kind=test/smoke)` this gate persists;
+  its own placement is resolved in SG7.
 - Should `CapabilityGrantExpired` be a distinct materialized event, or should
   expiry be evaluated purely from `expires_at` at decide time with no event? The
   SG3 acceptance allows it as optional; the replay test must reconstruct expired

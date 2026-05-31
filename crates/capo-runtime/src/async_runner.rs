@@ -105,6 +105,59 @@ impl AsyncLocalProcessRunner {
         self.inner.config()
     }
 
+    /// Run `request` to completion on a private current-thread runtime and return
+    /// its terminal [`StreamingOutcome`] -- the SYNCHRONOUS seam over the async
+    /// runner.
+    ///
+    /// This is the boundary the otherwise-synchronous controller calls: process
+    /// execution, the reactor, and the spawn -> drain -> `wait` bridging all stay
+    /// behind `capo-runtime` (which already owns process lifecycle), so a
+    /// synchronous caller never hand-rolls a tokio runtime or touches the child
+    /// directly. The deltas are drained to EOF (so the capped artifact is
+    /// complete) before `wait()`; the live `next_delta` stream is for streaming
+    /// subscribers and is not needed for a gate that only wants the terminal
+    /// pass/fail.
+    ///
+    /// Nested-reactor guard: a fresh `block_on` would PANIC if this were called
+    /// from inside an existing tokio runtime (e.g. an async server handler). We
+    /// therefore detect an enclosing runtime ([`tokio::runtime::Handle::
+    /// try_current`]) and, when present, run the private runtime on a dedicated
+    /// thread so the bridge is safe from either a sync or an async caller rather
+    /// than being a latent foot-gun. Callers already on a reactor should prefer
+    /// `spawn_streaming(...).wait().await` directly; this seam exists for the
+    /// synchronous controller path.
+    pub fn run_to_completion(
+        &self,
+        request: LocalProcessRequest,
+    ) -> RuntimeResult<StreamingOutcome> {
+        let runner = self.clone();
+        let drive = move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(async move {
+                let mut running = runner.spawn_streaming(request)?;
+                // Drain the delta stream so the capped artifact is fully
+                // accumulated before we collect the outcome.
+                while running.next_delta().await.is_some() {}
+                running.wait().await
+            })
+        };
+        if tokio::runtime::Handle::try_current().is_ok() {
+            // We are inside an existing reactor: a nested current-thread
+            // `block_on` would panic, so run the private runtime on its own
+            // thread. The closure owns everything it needs, so the thread is
+            // self-contained.
+            std::thread::scope(|scope| {
+                scope.spawn(drive).join().map_err(|_| {
+                    RuntimeError::Io(std::io::Error::other("verification runner thread panicked"))
+                })?
+            })
+        } else {
+            drive()
+        }
+    }
+
     /// Spawn `request` as a streaming child process.
     ///
     /// The child runs in its own process group, with stdin/stdout/stderr piped.
@@ -890,6 +943,100 @@ mod tests {
         assert_eq!(outcome.process.status, "failed");
         assert_eq!(outcome.exit_code, Some(3));
         assert!(!outcome.truncated);
+    }
+
+    #[test]
+    fn run_to_completion_classifies_pass_and_fail_from_a_sync_caller() {
+        // The synchronous seam the controller's VerificationRunner calls: no
+        // ambient tokio runtime here (a plain `#[test]`), so the seam owns its
+        // own current-thread runtime and drives spawn -> drain -> wait.
+        let workspace = temp_root("workspace-sync-classify");
+        let artifacts = temp_root("artifacts-sync-classify");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let runner = runner(&workspace, artifacts);
+
+        let pass = runner
+            .run_to_completion(LocalProcessRequest::new(
+                RunId::new("run-sync-pass"),
+                "/bin/sh",
+                vec!["-c".to_string(), "printf ok; exit 0".to_string()],
+                workspace.clone(),
+                HashMap::new(),
+            ))
+            .expect("run pass");
+        assert_eq!(pass.process.status, "exited");
+        assert_eq!(pass.exit_code, Some(0));
+
+        let fail = runner
+            .run_to_completion(LocalProcessRequest::new(
+                RunId::new("run-sync-fail"),
+                "/bin/sh",
+                vec!["-c".to_string(), "printf boom >&2; exit 7".to_string()],
+                workspace.clone(),
+                HashMap::new(),
+            ))
+            .expect("run fail");
+        assert_eq!(fail.process.status, "failed");
+        assert_eq!(fail.exit_code, Some(7));
+    }
+
+    #[tokio::test]
+    async fn run_to_completion_is_safe_from_within_an_existing_reactor() {
+        // The nested-reactor guard: called from inside a tokio runtime (this is a
+        // `#[tokio::test]`), a naive `block_on` would panic. The seam detects the
+        // enclosing reactor and runs its private runtime on a dedicated thread, so
+        // the bridge works from an async caller too.
+        let workspace = temp_root("workspace-nested-reactor");
+        let artifacts = temp_root("artifacts-nested-reactor");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let runner = runner(&workspace, artifacts);
+
+        let outcome = tokio::task::spawn_blocking(move || {
+            runner.run_to_completion(LocalProcessRequest::new(
+                RunId::new("run-nested"),
+                "/bin/sh",
+                vec!["-c".to_string(), "printf ok; exit 0".to_string()],
+                workspace.clone(),
+                HashMap::new(),
+            ))
+        })
+        .await
+        .expect("join blocking")
+        .expect("run within reactor");
+        assert_eq!(outcome.process.status, "exited");
+        assert_eq!(outcome.exit_code, Some(0));
+    }
+
+    #[test]
+    fn run_to_completion_over_cap_success_is_exited_and_truncated_not_failed() {
+        // The over-cap-success invariant through the SYNC seam: a successful run
+        // whose output exceeds the cap is `exited` + truncated, never `failed`.
+        let workspace = temp_root("workspace-sync-cap");
+        let artifacts = temp_root("artifacts-sync-cap");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut config = LocalProcessConfig::for_test(workspace.clone(), artifacts);
+        config.output_limit_bytes = 16;
+        let runner = AsyncLocalProcessRunner::new(config);
+
+        let outcome = runner
+            .run_to_completion(LocalProcessRequest::new(
+                RunId::new("run-sync-cap"),
+                "/bin/sh",
+                vec![
+                    "-c".to_string(),
+                    "printf 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'; exit 0".to_string(),
+                ],
+                workspace.clone(),
+                HashMap::new(),
+            ))
+            .expect("run over-cap success");
+        assert_eq!(
+            outcome.process.status, "exited",
+            "a successful over-cap run must be exited, not failed"
+        );
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(outcome.truncated, "over-cap run records truncation");
+        assert_eq!(std::fs::read(&outcome.stdout.path).unwrap().len(), 16);
     }
 
     #[tokio::test]

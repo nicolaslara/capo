@@ -511,7 +511,7 @@ Evidence:
 
 ## SG6 - VerificationRunner: Run Check/Lint/Test And Emit Real Pass/Fail Evidence
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -540,6 +540,50 @@ Verification:
 - A deterministic over-cap-successful-run test proving a long successful run is
   recorded passed-and-truncated, not failed.
 - `cargo fmt`.
+
+Notes:
+
+- Implemented in `crates/capo-controller/src/verification.rs` (the LOOP owner,
+  beside SG1-SG5). `FakeBoundaryController::run_verification` executes a
+  configured check/lint/test/smoke `VerificationCommand` through the existing
+  `capo-runtime` async runner via a NEW synchronous seam,
+  `AsyncLocalProcessRunner::run_to_completion`
+  (`crates/capo-runtime/src/async_runner.rs`), so the tokio runtime + spawn ->
+  drain -> `wait` bridging stay behind the runtime seam; the controller calls one
+  sync method and never hand-rolls a runtime. The seam has a nested-reactor guard
+  (runs the private current-thread runtime on a dedicated thread when called from
+  inside an existing tokio runtime, so it can never panic on a nested
+  `block_on`).
+- Pass/fail is derived STRICTLY from the real exit status (`exit_code ==
+  Some(0)`), never from `--status passed` or an agent claim.
+  `verify_from_test_run_record` consumes the typed `capo.test_run`/`capo.check`
+  record (`TestRunRecord`) and RE-DERIVES the verdict from its observed
+  `exit_status`, ignoring the record's own `claimed_passed` flag (anti-spoofing).
+- Evidence is persisted as OBSERVED `evidence.recorded(kind=test/smoke)`: the
+  event actor is `capo-controller-verification` and the payload carries
+  `source = "observed-runner"`, command, exit status, truncation flag, and the
+  redacted output artifact ref, distinct from any agent-reported channel so SG7's
+  observed-evidence-only `score_run` can score against it. A successful over-cap
+  run is recorded passed-and-truncated, not failed.
+- The dead `tokio` dependency added to `crates/capo-controller/Cargo.toml` by the
+  scaffolding-only stub commit was removed (and dropped from `Cargo.lock`); the
+  controller calls the `capo-runtime` sync seam instead of depending on tokio
+  directly.
+- Open question resolved in `knowledge.md`: the `VerificationRunner` gate lives in
+  `capo-controller`; `capo-eval`/`capo-server` do not produce the verdict.
+- Tests (focused): `crates/capo-controller/src/verification.rs` -- scripted
+  pass+fail exit-status classification, over-cap-successful-run is
+  passed-and-truncated, typed-record scored from exit status not `claimed_passed`,
+  and observed-evidence survives a store reopen and re-records idempotently.
+  `crates/capo-runtime/src/async_runner.rs` -- the sync seam's pass/fail,
+  over-cap-success, and nested-reactor-safe paths.
+- Commands run (from `/Users/nicolas/devel/capo-wt/safety-gates`):
+  `cargo test -p capo-controller verification` (4 passed),
+  `cargo test -p capo-runtime run_to_completion` (3 passed), `cargo fmt --check`
+  (exit 0 after `cargo fmt`), `cargo clippy --all-targets --all-features --
+  -D warnings` (exit 0, no warnings), `cargo test --workspace` (553 passed,
+  0 failed). No live Codex smoke required (SG6 verification is deterministic
+  scripted-command + replay only).
 
 ## SG7 - score_run Over Observed Evidence And Wall-Clock Timing
 

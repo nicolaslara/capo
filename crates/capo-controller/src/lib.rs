@@ -40,6 +40,7 @@ mod resource_ceiling;
 mod session_control;
 mod tool_dispatch;
 mod turn_loop;
+mod verification;
 mod workspace_lock;
 
 pub use grant_lifecycle::{
@@ -59,6 +60,10 @@ pub use tool_dispatch::{
     PermissionDecideOutcome, ToolDispatchOutcome, ToolDispatchScope, ToolRefusal,
 };
 pub use turn_loop::{TurnFinished, TurnStopReason};
+pub use verification::{
+    TestRunRecord, VERIFICATION_EVIDENCE_ACTOR, VERIFICATION_EVIDENCE_SOURCE, VerificationCommand,
+    VerificationKind, VerificationOutcome, VerificationScope,
+};
 pub use workspace_lock::{
     WorkspaceLeaseScope, WorkspaceLockConflict, WorkspaceWriteGate, WorkspaceWriteLeaseOutcome,
 };
