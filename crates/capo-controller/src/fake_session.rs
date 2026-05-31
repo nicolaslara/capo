@@ -93,14 +93,24 @@ impl FakeBoundaryController {
             session_id: session_id.clone(),
             agent_name: registration.agent_name.clone(),
         });
-        let adapter_output = self.adapter.send_turn(
-            &adapter_session,
-            TurnRequest {
-                turn_id: turn_id.clone(),
-                agent_name: registration.agent_name.clone(),
-                goal: goal.to_string(),
-            },
-        );
+        // AI2: drive chat through the agent's BOUND adapter via the fallible
+        // `try_send_turn` seam. The deterministic fake/scripted handles default
+        // this to an infallible `send_turn` (unchanged behaviour). A Codex-BOUND
+        // handle drives the real read-only one-shot when the live-provider gate is
+        // open, or fails CLOSED-FAST with a typed error (no spawn, no blocking)
+        // when it is off -- surfaced here as `StateError::CodexLiveChat`, never a
+        // fabricated fake summary. Mock/unbound agents never reach the Codex path.
+        let adapter_output = self
+            .adapter
+            .try_send_turn(
+                &adapter_session,
+                &TurnRequest {
+                    turn_id: turn_id.clone(),
+                    agent_name: registration.agent_name.clone(),
+                    goal: goal.to_string(),
+                },
+            )
+            .map_err(|error| StateError::CodexLiveChat(error.to_string()))?;
         let permission = self.permission_policy.decide(PermissionRequest {
             session_id: session_id.clone(),
             capability_profile_id: self.permission_policy.default_profile_id().to_string(),

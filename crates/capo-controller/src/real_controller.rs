@@ -37,9 +37,9 @@
 //! so call sites can read as production code; they are aliases of the shared
 //! structs so the read models stay one shape.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use capo_adapters::{AgentAdapterHandle, NormalizedAdapterEvent};
+use capo_adapters::{AgentAdapterHandle, CodexLiveAdapter, NormalizedAdapterEvent};
 use capo_core::{CommandEnvelope, TaskId, TurnId};
 use capo_state::{SqliteStateStore, StateResult};
 use capo_tools::{
@@ -144,6 +144,33 @@ impl RealBoundaryController {
             )?,
             tools: RealToolExposures::default_real(),
         })
+    }
+
+    /// AI2: open the production controller BOUND to the real Codex chat adapter.
+    ///
+    /// This is the binding-respecting production seam: a host opens this handle
+    /// ONLY for an agent explicitly bound to the Codex adapter. It does NOT make
+    /// Codex a global default -- fake/mock agents keep their fake/scripted handle
+    /// via [`Self::open`]/[`Self::open_with_adapter`]. The installed
+    /// [`CodexLiveAdapter`] drives the real read-only one-shot Codex on a chat
+    /// turn when [`capo_adapters::codex_live_chat_gate_open`] is true, and fails
+    /// CLOSED-FAST (an immediate typed error, no spawn) when it is off. An
+    /// absolute `CAPO_CODEX_BIN` override (ops) or an explicit test stub is
+    /// honored; otherwise `codex` resolves from PATH. Claude live stays blocked
+    /// because no Claude chat handle exists.
+    pub fn open_codex_chat(
+        project_id: ProjectId,
+        state_root: impl AsRef<Path>,
+        workspace_root: impl Into<PathBuf>,
+        artifact_root: impl Into<PathBuf>,
+    ) -> StateResult<Self> {
+        let mut adapter = CodexLiveAdapter::new(workspace_root, artifact_root);
+        if let Ok(codex_bin) = std::env::var("CAPO_CODEX_BIN")
+            && Path::new(&codex_bin).is_absolute()
+        {
+            adapter = adapter.with_codex_program_override(codex_bin);
+        }
+        Self::open_with_adapter(project_id, state_root, AgentAdapterHandle::codex(adapter))
     }
 
     /// Open the real controller over an injected adapter handle.

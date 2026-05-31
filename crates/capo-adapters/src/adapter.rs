@@ -1,5 +1,6 @@
 use capo_core::{BoundaryBinding, BoundaryKind, SessionId, TurnId};
 
+use crate::codex_live::{CodexLiveAdapter, CodexLiveChatError};
 use crate::{NormalizedAdapterEvent, ScriptedMockAgent};
 
 /// Provider-neutral seam every agent provider implements.
@@ -24,6 +25,24 @@ pub trait AgentAdapter {
 
     /// Send a turn to an open session and observe its output.
     fn send_turn(&self, session: &AdapterSession, request: TurnRequest) -> TurnOutput;
+
+    /// Fallible send seam (AI2).
+    ///
+    /// The deterministic fake/scripted adapters can never fail to produce a turn,
+    /// so this defaults to wrapping [`AgentAdapter::send_turn`] in `Ok`. The real
+    /// Codex chat adapter ([`CodexLiveAdapter`]) overrides it so a Codex-bound
+    /// chat turn can FAIL CLOSED FAST (an immediate typed
+    /// [`CodexLiveChatError::GateClosed`]) when the live-provider opt-in gate is
+    /// off -- no process spawn, no blocking -- rather than fabricating a fake
+    /// summary. The controller chat path drives THIS method and propagates the
+    /// typed error.
+    fn try_send_turn(
+        &self,
+        session: &AdapterSession,
+        request: &TurnRequest,
+    ) -> Result<TurnOutput, CodexLiveChatError> {
+        Ok(self.send_turn(session, request.clone()))
+    }
 
     /// Reattach to an existing external session reference.
     fn attach_session(&self, session_id: SessionId, external_session_ref: String)
@@ -52,6 +71,10 @@ pub trait AgentAdapter {
 pub enum AgentAdapterHandle {
     Fake(FakeAdapter),
     ScriptedMock(ScriptedMockAgent),
+    /// AI2: a real Codex chat handle. Installed ONLY for agents explicitly bound
+    /// to the Codex adapter; it never replaces the fake adapter as a global
+    /// default for unbound/mock agents.
+    Codex(CodexLiveAdapter),
 }
 
 impl AgentAdapterHandle {
@@ -63,10 +86,23 @@ impl AgentAdapterHandle {
         Self::ScriptedMock(script)
     }
 
+    /// Bind a real Codex chat adapter handle (AI2). Fail-closed-fast on chat when
+    /// the live-provider opt-in gate is off.
+    pub fn codex(adapter: CodexLiveAdapter) -> Self {
+        Self::Codex(adapter)
+    }
+
+    /// Whether this handle drives a real (non-fake) provider. Fake/scripted are
+    /// deterministic test handles; the Codex handle is a real provider binding.
+    pub fn is_real(&self) -> bool {
+        matches!(self, Self::Codex(_))
+    }
+
     fn as_adapter(&self) -> &dyn AgentAdapter {
         match self {
             Self::Fake(adapter) => adapter,
             Self::ScriptedMock(agent) => agent,
+            Self::Codex(adapter) => adapter,
         }
     }
 }
@@ -82,6 +118,14 @@ impl AgentAdapter for AgentAdapterHandle {
 
     fn send_turn(&self, session: &AdapterSession, request: TurnRequest) -> TurnOutput {
         self.as_adapter().send_turn(session, request)
+    }
+
+    fn try_send_turn(
+        &self,
+        session: &AdapterSession,
+        request: &TurnRequest,
+    ) -> Result<TurnOutput, CodexLiveChatError> {
+        self.as_adapter().try_send_turn(session, request)
     }
 
     fn attach_session(

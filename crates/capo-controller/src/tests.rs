@@ -4641,3 +4641,180 @@ fn temp_root() -> std::path::PathBuf {
     let counter = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("capo-controller-{nanos}-{counter}"))
 }
+
+// --- AI2: real-Codex chat backend, binding-respecting + fail-closed-fast ----
+
+/// The codex-live chat gate reads two process-global env vars, so the two tests
+/// that toggle them must not race each other (or any other env-touching test).
+static CODEX_LIVE_CHAT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Write an executable `codex` STUB pinned by absolute path. The runtime spawns
+/// with `env_clear()` (only HOME/PATH/TMPDIR/USER/LOGNAME/SHELL/LANG survive), so
+/// the stub uses ONLY POSIX builtins (`read`/`printf`) and reads its fixed JSONL
+/// from an absolute-path fixture -- no live provider is involved. Returns the
+/// absolute path to the stub program.
+#[cfg(unix)]
+fn write_codex_stub(dir: &std::path::Path, fixture_jsonl: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::create_dir_all(dir).expect("stub dir");
+    let fixture = dir.join("codex-output.jsonl");
+    std::fs::write(&fixture, fixture_jsonl).expect("write fixture");
+    let stub = dir.join("codex-stub.sh");
+    // The shebang resolves `/bin/sh` by absolute path (kernel-level), so an
+    // empty/clamped PATH does not matter. The body streams the absolute-path
+    // fixture to stdout using only the `read` + `printf` shell builtins.
+    let script = format!(
+        "#!/bin/sh\nwhile IFS= read -r line; do printf '%s\\n' \"$line\"; done < '{}'\n",
+        fixture.display()
+    );
+    std::fs::write(&stub, script).expect("write stub");
+    let mut perms = std::fs::metadata(&stub)
+        .expect("stub metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&stub, perms).expect("chmod stub");
+    stub
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_bound_chat_drives_the_real_adapter_through_a_codex_stub_with_gate_open() {
+    use capo_adapters::{AgentAdapterHandle, CodexLiveAdapter};
+
+    let _guard = CODEX_LIVE_CHAT_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    // The deterministic `codex` stub emits a fixed JSONL turn (an agent_message
+    // item + a turn.completed), pinned by absolute path. No live provider runs.
+    let stub_dir = temp_root();
+    let fixture = "{\"type\":\"thread.started\",\"thread_id\":\"codex-stub-thread\"}\n\
+{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"agent_message\",\"text\":\"CODEX_STUB_CHAT_SUMMARY\"}}\n\
+{\"type\":\"turn.completed\"}\n";
+    let stub = write_codex_stub(&stub_dir, fixture);
+
+    let workspace = temp_root();
+    let artifacts = temp_root();
+    std::fs::create_dir_all(&workspace).expect("workspace");
+
+    // Bind the agent to a REAL Codex chat handle (not fake/scripted), pinned to
+    // the stub program and a short bounded timeout.
+    let codex_handle = AgentAdapterHandle::codex(
+        CodexLiveAdapter::new(workspace.clone(), artifacts.clone())
+            .with_codex_program_override(stub.display().to_string())
+            .with_timeout_seconds(30),
+    );
+    assert!(
+        codex_handle.is_real(),
+        "codex handle must be a real binding"
+    );
+
+    // Gate OPEN: both live-provider opt-ins set.
+    // SAFETY: serialized by `CODEX_LIVE_CHAT_ENV_LOCK`.
+    unsafe {
+        std::env::set_var("CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT", "1");
+        std::env::set_var("CAPO_SERVER_RUN_CODEX_LIVE", "1");
+    }
+
+    let controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        codex_handle,
+    )
+    .expect("open controller with codex handle");
+    let registration = controller
+        .register_agent("codex-chat-worker")
+        .expect("agent");
+    let refs = controller
+        .send_task(&registration, "Summarize the current workpad")
+        .expect("codex-bound chat send_task succeeds with the gate open");
+
+    // SAFETY: serialized.
+    unsafe {
+        std::env::remove_var("CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT");
+        std::env::remove_var("CAPO_SERVER_RUN_CODEX_LIVE");
+    }
+
+    // The chat turn produced the STUB's output through the `AgentAdapter` trait:
+    // the session summary is the parsed Codex `agent_message` text from the stub,
+    // proving the real adapter ran (the open-session ref is the adapter's session
+    // template; the turn's observed summary is the load-bearing assertion).
+    let observation = controller.observe(&refs).expect("observe");
+    assert_eq!(
+        observation.session.latest_summary.as_deref(),
+        Some("CODEX_STUB_CHAT_SUMMARY"),
+        "chat summary must be the real stub output, not a fake-adapter summary"
+    );
+    assert_ne!(
+        observation.session.latest_summary.as_deref(),
+        Some("Fake adapter processed goal for codex-chat-worker: Summarize the current workpad")
+    );
+    // The Codex chat adapter's open-session ref names the real binding, not the
+    // fake-adapter template -- so chat for a Codex-bound agent is NOT the fake
+    // adapter masquerading.
+    assert_eq!(
+        refs.external_session_ref,
+        "codex-live-chat-session-codex-chat-worker"
+    );
+    assert_ne!(
+        refs.external_session_ref,
+        "fake-adapter-session-codex-chat-worker"
+    );
+}
+
+#[test]
+fn codex_bound_chat_fails_closed_fast_when_gate_is_off() {
+    use capo_adapters::{AgentAdapterHandle, CodexLiveAdapter};
+
+    let _guard = CODEX_LIVE_CHAT_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    // Gate OFF: ensure neither opt-in is set.
+    // SAFETY: serialized by `CODEX_LIVE_CHAT_ENV_LOCK`.
+    unsafe {
+        std::env::remove_var("CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT");
+        std::env::remove_var("CAPO_SERVER_RUN_CODEX_LIVE");
+    }
+
+    // A real Codex handle pointed at a NON-EXISTENT absolute program: the
+    // fail-closed-fast path must never spawn it, so the bogus path is never run.
+    let codex_handle = AgentAdapterHandle::codex(
+        CodexLiveAdapter::new(temp_root(), temp_root())
+            .with_codex_program_override("/nonexistent/codex-should-never-spawn".to_string())
+            .with_timeout_seconds(1),
+    );
+    let controller = FakeBoundaryController::open_with_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        codex_handle,
+    )
+    .expect("open controller with codex handle");
+    let registration = controller
+        .register_agent("codex-chat-worker")
+        .expect("agent");
+
+    // The chat turn returns an IMMEDIATE typed error (not a hang, not a fake
+    // summary). A wall-clock budget proves "fast": the fail-closed decision
+    // happens before any spawn/wait, so this returns well under a second.
+    let started = std::time::Instant::now();
+    let error = controller
+        .send_task(&registration, "Summarize the current workpad")
+        .expect_err("codex-bound chat must fail closed when the gate is off");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "fail-closed chat must return fast, not block: took {:?}",
+        started.elapsed()
+    );
+    match error {
+        StateError::CodexLiveChat(detail) => {
+            assert!(
+                detail.contains("fail-closed")
+                    && detail.contains("CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT"),
+                "typed fail-closed error should name the missing opt-in: {detail}"
+            );
+        }
+        other => panic!("expected StateError::CodexLiveChat, got {other:?}"),
+    }
+}

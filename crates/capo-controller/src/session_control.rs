@@ -70,14 +70,21 @@ impl FakeBoundaryController {
             .adapter
             .attach_session(refs.session_id.clone(), refs.external_session_ref.clone());
         let turn_id = TurnId::new(format!("redirect-{}", refs.session_id));
-        let adapter_output = self.adapter.send_turn(
-            &adapter_session,
-            TurnRequest {
-                turn_id: turn_id.clone(),
-                agent_name: registration.agent_name.clone(),
-                goal: goal.to_string(),
-            },
-        );
+        // AI2: SteerAgent drives the agent's BOUND adapter through the fallible
+        // `try_send_turn` seam too -- the fake/scripted handles are unchanged, a
+        // Codex-bound handle drives the real one-shot when the gate is open or
+        // fails CLOSED-FAST (typed error, no spawn) when it is off.
+        let adapter_output = self
+            .adapter
+            .try_send_turn(
+                &adapter_session,
+                &TurnRequest {
+                    turn_id: turn_id.clone(),
+                    agent_name: registration.agent_name.clone(),
+                    goal: goal.to_string(),
+                },
+            )
+            .map_err(|error| StateError::CodexLiveChat(error.to_string()))?;
 
         self.state.append_event(
             scoped_event(

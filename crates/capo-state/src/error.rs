@@ -22,6 +22,10 @@ pub enum StateError {
         error: String,
     },
     UnsafeArtifactRedactionState(RedactionState),
+    /// AI2: a Codex-bound chat turn failed (fail-closed gate, or spawn/parse
+    /// failure). Carried as a typed error so the chat surface never fabricates a
+    /// fake summary in place of a real Codex result.
+    CodexLiveChat(String),
 }
 
 impl From<std::io::Error> for StateError {

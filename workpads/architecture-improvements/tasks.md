@@ -109,42 +109,85 @@ Evidence (2026-05-31, updated after boundary review):
   documented exception for the low-level step primitives). Did NOT git commit
   (workflow commits after review).
 
-## AI2 - Inject a real Codex `AgentAdapter` as the default chat backend
+## AI2 - Real Codex `AgentAdapter` for the chat surface (binding-respecting, fail-closed-fast)
 
-Status: pending. Priority: high. Source: real-turn-loop arch review.
+Status: done. Priority: high. Source: real-turn-loop arch review.
 
 Problem:
 
-- Default chat/steer (`SendTask` -> `send_task_command`, `SteerAgent` ->
-  `redirect_command`) routes through `RealBoundaryController`, but its adapter is
-  hardcoded to the fake handle (`crates/capo-controller/src/lib.rs` `open` ->
-  `AgentAdapterHandle::fake()`). The only `AgentAdapter` implementations are
-  `Fake` and `ScriptedMock`; `CodexExecAdapter`/`ClaudeCodeAdapter`/`AcpAdapter`
-  are PARSER-only structs that do not implement the trait. Real Codex output is
-  produced only by the separate `run_live_provider_local` stdout-parsing path,
-  reachable via dispatch commands — never via chat. So the original
-  "chat = canned fake summary" problem the campaign set out to fix is still
-  present on the chat surface.
+- Chat/steer (`SendTask` -> `send_task`, `SteerAgent` -> `redirect`) drives the
+  agent's bound `AgentAdapterHandle` through the `AgentAdapter` trait, but the
+  only handle variants were the deterministic `Fake` and `ScriptedMock`
+  implementations; `CodexExecAdapter`/`ClaudeCodeAdapter`/`AcpAdapter` were
+  PARSER-only structs that did not implement the trait. Real Codex output was
+  produced only by the separate `run_live_provider_local` stdout-parsing dispatch
+  path — never via chat. So a Codex-profile agent's chat turn still produced a
+  canned fake summary.
 
-Acceptance:
+CORRECTED design (the prior attempt was reverted): the prior attempt made real
+Codex the GLOBAL default chat backend, so `SendTask`/`SteerAgent` for FAKE/mock
+agents routed into real Codex and HUNG
+`capo_planner_tracks_decisions_as_server_state_and_steers_mock_agent` (and would
+hang any fake-agent chat). The corrected design RESPECTS THE AGENT'S ADAPTER
+BINDING and FAILS CLOSED FAST:
 
-- A real Codex `AgentAdapter` implementation whose `send_turn` drives the live
-  Codex execution (spawn + parse) under the hood and returns provider-neutral
-  `TurnOutput`.
-- The production controller constructor injects the real Codex handle as the
-  default chat backend behind the existing live-provider opt-in gates
-  (`CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1` / `CAPO_SERVER_RUN_CODEX_LIVE=1`);
-  Claude live stays blocked.
-- With the gate off, chat fails closed (no fake output masquerading as real), as
-  the operator-control behaviour already does for attached Codex.
+- Real Codex chat applies ONLY to agents explicitly bound to the Codex adapter.
+  Fake/scripted/mock agents keep their fake/scripted handle and run
+  deterministically, EXACTLY as before AI2 — real Codex is NEVER a global default
+  for unbound/mock agents.
+- For a Codex-bound agent: when `codex_live_chat_gate_open()` is TRUE the chat
+  `send_turn` drives the real read-only one-shot `codex exec --json`; when FALSE
+  it returns an IMMEDIATE typed error (no process spawn, no blocking, no waiting),
+  mirroring operator-control's fail-closed posture. No chat path blocks the
+  server request handler.
 
-Verification:
+Acceptance (met):
 
-- Deterministic test: a scripted-mock adapter injected through the same default
-  path drives chat end-to-end (no fake handle on the chat surface).
-- Simple gated live Codex smoke: `SendTask`/`SteerAgent` with the Codex profile
-  produces real Codex output through the `AgentAdapter` trait.
-- `cargo fmt` / `cargo clippy ...` / focused `cargo test -p capo-controller -p capo-server`.
+- A real Codex `AgentAdapter` implementation
+  (`crates/capo-adapters/src/codex_live.rs` `CodexLiveAdapter`) whose chat turn
+  spawns + parses the read-only one-shot Codex and returns provider-neutral
+  `TurnOutput`. Added as a third `AgentAdapterHandle::Codex` variant; the trait
+  gained a fallible `try_send_turn` seam (default-impls to infallible `send_turn`
+  for the fake/scripted handles; the Codex handle overrides it with the
+  gate-respecting fail-closed path).
+- Routing is BY BINDING: the controller chat path
+  (`crates/capo-controller/src/fake_session.rs` `send_task`,
+  `crates/capo-controller/src/session_control.rs` `redirect`) drives
+  `self.adapter.try_send_turn(...)` — the agent's own handle — and maps a typed
+  failure to `StateError::CodexLiveChat`. Fake/mock agents never reach the Codex
+  path, so nothing "defaults" to Codex.
+- The gate (`codex_live_chat_gate_open()` in `codex_live.rs`) requires BOTH
+  `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1` AND `CAPO_SERVER_RUN_CODEX_LIVE=1`,
+  matching the live-provider dispatch opt-ins. With the gate off, a Codex-bound
+  chat fails closed FAST (immediate `CodexLiveChatError::GateClosed`); no fake
+  output masquerades as real. Claude live stays blocked (no Claude chat handle).
+- Production seam: `RealBoundaryController::open_codex_chat(...)` binds the Codex
+  chat handle for a Codex-bound agent (honoring an absolute `CAPO_CODEX_BIN`
+  override); the default `open`/`open_with_adapter` keep the fake/scripted handle.
+
+Verification (met):
+
+- Real-Codex-chat deterministic test (no live provider):
+  `codex_bound_chat_drives_the_real_adapter_through_a_codex_stub_with_gate_open`
+  (`crates/capo-controller/src/tests.rs`) writes an executable `codex` STUB pinned
+  by absolute path via `with_codex_program_override` (the runtime spawns with
+  `env_clear`, so the stub uses only POSIX builtins — `read`/`printf` — and
+  streams fixed JSONL from an absolute-path fixture), opens a Codex-bound
+  controller with the gate ON, and asserts the chat summary is the STUB's parsed
+  `agent_message` text (`CODEX_STUB_CHAT_SUMMARY`) through the `AgentAdapter`
+  trait — not a fake-adapter summary.
+- Fail-closed test:
+  `codex_bound_chat_fails_closed_fast_when_gate_is_off` opens a Codex-bound
+  controller pointed at a NON-EXISTENT codex path with the gate OFF and asserts
+  `send_task` returns an immediate `StateError::CodexLiveChat` (naming the missing
+  opt-in) in well under a second — proving NO spawn and NO hang.
+- The existing `capo_planner_tracks_decisions_as_server_state_and_steers_mock_agent`
+  passes UNCHANGED (the mock agent's chat still routes through the fake adapter).
+- Gate run (worktree, 2026-05-31): `cargo fmt --check` (exit 0); `cargo clippy
+  --all-targets --all-features -- -D warnings` (exit 0); `cargo test --workspace`
+  COMPLETED green (exit 0, 494 tests passed across binaries, 0 failed; no hang).
+  No live Codex smoke required (the deterministic stub path satisfies the
+  verification). Did NOT git commit (workflow commits after review).
 
 ## AI3 - Wire `dispatch_tool_call` into the production turn loop
 

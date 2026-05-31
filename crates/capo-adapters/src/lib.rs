@@ -6,6 +6,7 @@
 
 mod acp_client;
 mod adapter;
+mod codex_live;
 mod event;
 mod local_subscription;
 mod provider_parsers;
@@ -15,6 +16,10 @@ pub use acp_client::{AcpClientCall, AcpSessionSetupPlan};
 pub use adapter::{
     AdapterSession, AdapterSessionRequest, AgentAdapter, AgentAdapterHandle, FakeAdapter,
     FakeProviderConnector, FakeProviderInfo, ProviderConnector, TurnOutput, TurnRequest,
+};
+pub use codex_live::{
+    CODEX_LIVE_PREFLIGHT_OPT_IN_ENV, CODEX_LIVE_RUN_OPT_IN_ENV, CodexLiveAdapter,
+    CodexLiveChatError, codex_live_chat_gate_open,
 };
 pub use event::{
     AdapterFixtureParse, AdapterParseError, AdapterParseResult, AdapterTerminalOutcome,
