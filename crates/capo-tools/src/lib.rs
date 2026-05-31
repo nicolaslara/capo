@@ -144,6 +144,64 @@ impl ToolExposure {
             ),
         }
     }
+
+    /// SG3: derive the [`PermissionRequest`] (session id + capability profile +
+    /// required scope) this exposure WOULD decide for `request`, WITHOUT invoking
+    /// the tool.
+    ///
+    /// This is the seam the controller's decide step uses to consult the durable
+    /// grant store (read-back) before authorizing: it needs the canonical
+    /// `scope_json` (the tool definition's `required_scopes_json`) the policy and
+    /// grants are keyed on, derived the SAME way each variant's
+    /// `authorize_and_invoke` derives it, so read-back and the live dispatch agree
+    /// on the scope. Returns `None` for the test-only `Fake` variant, which has no
+    /// permission lifecycle.
+    pub fn permission_request_for(
+        &self,
+        request: &ToolExposureRequest,
+    ) -> Option<PermissionRequest> {
+        match (self, request) {
+            (Self::Capo(registry), ToolExposureRequest::Capo(request)) => {
+                let definition = registry
+                    .describe_tool(&request.tool_id)
+                    .unwrap_or_else(|| unknown_tool_definition(&request.tool_id));
+                Some(PermissionRequest {
+                    session_id: request.session_id.clone(),
+                    capability_profile_id: request.capability_profile_id.clone(),
+                    scope_json: definition.required_scopes_json,
+                })
+            }
+            (Self::Runtime(wrappers), ToolExposureRequest::Runtime(request)) => {
+                let definition = wrappers
+                    .describe_tool(&request.tool_id)
+                    .unwrap_or_else(|| unknown_tool_definition(&request.tool_id));
+                Some(PermissionRequest {
+                    session_id: request.session_id.clone(),
+                    capability_profile_id: request.capability_profile_id.clone(),
+                    scope_json: definition.required_scopes_json,
+                })
+            }
+            (Self::AgentReports(registry), ToolExposureRequest::AgentReport(request)) => {
+                let definition = registry
+                    .describe_tool(&request.tool_id)
+                    .unwrap_or_else(|| unknown_report_definition(&request.tool_id));
+                Some(PermissionRequest {
+                    session_id: request.session_id.clone(),
+                    capability_profile_id: request.capability_profile_id.clone(),
+                    scope_json: definition.required_scopes_json,
+                })
+            }
+            // The fake summary shim has no permission lifecycle; the real loop
+            // never routes it through the decide step.
+            (Self::Fake(_), _) => None,
+            (exposure, request) => panic!(
+                "ToolExposure::permission_request_for variant mismatch: `{}` exposure \
+                 cannot decide a `{}` request",
+                exposure.binding().variant,
+                request.variant_name()
+            ),
+        }
+    }
 }
 
 /// A typed tool-dispatch request: a real Capo-registry call, a real

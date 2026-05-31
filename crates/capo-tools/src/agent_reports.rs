@@ -446,7 +446,7 @@ fn report_redaction_policy(fields: &[&str]) -> String {
     format!("{{\"strategy\":\"credential_scan\",\"fields\":[{quoted}]}}")
 }
 
-fn unknown_report_definition(tool_id: &str) -> ToolDefinition {
+pub(crate) fn unknown_report_definition(tool_id: &str) -> ToolDefinition {
     ToolDefinition {
         tool_id: tool_id.to_string(),
         display_name: tool_id.to_string(),

@@ -6,6 +6,14 @@ pub enum PermissionPolicy {
     Fake(FakePermissionPolicy),
     TrustedLocal(AllowTrustedLocalProfilePolicy),
     Static(StaticPolicy),
+    /// SG3: a durable-grant authority. The controller's decide-step grant
+    /// read-back consults the durable grant store BEFORE the configured policy; a
+    /// hit (a valid subject+scope allow grant, or a standing `reject_always` deny
+    /// grant) becomes this one-shot policy so the SAME `authorize_and_invoke`
+    /// dispatch path enforces the durable verdict -- one decide path, not a
+    /// parallel API. It is never a configured controller default; it is minted per
+    /// dispatch from a read-back hit.
+    DurableGrant(DurableGrantPolicy),
 }
 
 impl PermissionPolicy {
@@ -25,11 +33,21 @@ impl PermissionPolicy {
         Self::Static(StaticPolicy::reviewer())
     }
 
+    /// SG3: a one-shot policy that returns the supplied durable-grant verdict for
+    /// this dispatch. Used by the controller's decide step to enforce a grant
+    /// read-back hit through the same `authorize_and_invoke` gate the policy path
+    /// uses, so a valid durable allow grant authorizes a call the configured
+    /// policy would deny, and a standing deny grant blocks a call it would allow.
+    pub fn durable_grant(decision: PermissionDecision) -> Self {
+        Self::DurableGrant(DurableGrantPolicy { decision })
+    }
+
     pub fn binding(&self) -> BoundaryBinding {
         match self {
             Self::Fake(policy) => policy.binding(),
             Self::TrustedLocal(policy) => policy.binding(),
             Self::Static(policy) => policy.binding(),
+            Self::DurableGrant(policy) => policy.binding(),
         }
     }
 
@@ -38,6 +56,7 @@ impl PermissionPolicy {
             Self::Fake(policy) => policy.decide(request),
             Self::TrustedLocal(policy) => policy.decide(request),
             Self::Static(policy) => policy.decide(request),
+            Self::DurableGrant(policy) => policy.decide(request),
         }
     }
 
@@ -46,6 +65,43 @@ impl PermissionPolicy {
             Self::Fake(_) => "fake",
             Self::TrustedLocal(_) => "trusted-local-dev",
             Self::Static(policy) => policy.profile_id(),
+            Self::DurableGrant(_) => "durable-grant",
+        }
+    }
+}
+
+/// SG3: a one-shot policy carrying a precomputed durable-grant verdict.
+///
+/// Read-back is the authority here, not a profile: the controller mints this from
+/// a durable grant-store hit and hands it to `authorize_and_invoke` for a single
+/// dispatch so the durable verdict (allow or `reject_always` deny) is enforced on
+/// the SAME gate the configured policy uses. `decide` returns the precomputed
+/// decision verbatim, re-stamped onto the live request's scope so it lines up with
+/// the dispatch's own `permission.requested`/`decided` audit events.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DurableGrantPolicy {
+    decision: PermissionDecision,
+}
+
+impl DurableGrantPolicy {
+    pub fn binding(&self) -> BoundaryBinding {
+        BoundaryBinding {
+            kind: BoundaryKind::PermissionPolicy,
+            variant: "durable-grant",
+            fake: false,
+        }
+    }
+
+    pub fn decide(&self, request: PermissionRequest) -> PermissionDecision {
+        PermissionDecision {
+            capability_grant_id: self.decision.capability_grant_id.clone(),
+            capability_profile_id: request.capability_profile_id,
+            effect: self.decision.effect.clone(),
+            scope_json: request.scope_json,
+            subject_json: format!("{{\"session_id\":\"{}\"}}", request.session_id),
+            decision_source: self.decision.decision_source.clone(),
+            persistence: self.decision.persistence.clone(),
+            explanation: self.decision.explanation.clone(),
         }
     }
 }

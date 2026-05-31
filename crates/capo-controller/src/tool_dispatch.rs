@@ -97,13 +97,24 @@ pub struct PermissionDecideOutcome {
     /// `true` when a `capability.grant_created` event was appended for this
     /// decision (allow or deny) with non-observational persistence.
     pub grant_created: bool,
+    /// SG3: which authority gated this live call -- a durable allow grant, a
+    /// durable deny grant, or the configured policy (when no valid grant matched
+    /// the request's subject+scope). The live decide gate consults the durable
+    /// grant store FIRST; this records the read-back result so the audit trail
+    /// names the authority even when it is the policy.
+    pub read_back_source: GrantReadBackSource,
     /// The structured, agent-readable refusal for a denied call, or `None` when
     /// allowed. The loop reflects on this rather than a raw error string.
     pub refusal: Option<ToolRefusal>,
 }
 
 impl PermissionDecideOutcome {
-    fn from_decision(decision: &PermissionDecision, tool_name: &str, grant_created: bool) -> Self {
+    fn from_decision(
+        decision: &PermissionDecision,
+        tool_name: &str,
+        grant_created: bool,
+        read_back_source: GrantReadBackSource,
+    ) -> Self {
         let allowed = decision.effect == "allow";
         let refusal = (!allowed).then(|| ToolRefusal {
             tool_name: tool_name.to_string(),
@@ -119,6 +130,7 @@ impl PermissionDecideOutcome {
             persistence: decision.persistence.clone(),
             explanation: decision.explanation.clone(),
             grant_created,
+            read_back_source,
             refusal,
         }
     }
@@ -165,11 +177,27 @@ impl FakeBoundaryController {
         scope: &ToolDispatchScope,
         request: ToolExposureRequest,
     ) -> StateResult<ToolDispatchOutcome> {
+        // SG3: grant READ-BACK is the FIRST step of the live decide gate -- the
+        // same gate this single dispatch path runs, not a parallel API. Before
+        // authorizing, the controller consults the durable grant store for a
+        // subject+scope-matched verdict and, on a hit, hands `authorize_and_invoke`
+        // a one-shot `durable_grant` policy so the durable verdict is enforced
+        // through the SAME authorize+invoke seam the configured policy uses:
+        //   - a standing `reject_always` DENY grant blocks the call even when the
+        //     configured policy would allow it (the durable deny over-rules);
+        //   - a valid ALLOW grant authorizes the call even when the configured
+        //     policy would deny it (grants are not write-only);
+        //   - a revoked/expired grant reads as ABSENT, so the configured policy
+        //     decides (unchanged path).
+        // The read-back source is recorded on the decide outcome so the audit trail
+        // names which authority gated the live call.
+        let (effective_policy, read_back_source) =
+            self.read_back_effective_policy(exposure, &request)?;
         // ACI7: capture wall-clock timing around the real authorize+invoke so the
         // persisted `ToolCall` projection carries `started_at`/`completed_at` for
         // later evaluation.
         let started_at = epoch_millis();
-        let result = exposure.authorize_and_invoke(request, &self.permission_policy);
+        let result = exposure.authorize_and_invoke(request, &effective_policy);
         let completed_at = epoch_millis();
         let normalized = NormalizedToolResult::from_result(&result);
         // ACI7: the per-call provenance that ties command -> turn -> permission ->
@@ -283,6 +311,7 @@ impl FakeBoundaryController {
             &normalized.permission_decision,
             &normalized.tool_name,
             grant_created,
+            read_back_source,
         );
         Ok(ToolDispatchOutcome {
             tool_call_id: scope.tool_call_id.clone(),
@@ -294,6 +323,56 @@ impl FakeBoundaryController {
             observed_event_kinds,
             result,
         })
+    }
+
+    /// SG3: resolve the effective policy for this dispatch from a durable
+    /// grant-store READ-BACK, plus the read-back source for the audit trail.
+    ///
+    /// This is the single live decide gate's first step. It derives the
+    /// [`capo_tools::PermissionRequest`] this exposure would decide (without
+    /// invoking), then consults the durable grant store SUBJECT-scoped (session +
+    /// capability profile + scope), checking standing deny grants before allow
+    /// grants:
+    ///
+    /// - a valid `reject_always` DENY grant -> a one-shot `durable_grant` deny
+    ///   policy (blocks the call even when the configured policy would allow);
+    /// - else a valid ALLOW grant -> a one-shot `durable_grant` allow policy
+    ///   (authorizes the call even when the configured policy would deny);
+    /// - else (no grant, or only revoked/expired grants) -> the configured policy
+    ///   unchanged.
+    ///
+    /// Routing the read-back hit through a one-shot policy means the SAME
+    /// `authorize_and_invoke` path enforces it, so the grant-created emission,
+    /// audit events, and the gate all flow through one seam. The `Fake` exposure
+    /// (no permission lifecycle) always falls through to the configured policy.
+    fn read_back_effective_policy(
+        &self,
+        exposure: &ToolExposure,
+        request: &ToolExposureRequest,
+    ) -> StateResult<(PermissionPolicy, GrantReadBackSource)> {
+        let Some(permission_request) = exposure.permission_request_for(request) else {
+            return Ok((self.permission_policy.clone(), GrantReadBackSource::Policy));
+        };
+        let now = grant_read_back_now();
+        // A standing deny grant over-rules even a permissive configured policy.
+        if let Some(deny) = self.active_deny_grant_for_request(&permission_request, &now)? {
+            let decision = grant_read_back_decision(&deny);
+            return Ok((
+                PermissionPolicy::durable_grant(decision),
+                GrantReadBackSource::DurableDenyGrant,
+            ));
+        }
+        // A valid allow grant authorizes even a call the configured policy denies.
+        if let Some(allow) = self.active_allow_grant_for_request(&permission_request, &now)? {
+            let decision = grant_read_back_decision(&allow);
+            return Ok((
+                PermissionPolicy::durable_grant(decision),
+                GrantReadBackSource::DurableGrant,
+            ));
+        }
+        // No valid durable grant (none, or only revoked/expired): the configured
+        // policy decides, exactly as before SG3 read-back.
+        Ok((self.permission_policy.clone(), GrantReadBackSource::Policy))
     }
 
     fn dispatch_event_projections(
@@ -445,6 +524,30 @@ impl FakeBoundaryController {
         // revoke, and the read-back path (SG3 decide) reads these columns.
         let created_at = epoch_millis().to_string();
         let expires_at = grant_expires_at(&decision.persistence, &created_at);
+        // SG3 review-fix: REVOCATION IS STICKY. `capability_grant_id` is
+        // deterministic in (session, profile, scope, effect)
+        // (`capo_tools::scoped_grant_id`), so a re-request after a revoke produces
+        // the SAME id. Without this guard the create path would re-emit the
+        // projection with `revoked_at: None` and the `ON CONFLICT DO UPDATE` in
+        // `apply.rs` would OVERWRITE the revoked row, silently un-revoking the
+        // grant. Once read-back is the live gate (this dispatch path), that would
+        // let a denied-then-re-requested scope resurrect a revoked grant under a
+        // permissive policy. So a grant whose durable row is already revoked stays
+        // revoked: we carry its prior `revoked_at` (and original `created_at`)
+        // forward, leaving re-granting after a revoke to an explicit future
+        // re-grant flow rather than an incidental id collision.
+        let existing = self
+            .state
+            .capability_grant_by_id(&decision.capability_grant_id)?;
+        let prior_revoked_at = existing
+            .as_ref()
+            .filter(|grant| grant.is_revoked())
+            .and_then(|grant| grant.revoked_at.clone());
+        let created_at_for_row = existing
+            .as_ref()
+            .filter(|grant| grant.is_revoked())
+            .and_then(|grant| grant.created_at.clone())
+            .unwrap_or_else(|| created_at.clone());
         let mut payload = serde_json::json!({
             "capability_grant_id": decision.capability_grant_id,
             "effect": decision.effect,
@@ -484,10 +587,14 @@ impl FakeBoundaryController {
                     decision_source: decision.decision_source.clone(),
                     persistence: decision.persistence.clone(),
                     explanation: decision.explanation.clone(),
-                    // SG3: a freshly created grant is never revoked yet.
-                    created_at: Some(created_at),
+                    // SG3: preserve the original `created_at` when re-emitting over
+                    // an already-revoked row; otherwise stamp the fresh instant.
+                    created_at: Some(created_at_for_row),
                     expires_at,
-                    revoked_at: None,
+                    // SG3 review-fix: a freshly created grant is never revoked, but
+                    // a re-emit over an already-revoked deterministic id KEEPS the
+                    // prior `revoked_at` so the revocation is not silently undone.
+                    revoked_at: prior_revoked_at,
                     updated_sequence: 0,
                 },
             )],
@@ -516,6 +623,32 @@ fn grant_expires_at(persistence: &str, created_at: &str) -> Option<String> {
 /// creation instant. The exact window is a prototype choice; the durable column
 /// is what decide-time read-back checks.
 const GRANT_UNTIL_TIME_WINDOW_MILLIS: i64 = 60 * 60 * 1000;
+
+/// SG3: the wall-clock instant (epoch-millis string) a dispatch's grant read-back
+/// is evaluated against `expires_at`/`revoked_at`, matching the grant-lifecycle
+/// module's clock so live read-back and the standalone read-back agree.
+fn grant_read_back_now() -> String {
+    epoch_millis().to_string()
+}
+
+/// SG3: rebuild the canonical [`PermissionDecision`] a durable grant carries, so a
+/// read-back hit can be enforced through the SAME `authorize_and_invoke` gate via
+/// a one-shot `durable_grant` policy. The decision's identity (grant id, effect,
+/// source, persistence, explanation) comes verbatim from the durable grant; the
+/// one-shot policy re-stamps it onto the live request's scope/subject so it lines
+/// up with the dispatch's own audit events.
+fn grant_read_back_decision(grant: &capo_state::CapabilityGrantProjection) -> PermissionDecision {
+    PermissionDecision {
+        capability_grant_id: grant.capability_grant_id.clone(),
+        capability_profile_id: grant.capability_profile_id.clone(),
+        effect: grant.effect.clone(),
+        scope_json: grant.scope_json.clone(),
+        subject_json: grant.subject_json.clone(),
+        decision_source: grant.decision_source.clone(),
+        persistence: grant.persistence.clone(),
+        explanation: grant.explanation.clone(),
+    }
+}
 
 /// The event-keying inputs that differ per caller of
 /// [`FakeBoundaryController::append_capability_grant_created_event`]: the event

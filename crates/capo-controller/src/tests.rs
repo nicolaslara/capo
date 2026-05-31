@@ -6037,3 +6037,414 @@ fn sg3_expired_grant_does_not_authorize() {
         .to_string();
     assert!(grant.is_expired(&now));
 }
+
+/// SG3 review-fix (CRITICAL: read-back is the LIVE gate). A valid durable allow
+/// grant authorizes a real agent-driven tool call THROUGH the single live decide
+/// path (`dispatch_tool_call`), even when the configured policy would deny it.
+/// This proves read-back is wired into the loop's gate, not a parallel test-only
+/// API: the tool runs, the audit flows, and the decide outcome names the durable
+/// grant as the authority.
+#[test]
+fn sg3_live_dispatch_durable_grant_authorizes_a_policy_denied_write() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{CapoToolContext, CapoToolRequest, ToolExposureRequest};
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("sg3-live-session"));
+    // The read-only-local STATIC policy DENIES `capo.evidence_record` (a write).
+    let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        PermissionPolicy::static_read_only_local(),
+        scripted,
+    )
+    .expect("open real controller");
+    let registration = controller.register_agent("sg3-live-worker").expect("agent");
+    let refs = controller
+        .send_task(&registration, "Drive a live SG3 read-back dispatch")
+        .expect("send task");
+
+    let request = CapoToolRequest {
+        tool_call_id: ToolCallId::new("tool-sg3-live-allow"),
+        session_id: refs.session_id.clone(),
+        tool_id: "capo.evidence_record".to_string(),
+        capability_profile_id: "trusted-local-dev".to_string(),
+        context: CapoToolContext {
+            task_status: "task active".to_string(),
+            agent_status: "agent running".to_string(),
+            session_summary: "summary".to_string(),
+            workpad_excerpt: "section".to_string(),
+            evidence_note: "note".to_string(),
+            capability_scope: "state:write:evidence".to_string(),
+        },
+    };
+    let exposure_request = ToolExposureRequest::Capo(request.clone());
+    // Derive the exact scope the live gate keys on, so the seeded grant matches
+    // what the dispatch path will read back (no brittle hand-built scope string).
+    let scope_json = controller
+        .capo_registry()
+        .expect("capo registry")
+        .describe_tool("capo.evidence_record")
+        .expect("evidence_record defined")
+        .required_scopes_json;
+
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-sg3-live-allow"),
+        tool_call_id: request.tool_call_id.clone(),
+    };
+
+    // WITHOUT a grant, the live gate consults the policy and the write is BLOCKED.
+    let denied = controller
+        .dispatch_tool_call(&scope, exposure_request.clone())
+        .expect("dispatch without grant");
+    assert!(
+        !denied.decide.allowed,
+        "policy denies the write with no grant"
+    );
+    assert_eq!(denied.status, "denied");
+    assert_eq!(
+        denied.decide.read_back_source,
+        crate::GrantReadBackSource::Policy
+    );
+    assert!(
+        !denied
+            .observed_event_kinds
+            .iter()
+            .any(|kind| kind == "tool.call_completed"),
+        "the denied write must not run"
+    );
+
+    // Seed a valid durable allow grant for the SAME subject (session +
+    // capability profile) and scope.
+    sg3_seed_grant(
+        &controller,
+        capo_state::CapabilityGrantProjection {
+            capability_grant_id: "grant-sg3-live-allow".to_string(),
+            capability_profile_id: "trusted-local-dev".to_string(),
+            scope_json: scope_json.clone(),
+            effect: "allow".to_string(),
+            subject_json: format!("{{\"session_id\":\"{}\"}}", refs.session_id),
+            decision_source: "allow_trusted_local_profile".to_string(),
+            persistence: "until_revoked".to_string(),
+            explanation: "operator-approved durable write grant".to_string(),
+            created_at: Some("1700000000000".to_string()),
+            expires_at: None,
+            revoked_at: None,
+            updated_sequence: 0,
+        },
+        "live-allow",
+    );
+
+    // Re-dispatch the SAME tool call through the live gate: the durable grant
+    // authorizes it even though the configured policy still denies the scope, the
+    // tool RUNS, and the decide outcome names the durable grant.
+    let scope = ToolDispatchScope {
+        turn_id: TurnId::new("turn-sg3-live-allow-2"),
+        tool_call_id: ToolCallId::new("tool-sg3-live-allow-2"),
+        ..scope
+    };
+    let request = CapoToolRequest {
+        tool_call_id: scope.tool_call_id.clone(),
+        ..request
+    };
+    let allowed = controller
+        .dispatch_tool_call(&scope, ToolExposureRequest::Capo(request))
+        .expect("dispatch with durable grant");
+    assert!(
+        allowed.decide.allowed,
+        "a valid durable grant authorizes the live call"
+    );
+    assert_eq!(allowed.status, "completed");
+    assert_eq!(
+        allowed.decide.read_back_source,
+        crate::GrantReadBackSource::DurableGrant,
+        "the live gate's authority is the durable grant, not the policy"
+    );
+    assert_eq!(allowed.decide.capability_grant_id, "grant-sg3-live-allow");
+    assert!(
+        allowed
+            .observed_event_kinds
+            .iter()
+            .any(|kind| kind == "tool.call_completed"),
+        "the authorized tool actually runs through the live path"
+    );
+}
+
+/// SG3 review-fix (SECURITY: standing deny grants participate in the live gate).
+/// A durable `deny` grant (a `reject_always` standing denial) BLOCKS a real tool
+/// call through `dispatch_tool_call` even when the configured policy would allow
+/// it. Without this, a previously `reject_always`-denied scope would be silently
+/// re-authorized under a permissive policy.
+#[test]
+fn sg3_live_dispatch_durable_deny_grant_blocks_a_policy_allowed_call() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{CapoToolContext, CapoToolRequest, ToolExposureRequest};
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("sg3-deny-session"));
+    // The TrustedLocal policy ALLOWS this read tool (it is the permissive default).
+    let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        PermissionPolicy::allow_trusted_local(),
+        scripted,
+    )
+    .expect("open real controller");
+    let registration = controller.register_agent("sg3-deny-worker").expect("agent");
+    let refs = controller
+        .send_task(&registration, "Drive a live SG3 deny-grant dispatch")
+        .expect("send task");
+
+    let scope_json = controller
+        .capo_registry()
+        .expect("capo registry")
+        .describe_tool("capo.agent_status")
+        .expect("agent_status defined")
+        .required_scopes_json;
+
+    // Seed a standing durable DENY grant for the subject + scope.
+    sg3_seed_grant(
+        &controller,
+        capo_state::CapabilityGrantProjection {
+            capability_grant_id: "grant-sg3-standing-deny".to_string(),
+            capability_profile_id: "trusted-local-dev".to_string(),
+            scope_json: scope_json.clone(),
+            effect: "deny".to_string(),
+            subject_json: format!("{{\"session_id\":\"{}\"}}", refs.session_id),
+            decision_source: "reject_always".to_string(),
+            persistence: "until_revoked".to_string(),
+            explanation: "operator standing denial".to_string(),
+            created_at: Some("1700000000000".to_string()),
+            expires_at: None,
+            revoked_at: None,
+            updated_sequence: 0,
+        },
+        "standing-deny",
+    );
+
+    let scope = ToolDispatchScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-sg3-standing-deny"),
+        tool_call_id: ToolCallId::new("tool-sg3-standing-deny"),
+    };
+    let outcome = controller
+        .dispatch_tool_call(
+            &scope,
+            ToolExposureRequest::Capo(CapoToolRequest {
+                tool_call_id: scope.tool_call_id.clone(),
+                session_id: refs.session_id.clone(),
+                tool_id: "capo.agent_status".to_string(),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                context: CapoToolContext {
+                    task_status: "task active".to_string(),
+                    agent_status: "agent running".to_string(),
+                    session_summary: "summary".to_string(),
+                    workpad_excerpt: "section".to_string(),
+                    evidence_note: "note".to_string(),
+                    capability_scope: "state:read:agent".to_string(),
+                },
+            }),
+        )
+        .expect("dispatch under standing deny");
+
+    assert!(
+        !outcome.decide.allowed,
+        "the standing deny grant blocks even a policy-allowed call"
+    );
+    assert_eq!(outcome.status, "denied");
+    assert_eq!(
+        outcome.decide.read_back_source,
+        crate::GrantReadBackSource::DurableDenyGrant
+    );
+    assert!(
+        !outcome
+            .observed_event_kinds
+            .iter()
+            .any(|kind| kind == "tool.call_completed"),
+        "no tool runs when a standing deny grant matches"
+    );
+}
+
+/// SG3 review-fix (SECURITY/CORRECTNESS: read-back is subject-scoped). A grant
+/// minted for session A does NOT authorize an identical-scope request from
+/// session B -- read-back matches the grant's subject (session id + capability
+/// profile), not the scope string alone, so it never broadens authorization
+/// across sessions/agents.
+#[test]
+fn sg3_grant_read_back_is_subject_scoped_across_sessions() {
+    let controller = RealBoundaryController::open_with_permission_policy(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        PermissionPolicy::static_read_only_local(),
+    )
+    .expect("open controller");
+    let scope_json = "[\"filesystem:write:workspace\"]".to_string();
+
+    // Seed an allow grant whose subject is session A.
+    sg3_seed_grant(
+        &controller,
+        sg3_grant("grant-sg3-session-a", &scope_json, None),
+        "session-a",
+    );
+
+    // Session A (the grant's subject) is authorized by read-back.
+    let session_a = controller
+        .decide_with_grant_read_back(PermissionRequest {
+            session_id: SessionId::new("session-sg3"),
+            capability_profile_id: "trusted-local-dev".to_string(),
+            scope_json: scope_json.clone(),
+        })
+        .expect("decide for session A");
+    assert!(session_a.allowed, "the grant's own session is authorized");
+    assert_eq!(session_a.source, crate::GrantReadBackSource::DurableGrant);
+
+    // Session B asks for the SAME scope: read-back does NOT authorize it (the
+    // grant's subject is session A), so it falls through to the denying policy.
+    let session_b = controller
+        .decide_with_grant_read_back(PermissionRequest {
+            session_id: SessionId::new("session-other"),
+            capability_profile_id: "trusted-local-dev".to_string(),
+            scope_json: scope_json.clone(),
+        })
+        .expect("decide for session B");
+    assert!(
+        !session_b.allowed,
+        "a grant for session A must not authorize session B for the same scope"
+    );
+    assert_eq!(session_b.source, crate::GrantReadBackSource::Policy);
+    assert!(session_b.authorizing_grant_id.is_none());
+
+    // A different capability profile for the SAME session is also not authorized.
+    let other_profile = controller
+        .decide_with_grant_read_back(PermissionRequest {
+            session_id: SessionId::new("session-sg3"),
+            capability_profile_id: "some-other-profile".to_string(),
+            scope_json,
+        })
+        .expect("decide for other profile");
+    assert!(
+        !other_profile.allowed,
+        "a grant for one profile must not authorize a different profile"
+    );
+    assert_eq!(other_profile.source, crate::GrantReadBackSource::Policy);
+}
+
+/// SG3 review-fix (CORRECTNESS: revocation is sticky). After a grant is revoked,
+/// a re-request that re-derives the SAME deterministic grant id under a permissive
+/// policy does NOT silently un-revoke it: the durable row keeps its `revoked_at`,
+/// so read-back still treats it as absent. This is what makes the revoked-then-
+/// re-requested-under-permissive-policy case (untestable while read-back was
+/// inert) safe now that read-back is the live gate.
+#[test]
+fn sg3_re_grant_after_revoke_does_not_un_revoke_under_permissive_policy() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+    use capo_tools::{CapoToolContext, CapoToolRequest, ToolExposureRequest};
+
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("sg3-resticky"));
+    // TrustedLocal allows the tool, so a re-request WOULD re-create the grant if
+    // the create path did not preserve the prior revocation.
+    let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        PermissionPolicy::allow_trusted_local(),
+        scripted,
+    )
+    .expect("open real controller");
+    let registration = controller
+        .register_agent("sg3-resticky-worker")
+        .expect("agent");
+    let refs = controller
+        .send_task(&registration, "Drive a re-grant-after-revoke flow")
+        .expect("send task");
+
+    // First dispatch creates a durable grant (TrustedLocal => until_session_end).
+    // capo.agent_status is a read tool TrustedLocal allows.
+    let make_request = |tool_call_id: &str| CapoToolRequest {
+        tool_call_id: ToolCallId::new(tool_call_id),
+        session_id: refs.session_id.clone(),
+        tool_id: "capo.agent_status".to_string(),
+        capability_profile_id: "trusted-local-dev".to_string(),
+        context: CapoToolContext {
+            task_status: "task active".to_string(),
+            agent_status: "agent running".to_string(),
+            session_summary: "summary".to_string(),
+            workpad_excerpt: "section".to_string(),
+            evidence_note: "note".to_string(),
+            capability_scope: "state:read:agent".to_string(),
+        },
+    };
+    let first = controller
+        .dispatch_tool_call(
+            &ToolDispatchScope {
+                task_id: refs.task_id.clone(),
+                agent_id: refs.agent_id.clone(),
+                session_id: refs.session_id.clone(),
+                run_id: refs.run_id.clone(),
+                turn_id: TurnId::new("turn-sg3-resticky-1"),
+                tool_call_id: ToolCallId::new("tool-sg3-resticky-1"),
+            },
+            ToolExposureRequest::Capo(make_request("tool-sg3-resticky-1")),
+        )
+        .expect("first dispatch");
+    assert!(first.decide.grant_created, "first allow creates a grant");
+    let grant_id = first.decide.capability_grant_id.clone();
+
+    // Revoke it.
+    controller
+        .revoke_capability_grant(
+            &crate::GrantRevocationScope {
+                task_id: refs.task_id.clone(),
+                agent_id: refs.agent_id.clone(),
+                session_id: refs.session_id.clone(),
+                run_id: refs.run_id.clone(),
+                turn_id: TurnId::new("turn-sg3-resticky-revoke"),
+            },
+            &grant_id,
+            "operator revoked",
+        )
+        .expect("revoke");
+    let revoked_at = controller
+        .state()
+        .capability_grant_by_id(&grant_id)
+        .expect("grant by id")
+        .expect("grant present")
+        .revoked_at
+        .expect("revoked_at stamped");
+
+    // Re-request the SAME tool under the still-permissive policy. The decision
+    // re-derives the SAME deterministic grant id; the create path MUST NOT clear
+    // the prior `revoked_at`.
+    controller
+        .dispatch_tool_call(
+            &ToolDispatchScope {
+                task_id: refs.task_id.clone(),
+                agent_id: refs.agent_id.clone(),
+                session_id: refs.session_id.clone(),
+                run_id: refs.run_id.clone(),
+                turn_id: TurnId::new("turn-sg3-resticky-2"),
+                tool_call_id: ToolCallId::new("tool-sg3-resticky-2"),
+            },
+            ToolExposureRequest::Capo(make_request("tool-sg3-resticky-2")),
+        )
+        .expect("second dispatch");
+
+    let after = controller
+        .state()
+        .capability_grant_by_id(&grant_id)
+        .expect("grant by id")
+        .expect("grant present");
+    assert!(
+        after.is_revoked(),
+        "a re-request after revoke must not silently un-revoke the grant"
+    );
+    assert_eq!(
+        after.revoked_at.as_deref(),
+        Some(revoked_at.as_str()),
+        "the prior revocation timestamp is preserved verbatim"
+    );
+}
