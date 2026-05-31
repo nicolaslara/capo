@@ -324,7 +324,15 @@ quit
 #[test]
 fn capo_planner_tracks_decisions_as_server_state_and_steers_mock_agent() {
     let state_root = temp_root("control-capo-planner-state");
-    let mut server = spawn_server(&state_root, 30);
+    // The bounded server is sized to the exact number of connections this flow
+    // opens (one connection per request): `register` (1) + `task send` (1) + the
+    // control REPL session (26) = 28. AI1 routes the capo planner's live turn
+    // through the single `RunDispatchTurn` command (one connection) instead of the
+    // old hand-sequenced `PreflightLiveProvider` + `RunLiveProviderLocal` (two
+    // connections), so the REPL now opens 28 rather than 30. Sizing the bound to a
+    // stale count makes the server block forever in `accept()` (it never reaches
+    // its budget) and the `server.wait()` below hangs.
+    let mut server = spawn_server(&state_root, 28);
     let stdout = server.stdout.take().expect("server stdout");
     let mut reader = BufReader::new(stdout);
     let address = read_server_address(&mut reader);
