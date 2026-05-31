@@ -5791,6 +5791,43 @@ fn sg3_seed_grant(
         .expect("seed grant");
 }
 
+/// SG4: seed a durable ALLOW grant for the `session-sg4` subject (the real
+/// re-admission surface for a critical scope -- a reviewed durable grant, not the
+/// test-only `allow_trusted_local_with_grants` constructor).
+fn sg4_seed_critical_grant(
+    controller: &RealBoundaryController,
+    grant_id: &str,
+    scope_json: &str,
+    event_suffix: &str,
+) {
+    controller
+        .state()
+        .append_event(
+            capo_state::NewEvent::new(
+                format!("event-sg4-grant-{event_suffix}"),
+                capo_state::EventKind::CapabilityGrantCreated,
+                "test",
+            ),
+            &[capo_state::ProjectionRecord::CapabilityGrant(
+                capo_state::CapabilityGrantProjection {
+                    capability_grant_id: grant_id.to_string(),
+                    capability_profile_id: "trusted-local-dev".to_string(),
+                    scope_json: scope_json.to_string(),
+                    effect: "allow".to_string(),
+                    subject_json: "{\"session_id\":\"session-sg4\"}".to_string(),
+                    decision_source: "user".to_string(),
+                    persistence: "until_revoked".to_string(),
+                    explanation: "operator-reviewed critical-scope grant".to_string(),
+                    created_at: Some("1700000000000".to_string()),
+                    expires_at: None,
+                    revoked_at: None,
+                    updated_sequence: 0,
+                },
+            )],
+        )
+        .expect("seed sg4 critical grant");
+}
+
 fn sg3_grant(
     grant_id: &str,
     scope_json: &str,
@@ -6268,6 +6305,120 @@ fn sg3_live_dispatch_durable_deny_grant_blocks_a_policy_allowed_call() {
             .any(|kind| kind == "tool.call_completed"),
         "no tool runs when a standing deny grant matches"
     );
+}
+
+/// SG4 review-fix (the critical-scope exclusion is enforced through the SAME live
+/// decide step the loop runs, and re-admission is the REAL durable-grant read-back
+/// path -- not the unused `allow_trusted_local_with_grants` constructor).
+///
+/// Under the DEFAULT `allow_trusted_local()` controller (no special opt-in), every
+/// doc-enumerated critical scope decides DENY through `decide_with_grant_read_back`
+/// (the controller decide step that `dispatch_tool_call`'s read-back gate funnels
+/// into via `self.permission_policy.decide`). Then seeding a durable ALLOW grant
+/// for that exact subject+scope re-admits the SAME critical-scope request through
+/// read-back, while the configured policy still records a deny -- proving the
+/// production re-admit mechanism (durable grants), not the test-only constructor,
+/// is what re-opens a critical scope.
+#[test]
+fn sg4_default_trusted_local_controller_denies_each_critical_scope_until_durable_grant() {
+    // The full `trusted-local-dev` v0 exclusion list (mirrors capo-tools'
+    // SG4_CRITICAL_SCOPES); kept in sync by the per-scope deny assertion below.
+    const SG4_CRITICAL_SCOPES: &[&str] = &[
+        "filesystem:write:path",
+        "network:connect:internet",
+        "network:expose:public",
+        "network:connect:private_tunnel",
+        "secret:read:credential_material",
+        "secret:write:credential_material",
+        "voice:read:raw_transcript",
+        "memory:export:project",
+        "memory:sync:external",
+        "browser:control:remote_page",
+        "shell:execute:path",
+    ];
+
+    // DEFAULT controller: the permissive TrustedLocal policy, no critical opt-in.
+    let controller = RealBoundaryController::open_with_permission_policy(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        PermissionPolicy::allow_trusted_local(),
+    )
+    .expect("open default trusted-local controller");
+
+    for (index, critical) in SG4_CRITICAL_SCOPES.iter().enumerate() {
+        let scope_json = format!("[\"{critical}\"]");
+
+        // Without a grant, the live decide step DENIES the critical scope even
+        // under the permissive default policy: TrustedLocal no longer blanket-
+        // allows it, and there is no durable grant, so read-back falls through to
+        // the policy and the policy itself denies.
+        let denied = controller
+            .decide_with_grant_read_back(PermissionRequest {
+                session_id: SessionId::new("session-sg4"),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                scope_json: scope_json.clone(),
+            })
+            .expect("decide critical scope without grant");
+        assert!(
+            !denied.allowed,
+            "default TrustedLocal must DENY critical scope `{critical}` with no grant"
+        );
+        assert_eq!(
+            denied.source,
+            crate::GrantReadBackSource::Policy,
+            "with no grant the authority is the configured policy for `{critical}`"
+        );
+        assert!(
+            denied.authorizing_grant_id.is_none(),
+            "no grant authorizes `{critical}`"
+        );
+        assert_eq!(
+            denied.policy_decision.effect, "deny",
+            "the TrustedLocal policy itself denies critical scope `{critical}`"
+        );
+        assert!(
+            denied.policy_decision.explanation.contains(critical),
+            "the deny explanation names `{critical}`, got: {}",
+            denied.policy_decision.explanation
+        );
+
+        // Seed a durable ALLOW grant for the SAME subject (session + profile) and
+        // scope -- the REAL re-admission surface used in the running loop.
+        let grant_id = format!("grant-sg4-critical-{index}");
+        sg4_seed_critical_grant(
+            &controller,
+            &grant_id,
+            &scope_json,
+            &format!("crit-{index}"),
+        );
+
+        // The SAME critical-scope request now ALLOWS, authorized by the durable
+        // grant (read-back), even though the configured policy STILL records a deny.
+        let readmitted = controller
+            .decide_with_grant_read_back(PermissionRequest {
+                session_id: SessionId::new("session-sg4"),
+                capability_profile_id: "trusted-local-dev".to_string(),
+                scope_json,
+            })
+            .expect("decide critical scope with durable grant");
+        assert!(
+            readmitted.allowed,
+            "a durable allow grant re-admits critical scope `{critical}` through read-back"
+        );
+        assert_eq!(
+            readmitted.source,
+            crate::GrantReadBackSource::DurableGrant,
+            "the durable grant, not the policy, is the authority for `{critical}`"
+        );
+        assert_eq!(
+            readmitted.authorizing_grant_id.as_deref(),
+            Some(grant_id.as_str())
+        );
+        assert_eq!(
+            readmitted.policy_decision.effect, "deny",
+            "the configured TrustedLocal policy still denies `{critical}`; only the grant re-admits"
+        );
+    }
 }
 
 /// SG3 review-fix (SECURITY/CORRECTNESS: read-back is subject-scoped). A grant

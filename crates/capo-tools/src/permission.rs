@@ -28,11 +28,21 @@ impl PermissionPolicy {
     /// SG4: TrustedLocal with an explicit set of granted critical scopes.
     ///
     /// `allow_trusted_local()` denies every critical scope (source-write outside
-    /// the workspace, network egress, secret/credential read, arbitrary shell);
-    /// this constructor re-admits ONLY the critical scopes named in `granted`, so a
-    /// reviewed profile can opt back into a specific critical capability without
-    /// reopening the blanket-allow hole. Non-critical TrustedLocal behavior is
-    /// unchanged either way.
+    /// the workspace, network egress, secret/credential read/write, raw voice
+    /// transcript read, external memory sync/export, remote browser control,
+    /// arbitrary shell); this constructor re-admits ONLY the critical scopes named
+    /// in `granted`, so a reviewed profile can opt back into a specific critical
+    /// capability without reopening the blanket-allow hole. Non-critical
+    /// TrustedLocal behavior is unchanged either way.
+    ///
+    /// NOTE (SG4 scope): this profile-level grant set is test-only scaffolding for
+    /// the policy unit tests. The PRODUCTION re-admission surface in the running
+    /// loop is the SG3 durable-grant read-back (`decide_with_grant_read_back` /
+    /// the dispatch gate's `read_back_effective_policy`): a reviewed durable allow
+    /// grant re-admits a critical scope the configured TrustedLocal policy denies.
+    /// That production path is what the controller-level SG4 test exercises with a
+    /// critical scope (`sg4_default_trusted_local_controller_denies_each_critical_
+    /// scope_until_durable_grant`); no production caller builds this constructor.
     pub fn allow_trusted_local_with_grants(granted: impl IntoIterator<Item = String>) -> Self {
         Self::TrustedLocal(AllowTrustedLocalProfilePolicy::with_granted_critical_scopes(granted))
     }
@@ -148,19 +158,40 @@ impl FakePermissionPolicy {
 /// workspace sandbox or touch credential material:
 ///
 /// - source-write outside the workspace (`filesystem:write:path`),
-/// - network egress (`network:connect:internet`, `network:expose:public`),
-/// - secret/credential read (`secret:read:credential_material`),
+/// - network egress / remote exposure (`network:connect:internet`,
+///   `network:expose:public`, `network:connect:private_tunnel`),
+/// - secret/credential read or write (`secret:read:credential_material`,
+///   `secret:write:credential_material`),
+/// - raw voice transcript read (`voice:read:raw_transcript`),
+/// - external memory sync/export (`memory:export:project`,
+///   `memory:sync:external`),
+/// - browser automation against a remote page with persisted session state
+///   (`browser:control:remote_page`),
 /// - arbitrary shell outside the workspace (`shell:execute:path`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CriticalScope {
     /// `filesystem:write:path` -- a source write addressed by path, not confined
     /// to the workspace root.
     SourceWriteOutsideWorkspace,
-    /// `network:connect:internet` or `network:expose:public` -- network egress /
-    /// public exposure.
+    /// `network:connect:internet`, `network:expose:public`, or
+    /// `network:connect:private_tunnel` -- network egress / public or private
+    /// tunnel exposure (the runtime's own remote/egress exposure scope set, see
+    /// `ExposureScope::permission_scope`).
     NetworkEgress,
     /// `secret:read:credential_material` -- reading raw credential material.
     SecretRead,
+    /// `secret:write:credential_material` -- writing/persisting raw credential
+    /// material (the doc marks credential material critical for read AND write).
+    SecretWrite,
+    /// `voice:read:raw_transcript` -- reading a raw (non-summarized) voice
+    /// transcript.
+    RawVoiceTranscriptRead,
+    /// `memory:export:project` or `memory:sync:external` -- external memory
+    /// sync/export off the local machine.
+    ExternalMemorySync,
+    /// `browser:control:remote_page` -- browser automation against a remote page,
+    /// which can drive persisted authenticated session state.
+    RemoteBrowserControl,
     /// `shell:execute:path` -- arbitrary shell at a path outside the workspace.
     ArbitraryShell,
 }
@@ -171,6 +202,10 @@ impl CriticalScope {
             Self::SourceWriteOutsideWorkspace => "source-write outside workspace",
             Self::NetworkEgress => "network egress",
             Self::SecretRead => "secret/credential read",
+            Self::SecretWrite => "secret/credential write",
+            Self::RawVoiceTranscriptRead => "raw voice transcript read",
+            Self::ExternalMemorySync => "external memory sync/export",
+            Self::RemoteBrowserControl => "remote browser control",
             Self::ArbitraryShell => "arbitrary shell",
         }
     }
@@ -183,11 +218,25 @@ impl CriticalScope {
 /// Capo tool invocation, etc.), so non-critical TrustedLocal behavior is
 /// untouched. Matching is on the full `{domain}:{action}:{resource}` scope string
 /// used for matching/display.
+///
+/// The set mirrors the `trusted-local-dev` v0 exclusion list in
+/// `capability-permissions.md` ("Excludes credential-material read/write, ...
+/// raw voice transcript read, public tunnel exposure, remote runtime execution,
+/// external memory sync/export, browser automation with persisted session
+/// state"). Private-tunnel exposure is included because the runtime emits it as a
+/// remote/egress scope (`ExposureScope::Private -> network:connect:private_tunnel`,
+/// `requires_permission() == true`).
 pub fn critical_scope_kind(scope: &str) -> Option<CriticalScope> {
     match scope {
         "filesystem:write:path" => Some(CriticalScope::SourceWriteOutsideWorkspace),
-        "network:connect:internet" | "network:expose:public" => Some(CriticalScope::NetworkEgress),
+        "network:connect:internet" | "network:expose:public" | "network:connect:private_tunnel" => {
+            Some(CriticalScope::NetworkEgress)
+        }
         "secret:read:credential_material" => Some(CriticalScope::SecretRead),
+        "secret:write:credential_material" => Some(CriticalScope::SecretWrite),
+        "voice:read:raw_transcript" => Some(CriticalScope::RawVoiceTranscriptRead),
+        "memory:export:project" | "memory:sync:external" => Some(CriticalScope::ExternalMemorySync),
+        "browser:control:remote_page" => Some(CriticalScope::RemoteBrowserControl),
         "shell:execute:path" => Some(CriticalScope::ArbitraryShell),
         _ => None,
     }

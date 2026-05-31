@@ -1009,15 +1009,24 @@ fn grant_ids_include_scope_identity() {
 
 // --- SG4: TrustedLocal critical-scope exclusion ----------------------------
 
-/// SG4: the enumerated critical scopes from `capability-permissions.md` that
-/// TrustedLocal must DENY without an explicit grant: source-write outside the
-/// workspace, network egress (connect + public expose), secret/credential read,
-/// and arbitrary shell.
+/// SG4: the enumerated critical scopes from `capability-permissions.md`'s
+/// `trusted-local-dev` v0 exclusion list that TrustedLocal must DENY without an
+/// explicit grant: source-write outside the workspace, network egress (internet
+/// connect, public expose, AND private-tunnel exposure -- the runtime's own
+/// remote/egress scope set), secret/credential read AND write, raw voice
+/// transcript read, external memory sync/export, remote browser control (browser
+/// automation with persisted session state), and arbitrary shell.
 const SG4_CRITICAL_SCOPES: &[&str] = &[
     "filesystem:write:path",
     "network:connect:internet",
     "network:expose:public",
+    "network:connect:private_tunnel",
     "secret:read:credential_material",
+    "secret:write:credential_material",
+    "voice:read:raw_transcript",
+    "memory:export:project",
+    "memory:sync:external",
+    "browser:control:remote_page",
     "shell:execute:path",
 ];
 
@@ -1059,8 +1068,10 @@ fn sg4_trusted_local_denies_each_ungranted_critical_scope() {
 
 #[test]
 fn sg4_critical_scope_classifier_covers_enumerated_scopes() {
-    // SG4: the classifier flags exactly the enumerated critical scopes and treats
-    // the workspace-scoped variants as non-critical.
+    // SG4: the classifier flags every scope in the `trusted-local-dev` v0
+    // exclusion list (`capability-permissions.md`) as critical, mapped to the
+    // right category, and treats the local/workspace-scoped variants as
+    // non-critical.
     assert_eq!(
         critical_scope_kind("filesystem:write:path"),
         Some(CriticalScope::SourceWriteOutsideWorkspace)
@@ -1074,14 +1085,48 @@ fn sg4_critical_scope_classifier_covers_enumerated_scopes() {
         Some(CriticalScope::NetworkEgress)
     );
     assert_eq!(
+        critical_scope_kind("network:connect:private_tunnel"),
+        Some(CriticalScope::NetworkEgress)
+    );
+    assert_eq!(
         critical_scope_kind("secret:read:credential_material"),
         Some(CriticalScope::SecretRead)
+    );
+    assert_eq!(
+        critical_scope_kind("secret:write:credential_material"),
+        Some(CriticalScope::SecretWrite)
+    );
+    assert_eq!(
+        critical_scope_kind("voice:read:raw_transcript"),
+        Some(CriticalScope::RawVoiceTranscriptRead)
+    );
+    assert_eq!(
+        critical_scope_kind("memory:export:project"),
+        Some(CriticalScope::ExternalMemorySync)
+    );
+    assert_eq!(
+        critical_scope_kind("memory:sync:external"),
+        Some(CriticalScope::ExternalMemorySync)
+    );
+    assert_eq!(
+        critical_scope_kind("browser:control:remote_page"),
+        Some(CriticalScope::RemoteBrowserControl)
     );
     assert_eq!(
         critical_scope_kind("shell:execute:path"),
         Some(CriticalScope::ArbitraryShell)
     );
-    // Non-critical: workspace-scoped writes/shell, git, secret metadata, tool calls.
+    // Every scope SG4 enumerates as critical must classify as Some(..); none may
+    // silently fall through to the audit-only allow.
+    for scope in SG4_CRITICAL_SCOPES {
+        assert!(
+            critical_scope_kind(scope).is_some(),
+            "enumerated critical scope `{scope}` must classify as critical"
+        );
+    }
+    // Non-critical: local/workspace-scoped writes/shell/browser/voice/memory, git,
+    // secret metadata, tool calls -- the local-prototype capabilities the doc
+    // keeps allowed under trusted-local-dev.
     for non_critical in [
         "filesystem:write:workspace",
         "filesystem:read:workspace",
@@ -1090,6 +1135,11 @@ fn sg4_critical_scope_classifier_covers_enumerated_scopes() {
         "git:diff:workspace",
         "network:connect:localhost",
         "secret:read:provider_metadata",
+        "voice:read:transcript_summary",
+        "memory:search:project",
+        "memory:read:record",
+        "browser:open:local_dashboard",
+        "browser:control:local_page",
         "tool:invoke:capo.file_write",
     ] {
         assert_eq!(
