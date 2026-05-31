@@ -869,6 +869,11 @@ impl FakeBoundaryController {
                     decision_source: permission.decision_source.clone(),
                     persistence: permission.persistence.clone(),
                     explanation: permission.explanation.clone(),
+                    // SG3: the legacy fake-session grant carries no lifecycle
+                    // timestamps (the real loop's grant writer stamps them).
+                    created_at: None,
+                    expires_at: None,
+                    revoked_at: None,
                     updated_sequence: 0,
                 },
             )],

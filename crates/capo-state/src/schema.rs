@@ -113,6 +113,9 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             decision_source TEXT NOT NULL DEFAULT 'unknown',
             persistence TEXT NOT NULL DEFAULT 'unknown',
             explanation TEXT NOT NULL DEFAULT '',
+            created_at TEXT,
+            expires_at TEXT,
+            revoked_at TEXT,
             updated_sequence INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS permission_approvals (
@@ -495,6 +498,11 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
         "explanation",
         "TEXT NOT NULL DEFAULT ''",
     )?;
+    // SG3: grant lifecycle timestamp columns. Nullable so grants created before
+    // the lifecycle landed (and observational decisions) back-fill as NULL.
+    add_missing_column(connection, "capability_grants", "created_at", "TEXT")?;
+    add_missing_column(connection, "capability_grants", "expires_at", "TEXT")?;
+    add_missing_column(connection, "capability_grants", "revoked_at", "TEXT")?;
     Ok(())
 }
 

@@ -262,7 +262,7 @@ Evidence:
 
 ## SG3 - Grant Read-Back, Revoke/Expire Events, Projection Columns, And Revoke Command
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -291,6 +291,53 @@ Verification:
 - Focused `cargo test -p capo-controller` proving revoke then re-request is
   denied and that old grant-created/used events are preserved.
 - `cargo fmt`.
+
+Evidence:
+
+- New event kinds: `CapabilityGrantRevoked` (`capability.grant_revoked`) and
+  `CapabilityGrantExpired` (`capability.grant_expired`) added to
+  `crates/capo-state/src/event.rs` (enum variant, `as_str`, and the `from_wire`
+  `ALL` list so they round-trip).
+- Projection columns: `created_at`/`expires_at`/`revoked_at` added to
+  `CapabilityGrantProjection` (`crates/capo-state/src/projections.rs`), threaded
+  through the schema (`schema.rs`: new nullable columns + `add_missing_column`
+  back-compat migrations), the apply INSERT/UPDATE (`apply.rs`), the
+  `capability_grants` + new `capability_grant_by_id` queries (`queries.rs`), and
+  the codec round-trip (`codec.rs`/`codec_encode.rs`: the three timestamps ride
+  in the projection `payload_json`, since positional slots a..g are taken, so a
+  rebuild reconstructs revoked/expired state identically). Added typed helpers
+  `is_active_allow`/`is_revoked`/`is_expired` (expiry compared numerically for
+  epoch-millis).
+- Grant read-back + revoke flow: new `crates/capo-controller/src/grant_lifecycle.rs`
+  adds `FakeBoundaryController::decide_with_grant_read_back` (read-back FIRST: a
+  valid allow grant for the scope authorizes; a revoked/expired grant is treated
+  as ABSENT and the policy decides), `active_allow_grant_for_scope`, and the typed
+  `revoke_capability_grant` (emits `capability.grant_revoked` with a reason and
+  re-emits the grant projection with `revoked_at` stamped; old grant-created/used
+  events stay unchanged). Re-exported on `RealBoundaryController`
+  (`real_controller.rs`) and from `lib.rs` (`GrantReadBackDecision`,
+  `GrantReadBackSource`, `GrantRevocation`, `GrantRevocationScope`). The SG1/SG2
+  shared grant writer (`tool_dispatch.rs::append_capability_grant_created_event`)
+  now stamps `created_at` and derives `expires_at` from `until_time` persistence,
+  so every loop-created grant carries lifecycle timestamps.
+- Tests: `crates/capo-state/src/tests.rs` adds `sg3_*` (event-kind wire
+  round-trip; lifecycle columns persist + rebuild identically;
+  revoked-AND-expired state rebuilds identically from the log with old
+  created/used events preserved). `crates/capo-controller/src/tests.rs` adds
+  `sg3_*` (valid durable grant authorizes via read-back even when the policy
+  denies; revoke then re-request is denied with old events preserved + one added
+  `capability.grant_revoked` event carrying the reason + replay parity; expired
+  grant does not authorize without an explicit revoke). Updated the existing
+  grant-projection construction sites for the three new fields
+  (capo-state tests, capo-controller `fake_session.rs`, capo-cli
+  `permission.rs`/`voice.rs`).
+- Commands run (from `/Users/nicolas/devel/capo-wt/safety-gates`):
+  `cargo fmt --check` (exit 0 after `cargo fmt`),
+  `cargo clippy --all-targets --all-features -- -D warnings` (exit 0, no
+  warnings), `cargo test -p capo-state sg3` (3 passed), `cargo test
+  -p capo-controller sg3` (3 passed), `cargo test --workspace` (exit 0; 0 failed
+  workspace-wide; capo-state 50 passed/0 failed, capo-controller 65 passed/0
+  failed/1 ignored). `git diff --check` clean. Acceptance met.
 
 ## SG4 - Fix TrustedLocal Critical-Scope Exclusion
 

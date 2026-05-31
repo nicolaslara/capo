@@ -5767,3 +5767,273 @@ fn sg2_round_trip_lifecycle_rebuilds_from_event_log() {
         "the round-trip grant survives a projection rebuild",
     );
 }
+
+// --- SG3: grant read-back + revoke/expire ----------------------------------
+
+/// Seed a durable grant projection directly through the state store, mirroring
+/// the `capability.grant_created` lifecycle event the real loop appends. Returns
+/// the controller already holding the seeded grant.
+fn sg3_seed_grant(
+    controller: &RealBoundaryController,
+    grant: capo_state::CapabilityGrantProjection,
+    event_suffix: &str,
+) {
+    controller
+        .state()
+        .append_event(
+            capo_state::NewEvent::new(
+                format!("event-sg3-grant-{event_suffix}"),
+                capo_state::EventKind::CapabilityGrantCreated,
+                "test",
+            ),
+            &[capo_state::ProjectionRecord::CapabilityGrant(grant)],
+        )
+        .expect("seed grant");
+}
+
+fn sg3_grant(
+    grant_id: &str,
+    scope_json: &str,
+    expires_at: Option<&str>,
+) -> capo_state::CapabilityGrantProjection {
+    capo_state::CapabilityGrantProjection {
+        capability_grant_id: grant_id.to_string(),
+        capability_profile_id: "trusted-local-dev".to_string(),
+        scope_json: scope_json.to_string(),
+        effect: "allow".to_string(),
+        subject_json: "{\"session_id\":\"session-sg3\"}".to_string(),
+        decision_source: "allow_trusted_local_profile".to_string(),
+        persistence: "until_revoked".to_string(),
+        explanation: "seeded allow grant".to_string(),
+        created_at: Some("1700000000000".to_string()),
+        expires_at: expires_at.map(str::to_string),
+        revoked_at: None,
+        updated_sequence: 0,
+    }
+}
+
+/// SG3 read-back: a valid durable allow grant authorizes a later request even
+/// when the policy itself would deny the scope (grants are not write-only).
+#[test]
+fn sg3_grant_read_back_authorizes_a_valid_durable_grant() {
+    // A read-only-local STATIC policy denies `filesystem:write:workspace`...
+    let controller = RealBoundaryController::open_with_permission_policy(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        PermissionPolicy::static_read_only_local(),
+    )
+    .expect("open controller");
+    let scope_json = "[\"filesystem:write:workspace\"]".to_string();
+
+    // Without any grant, the decide step falls through to the policy and denies.
+    let before = controller
+        .decide_with_grant_read_back(PermissionRequest {
+            session_id: SessionId::new("session-sg3"),
+            capability_profile_id: "trusted-local-dev".to_string(),
+            scope_json: scope_json.clone(),
+        })
+        .expect("decide without grant");
+    assert!(!before.allowed);
+    assert_eq!(before.source, crate::GrantReadBackSource::Policy);
+    assert!(before.authorizing_grant_id.is_none());
+
+    // ...but with a valid durable allow grant for that exact scope, read-back
+    // authorizes the request via the grant, not the policy.
+    sg3_seed_grant(
+        &controller,
+        sg3_grant("grant-sg3-readback", &scope_json, None),
+        "readback",
+    );
+    let after = controller
+        .decide_with_grant_read_back(PermissionRequest {
+            session_id: SessionId::new("session-sg3"),
+            capability_profile_id: "trusted-local-dev".to_string(),
+            scope_json,
+        })
+        .expect("decide with grant");
+    assert!(after.allowed, "a valid grant authorizes the request");
+    assert_eq!(after.source, crate::GrantReadBackSource::DurableGrant);
+    assert_eq!(
+        after.authorizing_grant_id.as_deref(),
+        Some("grant-sg3-readback")
+    );
+    // The policy still records a deny (the grant, not the policy, authorized).
+    assert_eq!(after.policy_decision.effect, "deny");
+}
+
+/// SG3 revoke: revoking a grant then re-requesting the same scope is denied
+/// (the revoked grant reads as absent), while the original
+/// `capability.grant_created`/`capability.grant_used` events remain unchanged and
+/// a `capability.grant_revoked` event with the reason is appended.
+#[test]
+fn sg3_revoke_then_re_request_is_denied_and_old_events_preserved() {
+    let controller = RealBoundaryController::open_with_permission_policy(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        PermissionPolicy::static_read_only_local(),
+    )
+    .expect("open controller");
+    let registration = controller.register_agent("sg3-worker").expect("agent");
+    let refs = controller
+        .send_task(&registration, "Drive an SG3 revoke flow")
+        .expect("send task");
+    let scope_json = "[\"filesystem:write:workspace\"]".to_string();
+
+    // Seed an allow grant for the scope and a grant-used event against it.
+    sg3_seed_grant(
+        &controller,
+        sg3_grant("grant-sg3-revoke", &scope_json, None),
+        "revoke",
+    );
+    controller
+        .state()
+        .append_event(
+            capo_state::NewEvent::new(
+                "event-sg3-grant-used",
+                capo_state::EventKind::CapabilityGrantUsed,
+                "test",
+            ),
+            &[],
+        )
+        .expect("seed grant-used");
+
+    // Read-back authorizes while the grant is valid.
+    let granted = controller
+        .decide_with_grant_read_back(PermissionRequest {
+            session_id: SessionId::new("session-sg3"),
+            capability_profile_id: "trusted-local-dev".to_string(),
+            scope_json: scope_json.clone(),
+        })
+        .expect("decide with grant");
+    assert!(granted.allowed);
+    assert_eq!(granted.source, crate::GrantReadBackSource::DurableGrant);
+
+    let events_before = controller.state().event_count().expect("event count");
+
+    // Revoke the grant with a reason.
+    let revoke_scope = crate::GrantRevocationScope {
+        task_id: refs.task_id.clone(),
+        agent_id: refs.agent_id.clone(),
+        session_id: refs.session_id.clone(),
+        run_id: refs.run_id.clone(),
+        turn_id: TurnId::new("turn-sg3-revoke"),
+    };
+    let revocation = controller
+        .revoke_capability_grant(&revoke_scope, "grant-sg3-revoke", "stricter policy")
+        .expect("revoke grant");
+    assert_eq!(revocation.capability_grant_id, "grant-sg3-revoke");
+    assert_eq!(revocation.reason, "stricter policy");
+
+    // Re-requesting the same scope after revoke is denied: the revoked grant
+    // reads as absent, so read-back falls through to the denying policy.
+    let after = controller
+        .decide_with_grant_read_back(PermissionRequest {
+            session_id: SessionId::new("session-sg3"),
+            capability_profile_id: "trusted-local-dev".to_string(),
+            scope_json,
+        })
+        .expect("decide after revoke");
+    assert!(!after.allowed, "a revoked grant no longer authorizes");
+    assert_eq!(after.source, crate::GrantReadBackSource::Policy);
+    assert!(after.authorizing_grant_id.is_none());
+
+    // The grant projection carries revoked_at; the durable store reads it back.
+    let grant = controller
+        .state()
+        .capability_grant_by_id("grant-sg3-revoke")
+        .expect("grant by id")
+        .expect("grant present");
+    assert!(grant.is_revoked());
+    assert_eq!(
+        grant.revoked_at.as_deref(),
+        Some(revocation.revoked_at.as_str())
+    );
+
+    // The original grant-created and grant-used events are preserved unchanged;
+    // revocation only ADDS a `capability.grant_revoked` event.
+    let events_after = controller.state().event_count().expect("event count");
+    assert_eq!(
+        events_after,
+        events_before + 1,
+        "revoke adds exactly one event"
+    );
+    let revoked_event = controller
+        .state()
+        .events_for_session_turn(&refs.session_id, "turn-sg3-revoke")
+        .expect("turn events")
+        .into_iter()
+        .find(|event| event.kind == "capability.grant_revoked")
+        .expect("grant_revoked event present");
+    assert!(
+        revoked_event
+            .payload_json
+            .contains("\"reason\":\"stricter policy\"")
+    );
+    assert!(revoked_event.payload_json.contains("grant-sg3-revoke"));
+
+    // A rebuild from the log reconstructs the revoked state identically (the old
+    // created/used events plus the revoke event yield the same revoked grant).
+    let before_rebuild = controller.state().capability_grants().expect("grants");
+    controller
+        .state()
+        .rebuild_projections()
+        .expect("rebuild projections");
+    let after_rebuild = controller.state().capability_grants().expect("grants");
+    assert_eq!(before_rebuild, after_rebuild);
+    assert!(
+        after_rebuild
+            .iter()
+            .any(|grant| { grant.capability_grant_id == "grant-sg3-revoke" && grant.is_revoked() })
+    );
+}
+
+/// SG3 expiry: a grant past its `expires_at` does not authorize even though it was
+/// never explicitly revoked (expiry is a denial input in decide).
+#[test]
+fn sg3_expired_grant_does_not_authorize() {
+    let controller = RealBoundaryController::open_with_permission_policy(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        PermissionPolicy::static_read_only_local(),
+    )
+    .expect("open controller");
+    let scope_json = "[\"filesystem:write:workspace\"]".to_string();
+
+    // Seed a grant whose `expires_at` is already in the past relative to the
+    // wall clock (epoch-millis 1, far before now).
+    sg3_seed_grant(
+        &controller,
+        sg3_grant("grant-sg3-expired", &scope_json, Some("1")),
+        "expired",
+    );
+
+    let decision = controller
+        .decide_with_grant_read_back(PermissionRequest {
+            session_id: SessionId::new("session-sg3"),
+            capability_profile_id: "trusted-local-dev".to_string(),
+            scope_json,
+        })
+        .expect("decide with expired grant");
+    assert!(
+        !decision.allowed,
+        "an expired grant does not authorize, even without an explicit revoke",
+    );
+    assert_eq!(decision.source, crate::GrantReadBackSource::Policy);
+    assert!(decision.authorizing_grant_id.is_none());
+    // The grant exists in the store but is past its expiry.
+    let grant = controller
+        .state()
+        .capability_grant_by_id("grant-sg3-expired")
+        .expect("grant by id")
+        .expect("grant present");
+    assert!(
+        !grant.is_revoked(),
+        "the grant was never explicitly revoked"
+    );
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_millis()
+        .to_string();
+    assert!(grant.is_expired(&now));
+}

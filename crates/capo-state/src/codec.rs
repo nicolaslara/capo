@@ -105,29 +105,44 @@ pub(crate) fn projection_record_from_row(
             recovery_of_run_id: optional_id(c),
             updated_sequence: 0,
         })),
-        "capability_grant" => Ok(ProjectionRecord::CapabilityGrant(
-            CapabilityGrantProjection {
-                capability_grant_id: record_id,
-                capability_profile_id: required_field(
-                    &projection_kind,
-                    "capability_grant",
-                    a,
-                    "capability_profile_id",
-                )?,
-                scope_json: required_field(&projection_kind, "capability_grant", b, "scope_json")?,
-                effect: required_field(&projection_kind, "capability_grant", c, "effect")?,
-                subject_json: required_field(
-                    &projection_kind,
-                    "capability_grant",
-                    d,
-                    "subject_json",
-                )?,
-                decision_source: e.unwrap_or_else(|| "unknown".to_string()),
-                persistence: f.unwrap_or_else(|| "unknown".to_string()),
-                explanation: g.unwrap_or_default(),
-                updated_sequence: 0,
-            },
-        )),
+        "capability_grant" => {
+            // SG3: the grant lifecycle timestamps (created_at/expires_at/
+            // revoked_at) ride in the payload -- positional slots a..g are taken
+            // by the grant body -- so a replay rebuilds revoked/expired state
+            // identically from the event log.
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::CapabilityGrant(
+                CapabilityGrantProjection {
+                    capability_grant_id: record_id,
+                    capability_profile_id: required_field(
+                        &projection_kind,
+                        "capability_grant",
+                        a,
+                        "capability_profile_id",
+                    )?,
+                    scope_json: required_field(
+                        &projection_kind,
+                        "capability_grant",
+                        b,
+                        "scope_json",
+                    )?,
+                    effect: required_field(&projection_kind, "capability_grant", c, "effect")?,
+                    subject_json: required_field(
+                        &projection_kind,
+                        "capability_grant",
+                        d,
+                        "subject_json",
+                    )?,
+                    decision_source: e.unwrap_or_else(|| "unknown".to_string()),
+                    persistence: f.unwrap_or_else(|| "unknown".to_string()),
+                    explanation: g.unwrap_or_default(),
+                    created_at: payload_optional_string(&payload, "created_at"),
+                    expires_at: payload_optional_string(&payload, "expires_at"),
+                    revoked_at: payload_optional_string(&payload, "revoked_at"),
+                    updated_sequence: 0,
+                },
+            ))
+        }
         "permission_approval" => {
             let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
             Ok(ProjectionRecord::PermissionApproval(

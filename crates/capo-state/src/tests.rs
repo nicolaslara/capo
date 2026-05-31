@@ -902,6 +902,9 @@ fn artifacts_tool_grants_memory_and_evidence_are_persisted_and_rebuilt() {
                     decision_source: "allow_trusted_local_profile".to_string(),
                     persistence: "until_session_end".to_string(),
                     explanation: "test grant".to_string(),
+                    created_at: None,
+                    expires_at: None,
+                    revoked_at: None,
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::ToolCall(ToolCallProjection {
@@ -1707,6 +1710,9 @@ fn permission_approval_projection_is_persisted_and_rebuilt() {
                     persistence: "until_revoked".to_string(),
                     explanation: "user approval decision reject_always for approval-shell"
                         .to_string(),
+                    created_at: None,
+                    expires_at: None,
+                    revoked_at: None,
                     updated_sequence: 0,
                 }),
             ],
@@ -1859,6 +1865,9 @@ fn connectivity_exposure_requires_grant_and_projects_revocation_and_health() {
                     decision_source: "user".to_string(),
                     persistence: "until_revoked".to_string(),
                     explanation: "operator allowed private remote-control exposure".to_string(),
+                    created_at: None,
+                    expires_at: None,
+                    revoked_at: None,
                     updated_sequence: 0,
                 },
             )],
@@ -2668,6 +2677,196 @@ fn recovery_completion_requires_started_attempt() {
         store.complete_recovery("missing"),
         Err(StateError::MissingRecoveryAttempt(id)) if id == "missing"
     ));
+}
+
+#[test]
+fn sg3_capability_grant_revoked_and_expired_event_kinds_round_trip() {
+    // SG3: the new grant-lifecycle event kinds have stable wire strings and
+    // round-trip through `as_str`/`from_wire`.
+    assert_eq!(
+        EventKind::CapabilityGrantRevoked.as_str(),
+        "capability.grant_revoked"
+    );
+    assert_eq!(
+        EventKind::CapabilityGrantExpired.as_str(),
+        "capability.grant_expired"
+    );
+    assert_eq!(
+        EventKind::from_wire("capability.grant_revoked"),
+        Some(EventKind::CapabilityGrantRevoked)
+    );
+    assert_eq!(
+        EventKind::from_wire("capability.grant_expired"),
+        Some(EventKind::CapabilityGrantExpired)
+    );
+}
+
+#[test]
+fn sg3_grant_lifecycle_columns_persist_and_rebuild_identically() {
+    // SG3: the created_at/expires_at/revoked_at columns on a CapabilityGrant
+    // projection persist to the `capability_grants` table AND rebuild
+    // byte-identically from the durable projection_records log on restart.
+    let store = temp_store("sg3-grant-columns");
+    let grant = CapabilityGrantProjection {
+        capability_grant_id: "grant-sg3-columns".to_string(),
+        capability_profile_id: "trusted-local-dev".to_string(),
+        scope_json: "[\"filesystem:write:workspace\"]".to_string(),
+        effect: "allow".to_string(),
+        subject_json: "{\"session_id\":\"session-sg3\"}".to_string(),
+        decision_source: "allow_trusted_local_profile".to_string(),
+        persistence: "until_time".to_string(),
+        explanation: "bounded write grant".to_string(),
+        created_at: Some("1700000000000".to_string()),
+        expires_at: Some("1700003600000".to_string()),
+        revoked_at: None,
+        updated_sequence: 0,
+    };
+
+    store
+        .append_event(
+            NewEvent::new("event-sg3-grant", EventKind::CapabilityGrantCreated, "test"),
+            &[ProjectionRecord::CapabilityGrant(grant.clone())],
+        )
+        .expect("append grant");
+
+    let live = store.capability_grants().expect("read grants");
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].created_at.as_deref(), Some("1700000000000"));
+    assert_eq!(live[0].expires_at.as_deref(), Some("1700003600000"));
+    assert_eq!(live[0].revoked_at, None);
+    // Single-grant read-back accessor also returns the columns.
+    let by_id = store
+        .capability_grant_by_id("grant-sg3-columns")
+        .expect("grant by id")
+        .expect("grant present");
+    assert_eq!(by_id.expires_at.as_deref(), Some("1700003600000"));
+
+    // Restart/replay: a fresh store over the same root rebuilds the timestamp
+    // columns identically purely from the durable event/projection log.
+    store.rebuild_projections().expect("rebuild");
+    let rebuilt = store
+        .capability_grants()
+        .expect("read grants after rebuild");
+    assert_eq!(rebuilt, live);
+}
+
+#[test]
+fn sg3_revoked_and_expired_grant_state_rebuilds_identically_from_the_log() {
+    // SG3 verification: a rebuild/replay reconstructs revoked AND expired grant
+    // state identically from the event log. We append create -> revoke for one
+    // grant and a bounded `expires_at` for another, then rebuild and assert the
+    // reconstructed projections match the live ones (and carry the lifecycle
+    // timestamps), with the original grant-created events preserved.
+    let store = temp_store("sg3-revoke-expire-replay");
+
+    let created = CapabilityGrantProjection {
+        capability_grant_id: "grant-sg3-revoked".to_string(),
+        capability_profile_id: "trusted-local-dev".to_string(),
+        scope_json: "[\"shell:execute:workspace\"]".to_string(),
+        effect: "allow".to_string(),
+        subject_json: "{\"session_id\":\"session-sg3\"}".to_string(),
+        decision_source: "allow_trusted_local_profile".to_string(),
+        persistence: "until_revoked".to_string(),
+        explanation: "shell grant".to_string(),
+        created_at: Some("1700000000000".to_string()),
+        expires_at: None,
+        revoked_at: None,
+        updated_sequence: 0,
+    };
+    store
+        .append_event(
+            NewEvent::new(
+                "event-sg3-revoke-create",
+                EventKind::CapabilityGrantCreated,
+                "test",
+            ),
+            &[ProjectionRecord::CapabilityGrant(created.clone())],
+        )
+        .expect("append create");
+    // A used event before revocation; it must remain unchanged after revoke.
+    store
+        .append_event(
+            NewEvent::new(
+                "event-sg3-revoke-use",
+                EventKind::CapabilityGrantUsed,
+                "test",
+            ),
+            &[],
+        )
+        .expect("append use");
+    // Revoke: stamp revoked_at on a re-emitted projection. Old events stay.
+    let mut revoked = created.clone();
+    revoked.revoked_at = Some("1700000500000".to_string());
+    revoked.explanation = "revoked: stricter policy".to_string();
+    store
+        .append_event(
+            NewEvent::new(
+                "event-sg3-revoke-revoke",
+                EventKind::CapabilityGrantRevoked,
+                "test",
+            ),
+            &[ProjectionRecord::CapabilityGrant(revoked.clone())],
+        )
+        .expect("append revoke");
+
+    // A second grant that carries a bounded `expires_at` (expiry as a denial
+    // input is evaluated at decide time from this column).
+    let expiring = CapabilityGrantProjection {
+        capability_grant_id: "grant-sg3-expiring".to_string(),
+        capability_profile_id: "trusted-local-dev".to_string(),
+        scope_json: "[\"network:connect:internet\"]".to_string(),
+        effect: "allow".to_string(),
+        subject_json: "{\"session_id\":\"session-sg3\"}".to_string(),
+        decision_source: "allow_trusted_local_profile".to_string(),
+        persistence: "until_time".to_string(),
+        explanation: "bounded network grant".to_string(),
+        created_at: Some("1700000000000".to_string()),
+        expires_at: Some("1700000000500".to_string()),
+        revoked_at: None,
+        updated_sequence: 0,
+    };
+    store
+        .append_event(
+            NewEvent::new(
+                "event-sg3-expiring-create",
+                EventKind::CapabilityGrantCreated,
+                "test",
+            ),
+            &[ProjectionRecord::CapabilityGrant(expiring.clone())],
+        )
+        .expect("append expiring");
+
+    let live = store.capability_grants().expect("read grants");
+    let revoked_live = live
+        .iter()
+        .find(|grant| grant.capability_grant_id == "grant-sg3-revoked")
+        .expect("revoked grant present");
+    assert_eq!(revoked_live.revoked_at.as_deref(), Some("1700000500000"));
+    assert!(revoked_live.is_revoked());
+    // A revoked allow grant is no longer an authorization.
+    assert!(!revoked_live.is_active_allow("1700000600000"));
+
+    let expiring_live = live
+        .iter()
+        .find(|grant| grant.capability_grant_id == "grant-sg3-expiring")
+        .expect("expiring grant present");
+    // Before expiry it authorizes; after `expires_at` it does not (expiry as a
+    // denial input), with no explicit revoke.
+    assert!(expiring_live.is_active_allow("1700000000400"));
+    assert!(!expiring_live.is_active_allow("1700000000600"));
+    assert!(expiring_live.is_expired("1700000000600"));
+
+    // The original grant-created and grant-used events are preserved unchanged.
+    let event_count = store.event_count().expect("event count");
+    assert_eq!(event_count, 4);
+
+    // Restart/replay: rebuild from the durable log reconstructs the revoked and
+    // expired state identically.
+    store.rebuild_projections().expect("rebuild");
+    let rebuilt = store
+        .capability_grants()
+        .expect("read grants after rebuild");
+    assert_eq!(rebuilt, live);
 }
 
 fn temp_store(name: &str) -> SqliteStateStore {

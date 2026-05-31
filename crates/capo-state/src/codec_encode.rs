@@ -97,7 +97,14 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             f: Some(grant.persistence.clone()),
             g: Some(grant.explanation.clone()),
             h: None,
-            payload_json: "{}".to_string(),
+            // SG3: positional slots a..g are exhausted, so the grant lifecycle
+            // timestamps ride in the payload to survive projection rebuilds.
+            payload_json: json!({
+                "created_at": grant.created_at,
+                "expires_at": grant.expires_at,
+                "revoked_at": grant.revoked_at,
+            })
+            .to_string(),
         },
         ProjectionRecord::PermissionApproval(approval) => ProjectionRecordRow {
             kind: "permission_approval",

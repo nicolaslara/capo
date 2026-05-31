@@ -335,6 +335,9 @@ fn decide_voice_permission_approval(
             "visible voice confirmation {decision} for {}",
             approval.approval_id
         ),
+        created_at: None,
+        expires_at: None,
+        revoked_at: None,
         updated_sequence: 0,
     };
     let decided_approval = PermissionApprovalProjection {

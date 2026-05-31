@@ -305,7 +305,8 @@ impl SqliteStateStore {
         let connection = Connection::open(&self.db_path)?;
         let mut statement = connection.prepare(
             "SELECT capability_grant_id, capability_profile_id, scope_json, effect,
-                    subject_json, decision_source, persistence, explanation, updated_sequence
+                    subject_json, decision_source, persistence, explanation,
+                    created_at, expires_at, revoked_at, updated_sequence
              FROM capability_grants
              ORDER BY updated_sequence ASC, capability_grant_id ASC",
         )?;
@@ -319,11 +320,53 @@ impl SqliteStateStore {
                 decision_source: row.get(5)?,
                 persistence: row.get(6)?,
                 explanation: row.get(7)?,
-                updated_sequence: row.get(8)?,
+                created_at: row.get(8)?,
+                expires_at: row.get(9)?,
+                revoked_at: row.get(10)?,
+                updated_sequence: row.get(11)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StateError::from)
+    }
+
+    /// SG3: read a single durable grant by id, or `None` if absent.
+    ///
+    /// The grant-revoke flow loads the existing grant so the
+    /// `capability.grant_revoked` projection can re-emit the SAME grant body
+    /// (scope/effect/subject/...) with only `revoked_at` set, and the decide-step
+    /// read-back consults the loaded grant's `revoked_at`/`expires_at`.
+    pub fn capability_grant_by_id(
+        &self,
+        capability_grant_id: &str,
+    ) -> StateResult<Option<CapabilityGrantProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT capability_grant_id, capability_profile_id, scope_json, effect,
+                    subject_json, decision_source, persistence, explanation,
+                    created_at, expires_at, revoked_at, updated_sequence
+             FROM capability_grants
+             WHERE capability_grant_id = ?1",
+        )?;
+        let grant = statement
+            .query_row(params![capability_grant_id], |row| {
+                Ok(CapabilityGrantProjection {
+                    capability_grant_id: row.get(0)?,
+                    capability_profile_id: row.get(1)?,
+                    scope_json: row.get(2)?,
+                    effect: row.get(3)?,
+                    subject_json: row.get(4)?,
+                    decision_source: row.get(5)?,
+                    persistence: row.get(6)?,
+                    explanation: row.get(7)?,
+                    created_at: row.get(8)?,
+                    expires_at: row.get(9)?,
+                    revoked_at: row.get(10)?,
+                    updated_sequence: row.get(11)?,
+                })
+            })
+            .optional()?;
+        Ok(grant)
     }
 
     pub fn permission_approvals(

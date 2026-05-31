@@ -175,7 +175,52 @@ pub struct CapabilityGrantProjection {
     pub decision_source: String,
     pub persistence: String,
     pub explanation: String,
+    /// SG3: when the grant was created. `None` for grants created before the
+    /// lifecycle timestamp columns existed (back-compat default).
+    pub created_at: Option<String>,
+    /// SG3: when the grant expires, if it has a bounded lifetime
+    /// (`persistence = until_time`). A grant past `expires_at` does not
+    /// authorize even if never explicitly revoked.
+    pub expires_at: Option<String>,
+    /// SG3: when the grant was revoked, set by a `capability.grant_revoked`
+    /// event. A revoked grant is treated as absent by decide-time read-back.
+    pub revoked_at: Option<String>,
     pub updated_sequence: i64,
+}
+
+impl CapabilityGrantProjection {
+    /// SG3: whether this grant authorizes a request AT the supplied wall-clock
+    /// instant (`now`, an RFC3339/comparable timestamp string).
+    ///
+    /// A grant authorizes only when it is an `allow` grant that has neither been
+    /// revoked nor passed its `expires_at`. A revoked or expired grant is treated
+    /// as ABSENT for read-back, never as a standing authorization. A `deny` grant
+    /// is never an authorization (it is a standing denial, surfaced separately).
+    pub fn is_active_allow(&self, now: &str) -> bool {
+        self.effect == "allow" && !self.is_revoked() && !self.is_expired(now)
+    }
+
+    /// SG3: whether this grant has been revoked.
+    pub fn is_revoked(&self) -> bool {
+        self.revoked_at.is_some()
+    }
+
+    /// SG3: whether this grant is past its `expires_at` at the supplied instant.
+    /// A grant with no `expires_at` never expires on its own.
+    ///
+    /// `now` and `expires_at` are compared numerically when both parse as integer
+    /// epoch timestamps (the controller stamps epoch-millis), so a shorter-but-
+    /// larger value is never mis-ordered; otherwise they fall back to a lexical
+    /// compare (suitable for fixed-width RFC3339).
+    pub fn is_expired(&self, now: &str) -> bool {
+        match &self.expires_at {
+            Some(expires_at) => match (now.parse::<i64>(), expires_at.parse::<i64>()) {
+                (Ok(now), Ok(expires_at)) => now >= expires_at,
+                _ => now >= expires_at.as_str(),
+            },
+            None => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

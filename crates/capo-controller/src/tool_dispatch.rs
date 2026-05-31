@@ -438,12 +438,21 @@ impl FakeBoundaryController {
         decision: &PermissionDecision,
         extra_payload: serde_json::Value,
     ) -> StateResult<()> {
+        // SG3: stamp the grant lifecycle timestamps at creation. `created_at` is
+        // the wall-clock instant the grant became durable; `expires_at` is derived
+        // from persistence (an `until_time` grant carries a bounded lifetime). A
+        // grant past `expires_at` does not authorize even without an explicit
+        // revoke, and the read-back path (SG3 decide) reads these columns.
+        let created_at = epoch_millis().to_string();
+        let expires_at = grant_expires_at(&decision.persistence, &created_at);
         let mut payload = serde_json::json!({
             "capability_grant_id": decision.capability_grant_id,
             "effect": decision.effect,
             "decision_source": decision.decision_source,
             "persistence": decision.persistence,
             "explanation": decision.explanation,
+            "created_at": created_at,
+            "expires_at": expires_at,
         });
         if let (Some(payload_obj), Some(extra_obj)) =
             (payload.as_object_mut(), extra_payload.as_object())
@@ -475,6 +484,10 @@ impl FakeBoundaryController {
                     decision_source: decision.decision_source.clone(),
                     persistence: decision.persistence.clone(),
                     explanation: decision.explanation.clone(),
+                    // SG3: a freshly created grant is never revoked yet.
+                    created_at: Some(created_at),
+                    expires_at,
+                    revoked_at: None,
                     updated_sequence: 0,
                 },
             )],
@@ -482,6 +495,27 @@ impl FakeBoundaryController {
         Ok(())
     }
 }
+
+/// SG3: derive a grant's `expires_at` from its persistence.
+///
+/// Only a profile-defined bounded lifetime (`until_time`) yields an expiry; the
+/// prototype maps it to a fixed window past `created_at` so a `until_time` grant
+/// stops authorizing once the clock passes it, with no explicit revoke required.
+/// Every other persistence (`once`, `until_turn_end`, `until_session_end`,
+/// `until_revoked`) has no wall-clock expiry: a transient grant is bounded by
+/// turn/session lifetime, and `until_revoked` only ends on an explicit revoke.
+fn grant_expires_at(persistence: &str, created_at: &str) -> Option<String> {
+    if persistence != "until_time" {
+        return None;
+    }
+    let created = created_at.parse::<i64>().ok()?;
+    Some((created + GRANT_UNTIL_TIME_WINDOW_MILLIS).to_string())
+}
+
+/// The fixed lifetime (one hour) a prototype `until_time` grant is given past its
+/// creation instant. The exact window is a prototype choice; the durable column
+/// is what decide-time read-back checks.
+const GRANT_UNTIL_TIME_WINDOW_MILLIS: i64 = 60 * 60 * 1000;
 
 /// The event-keying inputs that differ per caller of
 /// [`FakeBoundaryController::append_capability_grant_created_event`]: the event

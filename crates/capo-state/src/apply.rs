@@ -145,8 +145,9 @@ pub(crate) fn apply_projection_record(
             transaction.execute(
                 "INSERT INTO capability_grants(
                 capability_grant_id, capability_profile_id, scope_json, effect,
-                subject_json, decision_source, persistence, explanation, updated_sequence
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                subject_json, decision_source, persistence, explanation,
+                created_at, expires_at, revoked_at, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(capability_grant_id) DO UPDATE SET
                 capability_profile_id = excluded.capability_profile_id,
                 scope_json = excluded.scope_json,
@@ -155,6 +156,9 @@ pub(crate) fn apply_projection_record(
                 decision_source = excluded.decision_source,
                 persistence = excluded.persistence,
                 explanation = excluded.explanation,
+                created_at = excluded.created_at,
+                expires_at = excluded.expires_at,
+                revoked_at = excluded.revoked_at,
                 updated_sequence = excluded.updated_sequence",
             params![
                 grant.capability_grant_id,
@@ -165,6 +169,9 @@ pub(crate) fn apply_projection_record(
                 grant.decision_source,
                 grant.persistence,
                 grant.explanation,
+                grant.created_at,
+                grant.expires_at,
+                grant.revoked_at,
                 sequence,
             ],
             )?

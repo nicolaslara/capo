@@ -343,6 +343,28 @@ impl RealBoundaryController {
         self.core.run_adapter_permission_round_trip(scope)
     }
 
+    /// SG3: decide a permission request with durable grant read-back -- a valid
+    /// existing grant authorizes; a revoked/expired grant is treated as absent and
+    /// the policy decides. Delegates to the shared core.
+    pub fn decide_with_grant_read_back(
+        &self,
+        request: capo_tools::PermissionRequest,
+    ) -> StateResult<crate::GrantReadBackDecision> {
+        self.core.decide_with_grant_read_back(request)
+    }
+
+    /// SG3: revoke a durable grant by id, emitting `capability.grant_revoked` with
+    /// a revocation reason; old grant-created/used events stay unchanged.
+    pub fn revoke_capability_grant(
+        &self,
+        scope: &crate::GrantRevocationScope,
+        capability_grant_id: &str,
+        reason: &str,
+    ) -> StateResult<crate::GrantRevocation> {
+        self.core
+            .revoke_capability_grant(scope, capability_grant_id, reason)
+    }
+
     /// Borrow the Capo registry behind the real exposure, for callers that need
     /// the tool definitions (schemas/scopes) directly.
     pub fn capo_registry(&self) -> Option<&CapoToolRegistry> {

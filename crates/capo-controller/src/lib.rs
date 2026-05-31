@@ -32,6 +32,7 @@ use capo_tools::{
 
 mod adapter_replay;
 mod fake_session;
+mod grant_lifecycle;
 mod local_dispatch;
 mod permission_round_trip;
 mod real_controller;
@@ -40,6 +41,9 @@ mod session_control;
 mod tool_dispatch;
 mod turn_loop;
 
+pub use grant_lifecycle::{
+    GrantReadBackDecision, GrantReadBackSource, GrantRevocation, GrantRevocationScope,
+};
 pub use local_dispatch::LocalAdapterDispatchRunStart;
 pub use permission_round_trip::{
     PermissionCancellation, PermissionRoundTripOutcome, PermissionRoundTripScope,
