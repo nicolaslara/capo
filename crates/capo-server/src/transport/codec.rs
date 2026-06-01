@@ -20,6 +20,25 @@ use crate::{
     SubscriptionBacklog, TaskRunSummary, TurnFinishedSummary,
 };
 
+/// GA2 (security egress backstop): scrub credential-shaped tokens out of an
+/// agent-supplied free-text field before it crosses the transport boundary on a
+/// goal read surface.
+///
+/// The goal read payloads (`Goals` / `GoalView` / `GoalReports` / `GoalReport`)
+/// carry agent-authored text -- report summaries, the goal objective, blocker
+/// reasons, the structured `*_json` blobs, and the rendered report body -- that
+/// is recorded as `Safe` and so never passes through the `ServerEvent`
+/// egress guard ([`ServerEvent::redacted_for_egress`]). This applies the SAME
+/// `capo_runtime` credential-shape scanner that guard uses, at the SAME egress
+/// point, so a secret an agent pasted into a report summary or a success-criteria
+/// blob is scrubbed before it is streamed to every operator/subscriber rather
+/// than emitted raw. A field with no credential shape is returned unchanged, so
+/// the encode/decode round-trip is unaffected for ordinary content.
+fn redact_egress_text(text: &str) -> String {
+    let (scanned, _state) = capo_runtime::RedactionPolicy::new(Vec::new()).apply(text.as_bytes());
+    String::from_utf8_lossy(&scanned).into_owned()
+}
+
 pub(super) fn encode_origin(origin: &ServerClientOrigin) -> Value {
     json!({
         "client_id": origin.client_id,
@@ -745,7 +764,7 @@ pub(super) fn encode_payload(payload: &ServerResponsePayload) -> Value {
             "type": "goal_reports",
             "goal_id": listing.goal_id,
             "surface": listing.surface,
-            "blocker_reason": listing.blocker_reason,
+            "blocker_reason": redact_egress_text(&listing.blocker_reason),
             "reports": listing.reports.iter().map(encode_goal_report_view).collect::<Vec<_>>(),
         }),
         ServerResponsePayload::GoalTimeline(timeline) => json!({
@@ -763,7 +782,10 @@ pub(super) fn encode_payload(payload: &ServerResponsePayload) -> Value {
             "type": "goal_report",
             "goal_id": rendering.goal_id,
             "format": rendering.format,
-            "body": rendering.body,
+            // The rendered body concatenates every agent-authored field
+            // (objective, blocker, report summaries) -- scan it as the last
+            // egress backstop so a credential pasted into any of them is scrubbed.
+            "body": redact_egress_text(&rendering.body),
             "degraded": rendering.degraded,
         }),
     }
@@ -1174,7 +1196,7 @@ fn decode_goal_report_format(value: &str) -> TransportResult<GoalReportFormat> {
 fn encode_goal_summary(summary: &GoalStatusSummary) -> Value {
     json!({
         "goal_id": summary.goal_id,
-        "objective": summary.objective,
+        "objective": redact_egress_text(&summary.objective),
         "status": summary.status,
         "parent_goal_id": summary.parent_goal_id,
         "attempt_run_id": summary.attempt_run_id,
@@ -1183,7 +1205,7 @@ fn encode_goal_summary(summary: &GoalStatusSummary) -> Value {
         "blocked_requirement_count": summary.blocked_requirement_count,
         "contradicted_requirement_count": summary.contradicted_requirement_count,
         "report_count": summary.report_count,
-        "blocker_reason": summary.blocker_reason,
+        "blocker_reason": redact_egress_text(&summary.blocker_reason),
         "updated_sequence": summary.updated_sequence,
     })
 }
@@ -1210,7 +1232,7 @@ fn decode_goal_summary(value: &Value) -> TransportResult<GoalStatusSummary> {
 fn encode_goal_requirement_view(requirement: &GoalRequirementView) -> Value {
     json!({
         "requirement_id": requirement.requirement_id,
-        "summary": requirement.summary,
+        "summary": redact_egress_text(&requirement.summary),
         "status": requirement.status,
         "last_status_source": requirement.last_status_source,
         "observed": requirement.observed,
@@ -1238,7 +1260,7 @@ fn encode_goal_report_view(report: &GoalReportView) -> Value {
         "source": report.source,
         "observed": report.observed,
         "confidence": report.confidence,
-        "summary": report.summary,
+        "summary": redact_egress_text(&report.summary),
         "body_artifact_id": report.body_artifact_id,
         "evidence_id": report.evidence_id,
     })
@@ -1264,7 +1286,7 @@ fn encode_goal_continuation_view(continuation: &GoalContinuationView) -> Value {
     json!({
         "continuation_id": continuation.continuation_id,
         "decision": continuation.decision,
-        "reason": continuation.reason,
+        "reason": redact_egress_text(&continuation.reason),
         "attempt_run_id": continuation.attempt_run_id,
     })
 }
@@ -1308,11 +1330,11 @@ fn decode_delegated_provider_goal_view(
 fn encode_goal_view(view: &GoalView) -> Value {
     json!({
         "summary": encode_goal_summary(&view.summary),
-        "success_criteria_json": view.success_criteria_json,
-        "constraints_json": view.constraints_json,
-        "verification_surface_json": view.verification_surface_json,
-        "budget_json": view.budget_json,
-        "stop_conditions_json": view.stop_conditions_json,
+        "success_criteria_json": redact_egress_text(&view.success_criteria_json),
+        "constraints_json": redact_egress_text(&view.constraints_json),
+        "verification_surface_json": redact_egress_text(&view.verification_surface_json),
+        "budget_json": redact_egress_text(&view.budget_json),
+        "stop_conditions_json": redact_egress_text(&view.stop_conditions_json),
         "task_id": view.task_id,
         "agent_id": view.agent_id,
         "session_id": view.session_id,

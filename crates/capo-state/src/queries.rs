@@ -1818,6 +1818,53 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    /// Every event keyed by one of `item_ids` (in its `item_id` column), in
+    /// ascending sequence order. This is the item-scoped read behind the goal
+    /// timeline (GO5/GO10): a goal's lifecycle / report / requirement /
+    /// continuation events are keyed by their domain id as `item_id`, so a goal
+    /// timeline is a `WHERE item_id IN (...)` filter ordered by sequence -- it is
+    /// NOT a bounded prefix scan of the whole project log, so a goal event past
+    /// any global event count is still returned. Mirrors
+    /// [`Self::evidence_events_for_run`].
+    pub fn events_for_items(&self, item_ids: &[String]) -> StateResult<Vec<EventRecord>> {
+        if item_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = Connection::open(&self.db_path)?;
+        let placeholders = std::iter::repeat_n("?", item_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT sequence, event_id, kind, actor, project_id, task_id, agent_id, session_id,
+                    run_id, turn_id, item_id, payload_json, idempotency_key, redaction_state
+             FROM events
+             WHERE item_id IN ({placeholders})
+             ORDER BY sequence ASC"
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let params = rusqlite::params_from_iter(item_ids.iter().map(String::as_str));
+        let rows = statement.query_map(params, |row| {
+            Ok(EventRecord {
+                sequence: row.get(0)?,
+                event_id: row.get(1)?,
+                kind: row.get(2)?,
+                actor: row.get(3)?,
+                project_id: optional_id(row.get::<_, Option<String>>(4)?),
+                task_id: optional_id(row.get::<_, Option<String>>(5)?),
+                agent_id: optional_id(row.get::<_, Option<String>>(6)?),
+                session_id: optional_id(row.get::<_, Option<String>>(7)?),
+                run_id: optional_id(row.get::<_, Option<String>>(8)?),
+                turn_id: row.get(9)?,
+                item_id: row.get(10)?,
+                payload_json: row.get(11)?,
+                idempotency_key: row.get(12)?,
+                redaction_state: row.get(13)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     /// The `turn_id` of the most recently appended event for a session that
     /// carries a (non-null) turn id, or `None` when the session has no
     /// turn-keyed events yet.

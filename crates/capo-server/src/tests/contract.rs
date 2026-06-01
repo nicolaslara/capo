@@ -580,6 +580,103 @@ fn sample_commands() -> Vec<ServerCommand> {
             session_id: s(),
             from_sequence: 0,
         },
+        // GA2: every goal command through the real codec so a field-name/order
+        // swap in any goal encode/decode arm is caught by the round-trip below.
+        // Distinct, differently-shaped JSON blobs and a non-empty requirements vec
+        // so a swap (e.g. constraints_json decoded from verification_surface_json)
+        // does not survive on two equal values.
+        ServerCommand::SetGoal {
+            spec: crate::GoalSpec {
+                goal_id: "goal-set".to_string(),
+                objective: "objective-text".to_string(),
+                task_id: Some("task-1".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                session_id: Some("session-1".to_string()),
+                parent_goal_id: Some("parent-goal".to_string()),
+                attempt_run_id: Some("run-1".to_string()),
+                requirements: vec![
+                    crate::GoalRequirementSpec {
+                        requirement_id: "req-a".to_string(),
+                        summary: "requirement a".to_string(),
+                    },
+                    crate::GoalRequirementSpec {
+                        requirement_id: "req-b".to_string(),
+                        summary: "requirement b".to_string(),
+                    },
+                ],
+                success_criteria_json: r#"{"success":1}"#.to_string(),
+                constraints_json: r#"{"constraints":2}"#.to_string(),
+                verification_surface_json: r#"{"verification":3}"#.to_string(),
+                budget_json: r#"{"budget":4}"#.to_string(),
+                stop_conditions_json: r#"{"stop":5}"#.to_string(),
+            },
+        },
+        ServerCommand::PauseGoal {
+            goal_id: "goal-pause".to_string(),
+        },
+        ServerCommand::ResumeGoal {
+            goal_id: "goal-resume".to_string(),
+        },
+        ServerCommand::BlockGoal {
+            goal_id: "goal-block".to_string(),
+            reason: "blocked reason".to_string(),
+        },
+        ServerCommand::ClearGoal {
+            goal_id: "goal-clear".to_string(),
+            reason: "cleared reason".to_string(),
+        },
+        ServerCommand::SetRequirementStatus {
+            record: crate::RequirementStatusRecord {
+                requirement_id: "req-status".to_string(),
+                goal_id: "goal-req".to_string(),
+                summary: "requirement summary".to_string(),
+                status: "supported".to_string(),
+                source: "runtime_output".to_string(),
+            },
+        },
+        ServerCommand::RecordGoalReport {
+            report: crate::GoalReportRecord {
+                goal_report_id: "report-1".to_string(),
+                goal_id: "goal-report".to_string(),
+                session_id: Some("session-report".to_string()),
+                requirement_id: Some("req-report".to_string()),
+                report_kind: "capo.report_progress".to_string(),
+                source: "agent_reported".to_string(),
+                confidence: Some(80),
+                summary: "report summary".to_string(),
+                body_artifact_id: Some("artifact-1".to_string()),
+                evidence_id: Some("evidence-1".to_string()),
+            },
+        },
+        ServerCommand::MarkGoalComplete {
+            goal_id: "goal-complete".to_string(),
+        },
+        ServerCommand::ListGoals,
+        ServerCommand::ViewGoal {
+            goal_id: "goal-view".to_string(),
+        },
+        ServerCommand::GoalStory {
+            goal_id: "goal-story".to_string(),
+        },
+        ServerCommand::GoalTimeline {
+            goal_id: "goal-timeline".to_string(),
+        },
+        ServerCommand::GoalEvidence {
+            goal_id: "goal-evidence".to_string(),
+        },
+        ServerCommand::GoalValidations {
+            goal_id: "goal-validations".to_string(),
+        },
+        ServerCommand::GoalReviews {
+            goal_id: "goal-reviews".to_string(),
+        },
+        ServerCommand::GoalRisks {
+            goal_id: "goal-risks".to_string(),
+        },
+        ServerCommand::GoalReport {
+            goal_id: "goal-render".to_string(),
+            format: crate::GoalReportFormat::Json,
+        },
     ]
 }
 
@@ -756,7 +853,112 @@ fn sample_payloads() -> Vec<ServerResponsePayload> {
             next_sequence: 0,
             turns: vec![],
         }),
+        // GA2: every goal RESPONSE payload through the real codec. The nested
+        // values are distinct and differently-shaped (distinct success/constraints/
+        // verification/budget/stop blobs, a non-empty requirements/reports/
+        // continuations/delegated vec, distinct confidence/observed flags) so the
+        // round-trip loop catches a field swap in any goal encoder/decoder arm.
+        ServerResponsePayload::Goals(vec![goal_summary()]),
+        ServerResponsePayload::GoalView(Box::new(crate::GoalView {
+            summary: goal_summary(),
+            success_criteria_json: r#"{"success":1}"#.to_string(),
+            constraints_json: r#"{"constraints":2}"#.to_string(),
+            verification_surface_json: r#"{"verification":3}"#.to_string(),
+            budget_json: r#"{"budget":4}"#.to_string(),
+            stop_conditions_json: r#"{"stop":5}"#.to_string(),
+            task_id: Some("task-view".to_string()),
+            agent_id: Some("agent-view".to_string()),
+            session_id: Some("session-view".to_string()),
+            requirements: vec![goal_requirement_view()],
+            reports: vec![goal_report_view()],
+            continuations: vec![goal_continuation_view()],
+            delegated_provider_goals: vec![delegated_provider_goal_view()],
+        })),
+        ServerResponsePayload::GoalReports(crate::GoalReportListing {
+            goal_id: "goal-reports".to_string(),
+            surface: "evidence".to_string(),
+            blocker_reason: "listing blocker".to_string(),
+            reports: vec![goal_report_view()],
+        }),
+        ServerResponsePayload::GoalTimeline(crate::GoalTimelineView {
+            goal_id: "goal-timeline".to_string(),
+            entries: vec![crate::GoalTimelineEntry {
+                sequence: 7,
+                event_id: "event-timeline".to_string(),
+                kind: "goal.created".to_string(),
+                actor: "actor-timeline".to_string(),
+                redaction_state: "safe".to_string(),
+            }],
+        }),
+        ServerResponsePayload::GoalReport(crate::GoalReportRendering {
+            goal_id: "goal-render".to_string(),
+            format: "json".to_string(),
+            body: r#"{"goal_id":"goal-render"}"#.to_string(),
+            degraded: true,
+        }),
     ]
+}
+
+/// A [`GoalStatusSummary`] with distinct counts so a field swap in the summary
+/// codec does not survive the contract round-trip.
+fn goal_summary() -> crate::GoalStatusSummary {
+    crate::GoalStatusSummary {
+        goal_id: "goal-summary".to_string(),
+        objective: "summary objective".to_string(),
+        status: "active".to_string(),
+        parent_goal_id: Some("parent-summary".to_string()),
+        attempt_run_id: Some("run-summary".to_string()),
+        requirement_count: 4,
+        requirements_supported: 3,
+        blocked_requirement_count: 2,
+        contradicted_requirement_count: 1,
+        report_count: 5,
+        blocker_reason: "summary blocker".to_string(),
+        updated_sequence: 9,
+    }
+}
+
+fn goal_requirement_view() -> crate::GoalRequirementView {
+    crate::GoalRequirementView {
+        requirement_id: "req-view".to_string(),
+        summary: "requirement view summary".to_string(),
+        status: "supported".to_string(),
+        last_status_source: "runtime_output".to_string(),
+        observed: true,
+    }
+}
+
+fn goal_report_view() -> crate::GoalReportView {
+    crate::GoalReportView {
+        goal_report_id: "report-view".to_string(),
+        requirement_id: Some("req-report-view".to_string()),
+        report_kind: "capo.record_validation".to_string(),
+        source: "agent_reported".to_string(),
+        observed: false,
+        confidence: Some(60),
+        summary: "report view summary".to_string(),
+        body_artifact_id: Some("artifact-view".to_string()),
+        evidence_id: Some("evidence-view".to_string()),
+    }
+}
+
+fn goal_continuation_view() -> crate::GoalContinuationView {
+    crate::GoalContinuationView {
+        continuation_id: "continuation-view".to_string(),
+        decision: "continue".to_string(),
+        reason: "continuation reason".to_string(),
+        attempt_run_id: Some("run-continuation".to_string()),
+    }
+}
+
+fn delegated_provider_goal_view() -> crate::DelegatedProviderGoalView {
+    crate::DelegatedProviderGoalView {
+        delegated_goal_id: "delegated-view".to_string(),
+        provider_kind: "codex".to_string(),
+        provider_goal_ref: Some("provider-ref".to_string()),
+        provider_state: "running".to_string(),
+        source: "adapter_event".to_string(),
+    }
 }
 
 /// One value of every domain `ServerError` variant.

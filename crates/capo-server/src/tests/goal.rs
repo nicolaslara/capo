@@ -356,6 +356,264 @@ fn historical_report_renders_markdown_and_json_without_leaking_raw_bodies() {
         serde_json::from_str(&json.body).expect("json report body parses");
     assert_eq!(parsed["goal_id"], "goal-report");
     assert_eq!(parsed["objective"], "render a report");
-    // The raw artifact body is never inlined into the report JSON.
-    assert!(!json.body.contains("DO_NOT_INLINE_RAW"));
+    // GO10: the report references the raw body BY ARTIFACT ID and never resolves
+    // or inlines artifact content -- it carries the agent SUMMARY text, not a
+    // body. The renderer is given only the artifact id (no body bytes are ever
+    // fed to it), so we assert the load-bearing shape directly: the artifact id
+    // and the summary appear; the only report-row body text present is the
+    // summary, and there is no `body`/raw-content field in the report rows.
+    let reports = parsed["reports"]
+        .as_array()
+        .expect("reports array in json report");
+    let row = reports
+        .iter()
+        .find(|r| r["goal_report_id"] == "report-claim")
+        .expect("report-claim row");
+    assert_eq!(row["body_artifact_id"], "artifact-raw-stdout");
+    assert_eq!(row["summary"], "claimed the build passed");
+    assert!(
+        row.get("body").is_none(),
+        "report rows must reference the artifact id, never carry a resolved raw body"
+    );
+}
+
+#[test]
+fn consecutive_requirement_status_advances_each_reach_the_read_model() {
+    // The central GO3/GO9 ledger advance (unverified -> supported -> validated ->
+    // reviewed) on a SINGLE requirement: each transition is a distinct mutation,
+    // so the second/third must NOT be collapsed by the event idempotency key.
+    let server = open_server();
+    handle(
+        &server,
+        ServerCommand::SetGoal {
+            spec: goal_spec("goal-advance", "advance a requirement", &[("req-1", "x")]),
+        },
+    );
+    for status in ["supported", "validated", "reviewed"] {
+        let response = handle(
+            &server,
+            ServerCommand::SetRequirementStatus {
+                record: RequirementStatusRecord {
+                    requirement_id: "req-1".to_string(),
+                    goal_id: "goal-advance".to_string(),
+                    summary: "x".to_string(),
+                    status: status.to_string(),
+                    source: "runtime_output".to_string(),
+                },
+            },
+        );
+        let ServerResponsePayload::GoalView(view) = response.payload else {
+            panic!("expected goal view");
+        };
+        let requirement = view
+            .requirements
+            .iter()
+            .find(|r| r.requirement_id == "req-1")
+            .expect("req-1");
+        assert_eq!(
+            requirement.status, status,
+            "the read model must reflect the LATEST requirement status, not the first-written one"
+        );
+    }
+}
+
+#[test]
+fn a_set_goal_reissue_updates_the_objective_in_place() {
+    // types.rs documents SetGoal as "Idempotent on goal_id: re-issuing updates in
+    // place". A re-issue with a changed objective (and a new requirement) must
+    // append a new event and re-project, not be dropped by the idempotency key.
+    let server = open_server();
+    handle(
+        &server,
+        ServerCommand::SetGoal {
+            spec: goal_spec("goal-reissue", "first objective", &[("req-1", "x")]),
+        },
+    );
+    let reissued = handle(
+        &server,
+        ServerCommand::SetGoal {
+            spec: goal_spec(
+                "goal-reissue",
+                "second objective",
+                &[("req-1", "x"), ("req-2", "y")],
+            ),
+        },
+    );
+    let ServerResponsePayload::GoalView(view) = reissued.payload else {
+        panic!("expected goal view");
+    };
+    assert_eq!(view.summary.objective, "second objective");
+    assert_eq!(view.summary.requirement_count, 2);
+}
+
+#[test]
+fn validation_review_and_risk_surfaces_each_return_only_their_kind() {
+    let server = open_server();
+    handle(
+        &server,
+        ServerCommand::SetGoal {
+            spec: goal_spec("goal-surfaces", "surface filters", &[("req-1", "x")]),
+        },
+    );
+    // One row per surface plus a plain progress row that no specific surface
+    // should return.
+    for (report_id, kind, source) in [
+        ("rep-progress", "capo.report_progress", "agent_reported"),
+        ("rep-validation", "capo.record_validation", "runtime_output"),
+        ("rep-review", "capo.record_review", "agent_reported"),
+        ("rep-blocker", "capo.raise_blocker", "agent_reported"),
+    ] {
+        handle(
+            &server,
+            ServerCommand::RecordGoalReport {
+                report: report("goal-surfaces", report_id, kind, source),
+            },
+        );
+    }
+
+    let surface_ids = |command: ServerCommand| -> Vec<String> {
+        let response = handle(&server, command);
+        let ServerResponsePayload::GoalReports(listing) = response.payload else {
+            panic!("expected goal reports listing");
+        };
+        listing
+            .reports
+            .iter()
+            .map(|r| r.goal_report_id.clone())
+            .collect()
+    };
+
+    assert_eq!(
+        surface_ids(ServerCommand::GoalValidations {
+            goal_id: "goal-surfaces".to_string(),
+        }),
+        vec!["rep-validation".to_string()],
+    );
+    assert_eq!(
+        surface_ids(ServerCommand::GoalReviews {
+            goal_id: "goal-surfaces".to_string(),
+        }),
+        vec!["rep-review".to_string()],
+    );
+    assert_eq!(
+        surface_ids(ServerCommand::GoalRisks {
+            goal_id: "goal-surfaces".to_string(),
+        }),
+        vec!["rep-blocker".to_string()],
+    );
+}
+
+#[test]
+fn goal_timeline_returns_goal_and_requirement_and_report_events_in_sequence_order() {
+    let server = open_server();
+    handle(
+        &server,
+        ServerCommand::SetGoal {
+            spec: goal_spec("goal-tl", "timeline", &[("req-1", "x")]),
+        },
+    );
+    handle(
+        &server,
+        ServerCommand::SetRequirementStatus {
+            record: RequirementStatusRecord {
+                requirement_id: "req-1".to_string(),
+                goal_id: "goal-tl".to_string(),
+                summary: "x".to_string(),
+                status: "supported".to_string(),
+                source: "runtime_output".to_string(),
+            },
+        },
+    );
+    handle(
+        &server,
+        ServerCommand::RecordGoalReport {
+            report: report(
+                "goal-tl",
+                "rep-tl",
+                "capo.report_progress",
+                "agent_reported",
+            ),
+        },
+    );
+
+    let response = handle(
+        &server,
+        ServerCommand::GoalTimeline {
+            goal_id: "goal-tl".to_string(),
+        },
+    );
+    let ServerResponsePayload::GoalTimeline(timeline) = response.payload else {
+        panic!("expected goal timeline");
+    };
+    // The goal-created, the requirement-status-changed, and the report-recorded
+    // events all appear, in strict ascending sequence order, with no duplicates.
+    let kinds: Vec<String> = timeline.entries.iter().map(|e| e.kind.clone()).collect();
+    assert!(
+        kinds.iter().any(|k| k == "goal.created"),
+        "kinds: {kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| k == "goal.requirement_status_changed"),
+        "kinds: {kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| k == "goal.report_recorded"),
+        "kinds: {kinds:?}"
+    );
+    let sequences: Vec<i64> = timeline.entries.iter().map(|e| e.sequence).collect();
+    let mut sorted = sequences.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sequences, sorted,
+        "timeline must be in ascending sequence order"
+    );
+    let mut deduped = sequences.clone();
+    deduped.dedup();
+    assert_eq!(deduped, sequences, "timeline must be deduped by sequence");
+}
+
+#[test]
+fn agent_supplied_report_summary_is_credential_scrubbed_at_the_codec_egress() {
+    // GA2 security backstop: a credential pasted into an agent-supplied report
+    // summary is a `Safe`-labeled goal payload that never passes the ServerEvent
+    // egress guard. The goal codec must run the same credential-shape scan at the
+    // egress point, so the secret is scrubbed before it crosses the boundary.
+    use crate::jsonrpc_response_roundtrip;
+    let server = open_server();
+    handle(
+        &server,
+        ServerCommand::SetGoal {
+            spec: goal_spec("goal-secret", "scrub secrets", &[("req-1", "x")]),
+        },
+    );
+    let mut leaky = report(
+        "goal-secret",
+        "rep-secret",
+        "capo.report_progress",
+        "agent_reported",
+    );
+    // A credential-shaped token (a GitHub PAT prefix + high-entropy tail).
+    leaky.summary = "token ghp_ABCD1234efgh5678IJKL9012mnop3456qrst is the key".to_string();
+    handle(&server, ServerCommand::RecordGoalReport { report: leaky });
+
+    let response = handle(
+        &server,
+        ServerCommand::GoalStory {
+            goal_id: "goal-secret".to_string(),
+        },
+    );
+    // Cross the codec boundary as a real response frame would.
+    let on_wire = jsonrpc_response_roundtrip(&response);
+    let ServerResponsePayload::GoalReports(listing) = on_wire.payload else {
+        panic!("expected goal reports listing");
+    };
+    let summary = &listing.reports[0].summary;
+    assert!(
+        !summary.contains("ghp_ABCD1234efgh5678IJKL9012mnop3456qrst"),
+        "the credential must be scrubbed at egress, got: {summary}"
+    );
+    assert!(
+        summary.contains("[REDACTED:credential]"),
+        "the scrubbed summary must carry the credential placeholder, got: {summary}"
+    );
 }

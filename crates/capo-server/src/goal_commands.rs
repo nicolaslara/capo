@@ -43,19 +43,18 @@ const LIFECYCLE_STATUSES: &[&str] = &[
     GoalProjection::CLEARED,
 ];
 
-/// Classify a report/evidence/requirement `source` tag the same way
-/// [`GoalReportProjection::is_observed_evidence`] does, so the server and the
-/// projection agree on observed-vs-reported. Returns `Ok(true)` for observed
-/// evidence, `Ok(false)` for an agent claim, and an error for an unclassifiable
-/// source so a malformed tag never silently lands in the read model.
+/// Classify a report/evidence/requirement `source` tag. Delegates the
+/// observed-vs-claim decision to the canonical
+/// [`capo_tools::source_is_observed_evidence`] (the single source of truth the
+/// state and tools crates also share) and only adds the new error-on-unknown
+/// behavior on top: returns `Ok(true)` for observed evidence, `Ok(false)` for an
+/// agent claim, and an error for an unclassifiable source so a malformed tag
+/// never silently lands in the read model.
 fn source_is_observed(source: &str) -> ServerResult<bool> {
-    if source == "agent_reported" {
-        Ok(false)
-    } else if source == "runtime_output"
-        || source == "adapter_event"
-        || source.starts_with("adapter_event:")
-    {
+    if capo_tools::source_is_observed_evidence(source) {
         Ok(true)
+    } else if source == capo_tools::EVIDENCE_SOURCE_AGENT_REPORTED {
+        Ok(false)
     } else {
         Err(ServerError::UnclassifiableReportSource {
             source: source.to_string(),
@@ -117,6 +116,11 @@ impl CapoServer {
                 ));
             }
         }
+        // A `SetGoal` re-issue is a genuine mutation when its content differs (a
+        // changed objective, structured field, or new requirement), so the
+        // discriminator hashes the full spec content: an unchanged re-issue stays
+        // idempotent, a changed one appends and re-projects in place.
+        let discriminator = stable_hash(spec_content_fingerprint(&spec).as_bytes());
         self.append_goal_event(
             &origin,
             EventKind::GoalCreated,
@@ -124,6 +128,7 @@ impl CapoServer {
             spec.session_id.as_deref(),
             spec.agent_id.as_deref(),
             "goal.created",
+            &discriminator,
             &records,
         )?;
         self.goal_view_response(request_id, origin, &spec.goal_id)
@@ -149,6 +154,10 @@ impl CapoServer {
         // record (the same call both borrows these and consumes `goal`).
         let session_ref = goal.session_id.as_ref().map(|id| id.as_str().to_string());
         let agent_ref = goal.agent_id.as_ref().map(|id| id.as_str().to_string());
+        // A re-block / re-pause with a NEW reason after an intervening transition
+        // is a genuine mutation, so the discriminator carries the target status and
+        // reason; an identical repeat stays idempotent.
+        let discriminator = format!("{status}:{blocker_reason}");
         self.append_goal_event(
             &origin,
             event_kind,
@@ -156,6 +165,7 @@ impl CapoServer {
             session_ref.as_deref(),
             agent_ref.as_deref(),
             event_label,
+            &discriminator,
             &[ProjectionRecord::Goal(goal)],
         )?;
         self.goal_view_response(request_id, origin, &goal_id)
@@ -199,6 +209,11 @@ impl CapoServer {
             last_status_source: record.source.clone(),
             updated_sequence: 0,
         };
+        // Each requirement advance (unverified->supported->validated->reviewed) is
+        // a distinct ledger mutation, so the discriminator carries the requested
+        // status and source: the central GO3/GO9 advance is no longer collapsed
+        // into a single first-write, while a verbatim repeat stays idempotent.
+        let discriminator = format!("{}:{}", record.status, record.source);
         self.append_goal_event(
             &origin,
             EventKind::RequirementStatusChanged,
@@ -206,6 +221,7 @@ impl CapoServer {
             None,
             None,
             "goal.requirement_status_changed",
+            &discriminator,
             &[ProjectionRecord::RequirementLedger(ledger)],
         )?;
         self.goal_view_response(request_id, origin, &record.goal_id)
@@ -237,6 +253,11 @@ impl CapoServer {
             evidence_id: report.evidence_id.clone().map(EvidenceId::new),
             updated_sequence: 0,
         };
+        // Re-recording the same report id with changed content (a corrected
+        // summary, a now-cited evidence id) is a genuine upsert, so the
+        // discriminator hashes the report content; an identical re-record stays
+        // idempotent.
+        let discriminator = stable_hash(report_content_fingerprint(&report).as_bytes());
         self.append_goal_event(
             &origin,
             EventKind::GoalReportRecorded,
@@ -244,6 +265,7 @@ impl CapoServer {
             report.session_id.as_deref(),
             None,
             "goal.report_recorded",
+            &discriminator,
             &[ProjectionRecord::GoalReport(projection)],
         )?;
         self.goal_view_response(request_id, origin, &report.goal_id)
@@ -474,7 +496,14 @@ impl CapoServer {
 
     /// The goal's event timeline (GO5/GO10): the goal's own events (keyed by the
     /// goal id as `item_id`) plus its attempt run's events, in sequence order.
-    /// Reads the event log forward, so it rebuilds identically.
+    ///
+    /// This is an item-SCOPED read, not a bounded prefix scan of the whole project
+    /// log: the goal/requirement/report/continuation events are fetched directly by
+    /// their `item_id` via [`capo_state::SqliteStateStore::events_for_items`], so a
+    /// goal event with any sequence is returned regardless of how large the global
+    /// log has grown. The result is deduped by sequence (the run-scoped evidence
+    /// events may overlap an item-keyed event) and ordered by sequence, so the
+    /// timeline rebuilds identically from the log.
     fn goal_timeline_entries(&self, goal: &GoalProjection) -> ServerResult<Vec<EventRecord>> {
         let mut records: Vec<EventRecord> = Vec::new();
         if let Some(run_id) = goal.attempt_run_id.as_ref() {
@@ -483,10 +512,6 @@ impl CapoServer {
                 .evidence_events_for_run(run_id)
                 .map_err(ServerError::State)?;
         }
-        // The goal lifecycle / report / continuation events are keyed by the
-        // domain id as `item_id`, and the run-scoped read above misses goal events
-        // with no run. Fold the goal/requirement/report/continuation ids in by a
-        // forward scan, deduped by sequence.
         let mut item_ids: Vec<String> = vec![goal.goal_id.to_string()];
         for ledger in self
             .state()
@@ -509,17 +534,12 @@ impl CapoServer {
         {
             item_ids.push(continuation.continuation_id);
         }
-        let scanned = self
+        let scoped = self
             .state()
-            .events_after(0, EVENT_TIMELINE_LIMIT)
+            .events_for_items(&item_ids)
             .map_err(ServerError::State)?;
-        for record in scanned {
-            if record
-                .item_id
-                .as_deref()
-                .is_some_and(|item| item_ids.iter().any(|id| id == item))
-                && !records.iter().any(|seen| seen.sequence == record.sequence)
-            {
+        for record in scoped {
+            if !records.iter().any(|seen| seen.sequence == record.sequence) {
                 records.push(record);
             }
         }
@@ -557,6 +577,18 @@ impl CapoServer {
     /// recording the server-request envelope alongside. Mirrors the existing
     /// dispatch append pattern so goal mutations sit on the same single-writer
     /// serialization point as every other write.
+    ///
+    /// `discriminator` makes the idempotency key unique per LOGICAL operation, not
+    /// per `(kind, entity)`. The store's `append_event` short-circuits on a
+    /// repeated `(project_id, idempotency_key)` WITHOUT re-applying projections,
+    /// so a key of only `{event_label}:{item_id}` would collapse every later
+    /// same-kind transition on one entity (a second requirement-status advance, a
+    /// `SetGoal` re-issue, a re-block with a new reason) into a silent no-op. We
+    /// fold the intended new state into the key (status+source for a requirement,
+    /// the lifecycle status+reason for a goal, the spec/report content hash for a
+    /// create/record) so a genuine mutation appends a new event and re-applies its
+    /// projection, while a verbatim retry stays idempotent. Mirrors the
+    /// `dispatch.rs` pattern where the key embeds the occurrence-unique plan id.
     #[allow(clippy::too_many_arguments)]
     fn append_goal_event(
         &self,
@@ -566,13 +598,11 @@ impl CapoServer {
         session_id: Option<&str>,
         agent_id: Option<&str>,
         event_label: &str,
+        discriminator: &str,
         records: &[ProjectionRecord],
     ) -> ServerResult<()> {
-        let event_id = format!(
-            "event-{}-{}",
-            slug(event_label),
-            stable_hash(item_id.as_bytes())
-        );
+        let occurrence = stable_hash(format!("{item_id}:{discriminator}").as_bytes());
+        let event_id = format!("event-{}-{}", slug(event_label), occurrence);
         let mut event = NewEvent::new(event_id, kind, &origin.actor_id);
         event.project_id = Some(self.project_id.clone());
         event.agent_id = agent_id.map(|id| AgentId::new(id.to_string()));
@@ -583,20 +613,17 @@ impl CapoServer {
             "item_id": item_id,
         })
         .to_string();
-        event.idempotency_key = Some(format!("{event_label}:{item_id}"));
+        event.idempotency_key = Some(format!("{event_label}:{item_id}:{discriminator}"));
         event.redaction_state = RedactionState::Safe;
         self.state()
             .append_event(event, records)
             .map_err(ServerError::State)?;
         // Record the server-request envelope so the goal mutation is auditable as
         // a server-boundary action like every other command.
-        let command_hash = command_identity_hash(format!("{event_label}:{item_id}"));
+        let command_hash =
+            command_identity_hash(format!("{event_label}:{item_id}:{discriminator}"));
         let command = self.command_envelope(
-            &format!(
-                "goal-{}-{}",
-                slug(event_label),
-                stable_hash(item_id.as_bytes())
-            ),
+            &format!("goal-{}-{}", slug(event_label), occurrence),
             origin,
             &command_hash,
             CommandTarget::Project(self.project_id.clone()),
@@ -616,7 +643,50 @@ impl CapoServer {
     }
 }
 
-const EVENT_TIMELINE_LIMIT: usize = 4096;
+/// A stable, order-fixed fingerprint of a [`GoalSpec`]'s content. Two specs with
+/// the same content produce the same fingerprint (so an unchanged `SetGoal`
+/// re-issue is idempotent); any content change (objective, a structured field, a
+/// requirement) changes it (so a genuine re-issue appends and re-projects).
+fn spec_content_fingerprint(spec: &GoalSpec) -> String {
+    let mut requirements: Vec<String> = spec
+        .requirements
+        .iter()
+        .map(|requirement| format!("{}={}", requirement.requirement_id, requirement.summary))
+        .collect();
+    requirements.sort();
+    format!(
+        "obj={}|task={:?}|agent={:?}|session={:?}|parent={:?}|run={:?}|success={}|constraints={}|verification={}|budget={}|stop={}|reqs={}",
+        spec.objective,
+        spec.task_id,
+        spec.agent_id,
+        spec.session_id,
+        spec.parent_goal_id,
+        spec.attempt_run_id,
+        spec.success_criteria_json,
+        spec.constraints_json,
+        spec.verification_surface_json,
+        spec.budget_json,
+        spec.stop_conditions_json,
+        requirements.join(","),
+    )
+}
+
+/// A stable fingerprint of a [`GoalReportRecord`]'s content, for the same
+/// idempotency reasoning as [`spec_content_fingerprint`].
+fn report_content_fingerprint(report: &GoalReportRecord) -> String {
+    format!(
+        "goal={}|session={:?}|requirement={:?}|kind={}|source={}|confidence={:?}|summary={}|artifact={:?}|evidence={:?}",
+        report.goal_id,
+        report.session_id,
+        report.requirement_id,
+        report.report_kind,
+        report.source,
+        report.confidence,
+        report.summary,
+        report.body_artifact_id,
+        report.evidence_id,
+    )
+}
 
 /// Whether `status` is a recognized requirement-ledger status (GO9 states).
 fn is_known_requirement_status(status: &str) -> bool {
