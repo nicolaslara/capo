@@ -181,6 +181,14 @@ impl SqliteStateStore {
         self.root.join("shadow-git")
     }
 
+    /// DP8: the controller-owned root under which per-session/goal isolated git
+    /// worktrees are carved. Mirrors [`Self::shadow_git_root`] so the worktree
+    /// store hangs off the same durable state root and a worktree taken before a
+    /// restart is reattachable afterward (its durable record points back here).
+    pub fn worktrees_root(&self) -> PathBuf {
+        self.root.join("worktrees")
+    }
+
     pub fn append_event(
         &self,
         event: NewEvent,

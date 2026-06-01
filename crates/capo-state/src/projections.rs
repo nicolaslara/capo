@@ -36,6 +36,8 @@ pub enum ProjectionRecord {
     Evidence(EvidenceProjection),
     RunScore(RunScoreProjection),
     Checkpoint(CheckpointProjection),
+    // DP8: git worktree isolation per session/goal.
+    Worktree(WorktreeProjection),
     SourceBinding(SourceBindingProjection),
     WorkpadIndexReset(WorkpadIndexResetProjection),
     WorkpadFile(WorkpadFileProjection),
@@ -818,6 +820,69 @@ impl CheckpointProjection {
     /// SG8: whether this checkpoint has been restored at least once.
     pub fn is_restored(&self) -> bool {
         self.restored_at.is_some()
+    }
+}
+
+/// DP8: the durable read model for a session's (or goal's) isolated git worktree.
+///
+/// One row per worktree id. The lifecycle events (`worktree.created` /
+/// `worktree.reconciled` / `worktree.torn_down`) upsert this same row in place,
+/// so a worktree taken before a restart is reconstructable/inspectable after the
+/// controller rebuilds projections from the log -- a worktree is never silently
+/// abandoned. The worktree-PER-GOAL slice binds `goal_id` so a continued goal
+/// reattaches to its existing worktree rather than spawning a fresh one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorktreeProjection {
+    /// Stable per-worktree key (a collision-free encoding of the originating repo
+    /// root + the binding session/goal). One row per worktree; the reconcile and
+    /// teardown events update this same row in place.
+    pub worktree_id: String,
+    pub project_id: ProjectId,
+    /// The session this worktree isolates writes for.
+    pub session_id: SessionId,
+    /// The run currently writing in this worktree, when one is associated.
+    pub run_id: Option<RunId>,
+    /// The goal/goal-attempt this worktree is bound to (the worktree-PER-GOAL
+    /// slice). `None` for a plain session-scoped worktree. A continued goal looks
+    /// its existing worktree up by this binding and reattaches rather than
+    /// creating a new one.
+    pub goal_id: Option<GoalId>,
+    /// The originating repository root the worktree was carved from (the
+    /// operator's live working tree). Writes are confined to `worktree_path`, NOT
+    /// this root.
+    pub repo_root: String,
+    /// The dedicated worktree root the session's workspace-write run executes in
+    /// -- the `real-turn-loop` workspace-confinement scope for this session.
+    pub worktree_path: String,
+    /// The branch/ref checked out in the worktree (an isolated per-session ref so
+    /// two concurrent sessions never share a working ref).
+    pub branch: String,
+    /// Lifecycle status: `active` (created, writable), `reconciled` (merge-back
+    /// point recorded), or `torn_down` (removed). Never silently dropped.
+    pub status: String,
+    /// When the worktree was created (epoch-millis string).
+    pub created_at: Option<String>,
+    /// When the worktree was last reconciled/merged back, set by
+    /// `worktree.reconciled`. `None` until a reconcile point is recorded.
+    pub reconciled_at: Option<String>,
+    /// When the worktree was torn down, set by `worktree.torn_down`. `None` while
+    /// the worktree is still on disk.
+    pub torn_down_at: Option<String>,
+    pub updated_sequence: i64,
+}
+
+impl WorktreeProjection {
+    /// The status a freshly created, writable worktree carries.
+    pub const ACTIVE: &'static str = "active";
+    /// The status a worktree carries after a reconcile/merge-back point.
+    pub const RECONCILED: &'static str = "reconciled";
+    /// The status a torn-down (removed) worktree carries.
+    pub const TORN_DOWN: &'static str = "torn_down";
+
+    /// DP8: whether this worktree is still live (created and not torn down), so a
+    /// continued goal can reattach to it rather than spawning a fresh worktree.
+    pub fn is_live(&self) -> bool {
+        self.status != Self::TORN_DOWN && self.torn_down_at.is_none()
     }
 }
 

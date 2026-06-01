@@ -18,6 +18,7 @@ use std::os::unix::process::CommandExt;
 
 mod async_runner;
 mod sandbox;
+mod worktree;
 
 pub use async_runner::{
     AsyncLocalProcessRunner, AsyncRunningProcess, StreamSource, StreamingOutcome,
@@ -25,6 +26,10 @@ pub use async_runner::{
 pub use sandbox::{
     OsSandbox, SandboxEnforcement, SandboxPlan, SandboxProfile, SandboxRefusal, SandboxRun,
     SandboxTier,
+};
+pub use worktree::{
+    IsolatedWorktree, WORKTREE_ISOLATION_NONE_VARIANT, WORKTREE_ISOLATION_VARIANT, WorktreeError,
+    WorktreeEvent, WorktreeManager, WorktreeOutcome, WorktreeRequest,
 };
 
 /// First runtime variants from the prototype plan.

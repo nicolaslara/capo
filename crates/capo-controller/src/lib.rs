@@ -53,6 +53,7 @@ mod tool_dispatch;
 mod turn_loop;
 mod verification;
 mod workspace_lock;
+mod worktree_isolation;
 
 pub use acp_live_dispatch::AcpLiveTurnOutcome;
 pub use acp_replay_ingest::AcpReplayIngestReport;
@@ -102,6 +103,7 @@ pub use verification::{
 pub use workspace_lock::{
     WorkspaceLeaseScope, WorkspaceLockConflict, WorkspaceWriteGate, WorkspaceWriteLeaseOutcome,
 };
+pub use worktree_isolation::{WorktreeLifecycle, WorktreeScope};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FakeBoundaryController {

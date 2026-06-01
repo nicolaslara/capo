@@ -19,7 +19,7 @@ use crate::{
     RuntimeTargetProjection, SessionProjection, SourceBindingProjection, SqliteStateStore,
     StateError, StateResult, TaskOutcomeReportProjection, TaskProjection, ToolCallProjection,
     ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection, WorkpadTaskProjection,
-    WorkspaceLeaseProjection, optional_id,
+    WorkspaceLeaseProjection, WorktreeProjection, optional_id,
 };
 
 impl SqliteStateStore {
@@ -473,6 +473,62 @@ impl SqliteStateStore {
              ORDER BY updated_sequence ASC, checkpoint_id ASC",
         )?;
         let rows = statement.query_map(params![run_id.as_str()], checkpoint_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    /// DP8: read one session worktree back by id (`None` when absent), so the
+    /// controller's lifecycle/reconcile/teardown path and the restart-replay
+    /// reattach path can find the worktree's durable record.
+    pub fn worktree_by_id(&self, worktree_id: &str) -> StateResult<Option<WorktreeProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT worktree_id, project_id, session_id, run_id, goal_id, repo_root,
+                    worktree_path, branch, status, created_at, reconciled_at,
+                    torn_down_at, updated_sequence
+             FROM session_worktrees
+             WHERE worktree_id = ?1",
+        )?;
+        let worktree = statement
+            .query_row(params![worktree_id], worktree_from_row)
+            .optional()?;
+        Ok(worktree)
+    }
+
+    /// DP8: the worktree currently bound to a goal (the worktree-PER-GOAL slice),
+    /// most-recent first, so a continued goal reattaches to its existing live
+    /// worktree rather than spawning a fresh one.
+    pub fn worktrees_for_goal(&self, goal_id: &GoalId) -> StateResult<Vec<WorktreeProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT worktree_id, project_id, session_id, run_id, goal_id, repo_root,
+                    worktree_path, branch, status, created_at, reconciled_at,
+                    torn_down_at, updated_sequence
+             FROM session_worktrees
+             WHERE goal_id = ?1
+             ORDER BY updated_sequence DESC, worktree_id ASC",
+        )?;
+        let rows = statement.query_map(params![goal_id.as_str()], worktree_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    /// DP8: every worktree for a session, oldest first -- the per-session worktree
+    /// lifecycle the recovery/audit path reads to prove no worktree is orphaned.
+    pub fn worktrees_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> StateResult<Vec<WorktreeProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT worktree_id, project_id, session_id, run_id, goal_id, repo_root,
+                    worktree_path, branch, status, created_at, reconciled_at,
+                    torn_down_at, updated_sequence
+             FROM session_worktrees
+             WHERE session_id = ?1
+             ORDER BY updated_sequence ASC, worktree_id ASC",
+        )?;
+        let rows = statement.query_map(params![session_id.as_str()], worktree_from_row)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StateError::from)
     }
@@ -2425,6 +2481,24 @@ fn checkpoint_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CheckpointPr
         content_hash: row.get(9)?,
         created_at: row.get(10)?,
         restored_at: row.get(11)?,
+        updated_sequence: row.get(12)?,
+    })
+}
+
+fn worktree_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeProjection> {
+    Ok(WorktreeProjection {
+        worktree_id: row.get(0)?,
+        project_id: ProjectId::new(row.get::<_, String>(1)?),
+        session_id: SessionId::new(row.get::<_, String>(2)?),
+        run_id: optional_id(row.get::<_, Option<String>>(3)?),
+        goal_id: optional_id(row.get::<_, Option<String>>(4)?),
+        repo_root: row.get(5)?,
+        worktree_path: row.get(6)?,
+        branch: row.get(7)?,
+        status: row.get(8)?,
+        created_at: row.get(9)?,
+        reconciled_at: row.get(10)?,
+        torn_down_at: row.get(11)?,
         updated_sequence: row.get(12)?,
     })
 }

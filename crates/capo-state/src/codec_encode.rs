@@ -505,6 +505,30 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             })
             .to_string(),
         },
+        ProjectionRecord::Worktree(worktree) => ProjectionRecordRow {
+            kind: "worktree",
+            record_id: worktree.worktree_id.clone(),
+            a: Some(worktree.project_id.to_string()),
+            b: Some(worktree.session_id.to_string()),
+            c: Some(worktree.repo_root.clone()),
+            d: Some(worktree.worktree_path.clone()),
+            e: Some(worktree.branch.clone()),
+            f: Some(worktree.status.clone()),
+            g: None,
+            h: None,
+            // The optional run/goal bindings and the lifecycle timestamps ride in
+            // the payload, so a rebuild reconstructs the worktree row identically
+            // (a continued goal reattaches to its existing worktree by the bound
+            // goal id, never a fresh one).
+            payload_json: json!({
+                "run_id": worktree.run_id.as_ref().map(|id| id.to_string()),
+                "goal_id": worktree.goal_id.as_ref().map(|id| id.to_string()),
+                "created_at": worktree.created_at,
+                "reconciled_at": worktree.reconciled_at,
+                "torn_down_at": worktree.torn_down_at,
+            })
+            .to_string(),
+        },
         ProjectionRecord::TaskOutcomeReport(report) => ProjectionRecordRow {
             kind: "task_outcome_report",
             record_id: report.task_outcome_report_id.clone(),

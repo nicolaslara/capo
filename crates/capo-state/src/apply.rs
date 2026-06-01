@@ -967,6 +967,41 @@ pub(crate) fn apply_projection_record(
                 sequence,
             ],
         )?,
+        ProjectionRecord::Worktree(worktree) => transaction.execute(
+            "INSERT INTO session_worktrees(
+                worktree_id, project_id, session_id, run_id, goal_id, repo_root,
+                worktree_path, branch, status, created_at, reconciled_at,
+                torn_down_at, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(worktree_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                session_id = excluded.session_id,
+                run_id = excluded.run_id,
+                goal_id = excluded.goal_id,
+                repo_root = excluded.repo_root,
+                worktree_path = excluded.worktree_path,
+                branch = excluded.branch,
+                status = excluded.status,
+                created_at = excluded.created_at,
+                reconciled_at = excluded.reconciled_at,
+                torn_down_at = excluded.torn_down_at,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                worktree.worktree_id,
+                worktree.project_id.as_str(),
+                worktree.session_id.as_str(),
+                worktree.run_id.as_ref().map(|id| id.as_str()),
+                worktree.goal_id.as_ref().map(|id| id.as_str()),
+                worktree.repo_root,
+                worktree.worktree_path,
+                worktree.branch,
+                worktree.status,
+                worktree.created_at,
+                worktree.reconciled_at,
+                worktree.torn_down_at,
+                sequence,
+            ],
+        )?,
         ProjectionRecord::TaskOutcomeReport(report) => transaction.execute(
             "INSERT INTO task_outcome_reports(
                 task_outcome_report_id, project_id, task_id, session_id, run_id,

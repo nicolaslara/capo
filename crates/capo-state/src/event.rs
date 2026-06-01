@@ -68,6 +68,13 @@ pub enum EventKind {
     SessionStopped,
     CheckpointCreated,
     CheckpointRestored,
+    // DP8 (git worktree isolation per session/goal): the worktree lifecycle as
+    // events -- create-on-session-start, reconcile/merge-back point, and teardown
+    // -- recorded so a worktree can be reconstructed/inspected after restart and
+    // never silently abandoned.
+    WorktreeCreated,
+    WorktreeReconciled,
+    WorktreeTornDown,
     RunHardKilled,
     RunAborted,
     RunOrphaned,
@@ -194,6 +201,9 @@ impl EventKind {
             Self::SessionStopped => "session.stopped",
             Self::CheckpointCreated => "checkpoint.created",
             Self::CheckpointRestored => "checkpoint.restored",
+            Self::WorktreeCreated => "worktree.created",
+            Self::WorktreeReconciled => "worktree.reconciled",
+            Self::WorktreeTornDown => "worktree.torn_down",
             Self::RunHardKilled => "run.hard_killed",
             Self::RunAborted => "run.aborted",
             Self::RunOrphaned => "run.orphaned",
@@ -289,6 +299,9 @@ impl EventKind {
             EventKind::SessionStopped,
             EventKind::CheckpointCreated,
             EventKind::CheckpointRestored,
+            EventKind::WorktreeCreated,
+            EventKind::WorktreeReconciled,
+            EventKind::WorktreeTornDown,
             EventKind::RunHardKilled,
             EventKind::RunAborted,
             EventKind::RunOrphaned,

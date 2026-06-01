@@ -17,7 +17,7 @@ use crate::{
     SessionProjection, SourceBindingProjection, StateError, StateResult,
     TaskOutcomeReportProjection, TaskProjection, ToolCallProjection, ToolCallProvenance,
     ToolObservationProjection, WorkpadFileProjection, WorkpadIndexResetProjection,
-    WorkpadTaskProjection, WorkspaceLeaseProjection, optional_id,
+    WorkpadTaskProjection, WorkspaceLeaseProjection, WorktreeProjection, optional_id,
 };
 
 #[derive(Debug)]
@@ -668,6 +668,34 @@ pub(crate) fn projection_record_from_row(
                     .unwrap_or_default(),
                 created_at: payload_optional_string(&payload, "created_at"),
                 restored_at: payload_optional_string(&payload, "restored_at"),
+                updated_sequence: 0,
+            }))
+        }
+        "worktree" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::Worktree(WorktreeProjection {
+                worktree_id: record_id,
+                project_id: ProjectId::new(required_field(
+                    &projection_kind,
+                    "worktree",
+                    a,
+                    "project_id",
+                )?),
+                session_id: SessionId::new(required_field(
+                    &projection_kind,
+                    "worktree",
+                    b,
+                    "session_id",
+                )?),
+                repo_root: required_field(&projection_kind, "worktree", c, "repo_root")?,
+                worktree_path: required_field(&projection_kind, "worktree", d, "worktree_path")?,
+                branch: required_field(&projection_kind, "worktree", e, "branch")?,
+                status: required_field(&projection_kind, "worktree", f, "status")?,
+                run_id: optional_id(payload_optional_string(&payload, "run_id")),
+                goal_id: optional_id(payload_optional_string(&payload, "goal_id")),
+                created_at: payload_optional_string(&payload, "created_at"),
+                reconciled_at: payload_optional_string(&payload, "reconciled_at"),
+                torn_down_at: payload_optional_string(&payload, "torn_down_at"),
                 updated_sequence: 0,
             }))
         }
