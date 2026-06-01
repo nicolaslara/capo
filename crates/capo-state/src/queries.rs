@@ -9,13 +9,13 @@ use crate::{
     AdapterDispatchGateProjection, AdapterDispatchPlanProjection,
     AdapterDispatchPromptMaterializationProjection, AdapterDispatchPromptSourceProjection,
     AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
-    AgentProjection, CapabilityGrantProjection, CheckpointProjection,
+    AgentProjection, ArtifactRecord, CapabilityGrantProjection, CheckpointProjection,
     ConnectivityExposureProjection, DelegatedProviderGoalProjection, EventKind, EventRecord,
     EvidenceProjection, GoalContinuationProjection, GoalProjection, GoalReportProjection,
     InFlightRun, MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
-    PermissionApprovalProjection, RequirementLedgerProjection, ReviewFindingProjection,
-    RunProjection, RunScoreProjection, RuntimeTargetProjection, SessionProjection,
-    SourceBindingProjection, SqliteStateStore, StateError, StateResult,
+    PermissionApprovalProjection, RedactionState, RequirementLedgerProjection,
+    ReviewFindingProjection, RunProjection, RunScoreProjection, RuntimeTargetProjection,
+    SessionProjection, SourceBindingProjection, SqliteStateStore, StateError, StateResult,
     TaskOutcomeReportProjection, TaskProjection, ToolCallProjection, ToolCallProvenance,
     ToolObservationProjection, WorkpadFileProjection, WorkpadTaskProjection,
     WorkspaceLeaseProjection, optional_id,
@@ -2036,6 +2036,42 @@ impl SqliteStateStore {
             statement.query_map(params![goal_id.as_str()], delegated_provider_goal_from_row)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StateError::from)
+    }
+
+    /// GA3 (goal-orchestration GO7): the artifact record for `artifact_id`, or
+    /// `None` if absent.
+    ///
+    /// The continuation context packet references a report/evidence body by its
+    /// artifact id and carries the artifact's `content_hash` and `redaction_state`
+    /// for provenance, WITHOUT ever materializing the body. This read returns just
+    /// that metadata so the packet stays bounded and explainable: a referenced
+    /// fragment names its source and content hash; it never inlines raw content.
+    pub fn artifact_by_id(&self, artifact_id: &str) -> StateResult<Option<ArtifactRecord>> {
+        let connection = Connection::open(&self.db_path)?;
+        let artifact = connection
+            .query_row(
+                "SELECT artifact_id, project_id, session_id, run_id, kind, uri, content_hash,
+                        size_bytes, redaction_state
+                 FROM artifacts
+                 WHERE artifact_id = ?1",
+                params![artifact_id],
+                |row| {
+                    Ok(ArtifactRecord {
+                        artifact_id: row.get(0)?,
+                        project_id: optional_id(row.get::<_, Option<String>>(1)?),
+                        session_id: optional_id(row.get::<_, Option<String>>(2)?),
+                        run_id: optional_id(row.get::<_, Option<String>>(3)?),
+                        kind: row.get(4)?,
+                        uri: row.get(5)?,
+                        content_hash: row.get(6)?,
+                        size_bytes: row.get(7)?,
+                        redaction_state: RedactionState::from_wire(&row.get::<_, String>(8)?)
+                            .unwrap_or(RedactionState::Unknown),
+                    })
+                },
+            )
+            .optional()?;
+        Ok(artifact)
     }
 }
 

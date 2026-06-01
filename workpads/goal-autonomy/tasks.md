@@ -233,7 +233,51 @@ Must not do:
 
 ## GA3 - Milestone B: Sourced Continuation Context Packet And Prompt Assembly
 
-Status: pending.
+Status: done. The sourced continuation context packet + continuation prompt
+assembly (GO7) is implemented controller-side in
+`crates/capo-controller/src/continuation_context.rs` as a pure, read-only view
+over persisted goal state. `FakeBoundaryController::continuation_context_packet`
+(and `_with_limits`) reconstruct the active objective + audit contract (objective,
+status, success criteria, constraints, verification surface, stop conditions,
+current blocker, and the per-requirement ledger with observed-vs-reported
+provenance) STRICTLY from the GA1 `goals`/`requirement_ledgers` projections -- no
+transcript -- then fold the bounded newest reports, observed evidence, review
+findings, memory packets, continuation decisions, delegated-provider observations,
+and the goal's workpad/task ref into sourced `ContinuationContextFragment`s. Every
+fragment carries a `source_ref` and an FNV-1a `content_hash`; a referenced
+report/evidence/memory body is named by artifact id with the artifact's content
+hash and redaction state (new `SqliteStateStore::artifact_by_id` query), never
+inlined, and a non-`safe` or missing artifact is carried as a redacted reference.
+Assembly is bounded by explicit `ContinuationContextLimits` (newest-N selection +
+per-fragment summary char cap with an explicit ellipsis), and `render_prompt`
+leads with the reconstructed objective + audit contract. The packet is a return
+value (loop input), never persisted as authoritative read-model state.
+
+Evidence:
+
+- New module `crates/capo-controller/src/continuation_context.rs` (types
+  `ContinuationContextPacket`/`ContinuationAuditContract`/
+  `ContinuationContextFragment`/`ContinuationRequirement`/
+  `ContinuationSourceKind`/`ContinuationContextLimits`, all re-exported from the
+  controller crate root) plus a new read query
+  `SqliteStateStore::artifact_by_id` in `crates/capo-state/src/queries.rs` for the
+  referenced-body content hash + redaction lookup.
+- 4 deterministic controller tests (scripted/seeded goal state, no live provider):
+  `continuation_context_packet_selects_bounded_sourced_fragments` (selection +
+  source refs + observed-vs-reported tagging + content hashes + prompt),
+  `continuation_context_is_bounded_and_does_not_dump_whole_bodies` (selection and
+  summary-size limits enforced),
+  `continuation_context_preserves_artifact_content_hash_and_redacts_unsafe_bodies`
+  (provenance + redaction, including a missing-artifact degrade), and
+  `continuation_objective_and_audit_contract_survive_server_restart_and_rebuild`
+  (re-open over the same state root + `rebuild_projections` -> the objective +
+  audit contract + whole packet rebuild byte-for-byte identically).
+- `cargo test -p capo-controller continuation_context` -> 4 passed.
+- `cargo fmt --check` -> exit 0.
+- `cargo clippy --all-targets --all-features -- -D warnings` -> exit 0.
+- `cargo test --workspace` -> exit 0, 0 failed across all crates (capo-controller
+  lib: 122 passed, 2 ignored; capo-state lib: 62 passed).
+- `git diff --check` -> clean.
 
 Acceptance:
 

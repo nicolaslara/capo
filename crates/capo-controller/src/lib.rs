@@ -12,7 +12,7 @@ use capo_adapters::{
     ProviderConnector, ScriptedMockAgent, ScriptedMockTurn, TurnRequest,
 };
 use capo_core::{
-    AgentId, CommandEnvelope, CommandIntent, EvidenceId, MemoryPacketId, ProjectId, RunId,
+    AgentId, CommandEnvelope, CommandIntent, EvidenceId, GoalId, MemoryPacketId, ProjectId, RunId,
     SessionId, TaskId, ToolCallId, TurnId,
 };
 use capo_memory::{
@@ -32,6 +32,7 @@ use capo_tools::{
 
 mod adapter_replay;
 mod checkpoint;
+mod continuation_context;
 mod fake_session;
 mod grant_lifecycle;
 mod local_dispatch;
@@ -46,6 +47,10 @@ mod verification;
 mod workspace_lock;
 
 pub use checkpoint::{CheckpointCreated, CheckpointError, CheckpointRestored, CheckpointScope};
+pub use continuation_context::{
+    ContinuationAuditContract, ContinuationContextFragment, ContinuationContextLimits,
+    ContinuationContextPacket, ContinuationRequirement, ContinuationSourceKind,
+};
 pub use grant_lifecycle::{
     GrantReadBackDecision, GrantReadBackSource, GrantRevocation, GrantRevocationScope,
 };
