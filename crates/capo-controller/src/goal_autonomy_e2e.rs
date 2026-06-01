@@ -741,6 +741,160 @@ fn render_historical_report(
     render_goal_report_markdown(&inputs)
 }
 
+/// GA9 (goal-orchestration GO13 + GO14 close-out): reopen the controller over the
+/// SAME on-disk state root with a fresh scripted-mock adapter -- a genuine server
+/// restart, NOT a `rebuild_projections()` on the live handle. The reopened
+/// controller shares no in-memory state with the original: every read model it
+/// serves is reconstructed from the durable event log on disk.
+fn reopen(state_root: &Path) -> FakeBoundaryController {
+    FakeBoundaryController::open_with_adapter(
+        ProjectId::new(PROJECT),
+        state_root,
+        AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new(SESSION)),
+    )
+    .expect("reopen controller over the same state root")
+}
+
+/// GA9: the END-TO-END restart/replay gate.
+///
+/// GA6 (`reattach.rs`) and `capo-state`'s
+/// `goal_replay_full_goal_surface_rebuilds_identically_after_restart` prove the
+/// individual read models rebuild; the GA8 branches prove the scheduler/auditor
+/// COMPOSE on one live handle. GA9 closes the gap between them: it drives the full
+/// orchestration lifecycle (a recorded CONTINUATION decision, a claim-only
+/// AUDIT-incomplete, then an observed-evidence AUDIT-complete) on one controller,
+/// then DROPS that controller, REOPENS the store from the same disk path (a real
+/// server restart with no shared in-memory state), runs a full
+/// `rebuild_projections()`, and proves that goal + continuation + auditor verdict +
+/// historical report all survive byte-for-byte AND that the auditor re-decides
+/// identically on the rebuilt state with no in-memory transcript. This is the
+/// "goal + continuation + auditor + report state survives server restart and full
+/// projection rebuild END TO END" acceptance for GA9.
+#[test]
+fn goal_autonomy_e2e_full_state_survives_server_restart_and_rebuild() {
+    let (controller, state_root) = open();
+    seed_goal_with_run(&controller, GoalProjection::ACTIVE);
+    let goal_id = GoalId::new(GOAL);
+
+    // (1) A continuation decision at a safe boundary -- a durable scheduler verdict.
+    let cont = controller
+        .evaluate_and_record_continuation(&goal_id, "cont-ga9", &ready_conditions(), None, None)
+        .expect("continuation decision");
+    assert_eq!(cont.decision, ContinuationDecision::Continue);
+
+    // (2) An agent claim WITHOUT observed evidence: the auditor blocks completion.
+    seed(
+        &controller,
+        "ga9-claim-only",
+        &[
+            ProjectionRecord::RequirementLedger(requirement_ledger(
+                "req-1",
+                RequirementLedgerProjection::VALIDATED,
+                "agent_reported",
+            )),
+            ProjectionRecord::GoalReport(GoalReportProjection {
+                goal_report_id: "ga9-report-claim".to_string(),
+                goal_id: goal_id.clone(),
+                project_id: ProjectId::new(PROJECT),
+                session_id: Some(SessionId::new(SESSION)),
+                requirement_id: Some(RequirementId::new("req-1")),
+                report_kind: "capo.complete_requirement".to_string(),
+                source: "agent_reported".to_string(),
+                confidence: Some(99),
+                summary: "I completed it".to_string(),
+                body_artifact_id: None,
+                evidence_id: None,
+                updated_sequence: 0,
+            }),
+        ],
+    );
+    let claim_audit = controller
+        .audit_and_record_goal_completion(&goal_id, "ga9-audit-claim")
+        .expect("claim audit");
+    assert!(!claim_audit.verdict.is_complete());
+    assert_eq!(claim_audit.reason, "requirement_claim_only");
+
+    // (3) Concrete observed evidence arrives; the auditor now completes the goal.
+    seed(
+        &controller,
+        "ga9-observed-evidence",
+        &[ProjectionRecord::Evidence(observed_evidence(
+            "ga9-evidence-check",
+        ))],
+    );
+    let complete_audit = controller
+        .audit_and_record_goal_completion(&goal_id, "ga9-audit-complete")
+        .expect("complete audit");
+    assert!(complete_audit.verdict.is_complete());
+    assert_eq!(complete_audit.reason, "all_requirements_met");
+
+    // Capture the pre-restart read-model state the restart must reproduce.
+    let report_before = render_historical_report(&controller, &goal_id);
+    let continuations_before = continuation_decisions(&controller);
+    let verdict_before = controller
+        .state()
+        .latest_goal_audit_decision(&goal_id)
+        .expect("latest audit")
+        .expect("verdict present");
+    assert_eq!(
+        continuations_before,
+        vec![("continue".to_string(), "safe_boundary".to_string())]
+    );
+    assert_eq!(
+        verdict_before.verdict,
+        GoalAuditDecisionProjection::COMPLETE
+    );
+
+    // (4) SERVER RESTART: drop the live controller, reopen the store from disk, and
+    //     rebuild every projection from the durable event log alone.
+    drop(controller);
+    let restarted = reopen(&state_root);
+    restarted
+        .state()
+        .rebuild_projections()
+        .expect("rebuild projections after restart");
+
+    // The objective + audit contract re-inject from PERSISTED goal state (GA6/GO13):
+    // the reopened controller has no in-memory transcript, yet the goal is intact.
+    let goal_after = restarted
+        .state()
+        .goal(&goal_id)
+        .expect("goal lookup")
+        .expect("goal survives restart");
+    assert_eq!(goal_after.objective, "Land the GA8 end-to-end");
+    assert_eq!(goal_after.status, GoalProjection::ACTIVE);
+
+    // The continuation decision survives restart + rebuild byte-for-byte.
+    assert_eq!(
+        continuation_decisions(&restarted),
+        continuations_before,
+        "the scheduler's continuation verdict rebuilds identically after restart"
+    );
+
+    // The auditor verdict projection survives restart + rebuild byte-for-byte.
+    let verdict_after = restarted
+        .state()
+        .latest_goal_audit_decision(&goal_id)
+        .expect("latest audit")
+        .expect("verdict survives restart");
+    assert_eq!(verdict_after, verdict_before);
+
+    // The auditor RE-DECIDES identically on the rebuilt state -- it depends only on
+    // the persisted projections, never an in-memory transcript.
+    let re_audit = restarted
+        .audit_goal_completion(&goal_id)
+        .expect("re-audit on rebuilt state");
+    assert!(re_audit.verdict.is_complete());
+    assert_eq!(re_audit.reason, "all_requirements_met");
+
+    // The historical report rebuilds from the durable log to the identical bytes.
+    let report_after = render_historical_report(&restarted, &goal_id);
+    assert_eq!(
+        report_after.body, report_before.body,
+        "the historical report rebuilds identically after a server restart"
+    );
+}
+
 // A small compile-time sanity check that the budget helper imports resolve.
 #[test]
 fn goal_autonomy_e2e_budget_helpers_resolve() {

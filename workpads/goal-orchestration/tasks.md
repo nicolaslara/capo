@@ -54,7 +54,9 @@ Evidence:
 
 ## GO1 - Domain Model And Architecture Delta
 
-Status: pending.
+Status: design-realized in `goal-autonomy` GA1 (goal/requirement/evidence/review/
+validation/continuation/delegated-provider event model + projections on the real
+loop), with the architecture delta recorded in `goal-autonomy/knowledge.md`.
 
 Acceptance:
 
@@ -79,7 +81,10 @@ Verification:
 
 ## GO2 - Agent Reporting Tool Contract
 
-Status: pending.
+Status: design-realized in `tools-aci` (NOT `goal-autonomy`): the reporting/evidence
+TOOL surface and the `source=agent_reported` vs observed tagging are an ACI/
+tool-registry concern owned by `tools-aci`; `goal-autonomy` consumes those tagged
+events (see `goal-autonomy/knowledge.md` Scope Decision).
 
 Acceptance:
 
@@ -111,7 +116,10 @@ Verification:
 
 ## GO3 - Event Store And Read-Model Plumbing
 
-Status: pending.
+Status: design-realized in `goal-autonomy` GA1 (append-only goal/requirement/
+continuation/delegated-provider events, the five `ProjectionRecord` variants +
+structs, in-transaction apply, idempotency keys, and a full projection rebuild that
+reproduces the goal/requirement/report projections identically).
 
 Acceptance:
 
@@ -140,7 +148,9 @@ Verification:
 
 ## GO4 - Server Commands For Goals And Reports
 
-Status: pending.
+Status: design-realized in `goal-autonomy` GA2 (typed `capo-server` goal lifecycle
+mutations and read commands flowing through the server/controller boundary, with
+deterministic server-boundary tests).
 
 Acceptance:
 
@@ -160,7 +170,11 @@ Verification:
 
 ## GO5 - Operator Control Read Surfaces
 
-Status: pending.
+Status: design-realized in `goal-autonomy` GA2 (the typed read commands + shared
+GO10 report renderer are landed server-side; the `capo-cli` operator_control read
+surfaces -- `goals`/`goal`/`story`/`timeline`/`evidence`/`validations`/`reviews`/
+`risks` -- and their control-through-server tests remain a GA2-scoped follow-up
+tracked in GA2's Status before GA2 closes).
 
 Acceptance:
 
@@ -186,7 +200,11 @@ Verification:
 
 ## GO6 - Goal Lifecycle Commands
 
-Status: pending.
+Status: design-realized in `goal-autonomy` GA2 (goal lifecycle mutations linking
+project/task/agent/session/parent goal/requirements with structured success
+criteria/constraints/verification surface/budget/stop conditions; mark-complete is
+reachable only through the GA5 auditor and a direct mark-complete request is
+rejected; illegal transitions are rejected with tests).
 
 Acceptance:
 
@@ -209,7 +227,10 @@ Verification:
 
 ## GO7 - Context Packet And Continuation Prompt Assembly
 
-Status: pending.
+Status: design-realized in `goal-autonomy` GA3 (the sourced continuation context
+packet + prompt assembly reconstructed strictly from the goals/requirement-ledger
+projections, with per-fragment source refs + content hashes, redaction, bounded
+selection/size, and a restart-survival recovery test).
 
 Acceptance:
 
@@ -228,7 +249,11 @@ Verification:
 
 ## GO8 - Event-Driven Continuation Scheduler
 
-Status: pending.
+Status: design-realized in `goal-autonomy` GA4 (the safe-boundary continuation
+scheduler as a pure opt-in state machine -- continue/pause/block/budget-limit/
+no-progress-suppress -- consuming the `safety-gates` single-writer write lease, with
+checkpoint+verification gating on source-writing steps, no-progress/spin guards, and
+a `GoalBudget` that composes the RTL7 per-run ceiling).
 
 Acceptance:
 
@@ -254,7 +279,10 @@ Verification:
 
 ## GO9 - Evidence-Backed Completion Auditor
 
-Status: pending.
+Status: design-realized in `goal-autonomy` GA5 (the evidence-gated completion
+auditor as the ONLY path to goal-complete: agents propose, the auditor decides
+requirement-by-requirement on observed evidence/validation/review/blocker, with a
+recorded decision event + projection; agent-only claims never complete).
 
 Acceptance:
 
@@ -275,7 +303,11 @@ Verification:
 
 ## GO10 - Historical Execution Reports
 
-Status: pending.
+Status: design-realized in `goal-autonomy` GA2 (the shared
+`render_goal_report_markdown` renderer + JSON form) and GA8/GA9 (golden snapshot of
+the historical report, rebuilt identically from events + projections after a full
+projection rebuild and after a server restart; redaction + missing-artifact
+degradation honored).
 
 Acceptance:
 
@@ -300,7 +332,11 @@ Verification:
 
 ## GO11 - Parent/Child Agent Reporting And Subgoals
 
-Status: pending.
+Status: design-realized in `goal-autonomy` GA7 (parent/child subgoal reporting where
+child reports publish up to the parent goal without auto-satisfying parent
+requirements, a pure `ParentMergeGate` requiring child audit-complete + a parent
+merge/review point + in-scope `SubgoalResultContract`, and a parent-visible subgoal
+story projection).
 
 Acceptance:
 
@@ -319,7 +355,11 @@ Verification:
 
 ## GO12 - Provider-Native Goal Delegation
 
-Status: pending.
+Status: design-realized in `goal-autonomy` GA7 (feature-PROBES provider-native goal
+support rather than assuming it, mirrors objective/success criteria into a delegated
+mode for Codex `/goal` with a fallback when unavailable, and records provider-native
+goal state/completion as `source=agent_reported`/observed evidence the GA5 auditor
+weighs -- never authoritative Capo completion).
 
 Acceptance:
 
@@ -341,7 +381,12 @@ Verification:
 
 ## GO13 - Recovery, Artifact Retention, And Replay
 
-Status: pending.
+Status: design-realized in `goal-autonomy` GA6 (reattach-after-compaction re-injects
+the objective + audit contract from persisted goal state on server and adapter/
+provider session restart; the per-turn adapter-replay evidence key fix stops
+multi-turn artifact overwrite; the retention policy for raw output/summaries/hashes
+is recorded in `goal-autonomy/knowledge.md`) and proven end-to-end across a real
+server restart by GA9.
 
 Acceptance:
 
@@ -362,7 +407,15 @@ Verification:
 
 ## GO14 - E2E Gate And Review
 
-Status: pending.
+Status: design-realized in `goal-autonomy` GA8 (the full mocked e2e covering each
+scheduler/auditor branch -- create goal -> reports -> validation/review -> scheduler
+continues -> auditor blocks premature completion -> requirement completed with
+evidence -> historical report, asserting events + projections, not console text) and
+GA9 (the end-to-end restart/replay gate + review notes covering architecture fit/
+safety-privacy/test adequacy/provider lock-in/product fit; the objective gate --
+`cargo fmt --check` + `cargo clippy --all-targets --all-features -- -D warnings` +
+`cargo test --workspace` -- is green). `goal-orchestration` is thereby CLOSED as
+"design realized in `goal-autonomy` + `tools-aci`."
 
 Acceptance:
 

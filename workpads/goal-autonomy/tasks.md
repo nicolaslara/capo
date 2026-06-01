@@ -780,7 +780,107 @@ Must not do:
 
 ## GA9 - Restart/Replay, E2E Gate, And Goal-Orchestration Close-Out
 
-Status: pending.
+Status: done. The end-to-end restart/replay gate is proven, the objective gate is
+green across all crates, the realized `goal-orchestration` tasks are marked
+design-realized with pointers to the implementing `GA<N>` (in
+`goal-orchestration/tasks.md`), and the GA0 milestone-gating open question is
+resolved with evidence (both milestones share THIS close-out gate -- see below).
+The distinct GA9 deliverable over GA6/GA8 is a single end-to-end test that drives
+the full orchestration lifecycle (a recorded continuation decision -> a claim-only
+audit-incomplete -> an observed-evidence audit-complete) on one controller, then
+DROPS that controller, REOPENS the `SqliteStateStore` from the same on-disk state
+root (a genuine server restart with NO shared in-memory state, not a
+`rebuild_projections()` on the live handle), runs a full projection rebuild, and
+asserts that the goal, the scheduler's continuation decision, the auditor's verdict
+projection, AND the rendered historical report all survive byte-for-byte -- and that
+the auditor RE-DECIDES identically on the rebuilt state with no in-memory transcript.
+This composes GA4 (scheduler) + GA5 (auditor) + GA6 (reattach/replay) + GO10
+(historical report) across a real restart, closing the design-vs-code gap.
+
+Review notes (the five GA9 axes):
+
+- Architecture fit -- ONE orchestration path, no second controller. All scheduler
+  (`continuation_scheduler.rs`) and auditor (`completion_auditor.rs`) policy lives
+  controller-side and flows through the single server/controller boundary; the CLI
+  and every client are read/input surfaces only. The continuation budget COMPOSES
+  the RTL7 per-run `RunResourceCeiling` (GA4) rather than forking a second
+  run/turn-completion notion, and a goal attempt references the existing dispatch
+  run identity. No competing goal model exists: `goal-orchestration` is the design,
+  `goal-autonomy` (+ the GO2 surface in `tools-aci`) is the only implementation.
+- Safety/privacy. Goal-complete is reachable ONLY through the GA5 auditor on
+  CONCRETE OBSERVED evidence; a direct "mark complete" server request is rejected by
+  construction (GA2) and an agent claim / provider-native completion is recorded as
+  `source=agent_reported`/observed and never flips goal state (GA5/GA7). The
+  continuation packet and historical report carry only bounded summaries plus
+  artifact references (`artifact_id` + `content_hash` + `redaction_state`); a
+  non-`safe` or missing artifact degrades to a named redacted reference and raw
+  bodies are never inlined (GA3/GA6). Automatic continuation is opt-in only and
+  refuses to continue a source-writing step without a checkpoint boundary +
+  verification runner and without the `safety-gates` single-writer write lease (GA4).
+- Test adequacy. Deterministic, no-live-provider throughout: GA8's 7 branch tests +
+  driven lifecycle + the new GA9 end-to-end restart/replay test
+  (`goal_autonomy_e2e_full_state_survives_server_restart_and_rebuild`), the GA6
+  reattach tests, and `capo-state`'s
+  `goal_replay_full_goal_surface_rebuilds_identically_after_restart`. Every manual
+  smoke is paired with a deterministic assertion (event sequence, projection state,
+  exit status, byte-for-byte replay), honoring the workpad invariant. The historical
+  report snapshots through the SHARED `render_goal_report_markdown` renderer, so the
+  e2e pins exactly the bytes the operator sees.
+- Provider lock-in. Codex `/goal` is observed-not-authoritative: GA7 feature-PROBES
+  the provider's advertised command surface rather than assuming `/goal`, mirrors the
+  objective, records provider-native state as evidence the auditor weighs, and falls
+  back to Capo's loop when unavailable. A provider `completed` never auto-completes a
+  Capo goal. Capo's goal model does not depend on any provider's native goal command.
+- Product fit. The operator can answer "what happened?", "is this validated?", "why
+  is this (not) complete?" from durable read models (GA2 read surfaces + GA5 audit
+  decision projection + GO10 report), and goals survive restart/compaction, which is
+  the autonomy differentiator this phase set out to land.
+
+GA0 open question resolved (with evidence): Milestone A and Milestone B SHARE this
+single GA9 close-out gate; Milestone A did NOT gate independently before Milestone B
+started. Evidence: GA2 (Milestone A server side) and GA3-GA8 (Milestone B) were each
+made gate-green in their own task, but the workpad was never closed at a
+Milestone-A-only boundary, and the cross-milestone composition (the real loop +
+scheduler + auditor + restart/replay) is only provable once Milestone B exists --
+which is exactly what the GA8 e2e and the GA9 restart/replay test do. The other GA0
+open question (continuation budget) was resolved in GA4: `GoalBudget` COMPOSES the
+RTL7 `RunResourceCeiling`, it does not replace it.
+
+Note on GA2 residual: GA2's Status still records the `capo-cli` operator_control
+goal read surfaces (`goals`/`goal`/`story`/`timeline`/`evidence`/`validations`/
+`reviews`/`risks`) and the `cargo test -p capo-cli --test server_transport goal`
+control-through-server tests as a pending follow-up. That is a GA2-scoped CLI
+read-surface item (GO5 operator ergonomics), not part of the GA9
+restart/replay/e2e/close-out acceptance, which is server/controller-side and is
+fully met; the CLI surface is tracked under GA2 for a follow-up before GA2 closes.
+
+Evidence:
+
+- New end-to-end restart/replay test
+  `crates/capo-controller/src/goal_autonomy_e2e.rs::goal_autonomy_e2e_full_state_survives_server_restart_and_rebuild`
+  (plus a `reopen` helper that re-opens the `SqliteStateStore` over the same on-disk
+  state root). It drives continuation + claim-only-incomplete + observed-evidence-
+  complete, drops the controller, reopens from disk, rebuilds projections, and
+  asserts goal + continuation decision + auditor verdict + historical report all
+  rebuild byte-for-byte and the auditor re-decides identically on rebuilt state.
+- Marked `goal-orchestration` GO1/GO3/GO4/GO5/GO6/GO7/GO8/GO9/GO10/GO11/GO12/GO13/GO14
+  as design-realized in `workpads/goal-orchestration/tasks.md` with a pointer to the
+  realizing `GA<N>` task (GO2 stays owned by `tools-aci`).
+- `cargo test -p capo-state goal_replay` -> 1 passed.
+- `cargo test -p capo-controller goal_autonomy_e2e` -> 9 passed (8 prior GA8 + the
+  new GA9 restart/replay test).
+- `cargo fmt --check` -> exit 0.
+- `cargo clippy --all-targets --all-features -- -D warnings` -> exit 0.
+- `cargo test --workspace` -> exit 0, 0 failed across all crates (capo-controller
+  lib: 176 passed, 2 ignored; capo-state lib: 63 passed; capo-server lib: 108 passed,
+  3 ignored; capo-cli: 64 + server_transport 15; capo-adapters 37; capo-tools 113;
+  capo-runtime 44; capo-query 21; capo-voice 19; capo-eval 3; capo-memory 4;
+  capo-core 4; capo-workpads 2).
+- `git diff --check` -> clean.
+- Codex live smoke: GA9's Verification does not call for a live Codex smoke, so the
+  live gates (`CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 CAPO_SERVER_RUN_CODEX_LIVE=1`)
+  stayed unset; the GA7 deterministic fake delegated-provider test covers the
+  required provider-native behavior and Claude live stays blocked.
 
 Acceptance:
 
