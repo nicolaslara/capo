@@ -22,6 +22,7 @@ const STATUS_META: Record<AgentStatus, { tone: ToneKey; glyph: string; label: st
   paused: { tone: 'amber', glyph: '‖', label: 'paused' },
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- shared tone helper co-located with the components that consume it; not a fast-refresh boundary.
 export function statusTone(status: AgentStatus): ToneKey {
   return STATUS_META[status]?.tone ?? 'muted'
 }

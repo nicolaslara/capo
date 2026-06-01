@@ -244,7 +244,7 @@ function ControlPanel({
                 <span className="mono text-[12px] text-red">confirm {confirm}?</span>
                 <Button
                   variant="danger"
-                  onClick={() => { confirm === 'interrupt' ? onInterrupt() : onStop(); setConfirm(null) }}
+                  onClick={() => { if (confirm === 'interrupt') onInterrupt(); else onStop(); setConfirm(null) }}
                 >
                   Yes, {confirm}
                 </Button>

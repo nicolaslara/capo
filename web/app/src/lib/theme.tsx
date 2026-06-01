@@ -41,6 +41,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   return <ThemeContext.Provider value={{ theme, setTheme, toggle }}>{children}</ThemeContext.Provider>
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- the theme hook lives with its provider; the provider is the fast-refresh boundary.
 export function useTheme() {
   return useContext(ThemeContext)
 }
