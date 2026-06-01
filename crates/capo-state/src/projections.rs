@@ -46,6 +46,7 @@ pub enum ProjectionRecord {
     GoalReport(GoalReportProjection),
     GoalContinuation(GoalContinuationProjection),
     DelegatedProviderGoal(DelegatedProviderGoalProjection),
+    GoalAuditDecision(GoalAuditDecisionProjection),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1112,4 +1113,56 @@ pub struct DelegatedProviderGoalProjection {
     /// The artifact preserving the raw provider goal output, kept as an INPUT.
     pub body_artifact_id: Option<String>,
     pub updated_sequence: i64,
+}
+
+/// GA5 (goal-orchestration GO9): the evidence-gated completion auditor's verdict.
+///
+/// One row per `(goal, audit_id)`. The auditor is the ONLY path to a Capo
+/// goal-complete verdict: it decides requirement-by-requirement on OBSERVED
+/// evidence, validation, review, blocker, and confidence records, NEVER on agent
+/// prose or model confidence. The `verdict` is `complete` only when every
+/// requirement reached a satisfying state backed by observed evidence; otherwise
+/// it is `incomplete`, and `blocking_reason` names the first reason it is not
+/// complete. The per-requirement detail (each requirement's audited state and the
+/// reason) lives in `requirement_detail_json`, so "why is this (not) complete?" is
+/// a derived read model rather than hand-written prose. The decision rebuilds
+/// identically from the event log.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalAuditDecisionProjection {
+    /// Stable per-audit key. Re-auditing the SAME observed state under the same
+    /// `audit_id` re-records nothing (idempotent on `(goal, audit_id)`).
+    pub audit_id: String,
+    pub goal_id: GoalId,
+    pub project_id: ProjectId,
+    /// The dispatch run this audit was evaluated against, when a run exists.
+    /// References the dispatch run identity, never a second one.
+    pub attempt_run_id: Option<RunId>,
+    /// `complete` / `incomplete` -- the auditor's goal-level verdict.
+    pub verdict: String,
+    /// A short machine reason code for the verdict (e.g. `all_requirements_met`,
+    /// `requirement_blocked`, `requirement_unverified`, `requirement_claim_only`,
+    /// `no_requirements`).
+    pub reason: String,
+    /// How many requirements the goal carries.
+    pub requirements_total: i64,
+    /// How many of those requirements the auditor judged complete (a satisfying
+    /// state backed by observed evidence).
+    pub requirements_complete: i64,
+    /// A stable JSON array of the per-requirement audited detail (requirement id,
+    /// audited state, observed-evidence flag, reason), so the verdict is fully
+    /// explainable from the read model.
+    pub requirement_detail_json: String,
+    pub updated_sequence: i64,
+}
+
+impl GoalAuditDecisionProjection {
+    /// The goal-level verdicts the auditor can record. `complete` is reachable
+    /// ONLY here -- it is never a lifecycle write on [`GoalProjection`].
+    pub const COMPLETE: &'static str = "complete";
+    pub const INCOMPLETE: &'static str = "incomplete";
+
+    /// Whether this verdict marks the goal complete.
+    pub fn is_complete(&self) -> bool {
+        self.verdict == Self::COMPLETE
+    }
 }

@@ -1308,6 +1308,37 @@ pub(crate) fn apply_projection_record(
                 sequence,
             ],
         )?,
+        // GA5 (goal-orchestration GO9): the completion auditor's verdict, the ONLY
+        // path to a Capo goal-complete transition.
+        ProjectionRecord::GoalAuditDecision(audit) => transaction.execute(
+            "INSERT INTO goal_audit_decisions(
+                audit_id, goal_id, project_id, attempt_run_id, verdict, reason,
+                requirements_total, requirements_complete, requirement_detail_json,
+                updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(audit_id) DO UPDATE SET
+                goal_id = excluded.goal_id,
+                project_id = excluded.project_id,
+                attempt_run_id = excluded.attempt_run_id,
+                verdict = excluded.verdict,
+                reason = excluded.reason,
+                requirements_total = excluded.requirements_total,
+                requirements_complete = excluded.requirements_complete,
+                requirement_detail_json = excluded.requirement_detail_json,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                audit.audit_id,
+                audit.goal_id.as_str(),
+                audit.project_id.as_str(),
+                audit.attempt_run_id.as_ref().map(RunId::as_str),
+                audit.verdict,
+                audit.reason,
+                audit.requirements_total,
+                audit.requirements_complete,
+                audit.requirement_detail_json,
+                sequence,
+            ],
+        )?,
     };
     Ok(())
 }

@@ -11,13 +11,13 @@ use crate::{
     AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
     AgentProjection, ArtifactRecord, CapabilityGrantProjection, CheckpointProjection,
     ConnectivityExposureProjection, DelegatedProviderGoalProjection, EventKind, EventRecord,
-    EvidenceProjection, GoalContinuationProjection, GoalProjection, GoalReportProjection,
-    InFlightRun, MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
-    PermissionApprovalProjection, RedactionState, RequirementLedgerProjection,
-    ReviewFindingProjection, RunProjection, RunScoreProjection, RuntimeTargetProjection,
-    SessionProjection, SourceBindingProjection, SqliteStateStore, StateError, StateResult,
-    TaskOutcomeReportProjection, TaskProjection, ToolCallProjection, ToolCallProvenance,
-    ToolObservationProjection, WorkpadFileProjection, WorkpadTaskProjection,
+    EvidenceProjection, GoalAuditDecisionProjection, GoalContinuationProjection, GoalProjection,
+    GoalReportProjection, InFlightRun, MemoryPacketProjection, MemoryRecordProjection,
+    MemorySourceProjection, PermissionApprovalProjection, RedactionState,
+    RequirementLedgerProjection, ReviewFindingProjection, RunProjection, RunScoreProjection,
+    RuntimeTargetProjection, SessionProjection, SourceBindingProjection, SqliteStateStore,
+    StateError, StateResult, TaskOutcomeReportProjection, TaskProjection, ToolCallProjection,
+    ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection, WorkpadTaskProjection,
     WorkspaceLeaseProjection, optional_id,
 };
 
@@ -2141,6 +2141,38 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    /// GA5 (goal-orchestration GO9): the completion auditor's recorded verdicts
+    /// for a goal, oldest first. The newest row is the current verdict; the
+    /// history is preserved so the "why (not) complete?" answer is auditable over
+    /// time.
+    pub fn goal_audit_decisions_for_goal(
+        &self,
+        goal_id: &GoalId,
+    ) -> StateResult<Vec<GoalAuditDecisionProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT audit_id, goal_id, project_id, attempt_run_id, verdict, reason,
+                    requirements_total, requirements_complete, requirement_detail_json,
+                    updated_sequence
+             FROM goal_audit_decisions
+             WHERE goal_id = ?1
+             ORDER BY updated_sequence ASC, audit_id ASC",
+        )?;
+        let rows = statement.query_map(params![goal_id.as_str()], goal_audit_decision_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    /// GA5 (goal-orchestration GO9): the most recent auditor verdict for a goal,
+    /// or `None` if the goal has never been audited. This is the derived
+    /// "is this goal complete?" answer -- a read model, never hand-written prose.
+    pub fn latest_goal_audit_decision(
+        &self,
+        goal_id: &GoalId,
+    ) -> StateResult<Option<GoalAuditDecisionProjection>> {
+        Ok(self.goal_audit_decisions_for_goal(goal_id)?.pop())
+    }
+
     /// GA3 (goal-orchestration GO7): the artifact record for `artifact_id`, or
     /// `None` if absent.
     ///
@@ -2349,6 +2381,23 @@ fn delegated_provider_goal_from_row(
         provider_state: row.get(6)?,
         source: row.get(7)?,
         body_artifact_id: row.get(8)?,
+        updated_sequence: row.get(9)?,
+    })
+}
+
+fn goal_audit_decision_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<GoalAuditDecisionProjection> {
+    Ok(GoalAuditDecisionProjection {
+        audit_id: row.get(0)?,
+        goal_id: GoalId::new(row.get::<_, String>(1)?),
+        project_id: ProjectId::new(row.get::<_, String>(2)?),
+        attempt_run_id: optional_id(row.get::<_, Option<String>>(3)?),
+        verdict: row.get(4)?,
+        reason: row.get(5)?,
+        requirements_total: row.get(6)?,
+        requirements_complete: row.get(7)?,
+        requirement_detail_json: row.get(8)?,
         updated_sequence: row.get(9)?,
     })
 }

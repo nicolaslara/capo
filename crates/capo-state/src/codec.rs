@@ -10,13 +10,14 @@ use crate::codec_adapter::decode_adapter_projection;
 use crate::{
     AgentProjection, CapabilityGrantProjection, CheckpointProjection,
     ConnectivityExposureProjection, DelegatedProviderGoalProjection, EvidenceProjection,
-    GoalContinuationProjection, GoalProjection, GoalReportProjection, MemoryPacketProjection,
-    MemoryRecordProjection, MemorySourceProjection, PermissionApprovalProjection,
-    ProjectProjection, ProjectionRecord, RequirementLedgerProjection, ReviewFindingProjection,
-    RunProjection, RunScoreProjection, RuntimeTargetProjection, SessionProjection,
-    SourceBindingProjection, StateError, StateResult, TaskOutcomeReportProjection, TaskProjection,
-    ToolCallProjection, ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection,
-    WorkpadIndexResetProjection, WorkpadTaskProjection, WorkspaceLeaseProjection, optional_id,
+    GoalAuditDecisionProjection, GoalContinuationProjection, GoalProjection, GoalReportProjection,
+    MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
+    PermissionApprovalProjection, ProjectProjection, ProjectionRecord, RequirementLedgerProjection,
+    ReviewFindingProjection, RunProjection, RunScoreProjection, RuntimeTargetProjection,
+    SessionProjection, SourceBindingProjection, StateError, StateResult,
+    TaskOutcomeReportProjection, TaskProjection, ToolCallProjection, ToolCallProvenance,
+    ToolObservationProjection, WorkpadFileProjection, WorkpadIndexResetProjection,
+    WorkpadTaskProjection, WorkspaceLeaseProjection, optional_id,
 };
 
 #[derive(Debug)]
@@ -1057,6 +1058,50 @@ pub(crate) fn projection_record_from_row(
                         "source",
                     )?,
                     body_artifact_id: payload_optional_string(&payload, "body_artifact_id"),
+                    updated_sequence: 0,
+                },
+            ))
+        }
+        // GA5 (goal-orchestration GO9): rebuild the completion auditor's verdict.
+        // The requirement counts and per-requirement detail come back from payload.
+        "goal_audit_decision" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::GoalAuditDecision(
+                GoalAuditDecisionProjection {
+                    audit_id: record_id.clone(),
+                    goal_id: GoalId::new(required_field(
+                        &projection_kind,
+                        "goal_audit_decision",
+                        a,
+                        "goal_id",
+                    )?),
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "goal_audit_decision",
+                        b,
+                        "project_id",
+                    )?),
+                    attempt_run_id: optional_id(e),
+                    verdict: required_field(&projection_kind, "goal_audit_decision", c, "verdict")?,
+                    reason: required_field(&projection_kind, "goal_audit_decision", d, "reason")?,
+                    requirements_total: required_payload_i64(
+                        &projection_kind,
+                        &record_id,
+                        &payload,
+                        "requirements_total",
+                    )?,
+                    requirements_complete: required_payload_i64(
+                        &projection_kind,
+                        &record_id,
+                        &payload,
+                        "requirements_complete",
+                    )?,
+                    requirement_detail_json: required_payload_string(
+                        &projection_kind,
+                        &record_id,
+                        &payload,
+                        "requirement_detail_json",
+                    )?,
                     updated_sequence: 0,
                 },
             ))

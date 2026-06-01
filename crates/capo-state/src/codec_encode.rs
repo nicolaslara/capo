@@ -693,5 +693,26 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             })
             .to_string(),
         },
+        // GA5 (goal-orchestration GO9): the completion auditor's verdict. The
+        // requirement counts and the per-requirement detail JSON exceed the
+        // positional slots, so they ride in the payload to survive a rebuild.
+        ProjectionRecord::GoalAuditDecision(audit) => ProjectionRecordRow {
+            kind: "goal_audit_decision",
+            record_id: audit.audit_id.clone(),
+            a: Some(audit.goal_id.to_string()),
+            b: Some(audit.project_id.to_string()),
+            c: Some(audit.verdict.clone()),
+            d: Some(audit.reason.clone()),
+            e: audit.attempt_run_id.as_ref().map(ToString::to_string),
+            f: None,
+            g: None,
+            h: None,
+            payload_json: json!({
+                "requirements_total": audit.requirements_total,
+                "requirements_complete": audit.requirements_complete,
+                "requirement_detail_json": audit.requirement_detail_json,
+            })
+            .to_string(),
+        },
     }
 }

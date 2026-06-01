@@ -732,6 +732,10 @@ fn ga1_goal_lifecycle_event_kinds_round_trip() {
             EventKind::DelegatedProviderGoalObserved,
             "goal.delegated_provider_observed",
         ),
+        (
+            EventKind::GoalAuditDecisionRecorded,
+            "goal.audit_decision_recorded",
+        ),
     ] {
         assert_eq!(kind.as_str(), wire);
         assert_eq!(EventKind::from_wire(wire), Some(kind));

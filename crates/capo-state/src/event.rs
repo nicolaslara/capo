@@ -77,6 +77,10 @@ pub enum EventKind {
     GoalReportRecorded,
     ContinuationDecisionRecorded,
     DelegatedProviderGoalObserved,
+    // GA5 (goal-orchestration GO9): the evidence-gated completion auditor's
+    // decision. The auditor is the ONLY path to a Capo goal-complete verdict;
+    // it decides on OBSERVED evidence, never on agent prose or model confidence.
+    GoalAuditDecisionRecorded,
 }
 
 /// The terminal outcome a projected turn-ending event carries, in the
@@ -169,6 +173,7 @@ impl EventKind {
             Self::GoalReportRecorded => "goal.report_recorded",
             Self::ContinuationDecisionRecorded => "goal.continuation_decision_recorded",
             Self::DelegatedProviderGoalObserved => "goal.delegated_provider_observed",
+            Self::GoalAuditDecisionRecorded => "goal.audit_decision_recorded",
         }
     }
 
@@ -251,6 +256,7 @@ impl EventKind {
             EventKind::GoalReportRecorded,
             EventKind::ContinuationDecisionRecorded,
             EventKind::DelegatedProviderGoalObserved,
+            EventKind::GoalAuditDecisionRecorded,
         ];
         ALL.iter()
             .copied()

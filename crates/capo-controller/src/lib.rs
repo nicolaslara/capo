@@ -32,6 +32,7 @@ use capo_tools::{
 
 mod adapter_replay;
 mod checkpoint;
+mod completion_auditor;
 mod continuation_context;
 mod continuation_scheduler;
 mod fake_session;
@@ -48,6 +49,10 @@ mod verification;
 mod workspace_lock;
 
 pub use checkpoint::{CheckpointCreated, CheckpointError, CheckpointRestored, CheckpointScope};
+pub use completion_auditor::{
+    AuditDecision, AuditInputs, AuditVerdict, CompletionAuditor, RequirementAudit,
+    RequirementAuditState, RequirementInput,
+};
 pub use continuation_context::{
     ContinuationAuditContract, ContinuationContextFragment, ContinuationContextLimits,
     ContinuationContextPacket, ContinuationRequirement, ContinuationSourceKind,

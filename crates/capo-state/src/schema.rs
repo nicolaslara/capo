@@ -587,6 +587,21 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             body_artifact_id TEXT,
             updated_sequence INTEGER NOT NULL
         );
+        -- GA5 (goal-orchestration GO9): the evidence-gated completion auditor's
+        -- verdict. One row per (goal, audit). `verdict = complete` is reachable
+        -- ONLY through the auditor, never a lifecycle write on `goals`.
+        CREATE TABLE IF NOT EXISTS goal_audit_decisions (
+            audit_id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            attempt_run_id TEXT,
+            verdict TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            requirements_total INTEGER NOT NULL,
+            requirements_complete INTEGER NOT NULL,
+            requirement_detail_json TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
         ",
     )?;
     add_missing_column(
@@ -674,6 +689,7 @@ pub(crate) fn clear_projection_tables(transaction: &Transaction<'_>) -> StateRes
         "goal_reports",
         "goal_continuations",
         "delegated_provider_goals",
+        "goal_audit_decisions",
         "projection_watermarks",
     ] {
         transaction.execute(&format!("DELETE FROM {table}"), [])?;

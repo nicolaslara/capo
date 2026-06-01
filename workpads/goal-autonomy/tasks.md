@@ -407,7 +407,65 @@ Must not do:
 
 ## GA5 - Milestone B: Evidence-Gated Completion Auditor
 
-Status: pending.
+Status: done. The evidence-gated completion auditor (GO9) is implemented in
+`crates/capo-controller/src/completion_auditor.rs` as a PURE state machine:
+`CompletionAuditor::audit(&AuditInputs) -> AuditDecision` performs no I/O, appends
+no event, and is deterministic given its inputs, producing a goal-level
+`complete | incomplete` verdict plus per-requirement audited detail. It is the ONLY
+path to a Capo goal-complete transition: agents PROPOSE completion, the auditor
+DECIDES. A requirement counts toward completion ONLY when it reached a satisfying
+ledger status (`validated`/`reviewed`) AND is backed by CONCRETE OBSERVED EVIDENCE
+(a task-scoped `EvidenceProjection` row or a requirement-tagged observed
+`goal_reports` row, classified exactly like the `tools-aci` evidence sources); a
+`validated`/`reviewed` status with no observed evidence is downgraded to
+`claim_only` (the overclaim guard), and an explicitly weak/skipped validation is
+`weak` -- both stay incomplete. The auditor distinguishes the six ledger states
+(`unverified`/`supported`/`validated`/`reviewed`/`blocked`/`contradicted`) and adds
+`claim_only`/`weak` so the verdict explains every requirement; it never consults a
+global/aggregate confidence to substitute for requirement-level evidence (a
+high-confidence `capo.complete_requirement` claim alone never completes). A blocked
+or contradicted requirement is a hard blocker that outranks an otherwise-complete
+requirement; a goal with no requirements is never complete. The verdict is recorded
+through a new GA1-style `goal.audit_decision_recorded` event +
+`GoalAuditDecisionProjection` (idempotent on `(goal, audit_id)`) with the
+per-requirement detail as queryable JSON, so "why is this (not) complete?" is a
+derived read model, not hand-written prose. All auditor policy lives
+controller-side; no client surface holds it.
+
+Evidence:
+
+- New state plumbing for the auditor verdict: `EventKind::GoalAuditDecisionRecorded`
+  (`goal.audit_decision_recorded`) in `event.rs`; `GoalAuditDecisionProjection` +
+  `ProjectionRecord::GoalAuditDecision` in `projections.rs`; the
+  `goal_audit_decisions` table (`schema.rs` + `clear_projection_tables`); the
+  in-transaction apply (`apply.rs`); the encode/decode round-trip
+  (`codec_encode.rs`/`codec.rs`); and the typed reads
+  `goal_audit_decisions_for_goal` / `latest_goal_audit_decision` (`queries.rs`).
+- New controller module `crates/capo-controller/src/completion_auditor.rs` (types
+  `CompletionAuditor`/`AuditInputs`/`AuditDecision`/`AuditVerdict`/`RequirementInput`/
+  `RequirementAudit`/`RequirementAuditState`, all re-exported from the controller
+  crate root) plus controller methods `audit_goal_completion` (pure, read-only) and
+  `audit_and_record_goal_completion` (records the verdict through the new event +
+  projection).
+- 13 deterministic tests (mocked/seeded goal state, no live provider): 7 pure
+  auditor branch tests (complete when every requirement is observed validated/
+  reviewed; overclaimed `validated` without observed evidence is `claim_only`; weak
+  validation does not complete; blocked and contradicted block the goal; partial
+  supported/unverified incomplete; supported-without-evidence is `claim_only`; no
+  requirements is never complete) and 6 controller-wiring tests
+  (`agent_reported_completion_alone_does_not_transition_goal_to_complete` =
+  premature-completion-blocked; `requirement_with_observed_evidence_and_validation_transitions_to_complete`;
+  blocked requirement blocks even with evidence; recording idempotent on audit_id;
+  verdict survives restart + projection rebuild; observed report tagged to a
+  requirement backs completion). Extended the GA1
+  `ga1_goal_lifecycle_event_kinds_round_trip` test to cover the new event kind.
+- `cargo test -p capo-controller completion_auditor` -> 13 passed.
+- `cargo fmt --check` -> exit 0.
+- `cargo clippy --all-targets --all-features -- -D warnings` -> exit 0.
+- `cargo test --workspace` -> exit 0, 0 failed across all crates (capo-controller
+  lib: 153 passed, 2 ignored; capo-state lib: 62 passed; capo-server lib: 108
+  passed, 3 ignored).
+- `git diff --check` -> clean.
 
 Acceptance:
 
