@@ -350,10 +350,13 @@ const fn outcome(decision: ContinuationDecision, reason: &'static str) -> Contin
 /// cannot read from persisted goal state alone (idle/queued/pending live
 /// conditions plus the explicit enablement and the goal budget).
 ///
-/// The controller folds this together with the OBSERVED goal/continuation state
-/// (goal active/blocked, the prior continuation's progress, the workspace lock
-/// holder) to build the full [`SchedulerInputs`]. Keeping the live conditions in
-/// one struct keeps the pure decision and its inputs explicit and testable.
+/// The controller folds this together with the OBSERVED persisted goal state
+/// (goal active/blocked, the workspace lock holder) to build the full
+/// [`SchedulerInputs`]. The no-progress and strategy-change signals are carried
+/// HERE (not derived from the prior recorded decision) because they are the
+/// caller's observations of the goal's actual progress -- deriving them from the
+/// ledger's last decision would be circular. Keeping the live conditions in one
+/// struct keeps the pure decision and its inputs explicit and testable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContinuationConditions {
     /// Explicit operator/config enablement (opt-in only).
@@ -366,6 +369,19 @@ pub struct ContinuationConditions {
     pub next_step_writes_source: bool,
     pub checkpoint_boundary_available: bool,
     pub verification_runner_available: bool,
+    /// The caller's OBSERVATION that the prior continued turn made no MATERIAL
+    /// progress (e.g. a zero progress-delta over the goal's evidence/requirement
+    /// ledger between the turn that the last `continue` authorized and now). This
+    /// is the organic source of the GO8 spin guard: it is observed by the caller
+    /// from the goal's progress, NOT derived from the prior DECISION already being
+    /// a suppression (which would be circular and could never fire the first
+    /// suppression).
+    pub last_continuation_made_no_progress: bool,
+    /// The caller's OBSERVATION that strategy changed since the no-progress
+    /// suppression (an operator/planner intervention). This clears the
+    /// suppression: with it set, an otherwise-suppressed evaluation continues
+    /// again. Without a real signal here a suppression would be a permanent trap.
+    pub strategy_changed_since_suppression: bool,
     /// The goal-level budget (composes the RTL7 run ceiling).
     pub budget: GoalBudget,
 }
@@ -373,13 +389,13 @@ pub struct ContinuationConditions {
 impl FakeBoundaryController {
     /// GA4 (GO8): evaluate the continuation decision for a goal, PURELY.
     ///
-    /// Reads the OBSERVED state the scheduler needs -- the goal's lifecycle
-    /// status (active/blocked), whether its last recorded continuation suppressed
-    /// progress (and whether strategy has since changed), and whether a
-    /// conflicting `safety-gates` workspace lock is held by ANOTHER writer -- folds
-    /// it together with the caller's live `conditions`, and returns the pure
-    /// [`ContinuationScheduler::decide`] outcome. This appends NOTHING; it is the
-    /// read-only evaluation used to decide before recording.
+    /// Reads the OBSERVED state the scheduler needs from persisted goal state --
+    /// the goal's lifecycle status (active/blocked) and whether a conflicting
+    /// `safety-gates` workspace lock is held by ANOTHER writer -- folds it together
+    /// with the caller's live `conditions` (which carry the no-progress and
+    /// strategy-change OBSERVATIONS, see [`ContinuationConditions`]), and returns
+    /// the pure [`ContinuationScheduler::decide`] outcome. This appends NOTHING;
+    /// it is the read-only evaluation used to decide before recording.
     ///
     /// The `workspace_scope`, when supplied, names the workspace root + the
     /// session the continuation would run on; a held lease owned by a DIFFERENT
@@ -399,17 +415,14 @@ impl FakeBoundaryController {
         let goal_active = goal.is_active();
         let goal_blocked = goal.status == GoalProjection::BLOCKED;
 
-        // The no-progress / spin guard reads the GOAL's own continuation ledger:
-        // the most recent recorded decision. A prior `no-progress-suppress`
-        // suppresses the next automatic continuation. Strategy is considered
-        // changed only when a LATER continuation already recorded something other
-        // than another suppression (operator/planner intervention reflected in the
-        // ledger), so a fresh evaluation after a suppression stays suppressed
-        // until that intervention is recorded.
-        let continuations = self.state.goal_continuations_for_goal(goal_id)?;
-        let last_continuation_made_no_progress = continuations
-            .last()
-            .is_some_and(|c| c.decision == ContinuationDecision::NoProgressSuppress.as_str());
+        // The no-progress / spin guard is driven by the caller's OBSERVATION of
+        // whether the last continued turn made material progress, carried on
+        // `conditions`. It is deliberately NOT derived from the prior recorded
+        // DECISION being a suppression: that would be circular (a suppression is
+        // the OUTPUT of the guard, so deriving the input from it could never fire
+        // the FIRST suppression organically, and -- because a suppression re-records
+        // itself -- could never clear either). The matching clear signal, also a
+        // caller observation, is `strategy_changed_since_suppression`.
 
         // A conflicting workspace lock: a held lease whose holder is a DIFFERENT
         // session than the one the continuation would run on. A lease held by the
@@ -435,12 +448,8 @@ impl FakeBoundaryController {
             checkpoint_boundary_available: conditions.checkpoint_boundary_available,
             verification_runner_available: conditions.verification_runner_available,
             conflicting_workspace_lock,
-            last_continuation_made_no_progress,
-            // A fresh evaluation does not itself change strategy; the ledger does
-            // not carry an intervention marker yet, so suppression persists. A
-            // caller that knows strategy changed records a non-suppression
-            // continuation to clear it (see `evaluate_and_record_continuation`).
-            strategy_changed_since_suppression: false,
+            last_continuation_made_no_progress: conditions.last_continuation_made_no_progress,
+            strategy_changed_since_suppression: conditions.strategy_changed_since_suppression,
             budget: conditions.budget,
         };
 
@@ -544,8 +553,8 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use capo_state::{
-        AgentProjection, GoalContinuationProjection, GoalProjection, NewEvent, ProjectionRecord,
-        RunProjection, SessionProjection, TaskProjection,
+        AgentProjection, GoalProjection, NewEvent, ProjectionRecord, RunProjection,
+        SessionProjection, TaskProjection,
     };
 
     use super::*;
@@ -878,6 +887,8 @@ mod tests {
             next_step_writes_source: false,
             checkpoint_boundary_available: true,
             verification_runner_available: true,
+            last_continuation_made_no_progress: false,
+            strategy_changed_since_suppression: false,
             budget: GoalBudget::unbounded(),
         }
     }
@@ -935,19 +946,28 @@ mod tests {
         assert_eq!(out.decision, ContinuationDecision::Pause);
         assert_eq!(out.reason, "workspace_lock_conflict");
 
-        // The SAME session holding the lock is NOT a conflict: on a DISTINCT
-        // workspace root our own session takes the lease and the continuation
-        // proceeds (the holder is us, not another writer).
-        let self_scope = WorkspaceLeaseScope {
-            workspace_root: "/w/capo-self".to_string(),
-            ..lease_scope(SESSION)
-        };
+        // The SAME session holding the lock on the SAME key is NOT a conflict.
+        // Release the other writer's lease, then have OUR session take the lease
+        // on the SAME workspace root (`/w/capo`), and evaluate a continuation that
+        // runs on OUR session over that exact key. The held lease exists and is on
+        // the contended key, but its holder is us, so the
+        // `holder_session_id == scope.session_id` non-conflict arm fires and the
+        // continuation proceeds.
+        controller
+            .release_workspace_write_lease(&other, "test-handoff")
+            .expect("release other");
         let acquired_self = controller
-            .acquire_workspace_write_lease(&self_scope)
+            .acquire_workspace_write_lease(&ours)
             .expect("acquire self");
         assert!(acquired_self.may_write());
+        // Sanity: the lease is genuinely held, on the same key, by our session.
+        let held = controller
+            .workspace_lease_holder(&ours)
+            .expect("holder lookup")
+            .expect("lease held");
+        assert_eq!(held.holder_session_id, SessionId::new(SESSION));
         let out_self = controller
-            .evaluate_continuation(&GoalId::new(GOAL), &ready_conditions(), Some(&self_scope))
+            .evaluate_continuation(&GoalId::new(GOAL), &ready_conditions(), Some(&ours))
             .expect("decision");
         assert_eq!(out_self.decision, ContinuationDecision::Continue);
     }
@@ -1003,39 +1023,87 @@ mod tests {
         let (controller, _root) = open();
         seed_goal_with_run(&controller, GoalProjection::ACTIVE);
 
-        // Record a prior no-progress-suppress continuation directly into the
-        // ledger (as a prior evaluation would have).
-        seed(
-            &controller,
-            "seed-prior-suppress",
-            &[ProjectionRecord::GoalContinuation(
-                GoalContinuationProjection {
-                    continuation_id: "cont-prior".to_string(),
-                    goal_id: GoalId::new(GOAL),
-                    project_id: ProjectId::new(PROJECT),
-                    attempt_run_id: Some(RunId::new(RUN)),
-                    decision: ContinuationDecision::NoProgressSuppress
-                        .as_str()
-                        .to_string(),
-                    reason: "no_material_progress".to_string(),
-                    updated_sequence: 0,
-                },
-            )],
-        );
+        // Drive the spin guard ORGANICALLY: a goal Continues (cont-1), the turn
+        // it authorizes makes no material progress, and the caller observes that
+        // on the NEXT evaluation via `last_continuation_made_no_progress`. No
+        // suppression row is seeded -- the signal is the caller's observation of
+        // the goal's progress, not the prior decision being a suppression.
+        let first = controller
+            .evaluate_and_record_continuation(
+                &GoalId::new(GOAL),
+                "cont-1",
+                &ready_conditions(),
+                None,
+                None,
+            )
+            .expect("first decision");
+        assert_eq!(first.decision, ContinuationDecision::Continue);
 
-        // Even at an otherwise-safe boundary, the next automatic continuation is
-        // suppressed because the prior one made no material progress.
+        // The continued turn made no material progress: the next evaluation
+        // suppresses, even at an otherwise-safe boundary.
+        let no_progress = ContinuationConditions {
+            last_continuation_made_no_progress: true,
+            ..ready_conditions()
+        };
         let out = controller
             .evaluate_and_record_continuation(
                 &GoalId::new(GOAL),
                 "cont-next",
-                &ready_conditions(),
+                &no_progress,
                 None,
                 None,
             )
             .expect("decision");
         assert_eq!(out.decision, ContinuationDecision::NoProgressSuppress);
         assert_eq!(out.reason, "no_material_progress");
+
+        // The suppression is recorded so the "why didn't it continue?" answer is
+        // a derived read model.
+        let recorded = controller
+            .state()
+            .goal_continuations_for_goal(&GoalId::new(GOAL))
+            .expect("continuations");
+        assert_eq!(recorded.last().unwrap().decision, "no-progress-suppress");
+    }
+
+    #[test]
+    fn controller_no_progress_suppression_clears_when_strategy_changes() {
+        let (controller, _root) = open();
+        seed_goal_with_run(&controller, GoalProjection::ACTIVE);
+
+        // A no-progress turn suppresses the next continuation.
+        let no_progress = ContinuationConditions {
+            last_continuation_made_no_progress: true,
+            ..ready_conditions()
+        };
+        let suppressed = controller
+            .evaluate_and_record_continuation(
+                &GoalId::new(GOAL),
+                "cont-suppressed",
+                &no_progress,
+                None,
+                None,
+            )
+            .expect("suppressed decision");
+        assert_eq!(
+            suppressed.decision,
+            ContinuationDecision::NoProgressSuppress
+        );
+
+        // An operator/planner intervention changes strategy. The caller observes
+        // that and the next evaluation continues again -- the suppression is NOT a
+        // permanent trap. (The no-progress observation may still be carried; the
+        // strategy-change signal clears it.)
+        let strategy_changed = ContinuationConditions {
+            last_continuation_made_no_progress: true,
+            strategy_changed_since_suppression: true,
+            ..ready_conditions()
+        };
+        let resumed = controller
+            .evaluate_continuation(&GoalId::new(GOAL), &strategy_changed, None)
+            .expect("resumed decision");
+        assert_eq!(resumed.decision, ContinuationDecision::Continue);
+        assert_eq!(resumed.reason, "safe_boundary");
     }
 
     #[test]
