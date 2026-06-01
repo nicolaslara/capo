@@ -40,6 +40,7 @@ mod grant_lifecycle;
 mod local_dispatch;
 mod permission_round_trip;
 mod real_controller;
+mod reattach;
 mod resource_ceiling;
 mod score_run;
 mod session_control;

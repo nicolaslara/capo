@@ -117,6 +117,38 @@ Per-turn artifacts must be keyed so multiple provider turns do not overwrite
 earlier evidence (the observed `stdout.txt` reuse pattern must not destroy prior
 turn evidence the auditor and historical report depend on).
 
+GA6 implementation decisions (realized, deterministic, no live provider):
+
+- The objective + success criteria + audit contract re-inject through the GA3
+  continuation context packet, which reconstructs them STRICTLY from the
+  `goals` / `requirement_ledgers` projections; nothing GA6-specific was added
+  for that path. The auditor (`audit_goal_completion`) and scheduler
+  (`evaluate_continuation`) read the same persisted projections, so both operate
+  on rebuilt state with no in-memory transcript. Cross-attempt observed evidence
+  is read by the goal's stable TASK id, so a fresh attempt session (an
+  adapter/provider session restart) does not drop prior-attempt evidence.
+- The artifact-overwrite gap was concrete: the adapter-replay
+  `adapter.turn_completed` evidence row keyed its `evidence_id` only by
+  `(adapter_kind, session_id)`, so successive provider turns in one session
+  collapsed onto a single row and the next turn's `ON CONFLICT(evidence_id) DO
+  UPDATE` destroyed the prior turn's observed evidence. The fix keys that row PER
+  TURN (the explicit turn id when the loop drives a turn, else the event's
+  timeline/item key), mirroring how the adapter-replay events themselves are
+  already disambiguated. Re-replaying the SAME turn stays idempotent on one row.
+
+Retention policy for raw provider output (consistent with
+`workpads/architecture/state-model.md` artifact rules): raw provider/runtime
+output is NOT inlined into event payloads or projected read models -- it is stored
+as an `Artifact` (`raw_adapter_event` / `runtime_log` / `tool_output` / `evidence`
+kind) and referenced by `artifact_id` + `content_hash` + `redaction_state`. The
+continuation packet and historical report carry only bounded summaries plus those
+references; a non-`safe` artifact is carried as a redacted reference (named, never
+inlined), and a missing artifact degrades to a redacted reference rather than
+inventing content. Because per-turn evidence rows and their backing artifacts are
+keyed per turn, retaining one turn's raw output never overwrites another's, so the
+auditor and exported reports keep every turn's evidence recoverable after restart
++ rebuild.
+
 ## Non-Goals
 
 - Do not duplicate the `goal-orchestration` design prose (domain model, reporting

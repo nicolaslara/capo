@@ -706,6 +706,253 @@ fn goal_lifecycle_transitions_project_and_rebuild_identically() {
     assert_eq!(store.goal(&goal_id).unwrap(), Some(cleared_before));
 }
 
+// GA6 (goal-orchestration GO13): the WHOLE goal surface -- goals, requirements,
+// agent reports + validation claims, OBSERVED evidence, review findings,
+// continuation decisions, delegated-provider goal state, AND the auditor's verdict
+// -- must survive a server restart and a full projection rebuild byte-for-byte.
+//
+// This is the GA6 restart/replay test the Verification names
+// (`cargo test -p capo-state goal_replay`). It is broader than the GA1
+// `goal_projections_are_persisted_and_rebuild_identically` test (which omits review
+// findings, observed `evidence` rows, and the audit-decision projection): the GA6
+// guarantee is that the auditor and scheduler can operate on the rebuilt state with
+// NO in-memory transcript, which requires every one of these read models to
+// reconstruct from the durable event log alone.
+#[test]
+fn goal_replay_full_goal_surface_rebuilds_identically_after_restart() {
+    let store = temp_store("goal-replay-full-surface");
+    let project_id = ProjectId::new("project-capo");
+    let task_id = TaskId::new("task-replay");
+    let agent_id = AgentId::new("agent-replay");
+    let session_id = SessionId::new("session-replay");
+    let run_id = RunId::new("run-replay");
+    let goal_id = GoalId::new("goal-replay");
+    let requirement_id = RequirementId::new("req-replay");
+    let evidence_id = EvidenceId::new("evidence-replay-observed");
+
+    // A small seeding helper, keyed for idempotent replay.
+    let seed = |event_id: &str, kind: EventKind, records: &[ProjectionRecord]| {
+        let mut event = NewEvent::new(event_id, kind, "test-seed");
+        event.project_id = Some(project_id.clone());
+        event.session_id = Some(session_id.clone());
+        event.run_id = Some(run_id.clone());
+        event.item_id = Some(event_id.to_string());
+        event.idempotency_key = Some(event_id.to_string());
+        store.append_event(event, records).expect("seed append");
+    };
+
+    seed(
+        "goal-created",
+        EventKind::GoalCreated,
+        &[ProjectionRecord::Goal(GoalProjection {
+            goal_id: goal_id.clone(),
+            project_id: project_id.clone(),
+            task_id: Some(task_id.clone()),
+            agent_id: Some(agent_id.clone()),
+            session_id: Some(session_id.clone()),
+            parent_goal_id: None,
+            attempt_run_id: Some(run_id.clone()),
+            objective: "Survive restart with full goal surface".to_string(),
+            status: GoalProjection::ACTIVE.to_string(),
+            success_criteria_json: "{\"must\":[\"tests pass\"]}".to_string(),
+            constraints_json: "{\"no_network\":true}".to_string(),
+            verification_surface_json: "{\"cmd\":\"cargo test\"}".to_string(),
+            budget_json: "{\"max_turns\":8}".to_string(),
+            stop_conditions_json: "{\"on\":\"blocker\"}".to_string(),
+            blocker_reason: String::new(),
+            updated_sequence: 0,
+        })],
+    );
+    seed(
+        "requirement-validated",
+        EventKind::RequirementStatusChanged,
+        &[ProjectionRecord::RequirementLedger(
+            RequirementLedgerProjection {
+                requirement_id: requirement_id.clone(),
+                goal_id: goal_id.clone(),
+                project_id: project_id.clone(),
+                summary: "All tests pass".to_string(),
+                status: RequirementLedgerProjection::VALIDATED.to_string(),
+                last_status_source: "runtime_output".to_string(),
+                updated_sequence: 0,
+            },
+        )],
+    );
+    // An agent-reported validation CLAIM: distinct from observed evidence.
+    seed(
+        "report-validation-claim",
+        EventKind::GoalReportRecorded,
+        &[ProjectionRecord::GoalReport(GoalReportProjection {
+            goal_report_id: "report-validation".to_string(),
+            goal_id: goal_id.clone(),
+            project_id: project_id.clone(),
+            session_id: Some(session_id.clone()),
+            requirement_id: Some(requirement_id.clone()),
+            report_kind: "capo.record_validation".to_string(),
+            source: "agent_reported".to_string(),
+            confidence: Some(70),
+            summary: "Agent claims validation".to_string(),
+            body_artifact_id: None,
+            evidence_id: None,
+            updated_sequence: 0,
+        })],
+    );
+    // An OBSERVED evidence row tagged to the goal's task (the cross-attempt key the
+    // auditor reads).
+    seed(
+        "evidence-observed",
+        EventKind::EvidenceRecorded,
+        &[ProjectionRecord::Evidence(EvidenceProjection {
+            evidence_id: evidence_id.clone(),
+            project_id: project_id.clone(),
+            task_id: Some(task_id.clone()),
+            session_id: Some(session_id.clone()),
+            run_id: Some(run_id.clone()),
+            kind: "test".to_string(),
+            artifact_id: None,
+            confidence: 100,
+            updated_sequence: 0,
+        })],
+    );
+    seed(
+        "review-finding",
+        EventKind::ReviewFindingRecorded,
+        &[ProjectionRecord::ReviewFinding(ReviewFindingProjection {
+            review_finding_id: "review-replay".to_string(),
+            project_id: project_id.clone(),
+            task_id: task_id.clone(),
+            session_id: session_id.clone(),
+            run_id: Some(run_id.clone()),
+            tool_call_id: None,
+            workpad_task_id: None,
+            reviewer: "reviewer-replay".to_string(),
+            finding_kind: "correctness".to_string(),
+            severity: "low".to_string(),
+            summary: "looks good".to_string(),
+            status: "open".to_string(),
+            evidence_artifact_id: None,
+            follow_up: None,
+            updated_sequence: 0,
+        })],
+    );
+    seed(
+        "continuation-decision",
+        EventKind::ContinuationDecisionRecorded,
+        &[ProjectionRecord::GoalContinuation(
+            GoalContinuationProjection {
+                continuation_id: "continuation-replay".to_string(),
+                goal_id: goal_id.clone(),
+                project_id: project_id.clone(),
+                attempt_run_id: Some(run_id.clone()),
+                decision: "continue".to_string(),
+                reason: "safe_boundary".to_string(),
+                updated_sequence: 0,
+            },
+        )],
+    );
+    seed(
+        "delegated-provider",
+        EventKind::DelegatedProviderGoalObserved,
+        &[ProjectionRecord::DelegatedProviderGoal(
+            DelegatedProviderGoalProjection {
+                delegated_goal_id: "delegated-replay".to_string(),
+                goal_id: goal_id.clone(),
+                project_id: project_id.clone(),
+                session_id: Some(session_id.clone()),
+                provider_kind: "codex".to_string(),
+                provider_goal_ref: Some("codex-goal-replay".to_string()),
+                provider_state: "completed".to_string(),
+                source: "agent_reported".to_string(),
+                body_artifact_id: None,
+                updated_sequence: 0,
+            },
+        )],
+    );
+    seed(
+        "audit-decision",
+        EventKind::GoalAuditDecisionRecorded,
+        &[ProjectionRecord::GoalAuditDecision(
+            GoalAuditDecisionProjection {
+                audit_id: "audit-replay".to_string(),
+                goal_id: goal_id.clone(),
+                project_id: project_id.clone(),
+                attempt_run_id: Some(run_id.clone()),
+                verdict: GoalAuditDecisionProjection::COMPLETE.to_string(),
+                reason: "all_requirements_met".to_string(),
+                requirements_total: 1,
+                requirements_complete: 1,
+                requirement_detail_json:
+                    "[{\"requirement_id\":\"req-replay\",\"state\":\"complete\"}]".to_string(),
+                updated_sequence: 0,
+            },
+        )],
+    );
+
+    // Capture every goal-surface read model BEFORE the rebuild.
+    let goal_before = store.goal(&goal_id).unwrap().expect("goal");
+    let requirements_before = store.requirement_ledgers_for_goal(&goal_id).unwrap();
+    let reports_before = store.goal_reports_for_goal(&goal_id).unwrap();
+    let evidence_before = store.evidence_for_task(&task_id).unwrap();
+    let reviews_before = store.review_findings_for_task(&task_id).unwrap();
+    let continuations_before = store.goal_continuations_for_goal(&goal_id).unwrap();
+    let delegated_before = store.delegated_provider_goals_for_goal(&goal_id).unwrap();
+    let audits_before = store.goal_audit_decisions_for_goal(&goal_id).unwrap();
+    let latest_audit_before = store.latest_goal_audit_decision(&goal_id).unwrap();
+
+    // Sanity: the seeded surface is non-empty (so the equality below is
+    // load-bearing, not vacuously true).
+    assert_eq!(requirements_before.len(), 1);
+    assert_eq!(reports_before.len(), 1);
+    assert_eq!(evidence_before.len(), 1);
+    assert_eq!(reviews_before.len(), 1);
+    assert_eq!(continuations_before.len(), 1);
+    assert_eq!(delegated_before.len(), 1);
+    assert_eq!(audits_before.len(), 1);
+    assert!(
+        latest_audit_before
+            .as_ref()
+            .is_some_and(GoalAuditDecisionProjection::is_complete),
+        "the auditor's complete verdict is durable before restart"
+    );
+
+    // Restart + replay: rebuild EVERY projection from the durable event log.
+    store.rebuild_projections().expect("rebuild projections");
+
+    // The load-bearing GA6 property: every goal-surface read model rebuilds
+    // byte-for-byte identically -- the auditor and scheduler can operate on this
+    // rebuilt state with no in-memory transcript.
+    assert_eq!(store.goal(&goal_id).unwrap(), Some(goal_before));
+    assert_eq!(
+        store.requirement_ledgers_for_goal(&goal_id).unwrap(),
+        requirements_before
+    );
+    assert_eq!(
+        store.goal_reports_for_goal(&goal_id).unwrap(),
+        reports_before
+    );
+    assert_eq!(store.evidence_for_task(&task_id).unwrap(), evidence_before);
+    assert_eq!(
+        store.review_findings_for_task(&task_id).unwrap(),
+        reviews_before
+    );
+    assert_eq!(
+        store.goal_continuations_for_goal(&goal_id).unwrap(),
+        continuations_before
+    );
+    assert_eq!(
+        store.delegated_provider_goals_for_goal(&goal_id).unwrap(),
+        delegated_before
+    );
+    assert_eq!(
+        store.goal_audit_decisions_for_goal(&goal_id).unwrap(),
+        audits_before
+    );
+    assert_eq!(
+        store.latest_goal_audit_decision(&goal_id).unwrap(),
+        latest_audit_before
+    );
+}
+
 // GA1: pin the new goal-lifecycle EventKind wire strings so a typo in any of
 // them is caught, mirroring the SG3 grant-lifecycle round-trip test. The
 // persisted `EventRecord.kind` string is the durable contract, so `as_str` and

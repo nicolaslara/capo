@@ -261,10 +261,20 @@ impl FakeBoundaryController {
             "adapter.turn_completed" => Ok(Some((
                 EventKind::EvidenceRecorded,
                 ProjectionRecord::Evidence(capo_state::EvidenceProjection {
+                    // GA6 (GO13): the evidence row id is keyed PER TURN, not just by
+                    // `(adapter_kind, session_id)`. A session takes many provider
+                    // turns; keying only by session collapses every turn's
+                    // `adapter.turn_completed` evidence onto ONE row, so the
+                    // `ON CONFLICT(evidence_id) DO UPDATE` of the next turn destroys
+                    // the prior turn's observed evidence -- exactly the overwrite the
+                    // auditor and historical report must not suffer (the observed
+                    // `stdout.txt`-reuse pattern). Per-turn keying keeps each turn's
+                    // evidence recoverable after restart/rebuild.
                     evidence_id: EvidenceId::new(format!(
-                        "evidence-adapter-replay-{}-{}",
+                        "evidence-adapter-replay-{}-{}-{}",
                         adapter_event.adapter_kind.as_str(),
-                        refs.session_id
+                        refs.session_id,
+                        adapter_replay_evidence_discriminator(adapter_event, turn_id_override),
                     )),
                     project_id: self.project_id.clone(),
                     task_id: Some(refs.task_id.clone()),
@@ -462,6 +472,32 @@ fn adapter_replay_fallback_key(
         key.push_str(suffix);
     }
     key
+}
+
+/// GA6 (GO13): the per-turn discriminator for an `adapter.turn_completed` evidence
+/// row id, so successive provider turns in the same session DO NOT overwrite each
+/// other's observed evidence.
+///
+/// It mirrors [`adapter_replay_turn_id`] / [`adapter_event_identity`]: when the loop
+/// drives a turn explicitly the turn id is the stable key (so re-replaying the SAME
+/// turn stays idempotent on one row); otherwise the event's own timeline/item key
+/// (falling back to its raw-event hash) discriminates one turn from the next. The
+/// result is slugged so it is a safe, stable id fragment.
+fn adapter_replay_evidence_discriminator(
+    adapter_event: &NormalizedAdapterEvent,
+    turn_id_override: Option<&str>,
+) -> String {
+    let raw = turn_id_override
+        .map(ToString::to_string)
+        .or_else(|| adapter_event.timeline_key.clone())
+        .or_else(|| adapter_event.external_item_ref.clone())
+        .unwrap_or_else(|| adapter_event.raw_event_hash.clone());
+    let discriminator = slug(&raw);
+    if discriminator.is_empty() {
+        adapter_event.raw_event_hash.clone()
+    } else {
+        discriminator
+    }
 }
 
 fn adapter_replay_turn_id(

@@ -503,7 +503,58 @@ Must not do:
 
 ## GA6 - Milestone B: Reattach-After-Compaction
 
-Status: pending.
+Status: done. Reattach-after-compaction (GO13) re-injects the active objective,
+success criteria, and audit contract from PERSISTED goal state on both server
+restart and adapter/provider session restart, and the auditor + scheduler operate
+on the rebuilt state with no in-memory transcript. The objective/contract path is
+the GA3 continuation context packet (reconstructed from the `goals` /
+`requirement_ledgers` projections); cross-attempt observed evidence is read by the
+goal's stable TASK id, so a fresh attempt session does not drop prior-attempt
+evidence. The remaining gap -- a provider-turn artifact OVERWRITE -- is fixed: the
+adapter-replay `adapter.turn_completed` evidence row keyed its `evidence_id` only
+by `(adapter_kind, session_id)`, collapsing every turn's observed evidence onto one
+row so the next turn's `ON CONFLICT(evidence_id) DO UPDATE` destroyed the prior
+turn's evidence (the observed `stdout.txt`-reuse pattern). It is now keyed PER TURN
+(`crates/capo-controller/src/adapter_replay.rs`,
+`adapter_replay_evidence_discriminator`), mirroring the existing per-turn event
+disambiguation; re-replaying the SAME turn stays idempotent on one row. The
+retention policy (raw output stored as a referenced `Artifact` with
+`content_hash`/`redaction_state`, never inlined; summaries + redacted/missing-as-
+redacted references in the packet/report) is recorded in `knowledge.md` consistent
+with `state-model.md`.
+
+Evidence:
+
+- Bug fix: `crates/capo-controller/src/adapter_replay.rs` keys the
+  `adapter.turn_completed` evidence row per turn. A temporary revert to the old
+  `(adapter_kind, session_id)` key made
+  `reattach_multiple_provider_turns_do_not_overwrite_earlier_turn_evidence` FAIL
+  (`left: 1, right: 3` -- three turns collapsed to one row), proving the test is
+  load-bearing; restoring the fix makes it pass.
+- New deterministic controller tests (no live provider):
+  `crates/capo-controller/src/reattach.rs` (registered `mod reattach;` in
+  `lib.rs`) -- `reattach_multiple_provider_turns_do_not_overwrite_earlier_turn_evidence`
+  (three provider turns keep three distinct observed-evidence rows that rebuild
+  identically after restart) and
+  `reattach_reinjects_objective_and_audit_contract_after_session_restart_and_rebuild`
+  (objective + success criteria + audit contract re-inject from persisted state
+  after a session rebind + full rebuild; prior-attempt observed evidence survives;
+  the auditor verdict and scheduler decision are derived purely from rebuilt
+  state).
+- New deterministic state test:
+  `crates/capo-state/src/tests.rs::goal_replay_full_goal_surface_rebuilds_identically_after_restart`
+  -- goals, requirements, agent reports/validations, OBSERVED evidence, review
+  findings, continuation decisions, delegated-provider goal state, and the audit
+  decision all rebuild byte-for-byte after `rebuild_projections`.
+- `cargo test -p capo-controller reattach` -> 3 passed (2 new GA6 + 1 pre-existing
+  sg9 reattach).
+- `cargo test -p capo-state goal_replay` -> 1 passed.
+- `cargo fmt --check` -> exit 0.
+- `cargo clippy --all-targets --all-features -- -D warnings` -> exit 0.
+- `cargo test --workspace` -> exit 0, 0 failed across all crates (capo-controller
+  lib: 155 passed, 2 ignored; capo-state lib: 63 passed; capo-server lib: 108
+  passed, 3 ignored).
+- `git diff --check` -> clean.
 
 Acceptance:
 
