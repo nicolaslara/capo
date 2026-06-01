@@ -6,6 +6,7 @@
 
 mod acp_client;
 mod acp_live;
+mod acp_replay;
 mod acp_wire;
 mod adapter;
 mod codex_live;
@@ -20,10 +21,15 @@ pub use acp_live::{
     ACP_LIVE_PREFLIGHT_OPT_IN_ENV, ACP_LIVE_RUN_OPT_IN_ENV, AcpLiveAdapter, AcpLiveError,
     acp_live_gate_open, turn_output_from_transcript,
 };
+pub use acp_replay::{
+    AcpDedupeConfidence, AcpRawUpdateRecord, AcpReconcileDecision, AcpReconciledCandidate,
+    AcpReplayEngine, AcpReplayPlan, AcpReplaySource, AcpTimelineKeyRecord, AcpTimelineKind,
+    ExistingItemFingerprint,
+};
 pub use acp_wire::{
     ACP_PROTOCOL_VERSION, ACP_PUMP_READ_TIMEOUT, AcpClientCallRecord, AcpPermissionRoundTrip,
-    AcpTransport, AcpTurnTranscript, AcpWireClient, AcpWireError, PipedProcessTransport,
-    RecvOutcome, ScriptedAcpTransport, ScriptedServerFrame,
+    AcpResumeOutcome, AcpTransport, AcpTurnTranscript, AcpWireClient, AcpWireError,
+    PipedProcessTransport, RecvOutcome, ScriptedAcpTransport, ScriptedServerFrame,
 };
 pub use adapter::{
     AdapterSession, AdapterSessionRequest, AgentAdapter, AgentAdapterHandle, FakeAdapter,

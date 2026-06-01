@@ -8,7 +8,8 @@ use crate::{
     AdapterDispatchExecutionProjection, AdapterDispatchExecutionRequestProjection,
     AdapterDispatchGateProjection, AdapterDispatchPlanProjection,
     AdapterDispatchPromptMaterializationProjection, AdapterDispatchPromptSourceProjection,
-    AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
+    AdapterDispatchReplayProjection, AdapterRawUpdateProjection, AdapterReadinessProjection,
+    AdapterReplayBatchProjection, AdapterSmokeReportProjection, AdapterTimelineKeyProjection,
     AgentProjection, ArtifactRecord, CapabilityGrantProjection, CheckpointProjection,
     ConnectivityExposureProjection, DelegatedProviderGoalProjection, EventKind, EventRecord,
     EvidenceProjection, GoalAuditDecisionProjection, GoalContinuationProjection, GoalProjection,
@@ -1547,6 +1548,122 @@ impl SqliteStateStore {
                 raw_event_hash: row.get(9)?,
                 artifact_id: row.get(10)?,
                 updated_sequence: row.get(11)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    /// DP2 (acp-replay-dedupe.md): the ACP replay batches for a session, in
+    /// ingest order. The batch summary is the authoritative record of one ACP
+    /// ingest (its source, status, and imported/duplicate/ambiguous counts).
+    pub fn adapter_replay_batches_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> StateResult<Vec<AdapterReplayBatchProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT acp_replay_batch_id, session_id, project_id, external_session_ref, source,
+                    status, load_request_id, prompt_request_id, recovery_attempt_id,
+                    raw_update_count, imported_count, duplicate_count, ambiguous_count,
+                    normalized_sequence_start, normalized_sequence_end, started_at, completed_at,
+                    updated_sequence
+             FROM adapter_replay_batches
+             WHERE session_id = ?1
+             ORDER BY updated_sequence ASC, acp_replay_batch_id ASC",
+        )?;
+        let rows = statement.query_map(params![session_id.as_str()], |row| {
+            Ok(AdapterReplayBatchProjection {
+                acp_replay_batch_id: row.get(0)?,
+                session_id: SessionId::new(row.get::<_, String>(1)?),
+                project_id: ProjectId::new(row.get::<_, String>(2)?),
+                external_session_ref: row.get(3)?,
+                source: row.get(4)?,
+                status: row.get(5)?,
+                load_request_id: row.get(6)?,
+                prompt_request_id: row.get(7)?,
+                recovery_attempt_id: row.get(8)?,
+                raw_update_count: row.get(9)?,
+                imported_count: row.get(10)?,
+                duplicate_count: row.get(11)?,
+                ambiguous_count: row.get(12)?,
+                normalized_sequence_start: row.get(13)?,
+                normalized_sequence_end: row.get(14)?,
+                started_at: row.get(15)?,
+                completed_at: row.get(16)?,
+                updated_sequence: row.get(17)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    /// DP2: the raw ACP updates persisted for a batch, in `batch_index` order.
+    /// Raw observations retained before normalization; never read-model authority.
+    pub fn adapter_raw_updates_for_batch(
+        &self,
+        acp_replay_batch_id: &str,
+    ) -> StateResult<Vec<AdapterRawUpdateProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT acp_raw_update_id, acp_replay_batch_id, project_id, external_session_ref,
+                    batch_index, jsonrpc_method, session_update_kind, external_item_ref,
+                    acp_timeline_key, payload_hash, payload_artifact_id, replay_source,
+                    dedupe_confidence, observed_at, updated_sequence
+             FROM adapter_raw_updates
+             WHERE acp_replay_batch_id = ?1
+             ORDER BY batch_index ASC, acp_raw_update_id ASC",
+        )?;
+        let rows = statement.query_map(params![acp_replay_batch_id], |row| {
+            Ok(AdapterRawUpdateProjection {
+                acp_raw_update_id: row.get(0)?,
+                acp_replay_batch_id: row.get(1)?,
+                project_id: ProjectId::new(row.get::<_, String>(2)?),
+                external_session_ref: row.get(3)?,
+                batch_index: row.get(4)?,
+                jsonrpc_method: row.get(5)?,
+                session_update_kind: row.get(6)?,
+                external_item_ref: row.get(7)?,
+                acp_timeline_key: row.get(8)?,
+                payload_hash: row.get(9)?,
+                payload_artifact_id: row.get(10)?,
+                replay_source: row.get(11)?,
+                dedupe_confidence: row.get(12)?,
+                observed_at: row.get(13)?,
+                updated_sequence: row.get(14)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    /// DP2: the protocol-aware timeline keys derived for a session.
+    pub fn adapter_timeline_keys_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> StateResult<Vec<AdapterTimelineKeyProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT adapter_timeline_key_id, session_id, project_id, external_session_ref, kind,
+                    stable_ref, synthetic_ref, confidence, first_sequence, last_sequence,
+                    updated_sequence
+             FROM adapter_timeline_keys
+             WHERE session_id = ?1
+             ORDER BY updated_sequence ASC, adapter_timeline_key_id ASC",
+        )?;
+        let rows = statement.query_map(params![session_id.as_str()], |row| {
+            Ok(AdapterTimelineKeyProjection {
+                adapter_timeline_key_id: row.get(0)?,
+                session_id: SessionId::new(row.get::<_, String>(1)?),
+                project_id: ProjectId::new(row.get::<_, String>(2)?),
+                external_session_ref: row.get(3)?,
+                kind: row.get(4)?,
+                stable_ref: row.get(5)?,
+                synthetic_ref: row.get(6)?,
+                confidence: row.get(7)?,
+                first_sequence: row.get(8)?,
+                last_sequence: row.get(9)?,
+                updated_sequence: row.get(10)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()

@@ -30,6 +30,7 @@ use capo_tools::{
     FakeToolRequest, PermissionDecision, PermissionPolicy, PermissionRequest, ToolExposure,
 };
 
+mod acp_replay_ingest;
 mod adapter_replay;
 mod checkpoint;
 mod completion_auditor;
@@ -51,6 +52,7 @@ mod turn_loop;
 mod verification;
 mod workspace_lock;
 
+pub use acp_replay_ingest::AcpReplayIngestReport;
 pub use checkpoint::{CheckpointCreated, CheckpointError, CheckpointRestored, CheckpointScope};
 pub use completion_auditor::{
     AuditDecision, AuditInputs, AuditVerdict, CompletionAuditor, RequirementAudit,

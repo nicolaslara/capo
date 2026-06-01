@@ -9264,3 +9264,326 @@ mod sg11 {
         }
     }
 }
+
+// --------------------------------------------------------------------------
+// DP2 (acp-replay-dedupe.md): the end-to-end ACP replay/reconciliation
+// producer path. These drive the `AcpReplayEngine` plan through the controller
+// ingest seam (`ingest_acp_replay_plan`) so the 8 `adapter.attach_*` /
+// `adapter.replay_*` event kinds and the 3 read-model projections are produced
+// by a REAL producer (not dead code), event-sourced into capo-state, and
+// proven to rebuild identically on restart.
+// --------------------------------------------------------------------------
+
+fn dp2_controller_with_session(label: &str) -> (FakeBoundaryController, FakeRunRefs) {
+    let root = temp_root();
+    let controller =
+        FakeBoundaryController::open(ProjectId::new("project-capo"), &root).expect("controller");
+    let registration = controller
+        .register_agent(&format!("acp-{label}"))
+        .expect("register agent");
+    let refs = controller
+        .send_task(&registration, "Drive an ACP replay")
+        .expect("send task");
+    (controller, refs)
+}
+
+fn acp_update(session: &str, body: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": { "sessionId": session, "update": body }
+    })
+}
+
+#[test]
+fn dp2_session_resume_attach_adds_no_items_but_records_attach_batch() {
+    // Fixture 2: a `session/resume` attach emits attach_started -> attach_completed
+    // with NO message/item replay events; the read-model session item count is
+    // unchanged, and the batch records source=session_resume_attach.
+    use capo_adapters::AcpReplayEngine;
+    let (controller, refs) = dp2_controller_with_session("resume");
+
+    let tools_before = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tools")
+        .len();
+
+    let plan = AcpReplayEngine::plan_resume_attach(
+        "acp-ext-resume",
+        &serde_json::json!({ "resumed": true }),
+    );
+    let report = controller
+        .ingest_acp_replay_plan(&refs, &plan)
+        .expect("ingest resume attach");
+
+    assert_eq!(report.imported_count, 0, "resume imports no items");
+    assert_eq!(report.duplicate_count, 0);
+    assert_eq!(report.ambiguous_count, 0);
+
+    // No new tool/item read-model rows were created by the attach.
+    let tools_after = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tools")
+        .len();
+    assert_eq!(tools_after, tools_before, "resume attach adds no items");
+
+    // The attach batch is recorded with the resume source + completed status.
+    let batches = controller
+        .state()
+        .adapter_replay_batches_for_session(&refs.session_id)
+        .expect("batches");
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].source, "session_resume_attach");
+    assert_eq!(batches[0].status, "completed");
+
+    // The attach lifecycle is event-sourced: attach_started + attach_completed.
+    let events = controller
+        .state()
+        .recent_events_for_session(&refs.session_id, 200)
+        .expect("events");
+    assert!(
+        events.iter().any(|e| e.kind == "adapter.attach_started"),
+        "attach_started must be emitted"
+    );
+    assert!(
+        events.iter().any(|e| e.kind == "adapter.attach_completed"),
+        "attach_completed must be emitted"
+    );
+    assert!(
+        !events.iter().any(|e| e.kind == "adapter.replay_started"),
+        "a resume must not open a replay batch"
+    );
+}
+
+#[test]
+fn dp2_foreign_session_load_imports_each_item_once_then_rebuilds_identically() {
+    // Fixture 4 + restart/replay invariant: a FOREIGN `session/load` (no local
+    // history) imports each user/agent chunk and tool call exactly once; the raw
+    // updates + timeline keys + batch are event-sourced; and a clear-and-replay
+    // rebuild reconstructs every DP2 read model byte-identically.
+    use capo_adapters::{AcpReplayEngine, AcpReplaySource};
+    let (controller, refs) = dp2_controller_with_session("foreign-load");
+
+    let frames = vec![
+        acp_update(
+            "acp-ext-foreign",
+            serde_json::json!({
+                "sessionUpdate": "user_message_chunk",
+                "content": { "type": "text", "text": "do the task" }
+            }),
+        ),
+        acp_update(
+            "acp-ext-foreign",
+            serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tool-foreign-1",
+                "title": "write file",
+                "status": "completed",
+                "content": { "type": "text", "text": "done" }
+            }),
+        ),
+    ];
+
+    let existing = controller
+        .acp_existing_item_fingerprints(&refs)
+        .expect("fingerprints");
+    assert!(
+        existing.is_empty(),
+        "a foreign session has no local history"
+    );
+    let plan = AcpReplayEngine::plan_load(
+        AcpReplaySource::ForeignImport,
+        "acp-ext-foreign",
+        &frames,
+        &existing,
+    );
+    let report = controller
+        .ingest_acp_replay_plan(&refs, &plan)
+        .expect("ingest foreign load");
+
+    assert_eq!(report.raw_update_count, 2, "every raw frame persisted");
+    assert_eq!(
+        report.imported_count, 2,
+        "import user chunk + tool call once"
+    );
+    assert_eq!(report.duplicate_count, 0);
+
+    // Raw updates persisted (before normalization) and the tool imported once.
+    let raw = controller
+        .state()
+        .adapter_raw_updates_for_batch(&report.acp_replay_batch_id)
+        .expect("raw updates");
+    assert_eq!(raw.len(), 2);
+    let tools = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tools");
+    let acp_tools: Vec<_> = tools
+        .iter()
+        .filter(|t| t.tool_origin == "adapter_native:acp")
+        .collect();
+    assert_eq!(
+        acp_tools.iter().filter(|t| t.status == "completed").count(),
+        1,
+        "the foreign tool call is inspectable exactly once"
+    );
+
+    // Restart/replay: snapshot every DP2 read model, then rebuild and compare.
+    let batches_before = controller
+        .state()
+        .adapter_replay_batches_for_session(&refs.session_id)
+        .expect("batches");
+    let raw_before = controller
+        .state()
+        .adapter_raw_updates_for_batch(&report.acp_replay_batch_id)
+        .expect("raw before");
+    let keys_before = controller
+        .state()
+        .adapter_timeline_keys_for_session(&refs.session_id)
+        .expect("keys before");
+    let tools_before = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tools before");
+
+    controller.state().rebuild_projections().expect("rebuild");
+
+    assert_eq!(
+        controller
+            .state()
+            .adapter_replay_batches_for_session(&refs.session_id)
+            .expect("batches after"),
+        batches_before,
+        "replay batches rebuild identically"
+    );
+    assert_eq!(
+        controller
+            .state()
+            .adapter_raw_updates_for_batch(&report.acp_replay_batch_id)
+            .expect("raw after"),
+        raw_before,
+        "raw updates rebuild identically"
+    );
+    assert_eq!(
+        controller
+            .state()
+            .adapter_timeline_keys_for_session(&refs.session_id)
+            .expect("keys after"),
+        keys_before,
+        "timeline keys rebuild identically"
+    );
+    assert_eq!(
+        controller
+            .state()
+            .tool_calls_for_session(&refs.session_id)
+            .expect("tools after"),
+        tools_before,
+        "imported tool calls rebuild identically"
+    );
+}
+
+#[test]
+fn dp2_load_of_known_history_adds_no_duplicate_ui_items() {
+    // Fixture 3: replaying the SAME `session/load` history a second time adds no
+    // duplicate UI items -- the second load reconciles every candidate as a
+    // duplicate observation against the timeline keys the first load recorded.
+    use capo_adapters::{AcpReplayEngine, AcpReplaySource};
+    let (controller, refs) = dp2_controller_with_session("known-load");
+
+    let frames = vec![
+        acp_update(
+            "acp-ext-known",
+            serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "the answer is 42" }
+            }),
+        ),
+        acp_update(
+            "acp-ext-known",
+            serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tool-known-1",
+                "title": "write file",
+                "status": "completed",
+                "content": { "type": "text", "text": "done" }
+            }),
+        ),
+    ];
+
+    // First load: import.
+    let first = controller
+        .ingest_acp_replay_plan(
+            &refs,
+            &AcpReplayEngine::plan_load(
+                AcpReplaySource::SessionLoad,
+                "acp-ext-known",
+                &frames,
+                &controller
+                    .acp_existing_item_fingerprints(&refs)
+                    .expect("fingerprints 1"),
+            ),
+        )
+        .expect("ingest first load");
+    assert_eq!(first.imported_count, 2);
+
+    let tools_after_first = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tools 1")
+        .len();
+
+    // Second load of the SAME history: now Capo has local timeline keys, so every
+    // candidate reconciles as a duplicate -> no new UI items.
+    let existing = controller
+        .acp_existing_item_fingerprints(&refs)
+        .expect("fingerprints 2");
+    assert!(
+        !existing.is_empty(),
+        "the first load recorded local timeline keys"
+    );
+    let second = controller
+        .ingest_acp_replay_plan(
+            &refs,
+            &AcpReplayEngine::plan_load(
+                AcpReplaySource::SessionLoad,
+                "acp-ext-known",
+                &frames,
+                &existing,
+            ),
+        )
+        .expect("ingest second load");
+
+    assert_eq!(
+        second.imported_count, 0,
+        "a known-history reload imports nothing"
+    );
+    assert_eq!(
+        second.duplicate_count, 2,
+        "both candidates reconcile as duplicate observations"
+    );
+
+    // The UI item count is unchanged by the second load.
+    let tools_after_second = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tools 2")
+        .len();
+    assert_eq!(
+        tools_after_second, tools_after_first,
+        "the second load adds no duplicate UI items"
+    );
+
+    // A duplicate-detected marker was event-sourced (not item events).
+    let events = controller
+        .state()
+        .recent_events_for_session(&refs.session_id, 400)
+        .expect("events");
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == "adapter.replay_duplicate_detected"),
+        "a duplicate observation marker must be emitted"
+    );
+}

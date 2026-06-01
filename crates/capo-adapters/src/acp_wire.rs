@@ -153,6 +153,13 @@ pub struct AcpTurnTranscript {
     /// Normalized events from every ingested `session/update` notification, in
     /// wire order.
     pub events: Vec<NormalizedAdapterEvent>,
+    /// DP2 (acp-replay-dedupe.md): the RAW `session/update` JSON frames, in wire
+    /// order, exactly as they arrived -- BEFORE normalization. The replay engine
+    /// persists each as an `AcpRawUpdate` and re-normalizes it to stage candidates,
+    /// so the raw observation is retained even when normalization dedupes it. Kept
+    /// alongside `events` so a `session/load` reconciliation has the unnormalized
+    /// input the design mandates.
+    pub raw_updates: Vec<Value>,
     /// Every `session/request_permission` round-trip the client answered.
     pub permission_round_trips: Vec<AcpPermissionRoundTrip>,
     /// Every inbound `fs/*` / `terminal/*` client-call the client serviced on the
@@ -165,6 +172,19 @@ pub struct AcpTurnTranscript {
     pub stop_reason: Option<String>,
     /// Whether a `session/cancel` was issued during this turn.
     pub cancelled: bool,
+}
+
+/// DP2 (acp-replay-dedupe.md): the outcome of a `session/resume` reconnect.
+///
+/// `response` is the raw agent response object, persisted as raw attach metadata
+/// (the resume attach batch's single raw observation). `transcript` carries any
+/// frames the agent streamed; for a well-behaved resume it has NO item/message
+/// `events`, which is exactly the "resume adds no items" invariant the
+/// reconciliation engine asserts.
+#[derive(Clone, Debug, Default)]
+pub struct AcpResumeOutcome {
+    pub response: Value,
+    pub transcript: AcpTurnTranscript,
 }
 
 /// The audited outcome of one inbound ACP client-call (`fs/*` / `terminal/*`)
@@ -334,6 +354,49 @@ impl<T: AcpTransport> AcpWireClient<T> {
         self.send_notification("session/cancel", &params)
     }
 
+    /// DP2 `session/resume` (acp-replay-dedupe.md): reconnect to an EXISTING
+    /// external session WITHOUT replaying conversation history. The agent
+    /// answers the request with reconnect metadata only; a well-behaved
+    /// `session/resume` therefore yields a transcript with NO `session/update`
+    /// item/message frames (the resume strategy creates no item replay events).
+    /// The raw response object is returned so the caller can persist it as raw
+    /// attach metadata.
+    pub fn session_resume(&mut self, session_id: &str) -> Result<AcpResumeOutcome, AcpWireError> {
+        let id = self.alloc_id();
+        let params = json!({ "sessionId": session_id });
+        self.send_request("session/resume", &params, id)?;
+        let mut transcript = AcpTurnTranscript::default();
+        let response = self.pump_until_response(id, "session/resume", &mut transcript)?;
+        self.external_session_id = Some(session_id.to_string());
+        Ok(AcpResumeOutcome {
+            response,
+            transcript,
+        })
+    }
+
+    /// DP2 `session/load` (acp-replay-dedupe.md): replay the ENTIRE conversation
+    /// history of an external session as interleaved `session/update`
+    /// notifications, then return the load response. Every replayed update is
+    /// ingested through the SAME shared `parse_acp_record` normalization path the
+    /// live prompt uses (no parallel route), so the returned transcript carries
+    /// the full ordered candidate set the reconciliation engine stages and
+    /// finalizes. Load is an import/reconciliation operation, never a direct UI
+    /// stream -- the caller stages, finalizes, and reconciles the transcript
+    /// rather than projecting it.
+    pub fn session_load(&mut self, session_id: &str) -> Result<AcpTurnTranscript, AcpWireError> {
+        let id = self.alloc_id();
+        let params = json!({ "sessionId": session_id, "mcpServers": [] });
+        self.send_request("session/load", &params, id)?;
+        let mut transcript = AcpTurnTranscript::default();
+        let response = self.pump_until_response(id, "session/load", &mut transcript)?;
+        transcript.stop_reason = response
+            .get("stopReason")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        self.external_session_id = Some(session_id.to_string());
+        Ok(transcript)
+    }
+
     /// Send a request and pump until its matching response, returning the
     /// `result` object. Used for the request/response calls (`initialize`,
     /// `session/new`).
@@ -422,6 +485,9 @@ impl<T: AcpTransport> AcpWireClient<T> {
                 ("session/update", _) => {
                     let events = AcpAdapter::normalize_update(&value);
                     transcript.events.extend(events);
+                    // DP2: retain the raw frame BEFORE normalization for the
+                    // replay engine's raw-update persistence + candidate staging.
+                    transcript.raw_updates.push(value);
                 }
                 ("session/request_permission", _) => {
                     self.answer_permission(&value, transcript)?;
@@ -1413,6 +1479,127 @@ mod tests {
         assert!(
             matches!(error, AcpWireError::Timeout { .. }),
             "expected a typed timeout, got {error:?}"
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    // DP2 (acp-replay-dedupe.md): session/resume + session/load wire round-trips
+    // through the SAME scripted transport, feeding the deterministic replay
+    // engine. These exercise the real wire client (no live process) so the
+    // engine's plan is built from frames that genuinely pumped off the wire.
+    // ----------------------------------------------------------------------
+
+    /// `session/resume` reconnects WITHOUT replaying history: the transcript
+    /// carries no item/message events, and the resume-attach plan stages zero
+    /// candidates (resume adds no items).
+    #[test]
+    fn dp2_session_resume_adds_no_items() {
+        use crate::{AcpReplayEngine, AcpReplaySource};
+
+        let transport = ScriptedAcpTransport::new()
+            .on_request(
+                "initialize",
+                vec![ScriptedServerFrame::Response(
+                    json!({ "protocolVersion": 1, "agentCapabilities": {} }),
+                )],
+            )
+            .on_request(
+                "session/resume",
+                vec![ScriptedServerFrame::Response(json!({
+                    "sessionCapabilities": { "resume": true },
+                    "resumed": true
+                }))],
+            );
+        let mut client = AcpWireClient::attach(transport, setup_plan());
+        client.initialize().expect("initialize");
+        let outcome = client
+            .session_resume("acp-session-existing")
+            .expect("resume");
+
+        // No item/message updates streamed on a resume reconnect.
+        assert!(
+            outcome.transcript.events.is_empty(),
+            "resume must not replay item/message events: {:?}",
+            outcome.transcript.events
+        );
+        assert!(outcome.transcript.raw_updates.is_empty());
+
+        let plan = AcpReplayEngine::plan_resume_attach("acp-session-existing", &outcome.response);
+        assert_eq!(plan.source, AcpReplaySource::SessionResumeAttach);
+        assert_eq!(plan.candidates.len(), 0, "resume stages zero candidates");
+        assert_eq!(plan.imported_count(), 0);
+        assert_eq!(plan.duplicate_count(), 0);
+        // The resume response is retained as a single raw observation (attach
+        // metadata), but it is not an item.
+        assert_eq!(plan.raw_update_count(), 1);
+        assert!(plan.response_payload_hash.is_some());
+    }
+
+    /// `session/load` replays the full history as interleaved `session/update`
+    /// notifications, then returns the load response. The transcript carries the
+    /// raw frames the engine reconciles.
+    #[test]
+    fn dp2_session_load_pumps_raw_history_then_reconciles() {
+        use crate::{AcpReconcileDecision, AcpReplayEngine, AcpReplaySource};
+
+        let transport = ScriptedAcpTransport::new()
+            .on_request(
+                "initialize",
+                vec![ScriptedServerFrame::Response(
+                    json!({ "protocolVersion": 1, "agentCapabilities": {} }),
+                )],
+            )
+            .on_request(
+                "session/load",
+                vec![
+                    ScriptedServerFrame::Update(json!({
+                        "sessionId": "acp-session-load",
+                        "update": {
+                            "sessionUpdate": "user_message_chunk",
+                            "content": { "type": "text", "text": "do the task" }
+                        }
+                    })),
+                    ScriptedServerFrame::Update(json!({
+                        "sessionId": "acp-session-load",
+                        "update": {
+                            "sessionUpdate": "tool_call",
+                            "toolCallId": "tool-load-1",
+                            "title": "write file",
+                            "status": "completed",
+                            "content": { "type": "text", "text": "done" }
+                        }
+                    })),
+                    ScriptedServerFrame::Response(json!({ "stopReason": "end_turn" })),
+                ],
+            );
+        let mut client = AcpWireClient::attach(transport, setup_plan());
+        client.initialize().expect("initialize");
+        let transcript = client.session_load("acp-session-load").expect("load");
+
+        // Every replayed frame is retained raw, before normalization.
+        assert_eq!(transcript.raw_updates.len(), 2);
+
+        // FOREIGN import: Capo has no existing items, so both candidates import once.
+        let plan = AcpReplayEngine::plan_load(
+            AcpReplaySource::ForeignImport,
+            "acp-session-load",
+            &transcript.raw_updates,
+            &[],
+        );
+        assert_eq!(plan.raw_update_count(), 2);
+        assert_eq!(plan.candidates.len(), 2, "one message + one tool candidate");
+        assert!(
+            plan.candidates
+                .iter()
+                .all(|c| c.decision == AcpReconcileDecision::Imported)
+        );
+        assert_eq!(plan.imported_count(), 2);
+        assert_eq!(plan.duplicate_count(), 0);
+        // The tool candidate carries the stable tool timeline key.
+        assert!(
+            plan.timeline_keys
+                .iter()
+                .any(|key| key.timeline_key == "acp:acp-session-load:tool:tool-load-1")
         );
     }
 }

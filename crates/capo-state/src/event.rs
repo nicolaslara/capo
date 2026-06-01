@@ -90,6 +90,12 @@ pub enum EventKind {
     // mutate read models directly.
     AdapterAttachStarted,
     AdapterAttachCompleted,
+    // The attach-failure terminal kind: emitted when a `session/resume` reconnect
+    // fails. The happy-path producer (`capo-controller::ingest_acp_replay_plan`)
+    // brackets a successful attach with `started`/`completed`; this is the
+    // fail-closed terminal the runtime/health-probe path stamps when the reconnect
+    // errors (its `as_str`/`from_wire` round-trip is covered by
+    // `dp2_acp_replay_event_kinds_round_trip`).
     AdapterAttachFailed,
     AdapterReplayStarted,
     AdapterRawUpdateObserved,

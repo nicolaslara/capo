@@ -259,19 +259,62 @@ Verification:
 - Focused `cargo test -p capo-adapters -p capo-state`.
 - `cargo fmt`
 
-Evidence (DP2 gate fix 2026-06-01):
+Evidence (DP2 review fixes 2026-06-01):
 
-- Objective gate had failed with `fmt=fail` only (clippy/test already ok). The
-  `adapter_raw_update` `batch_index` decode in
-  `crates/capo-state/src/codec_adapter.rs:832` was mis-indented (the long
-  `required_field(...)` call needed wrapping onto the next line). Ran `cargo fmt`
-  from `/Users/nicolas/devel/capo-wt/depth`, which reformatted exactly that
-  `let batch_index = ...` block and no other code. Files changed:
-  `crates/capo-state/src/codec_adapter.rs` (formatting only).
+- The prior DP2 commit landed ONLY the `capo-state` read-model scaffolding (event
+  kinds, 3 tables, 3 projections, codec) with NO producer and NO tests, so the 8
+  event kinds and 3 projections were dead code and the behavioral acceptance
+  (resume/load/reconciliation) was unimplemented. This review fix lands the
+  missing behavior + verification suite.
+- New `crates/capo-adapters/src/acp_replay.rs`: the deterministic
+  reconciliation REDUCER (`AcpReplayEngine`). Pure, storage-free: given the raw
+  `session/load` frames (or the empty resume-attach stream) plus the fingerprints
+  of items Capo already holds, it produces an `AcpReplayPlan` (batch summary,
+  ordered `AcpRawUpdateRecord`s, derived `AcpTimelineKeyRecord`s, and per-candidate
+  `AcpReconcileDecision`: imported / duplicate / ambiguous). Tool calls dedupe by
+  stable `acp:{session}:tool:{id}`; `tool_call_update` content/locations are
+  replacement fields (repeated identical updates collapse to ONE candidate while
+  every raw frame is retained); plans use `acp:{session}:plan:current`; ID-less
+  consecutive same-type message chunks finalize to a content hash with `low`
+  boundary confidence and import as ambiguous.
+- `crates/capo-adapters/src/acp_wire.rs`: real `session_resume` /
+  `session_load` wire methods on `AcpWireClient` (resume returns metadata only and
+  yields NO item events; load pumps the full history through the SAME
+  `parse_acp_record` route). The transcript now retains the RAW `session/update`
+  frames before normalization for the engine.
+- `crates/capo-controller/src/acp_replay_ingest.rs`: the single orchestration
+  PRODUCER (`ingest_acp_replay_plan`) that turns a plan into durable events +
+  projections at the controller seam, mirroring the
+  `PermissionApproval`/`CapabilityGrant` pattern: opens the batch
+  (`adapter.replay_started`/`adapter.attach_started`), appends one
+  `adapter.raw_update_observed` + `AdapterRawUpdate` per frame, records each
+  `AdapterTimelineKey`, emits `adapter.replay_duplicate_detected` /
+  `adapter.replay_ambiguous` markers (no item events) or imports missing items via
+  the shared `apply_normalized_adapter_events` route, then finalizes
+  (`adapter.replay_completed`/`adapter.attach_completed`) with the counts. Every
+  event carries the design's `acp:{session}:{family}:{key}:{op}` idempotency key.
+  `acp_existing_item_fingerprints` reads Capo's durable `adapter_timeline_keys`
+  (Capo owns identity; the reducer never touches storage).
+- `crates/capo-state/src/queries.rs`: `adapter_replay_batches_for_session`,
+  `adapter_raw_updates_for_batch`, `adapter_timeline_keys_for_session`.
+- Tests (all run under the gate): capo-adapters
+  `dp2_session_resume_adds_no_items`, `dp2_session_load_pumps_raw_history_then_reconciles`,
+  `repeated_tool_call_update_collapses_to_one_candidate_with_raw_duplicates`,
+  `idless_consecutive_chunks_record_low_boundary_confidence`,
+  `load_of_known_tool_history_is_duplicate_not_reimport`,
+  `load_of_known_message_matches_by_content_hash`,
+  `plan_updates_collapse_to_single_current_plan_candidate`; capo-state
+  `dp2_acp_replay_event_kinds_round_trip` (8 kinds as_str/from_wire) and the three
+  `dp2_adapter_*_projection_persists_and_rebuilds_identically`; capo-controller
+  `dp2_session_resume_attach_adds_no_items_but_records_attach_batch`,
+  `dp2_foreign_session_load_imports_each_item_once_then_rebuilds_identically`
+  (restart/replay rebuild-identically proof for all 3 read models + imported
+  items), `dp2_load_of_known_history_adds_no_duplicate_ui_items`.
 - Gate re-run from `/Users/nicolas/devel/capo-wt/depth`: `cargo fmt --check` PASS;
   `cargo clippy --all-targets --all-features -- -D warnings` PASS (no warnings);
-  `cargo test --workspace` PASS (every `test result:` line reports 0 failed across
-  all crates and doc-tests). Acceptance met.
+  `cargo test --workspace` PASS (0 failed across all crates + doc-tests). The new
+  tests fail-for-the-right-reason without the producer/engine (the projections are
+  unreachable and the counts/markers are absent); they pass with it.
 
 ## DP3 - ACP Raw-Update Storage, Provenance, And Cancel-While-Permission-Pending
 

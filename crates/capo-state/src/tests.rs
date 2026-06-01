@@ -4304,3 +4304,222 @@ fn sg5_workspace_lease_projection_persists_and_rebuilds_identically() {
     assert_eq!(rebuilt, after_release);
     assert!(!rebuilt[0].is_held());
 }
+
+#[test]
+fn dp2_acp_replay_event_kinds_round_trip() {
+    // DP2 (acp-replay-dedupe.md): the 8 ACP attach/replay event kinds have stable
+    // wire strings and round-trip through `as_str` / `from_wire`, so the persisted
+    // `EventRecord.kind` classifies back to the typed kind the append side used.
+    let pairs = [
+        (EventKind::AdapterAttachStarted, "adapter.attach_started"),
+        (
+            EventKind::AdapterAttachCompleted,
+            "adapter.attach_completed",
+        ),
+        (EventKind::AdapterAttachFailed, "adapter.attach_failed"),
+        (EventKind::AdapterReplayStarted, "adapter.replay_started"),
+        (
+            EventKind::AdapterRawUpdateObserved,
+            "adapter.raw_update_observed",
+        ),
+        (
+            EventKind::AdapterReplayDuplicateDetected,
+            "adapter.replay_duplicate_detected",
+        ),
+        (
+            EventKind::AdapterReplayAmbiguous,
+            "adapter.replay_ambiguous",
+        ),
+        (
+            EventKind::AdapterReplayCompleted,
+            "adapter.replay_completed",
+        ),
+    ];
+    for (kind, wire) in pairs {
+        assert_eq!(kind.as_str(), wire);
+        assert_eq!(EventKind::from_wire(wire), Some(kind));
+    }
+}
+
+#[test]
+fn dp2_adapter_replay_batch_projection_persists_and_rebuilds_identically() {
+    // DP2: an AcpReplayBatch projection persists to `adapter_replay_batches` AND
+    // rebuilds byte-identically from the durable projection_records log on restart
+    // (the single load-bearing invariant: reconciled projections survive a
+    // clear-and-replay). The decode resets `updated_sequence` from the record's
+    // sequence column, so a rebuild re-derives the same row.
+    let store = temp_store("dp2-replay-batch");
+    let project_id = ProjectId::new("project-capo");
+    let session_id = SessionId::new("session-acp");
+
+    let mut batch = AdapterReplayBatchProjection {
+        acp_replay_batch_id: "acp-replay-batch-1".to_string(),
+        session_id: session_id.clone(),
+        project_id: project_id.clone(),
+        external_session_ref: "acp-ext-session-1".to_string(),
+        source: AdapterReplayBatchProjection::SOURCE_SESSION_LOAD.to_string(),
+        status: AdapterReplayBatchProjection::STATUS_OPEN.to_string(),
+        load_request_id: Some("load-req-1".to_string()),
+        prompt_request_id: None,
+        recovery_attempt_id: None,
+        raw_update_count: 3,
+        imported_count: 0,
+        duplicate_count: 0,
+        ambiguous_count: 0,
+        normalized_sequence_start: None,
+        normalized_sequence_end: None,
+        started_at: Some("1700000000000".to_string()),
+        completed_at: None,
+        updated_sequence: 0,
+    };
+    store
+        .append_event(
+            NewEvent::new(
+                "event-dp2-replay-started",
+                EventKind::AdapterReplayStarted,
+                "test",
+            ),
+            &[ProjectionRecord::AdapterReplayBatch(batch.clone())],
+        )
+        .expect("append replay_started");
+
+    // Finalize: same row, completed + counts stamped.
+    batch.status = AdapterReplayBatchProjection::STATUS_COMPLETED.to_string();
+    batch.imported_count = 2;
+    batch.duplicate_count = 1;
+    batch.ambiguous_count = 0;
+    batch.completed_at = Some("1700000000999".to_string());
+    store
+        .append_event(
+            NewEvent::new(
+                "event-dp2-replay-completed",
+                EventKind::AdapterReplayCompleted,
+                "test",
+            ),
+            &[ProjectionRecord::AdapterReplayBatch(batch.clone())],
+        )
+        .expect("append replay_completed");
+
+    let live = store
+        .adapter_replay_batches_for_session(&session_id)
+        .expect("batches");
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].status, "completed");
+    assert_eq!(live[0].imported_count, 2);
+    assert_eq!(live[0].duplicate_count, 1);
+
+    store.rebuild_projections().expect("rebuild");
+    let rebuilt = store
+        .adapter_replay_batches_for_session(&session_id)
+        .expect("batches rebuilt");
+    assert_eq!(rebuilt, live, "replay batch rebuilds identically");
+}
+
+#[test]
+fn dp2_adapter_raw_update_projection_persists_and_rebuilds_identically() {
+    // DP2: a raw ACP update persists to `adapter_raw_updates` (identity is
+    // (batch, batch_index)) and rebuilds identically; the `batch_index` is packed
+    // as a string in column `d` and parsed back, so this guards that decode path.
+    let store = temp_store("dp2-raw-update");
+    let project_id = ProjectId::new("project-capo");
+
+    let raw = AdapterRawUpdateProjection {
+        acp_raw_update_id: "acp-raw-1".to_string(),
+        acp_replay_batch_id: "acp-replay-batch-1".to_string(),
+        project_id,
+        external_session_ref: "acp-ext-session-1".to_string(),
+        batch_index: 7,
+        jsonrpc_method: "session/update".to_string(),
+        session_update_kind: Some("tool_call".to_string()),
+        external_item_ref: Some("tool-1".to_string()),
+        acp_timeline_key: Some("acp:s1:tool:tool-1".to_string()),
+        payload_hash: "fnv1a64:deadbeefdeadbeef".to_string(),
+        payload_artifact_id: Some("artifact-acp-raw-1".to_string()),
+        replay_source: AdapterReplayBatchProjection::SOURCE_SESSION_LOAD.to_string(),
+        dedupe_confidence: AdapterRawUpdateProjection::CONFIDENCE_STABLE.to_string(),
+        observed_at: Some("1700000000001".to_string()),
+        updated_sequence: 0,
+    };
+    store
+        .append_event(
+            NewEvent::new(
+                "event-dp2-raw-observed",
+                EventKind::AdapterRawUpdateObserved,
+                "test",
+            ),
+            &[ProjectionRecord::AdapterRawUpdate(raw.clone())],
+        )
+        .expect("append raw_update_observed");
+
+    let live = store
+        .adapter_raw_updates_for_batch("acp-replay-batch-1")
+        .expect("raw updates");
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].batch_index, 7);
+    assert_eq!(live[0].dedupe_confidence, "stable");
+
+    store.rebuild_projections().expect("rebuild");
+    let rebuilt = store
+        .adapter_raw_updates_for_batch("acp-replay-batch-1")
+        .expect("raw updates rebuilt");
+    assert_eq!(rebuilt, live, "raw update rebuilds identically");
+}
+
+#[test]
+fn dp2_adapter_timeline_key_projection_persists_and_rebuilds_identically() {
+    // DP2: a protocol-aware timeline key persists to `adapter_timeline_keys` and
+    // rebuilds identically; covers both a stable tool key and a synthetic
+    // low-confidence message key.
+    let store = temp_store("dp2-timeline-key");
+    let project_id = ProjectId::new("project-capo");
+    let session_id = SessionId::new("session-acp");
+
+    let tool_key = AdapterTimelineKeyProjection {
+        adapter_timeline_key_id: "acp-timeline-tool-1".to_string(),
+        session_id: session_id.clone(),
+        project_id: project_id.clone(),
+        external_session_ref: "acp-ext-session-1".to_string(),
+        kind: "tool".to_string(),
+        stable_ref: Some("tool-1".to_string()),
+        synthetic_ref: None,
+        confidence: "stable".to_string(),
+        first_sequence: Some(1),
+        last_sequence: Some(3),
+        updated_sequence: 0,
+    };
+    let message_key = AdapterTimelineKeyProjection {
+        adapter_timeline_key_id: "acp-timeline-msg-1".to_string(),
+        session_id: session_id.clone(),
+        project_id: project_id.clone(),
+        external_session_ref: "acp-ext-session-1".to_string(),
+        kind: "message".to_string(),
+        stable_ref: None,
+        synthetic_ref: Some("assistant:fnv1a64:0011223344556677".to_string()),
+        confidence: "low".to_string(),
+        first_sequence: Some(2),
+        last_sequence: Some(2),
+        updated_sequence: 0,
+    };
+    for (id, key) in [
+        ("event-dp2-tlk-tool", &tool_key),
+        ("event-dp2-tlk-msg", &message_key),
+    ] {
+        store
+            .append_event(
+                NewEvent::new(id, EventKind::AdapterRawUpdateObserved, "test"),
+                &[ProjectionRecord::AdapterTimelineKey(key.clone())],
+            )
+            .expect("append timeline key");
+    }
+
+    let live = store
+        .adapter_timeline_keys_for_session(&session_id)
+        .expect("timeline keys");
+    assert_eq!(live.len(), 2);
+
+    store.rebuild_projections().expect("rebuild");
+    let rebuilt = store
+        .adapter_timeline_keys_for_session(&session_id)
+        .expect("timeline keys rebuilt");
+    assert_eq!(rebuilt, live, "timeline keys rebuild identically");
+}
