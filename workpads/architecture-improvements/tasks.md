@@ -419,3 +419,53 @@ Acceptance: met (real-Codex chat is now reachable end-to-end through the running
 server: register `--adapter codex`, then `SendTask`/`SteerAgent` drive the real
 read-only one-shot Codex per the agent's binding, fail-closed-fast when the gate is
 off, with fake agents unchanged).
+
+## AI5 - Close the autonomy loop: a `Continue` continuation decision must drive the next turn through the single production path
+
+Status: open. Priority: medium. Source: goal-autonomy boundary review (2026-06-01).
+
+Problem:
+
+- The GA4 continuation scheduler (`crates/capo-controller/src/continuation_scheduler.rs`)
+  is a sound pure state machine, and `evaluate_and_record_continuation` durably
+  records the `continue | pause | block | budget-limit | no-progress-suppress`
+  decision (event + `GoalContinuationProjection`) and wires the terminal
+  `budget-limit -> run.aborted` path. But a `Continue` decision is NOT wired to
+  drive the next turn: there is no `ServerCommand` that evaluates continuation,
+  and `evaluate_*continuation` is reached only from the GA e2e/reattach tests
+  (`crates/capo-controller/src/goal_autonomy_e2e.rs`, `.../reattach.rs`), which
+  simulate "decide continue, then the next turn happens" by manually driving the
+  follow-on turn rather than by the scheduler triggering it.
+- Net: the autonomy loop is BUILT but not CLOSED on the production path. This is
+  acceptable for goal-autonomy (M2-on-substrate, opt-in, off by default, with
+  `depth`/integration following), and it correctly did NOT create a second
+  orchestration shape. The loop-closing wire is the next architectural step and is
+  larger than an inline fix.
+
+Why this is the right boundary:
+
+- The single production orchestration path is `run_dispatch_turn` (AI1). A
+  `Continue` decision MUST re-enter THAT path (issue a `ServerCommand::RunDispatchTurn`
+  for the goal's attempt run), never a parallel turn driver, so "the loop is the
+  loop" holds for autonomous continuation exactly as it does for an operator turn.
+
+Acceptance:
+
+- A production server command (e.g. `ServerCommand::ContinueGoal { goal_id }` or a
+  controller-owned tick) evaluates continuation through
+  `evaluate_and_record_continuation` and, ONLY on `Continue` and ONLY when
+  continuation is explicitly enabled, issues exactly one `RunDispatchTurn` for the
+  goal's attempt run through the AI1 single path.
+- Opt-in preserved: with continuation disabled the command never dispatches a turn;
+  the off-by-default invariant from `goal-autonomy/knowledge.md` Non-Goals holds.
+- No second orchestration path: the continued turn produces the SAME dispatch event
+  sequence + `TurnFinished` as an operator turn.
+- A deterministic test drives the PRODUCTION command (not the bespoke e2e harness)
+  and asserts: enabled + safe-boundary -> one continued `RunDispatchTurn` +
+  `TurnFinished`; disabled -> no dispatch; `budget-limit` -> `run.aborted`, no
+  dispatch.
+
+Verification:
+
+- `cargo fmt --all --check`; `cargo clippy --all-targets --all-features -- -D warnings`;
+  `cargo test --workspace`.
