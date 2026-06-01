@@ -52,7 +52,10 @@ async fn main() {
     let state_root = std::env::var("CAPO_STATE_ROOT").unwrap_or_else(|_| ".capo-dev".to_string());
     let dist = std::env::var("CAPO_WEB_DIST").unwrap_or_else(|_| "web/app/dist".to_string());
 
-    let cfg = Arc::new(Config { state_root: state_root.clone(), addr: addr.clone() });
+    let cfg = Arc::new(Config {
+        state_root: state_root.clone(),
+        addr: addr.clone(),
+    });
 
     let index = format!("{dist}/index.html");
     let static_service = ServeDir::new(&dist).not_found_service(ServeFile::new(index));
@@ -90,7 +93,9 @@ fn build_console(state_root: &str, addr: &str) -> Result<Value, String> {
     let server = CapoServer::open(ProjectId::new(PROJECT_ID), state_root)
         .map_err(|e| format!("open server: {e:?}"))?;
     let snapshot = match server
-        .handle(api_request(ServerCommand::Dashboard { recent_event_limit: 50 }))
+        .handle(api_request(ServerCommand::Dashboard {
+            recent_event_limit: 50,
+        }))
         .map_err(|e| format!("handle: {e:?}"))?
         .payload
     {
@@ -124,7 +129,12 @@ fn read_lanes(state_root: &str) -> Option<Lanes> {
             session_agent.insert(s.session.session_id.to_string(), row.agent.name.clone());
         }
     }
-    let target_of = |sid: &str| session_agent.get(sid).cloned().unwrap_or_else(|| sid.to_string());
+    let target_of = |sid: &str| {
+        session_agent
+            .get(sid)
+            .cloned()
+            .unwrap_or_else(|| sid.to_string())
+    };
 
     // Activity: flatten + dedupe recent events, newest first.
     let mut events = Vec::new();
@@ -164,7 +174,11 @@ fn read_lanes(state_root: &str) -> Option<Lanes> {
         .project_evidence
         .iter()
         .map(|e| {
-            let sid = e.session_id.as_ref().map(|s| s.to_string()).unwrap_or_default();
+            let sid = e
+                .session_id
+                .as_ref()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
             json!({
                 "id": e.evidence_id.to_string(),
                 "kind": e.kind,
@@ -177,24 +191,33 @@ fn read_lanes(state_root: &str) -> Option<Lanes> {
     let reviews: Vec<Value> = pd
         .review_findings
         .iter()
-        .map(|r| json!({
-            "id": r.review_finding_id,
-            "status": r.status,
-            "target": target_of(&r.session_id.to_string()),
-        }))
+        .map(|r| {
+            json!({
+                "id": r.review_finding_id,
+                "status": r.status,
+                "target": target_of(&r.session_id.to_string()),
+            })
+        })
         .collect();
 
     let validations: Vec<Value> = pd
         .task_outcome_reports
         .iter()
-        .map(|t| json!({
-            "id": t.task_outcome_report_id,
-            "status": t.outcome_status,
-            "target": target_of(&t.session_id.to_string()),
-        }))
+        .map(|t| {
+            json!({
+                "id": t.task_outcome_report_id,
+                "status": t.outcome_status,
+                "target": target_of(&t.session_id.to_string()),
+            })
+        })
         .collect();
 
-    Some(Lanes { activity, evidence, reviews, validations })
+    Some(Lanes {
+        activity,
+        evidence,
+        reviews,
+        validations,
+    })
 }
 
 async fn dashboard(State(cfg): State<Arc<Config>>) -> Result<Json<Value>, (StatusCode, String)> {
@@ -226,23 +249,42 @@ async fn commands(
     let command = match body.kind.as_str() {
         "steer_agent" => ServerCommand::SteerAgent {
             agent_name: body.agent,
-            goal: if body.message.is_empty() { body.goal } else { body.message },
+            goal: if body.message.is_empty() {
+                body.goal
+            } else {
+                body.message
+            },
         },
         "interrupt_agent" => ServerCommand::InterruptAgent {
             agent_name: body.agent,
-            reason: if body.reason.is_empty() { "operator interrupt".to_string() } else { body.reason },
+            reason: if body.reason.is_empty() {
+                "operator interrupt".to_string()
+            } else {
+                body.reason
+            },
         },
         "stop_agent" => ServerCommand::StopAgent {
             agent_name: body.agent,
-            reason: if body.reason.is_empty() { "operator stop".to_string() } else { body.reason },
+            reason: if body.reason.is_empty() {
+                "operator stop".to_string()
+            } else {
+                body.reason
+            },
         },
-        other => return Err((StatusCode::BAD_REQUEST, format!("unsupported command: {other}"))),
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("unsupported command: {other}"),
+            ));
+        }
     };
     let state_root = cfg.state_root.clone();
     tokio::task::spawn_blocking(move || {
         let server = CapoServer::open(ProjectId::new(PROJECT_ID), &state_root)
             .map_err(|e| format!("open: {e:?}"))?;
-        server.handle(api_request(command)).map_err(|e| format!("handle: {e:?}"))
+        server
+            .handle(api_request(command))
+            .map_err(|e| format!("handle: {e:?}"))
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
@@ -250,19 +292,23 @@ async fn commands(
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn events(State(cfg): State<Arc<Config>>) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
-    let stream = IntervalStream::new(tokio::time::interval(Duration::from_millis(1500))).then(move |_| {
-        let cfg = cfg.clone();
-        async move {
-            let value = tokio::task::spawn_blocking(move || build_console(&cfg.state_root, &cfg.addr))
-                .await
-                .unwrap_or_else(|e| Err(format!("join: {e}")))
-                .unwrap_or_else(|e| json!({ "error": e }));
-            Ok(Event::default()
-                .json_data(value)
-                .unwrap_or_else(|_| Event::default().data("{}")))
-        }
-    });
+async fn events(
+    State(cfg): State<Arc<Config>>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let stream =
+        IntervalStream::new(tokio::time::interval(Duration::from_millis(1500))).then(move |_| {
+            let cfg = cfg.clone();
+            async move {
+                let value =
+                    tokio::task::spawn_blocking(move || build_console(&cfg.state_root, &cfg.addr))
+                        .await
+                        .unwrap_or_else(|e| Err(format!("join: {e}")))
+                        .unwrap_or_else(|e| json!({ "error": e }));
+                Ok(Event::default()
+                    .json_data(value)
+                    .unwrap_or_else(|_| Event::default().data("{}")))
+            }
+        });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -322,7 +368,13 @@ fn agent_status(a: &AgentSummary) -> &'static str {
         .unwrap_or_default();
     match raw.as_str() {
         s if s.contains("run") || s.contains("progress") || s.contains("active") => "running",
-        s if s.contains("finish") || s.contains("complete") || s.contains("done") || s.contains("succeed") => "finished",
+        s if s.contains("finish")
+            || s.contains("complete")
+            || s.contains("done")
+            || s.contains("succeed") =>
+        {
+            "finished"
+        }
         s if s.contains("timeout") || s.contains("timed") => "timed out",
         s if s.contains("block") => "blocked",
         s if s.contains("pause") => "paused",
@@ -333,7 +385,10 @@ fn agent_status(a: &AgentSummary) -> &'static str {
 
 fn map_agent(a: &AgentSummary) -> Value {
     let s = a.session.as_ref();
-    let confidence = s.and_then(|x| x.latest_confidence).map(map_confidence).unwrap_or("medium");
+    let confidence = s
+        .and_then(|x| x.latest_confidence)
+        .map(map_confidence)
+        .unwrap_or("medium");
     json!({
         "id": a.name,
         "name": a.name,
@@ -358,7 +413,11 @@ fn map_agent(a: &AgentSummary) -> Value {
 }
 
 fn map_dispatch(s: &SessionSummary) -> Value {
-    let plan = if s.latest_dispatch_plan_id.is_some() { "done" } else { "none" };
+    let plan = if s.latest_dispatch_plan_id.is_some() {
+        "done"
+    } else {
+        "none"
+    };
     let gate = match s.dispatch_gate_status.as_deref() {
         Some(v) if v.contains("approv") || v.contains("gated") || v.contains("ready") => "done",
         Some(v) if v.contains("block") || v.contains("reject") => "blocked",
@@ -418,11 +477,13 @@ fn kind_label(kind: &str) -> String {
 
 fn summarize(payload_json: &str, kind: &str) -> String {
     if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(payload_json) {
-        for key in ["summary", "goal", "text", "message", "reason", "content", "title", "detail", "note"] {
-            if let Some(Value::String(s)) = map.get(key) {
-                if !s.is_empty() {
-                    return truncate(s, 160);
-                }
+        for key in [
+            "summary", "goal", "text", "message", "reason", "content", "title", "detail", "note",
+        ] {
+            if let Some(Value::String(s)) = map.get(key)
+                && !s.is_empty()
+            {
+                return truncate(s, 160);
             }
         }
     }
