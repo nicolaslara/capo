@@ -588,7 +588,67 @@ Must not do:
 
 ## GA7 - Milestone B: Parent/Child Subgoals And Provider-Native Delegation
 
-Status: pending.
+Status: done. Parent/child subgoal reporting (GO11) and provider-native goal
+delegation as observed-not-authoritative (GO12) are implemented controller-side in
+`crates/capo-controller/src/parent_child.rs` on the existing GA1
+goal/requirement/report/delegated-provider projections and the GA5 auditor -- no
+second completion notion. Parent/child (GO11): `report_child_to_parent` publishes a
+child's progress/evidence/blocker/completion reports UP to the parent Capo goal
+(recorded as a `goal.report_recorded` against the PARENT goal, attributed to the
+child's session, preserving the observed-vs-reported `source` tag) WITHOUT touching
+the parent requirement ledger, so a child claim never auto-satisfies a parent
+requirement; `parent_subgoal_story` is the parent-visible per-subgoal story over the
+new `SqliteStateStore::child_goals_for_parent` query. The merge/review point is the
+pure `ParentMergeGate::decide`: child work satisfies a parent requirement ONLY when
+(1) the child goal is itself audited `complete` by the GA5 auditor on OBSERVED
+evidence, AND (2) the parent recorded a merge/review point citing the child, AND (3)
+the claim is in-scope of the explicit `SubgoalResultContract` (capability profile +
+workspace/checkpoint) -- a bare child claim is `Rejected`
+(`child_not_audited_complete`). Provider delegation (GO12): `ProviderGoalSupport::
+probe` FEATURE-PROBES the provider's advertised command surface for the native
+`/goal` command rather than assuming it (Native -> delegate/mirror objective;
+Unavailable -> fall back to Capo's loop), and `record_delegated_provider_goal`
+records provider-native goal state/completion as a `DelegatedProviderGoalProjection`
+tagged `source=agent_reported`/observed -- evidence the GA5 auditor weighs, never an
+authoritative Capo completion. Codex `/goal` is therefore observed-not-authoritative:
+a provider-native `completed` state does NOT flip the Capo goal (the auditor judges
+it `requirement_claim_only` with no observed evidence). The optional live Codex
+`/goal` smoke stays behind the explicit `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1
+CAPO_SERVER_RUN_CODEX_LIVE=1` opt-in (unset here, so correctly skipped); the
+deterministic fake delegated-provider test covers the required behavior.
+
+Evidence:
+
+- New controller module `crates/capo-controller/src/parent_child.rs` (types
+  `SubgoalResultContract`/`ChildCompletionClaim`/`ParentMergeInputs`/
+  `ParentMergeDecision`/`ParentMergeOutcome`/`ParentMergeGate`/`ProviderGoalSupport`/
+  `ProviderGoalCapability`/`ParentSubgoalStoryEntry`, all re-exported from the
+  controller crate root; `mod parent_child;` registered in `lib.rs`) plus controller
+  methods `report_child_to_parent`, `parent_subgoal_story`, `evaluate_parent_merge`,
+  and `record_delegated_provider_goal`. One new read query
+  `SqliteStateStore::child_goals_for_parent` in `crates/capo-state/src/queries.rs`.
+  No new event/projection types were needed: the GA1 `GoalReportRecorded` +
+  `GoalReportProjection`, `DelegatedProviderGoalObserved` +
+  `DelegatedProviderGoalProjection`, and the GA5 auditor/`latest_goal_audit_decision`
+  are reused.
+- 12 deterministic tests (mocked multi-agent / fake delegated provider, no live
+  provider): 4 pure merge-gate branch tests (merges only when audited + reviewed +
+  in-scope; rejects a child claim without the child's own audit; rejects without a
+  parent merge review; rejects an out-of-scope claim) + 1 pure provider-probe test
+  (native vs unavailable) + 7 controller-wiring tests (child reports publish up and
+  form a subgoal story while the parent requirement stays unverified; a child claim
+  alone does NOT merge into a parent requirement; child audited-complete + parent
+  reviewed DOES merge; a provider `completed` delegation is recorded as evidence and
+  audited incomplete, not auto-completed; provider-unavailable fallback still records
+  observed state; parent/child + delegation survive restart + projection rebuild;
+  delegated recording is idempotent).
+- `cargo test -p capo-controller parent_child` -> 12 passed.
+- `cargo fmt --check` -> exit 0.
+- `cargo clippy --all-targets --all-features -- -D warnings` -> exit 0.
+- `cargo test --workspace` -> exit 0, 0 failed across all crates (capo-controller
+  lib: 167 passed, 2 ignored; capo-state lib: 63 passed; capo-server lib: 108 passed,
+  3 ignored).
+- `git diff --check` -> clean.
 
 Acceptance:
 

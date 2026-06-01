@@ -2065,6 +2065,31 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    /// GA7 (goal-orchestration GO11): the child subgoals of a parent goal,
+    /// newest activity first then by id for a stable order.
+    ///
+    /// A child goal carries the parent's id in `parent_goal_id`; this is the
+    /// queryable spine behind the parent-visible subgoal story (GO11). Like every
+    /// goal read it round-trips identically across a projection rebuild.
+    pub fn child_goals_for_parent(
+        &self,
+        parent_goal_id: &GoalId,
+    ) -> StateResult<Vec<GoalProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT goal_id, project_id, task_id, agent_id, session_id, parent_goal_id,
+                    attempt_run_id, objective, status, success_criteria_json, constraints_json,
+                    verification_surface_json, budget_json, stop_conditions_json,
+                    blocker_reason, updated_sequence
+             FROM goals
+             WHERE parent_goal_id = ?1
+             ORDER BY updated_sequence DESC, goal_id ASC",
+        )?;
+        let rows = statement.query_map(params![parent_goal_id.as_str()], goal_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     /// GA1 (goal-orchestration GO3): the per-requirement status ledger for a goal.
     pub fn requirement_ledgers_for_goal(
         &self,

@@ -38,6 +38,7 @@ mod continuation_scheduler;
 mod fake_session;
 mod grant_lifecycle;
 mod local_dispatch;
+mod parent_child;
 mod permission_round_trip;
 mod real_controller;
 mod reattach;
@@ -66,6 +67,11 @@ pub use grant_lifecycle::{
     GrantReadBackDecision, GrantReadBackSource, GrantRevocation, GrantRevocationScope,
 };
 pub use local_dispatch::LocalAdapterDispatchRunStart;
+pub use parent_child::{
+    ChildCompletionClaim, ParentMergeDecision, ParentMergeGate, ParentMergeInputs,
+    ParentMergeOutcome, ParentSubgoalStoryEntry, ProviderGoalCapability, ProviderGoalSupport,
+    SubgoalResultContract,
+};
 pub use permission_round_trip::{
     PermissionCancellation, PermissionRoundTripOutcome, PermissionRoundTripScope,
 };
