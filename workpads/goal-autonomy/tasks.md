@@ -311,7 +311,61 @@ Must not do:
 
 ## GA4 - Milestone B: Safe-Boundary Continuation Scheduler
 
-Status: pending.
+Status: done. The safe-boundary continuation scheduler (GO8) is implemented in
+`crates/capo-controller/src/continuation_scheduler.rs` as a PURE state machine:
+`ContinuationScheduler::decide(&SchedulerInputs) -> ContinuationOutcome` performs
+no I/O, appends no event, and is deterministic given its inputs, producing one of
+`continue | pause | block | budget-limit | no-progress-suppress` with a stable
+machine reason code. It is opt-in only: `SchedulerInputs::enabled` (an explicit
+operator/config flag) is required for `continue`; `enabled = false` short-circuits
+to `pause` (`not_enabled`), so automatic continuation is never on by default.
+Continue is reachable only at a safe boundary -- goal active, runtime + session
+idle, no queued user input, no pending permission, capability profile valid,
+budget available, no recent no-progress suppression, AND no conflicting
+`safety-gates` workspace lock (consuming the SG5 single-writer write lease via
+`workspace_lease_holder`: a held lease owned by a DIFFERENT session is a conflict;
+the same session is not). A source-writing next step requires BOTH a checkpoint
+boundary and the verification runner present, else it pauses
+(`writes_source_without_checkpoint` / `writes_source_without_verification`) -- the
+scheduler refuses to continue a goal that would write source without a checkpoint
+boundary. No-progress/spin guard: a prior `no-progress-suppress` continuation
+(read from the goal's continuation ledger) forces `no-progress-suppress` until
+strategy changes. Budget exhaustion is a terminal `budget-limit`; the recording
+path `evaluate_and_record_continuation` durably records the decision through the
+GA1 `goal.continuation_decision_recorded` event + `GoalContinuationProjection`
+(idempotent on `(goal, continuation_id)`) and pairs `budget-limit` with the
+existing RTL7 `abort_run_for_ceiling` `run.aborted` abort. GA0 open question
+resolved: `GoalBudget` COMPOSES the RTL7 per-run `RunResourceCeiling` (reusing its
+ceiling/usage types) rather than replacing it; the run-level floor still fires in
+the loop. All scheduler policy lives controller-side; no client surface holds it.
+
+Evidence:
+
+- New module `crates/capo-controller/src/continuation_scheduler.rs` (types
+  `ContinuationScheduler`/`ContinuationDecision`/`ContinuationOutcome`/
+  `SchedulerInputs`/`ContinuationConditions`/`GoalBudget`, all re-exported from the
+  controller crate root) plus controller methods `evaluate_continuation` (pure,
+  read-only) and `evaluate_and_record_continuation` (records the decision + aborts
+  on budget-limit). No new event/projection types were needed: the GA1
+  `ContinuationDecisionRecorded` event + `GoalContinuationProjection` and the RTL7
+  `abort_run_for_ceiling` path are reused.
+- 15 deterministic tests (mocked/seeded goal state, no live provider): 8 pure
+  state-machine branch tests (continue at safe boundary; never continue when not
+  enabled; pause on each unsafe-boundary condition; refuse source write without
+  checkpoint/verification; block outranks every other signal; budget-limit
+  outranks soft pause; no-progress suppression until strategy changes) and 7
+  controller-wiring tests (records a continue decision; refuses to continue when
+  another writer holds the workspace lock and the same session does not conflict;
+  budget-limit aborts the run durably; no-progress suppression blocks the next
+  continuation; blocks a blocked goal; recording idempotent on continuation_id;
+  continuation decisions survive restart + projection rebuild).
+- `cargo test -p capo-controller continuation_scheduler` -> 15 passed.
+- `cargo fmt --check` -> exit 0.
+- `cargo clippy --all-targets --all-features -- -D warnings` -> exit 0.
+- `cargo test --workspace` -> exit 0, 0 failed across all crates (capo-controller
+  lib: 139 passed, 2 ignored; capo-state lib: 62 passed; capo-server lib: 108
+  passed, 3 ignored).
+- `git diff --check` -> clean.
 
 Acceptance:
 

@@ -33,6 +33,7 @@ use capo_tools::{
 mod adapter_replay;
 mod checkpoint;
 mod continuation_context;
+mod continuation_scheduler;
 mod fake_session;
 mod grant_lifecycle;
 mod local_dispatch;
@@ -50,6 +51,10 @@ pub use checkpoint::{CheckpointCreated, CheckpointError, CheckpointRestored, Che
 pub use continuation_context::{
     ContinuationAuditContract, ContinuationContextFragment, ContinuationContextLimits,
     ContinuationContextPacket, ContinuationRequirement, ContinuationSourceKind,
+};
+pub use continuation_scheduler::{
+    ContinuationConditions, ContinuationDecision, ContinuationOutcome, ContinuationScheduler,
+    GoalBudget, SchedulerInputs,
 };
 pub use grant_lifecycle::{
     GrantReadBackDecision, GrantReadBackSource, GrantRevocation, GrantRevocationScope,
