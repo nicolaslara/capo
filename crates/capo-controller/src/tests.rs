@@ -5154,6 +5154,154 @@ fn sg1_denied_request_blocks_invocation_with_structured_refusal() {
     );
 }
 
+/// SG1 (single canonical decide / loop consumes the typed refusal): the REAL turn
+/// LOOP -- `RealBoundaryController::send_task`, the production chat/send-task path
+/// -- no longer runs its own second upfront `permission_policy.decide`. Its ONLY
+/// decide is the dispatch's, and the loop CONSUMES the typed
+/// `PermissionDecideOutcome`/`ToolRefusal` that dispatch returns.
+///
+/// This proves the loop SURFACES the typed refusal (not merely that the call was
+/// blocked): a standing durable `reject_always` deny grant (the SG3 read-back deny,
+/// reachable in production) blocks the per-turn `capo.session_summary` dispatch, and
+/// `send_task` reflects the refusal's structured `agent_message()` back onto the
+/// blocked session read model -- the session `latest_blocker` IS the agent-readable
+/// refusal line, not a raw error string -- and skips the downstream
+/// memory/artifact/evidence steps. Under a PERMISSIVE policy (TrustedLocal) the only
+/// thing that can deny here is the single canonical (dispatch) decide, so a block
+/// here cannot be the dead upfront gate.
+#[test]
+fn sg1_real_loop_send_task_surfaces_typed_refusal_when_dispatch_denies() {
+    use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
+
+    let agent_name = "sg1-loop-deny-worker";
+    let session_id = format!("session-{agent_name}");
+    let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("sg1-loop-deny"));
+    // TrustedLocal ALLOWS `capo.session_summary` (the permissive default), so the
+    // upfront-decide gate this change removed would NOT have blocked it. The only
+    // authority that can deny is the dispatch's single canonical decide via the SG3
+    // standing-deny read-back seeded below.
+    let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
+        ProjectId::new("project-capo"),
+        temp_root(),
+        PermissionPolicy::allow_trusted_local(),
+        scripted,
+    )
+    .expect("open real controller");
+    let registration = controller.register_agent(agent_name).expect("agent");
+
+    // The exact scope_json the per-turn `capo.session_summary` dispatch decides over
+    // (the tool's own required scopes) -- so the seeded standing deny matches the
+    // dispatch read-back's (subject + scope) key.
+    let scope_json = controller
+        .capo_registry()
+        .expect("capo registry")
+        .describe_tool("capo.session_summary")
+        .expect("session_summary defined")
+        .required_scopes_json;
+
+    // Seed a standing durable DENY grant for the loop's subject + the session-summary
+    // scope. The dispatch's grant read-back (SG3) enforces this as a `reject_always`
+    // standing denial, so the single canonical decide denies the per-turn tool.
+    sg3_seed_grant(
+        &controller,
+        capo_state::CapabilityGrantProjection {
+            capability_grant_id: "grant-sg1-loop-standing-deny".to_string(),
+            capability_profile_id: "trusted-local-dev".to_string(),
+            scope_json,
+            effect: "deny".to_string(),
+            subject_json: format!("{{\"session_id\":\"{session_id}\"}}"),
+            decision_source: "reject_always".to_string(),
+            persistence: "until_revoked".to_string(),
+            explanation: "operator standing denial of the per-turn summary tool".to_string(),
+            created_at: Some("1700000000000".to_string()),
+            expires_at: None,
+            revoked_at: None,
+            updated_sequence: 0,
+        },
+        "sg1-loop-standing-deny",
+    );
+
+    // Drive the REAL loop. send_task returns Ok with BLOCKED state (mirroring the
+    // legacy deny path), not an error -- the deny is a reflected decide outcome.
+    let refs = controller
+        .send_task(&registration, "Inspect the session under a standing deny")
+        .expect("send task returns blocked state, not an error");
+    assert_eq!(refs.session_id.as_str(), session_id);
+    let observation = controller.observe(&refs).expect("observe");
+
+    // The loop SURFACED the typed refusal: the session blocker is the structured,
+    // agent-readable refusal line (`ToolRefusal::agent_message()`), NOT a raw error.
+    assert_eq!(observation.task.capo_execution_status, "blocked");
+    assert_eq!(observation.agent.status, "paused");
+    assert_eq!(observation.session.status, "waiting_for_permission");
+    let blocker = observation
+        .session
+        .latest_blocker
+        .as_deref()
+        .expect("the blocked session carries the reflected refusal");
+    // The agent-readable refusal shape: names the refused tool and the deciding
+    // authority -- the structured line `ToolRefusal::agent_message()` produces.
+    assert!(
+        blocker.starts_with("Permission denied for tool `capo.session_summary`"),
+        "the session blocker is the typed refusal's agent message, got: {blocker}",
+    );
+    assert!(
+        blocker.contains("reject_always"),
+        "the reflected refusal names the deciding authority (the standing deny), got: {blocker}",
+    );
+
+    // The dispatch's decide recorded the lifecycle (requested + decided) AND blocked
+    // the tool: the tool-call projection reached terminal `denied`, and NO tool ran.
+    let tools = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    assert_eq!(tools.len(), 1, "exactly the one denied per-turn dispatch");
+    assert_eq!(tools[0].status, "denied");
+    assert!(tools[0].output_artifact_id.is_none());
+
+    let turn_events = controller
+        .state()
+        .events_for_session_turn(&refs.session_id, &format!("turn-{agent_name}"))
+        .expect("session turn events");
+    assert!(
+        turn_events
+            .iter()
+            .any(|event| event.kind == "permission.decided"
+                && event.payload_json.contains("\"effect\":\"deny\"")),
+        "the single canonical decide recorded the deny on the log",
+    );
+    for blocked_kind in [
+        "capability.grant_used",
+        "tool.invocation_started",
+        "tool.output_observed",
+        "tool.call_completed",
+        "tool.result_delivered",
+    ] {
+        assert!(
+            !turn_events.iter().any(|event| event.kind == blocked_kind),
+            "a denied per-turn dispatch must not emit {blocked_kind}",
+        );
+    }
+
+    // The early-return from the typed refusal skipped the downstream steps, exactly
+    // like the legacy deny path: no memory packet, no evidence.
+    assert!(
+        controller
+            .state()
+            .memory_packets_for_session(&refs.session_id)
+            .expect("memory packets")
+            .is_empty(),
+    );
+    assert!(
+        controller
+            .state()
+            .evidence_for_session(&refs.session_id)
+            .expect("evidence")
+            .is_empty(),
+    );
+}
+
 // --- SG2: AgentAdapter permission round-trip + ACP option mapping (fixtures) -
 //
 // A fake/scripted adapter raises an `AdapterPermissionRequest` carrying the ACP

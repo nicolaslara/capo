@@ -111,40 +111,66 @@ impl FakeBoundaryController {
                 },
             )
             .map_err(|error| StateError::CodexLiveChat(error.to_string()))?;
-        let permission = self.permission_policy.decide(PermissionRequest {
+        // SG1 (single canonical decide): the FAKE fixture path keeps its legacy
+        // upfront `permission_policy.decide` gate (a hand-rolled scope string) so
+        // the deterministic e2e fixtures stay byte-for-byte. The REAL loop does NOT
+        // decide here: its single canonical decide is the one the dispatch's
+        // `authorize_and_invoke` runs over the tool's OWN required scope, and the
+        // loop CONSUMES the typed `PermissionDecideOutcome`/`ToolRefusal` that
+        // dispatch returns (below). A second upfront decide on a different,
+        // hand-rolled scope would be exactly the two-decide-paths smell this removes,
+        // so it is fake-only.
+        let dispatch_scope = ToolDispatchScope {
+            task_id: task_id.clone(),
+            agent_id: registration.agent_id.clone(),
             session_id: session_id.clone(),
-            capability_profile_id: self.permission_policy.default_profile_id().to_string(),
-            scope_json: "[\"tool:invoke:capo.session_summary\",\"state:read:session\",\"state:read:tool\",\"state:read:permission_queue\",\"memory:build_packet:session\"]".to_string(),
-        });
-        let permission_event_suffix = slug(&format!(
-            "{} {}",
-            tool_call_id, permission.capability_grant_id
-        ));
-        if permission.effect != "allow" {
-            self.record_denied_tool_request(
-                registration,
-                goal,
-                &task_id,
-                &session_id,
-                &run_id,
-                &turn_id,
-                &tool_call_id,
-                runtime_process.status.clone(),
-                &adapter_output.status,
-                adapter_output.confidence,
-                &adapter_output.summary,
-                &adapter_session.external_session_ref,
-                &permission,
-                &permission_event_suffix,
-            )?;
-            return Ok(FakeRunRefs {
-                task_id,
-                agent_id: registration.agent_id.clone(),
-                session_id,
-                run_id,
-                runtime_process_ref: runtime_process.runtime_process_ref,
-                external_session_ref: adapter_output.external_session_ref,
-            });
+            run_id: run_id.clone(),
+            turn_id: turn_id.clone(),
+            tool_call_id: tool_call_id.clone(),
+        };
+        let permission: Option<PermissionDecision> = match &dispatch_mode {
+            ToolDispatchMode::Fake => Some(self.permission_policy.decide(PermissionRequest {
+                session_id: session_id.clone(),
+                capability_profile_id: self.permission_policy.default_profile_id().to_string(),
+                scope_json: "[\"tool:invoke:capo.session_summary\",\"state:read:session\",\"state:read:tool\",\"state:read:permission_queue\",\"memory:build_packet:session\"]".to_string(),
+            })),
+            // The real path's decide is the dispatch's own; nothing decides here.
+            ToolDispatchMode::Real(_) => None,
+        };
+        if let ToolDispatchMode::Fake = dispatch_mode {
+            let permission = permission
+                .as_ref()
+                .expect("fake dispatch always decides upfront");
+            let permission_event_suffix = slug(&format!(
+                "{} {}",
+                tool_call_id, permission.capability_grant_id
+            ));
+            if permission.effect != "allow" {
+                self.record_denied_tool_request(
+                    registration,
+                    goal,
+                    &task_id,
+                    &session_id,
+                    &run_id,
+                    &turn_id,
+                    &tool_call_id,
+                    runtime_process.status.clone(),
+                    &adapter_output.status,
+                    adapter_output.confidence,
+                    &adapter_output.summary,
+                    &adapter_session.external_session_ref,
+                    permission,
+                    &permission_event_suffix,
+                )?;
+                return Ok(FakeRunRefs {
+                    task_id,
+                    agent_id: registration.agent_id.clone(),
+                    session_id,
+                    run_id,
+                    runtime_process_ref: runtime_process.runtime_process_ref,
+                    external_session_ref: adapter_output.external_session_ref,
+                });
+            }
         }
         // AI3: execute the per-turn summary tool. In the FAKE mode the legacy
         // summary shim runs here and the canonical tool-call events are
@@ -154,14 +180,6 @@ impl FakeBoundaryController {
         // the canonical observed audit sequence + `ToolCall`/`ToolObservation`
         // projections keyed to the turn -- so a real production turn's tool call
         // is a real dispatched result, not a fabricated fake summary.
-        let dispatch_scope = ToolDispatchScope {
-            task_id: task_id.clone(),
-            agent_id: registration.agent_id.clone(),
-            session_id: session_id.clone(),
-            run_id: run_id.clone(),
-            turn_id: turn_id.clone(),
-            tool_call_id: tool_call_id.clone(),
-        };
         let tool_result = match &dispatch_mode {
             ToolDispatchMode::Fake => {
                 let fake = self.tools.invoke(FakeToolRequest {
@@ -177,12 +195,42 @@ impl FakeBoundaryController {
                     summary: fake.summary,
                 }
             }
-            ToolDispatchMode::Real(exposure) => self.dispatch_turn_summary_tool(
-                exposure,
-                &dispatch_scope,
-                &adapter_output.tool_name,
-                &adapter_output.summary,
-            )?,
+            // SG1: the real loop consumes the dispatch's typed decide outcome. On a
+            // DENY, `dispatch_turn_summary_tool` returns the structured `ToolRefusal`
+            // the dispatch built; the loop reflects it back into the blocked session
+            // state and drives the early return FROM THE TYPED REFUSAL, rather than a
+            // second upfront decide short-circuiting before any tool runs.
+            ToolDispatchMode::Real(exposure) => {
+                match self.dispatch_turn_summary_tool(
+                    exposure,
+                    &dispatch_scope,
+                    &adapter_output.tool_name,
+                    &adapter_output.summary,
+                )? {
+                    Ok(tool_result) => tool_result,
+                    Err(refusal) => {
+                        self.record_real_dispatch_denied(
+                            registration,
+                            goal,
+                            &dispatch_scope,
+                            runtime_process.status.clone(),
+                            &adapter_output.status,
+                            adapter_output.confidence,
+                            &adapter_output.summary,
+                            &adapter_session.external_session_ref,
+                            &refusal,
+                        )?;
+                        return Ok(FakeRunRefs {
+                            task_id,
+                            agent_id: registration.agent_id.clone(),
+                            session_id,
+                            run_id,
+                            runtime_process_ref: runtime_process.runtime_process_ref,
+                            external_session_ref: adapter_output.external_session_ref,
+                        });
+                    }
+                }
+            }
         };
         let memory_packet = self.memory.build_source_linked_packet(
             SourceLinkedMemoryPacketRequest {
@@ -353,6 +401,13 @@ impl FakeBoundaryController {
         // `dispatch_turn_summary_tool` above (through `authorize_and_invoke`), so
         // it must NOT also hand-roll a second, duplicate tool-call sequence.
         if let ToolDispatchMode::Fake = dispatch_mode {
+            let permission = permission
+                .as_ref()
+                .expect("fake dispatch always decides upfront");
+            let permission_event_suffix = slug(&format!(
+                "{} {}",
+                tool_call_id, permission.capability_grant_id
+            ));
             self.record_permission_decision(
                 registration,
                 &task_id,
@@ -360,7 +415,7 @@ impl FakeBoundaryController {
                 &run_id,
                 &turn_id,
                 &tool_call_id,
-                &permission,
+                permission,
                 &permission_event_suffix,
             )?;
 
@@ -601,20 +656,31 @@ impl FakeBoundaryController {
         })
     }
 
-    /// AI3: dispatch the per-turn `capo.session_summary` tool through the REAL
-    /// `dispatch_tool_call` seam (`authorize_and_invoke` against the Capo
+    /// AI3 + SG1: dispatch the per-turn `capo.session_summary` tool through the
+    /// REAL `dispatch_tool_call` seam (`authorize_and_invoke` against the Capo
     /// registry), persisting the canonical observed audit sequence +
-    /// `ToolCall`/`ToolObservation` projections keyed to the turn. Returns the
-    /// narrow [`TurnToolResult`] the surrounding `send_task` scaffolding consumes
-    /// (memory-packet candidate + tool-output artifact), derived from the REAL
-    /// result -- never a fabricated fake summary.
+    /// `ToolCall`/`ToolObservation` projections keyed to the turn.
+    ///
+    /// This dispatch's decide is the SINGLE canonical permission decide for the
+    /// real loop. The method CONSUMES `outcome.decide`:
+    ///
+    /// - on ALLOW, returns the narrow [`TurnToolResult`] the surrounding
+    ///   `send_task` scaffolding consumes (memory-packet candidate + tool-output
+    ///   artifact), derived from the REAL result -- never a fabricated fake summary;
+    /// - on DENY, returns the structured, agent-readable [`ToolRefusal`] the
+    ///   dispatch built (`outcome.decide.refusal`), so the loop can reflect it back
+    ///   to the agent / persist it and drive the early-return from the TYPED refusal
+    ///   rather than a raw error string or a silent continue.
+    ///
+    /// The outer `StateResult` is the store I/O fallibility; the inner
+    /// `Result<_, ToolRefusal>` is the decide verdict the loop reflects on.
     fn dispatch_turn_summary_tool(
         &self,
         exposure: &ToolExposure,
         scope: &ToolDispatchScope,
         tool_name: &str,
         adapter_summary: &str,
-    ) -> StateResult<TurnToolResult> {
+    ) -> StateResult<Result<TurnToolResult, ToolRefusal>> {
         let outcome = self.dispatch_tool_call(
             exposure,
             scope,
@@ -637,6 +703,24 @@ impl FakeBoundaryController {
                 },
             }),
         )?;
+        // SG1: the loop's single decide gate. The dispatch already recorded
+        // `permission.requested`/`permission.decided` (and blocked the tool) for a
+        // deny; here the loop CONSUMES the typed decide outcome it returned. On a
+        // deny, surface the structured refusal so the caller reflects it back rather
+        // than treating a `denied` result as a tool output.
+        if !outcome.decide.allowed {
+            let refusal = outcome
+                .decide
+                .refusal
+                .clone()
+                .unwrap_or_else(|| ToolRefusal {
+                    tool_name: outcome.tool_name.clone(),
+                    decision_source: outcome.decide.decision_source.clone(),
+                    scope_json: String::new(),
+                    reason: outcome.decide.explanation.clone(),
+                });
+            return Ok(Err(refusal));
+        }
         // The narrow output the memory packet / artifacts consume comes from the
         // REAL dispatched result (the Capo registry's rendered output + the
         // dispatch-issued artifact id), not the fake shim.
@@ -650,12 +734,106 @@ impl FakeBoundaryController {
             .output_artifact_id
             .clone()
             .unwrap_or_else(|| format!("artifact-tool-{}", scope.session_id));
-        Ok(TurnToolResult {
+        Ok(Ok(TurnToolResult {
             tool_call_id: outcome.tool_call_id,
             tool_name: outcome.tool_name,
             output_artifact_id,
             summary,
-        })
+        }))
+    }
+
+    /// SG1: record the blocked session state for a REAL-loop dispatch that the
+    /// single canonical decide DENIED, reflecting the typed [`ToolRefusal`] back.
+    ///
+    /// The dispatch's decide step ALREADY persisted `permission.requested` ->
+    /// `permission.decided` and drove the tool-call projection to its terminal
+    /// `denied` status (and, for a `reject_always`, the durable deny grant), so this
+    /// helper does NOT re-emit any permission/tool events -- doing so would be the
+    /// second decide path this change removes. It only appends the `SessionStarted`
+    /// event carrying the blocked task/agent/session/run projections, with the
+    /// session blocker set to the refusal's agent-readable message so the loop
+    /// SURFACES the typed refusal (it is queryable on the session read model, not
+    /// just discarded). The memory-packet / artifact / evidence steps are skipped
+    /// (the early return), exactly as the fake deny path skips them.
+    #[allow(clippy::too_many_arguments)]
+    fn record_real_dispatch_denied(
+        &self,
+        registration: &FakeAgentRegistration,
+        goal: &str,
+        scope: &ToolDispatchScope,
+        run_status: String,
+        adapter_status: &str,
+        adapter_confidence: i64,
+        adapter_summary: &str,
+        external_session_ref: &str,
+        refusal: &ToolRefusal,
+    ) -> StateResult<()> {
+        let blocker = refusal.agent_message();
+        self.state.append_event(
+            scoped_event(
+                &format!("event-task-started-{}", scope.session_id),
+                EventKind::SessionStarted,
+                &self.project_id,
+                &scope.task_id,
+                &registration.agent_id,
+                &scope.session_id,
+                &scope.run_id,
+            )
+            .with_turn(scope.turn_id.clone())
+            .with_payload(
+                serde_json::json!({
+                    "goal": goal,
+                    "permission_effect": "deny",
+                    "decision_source": refusal.decision_source,
+                    "adapter_status": adapter_status,
+                    "refusal": blocker,
+                })
+                .to_string(),
+            ),
+            &[
+                ProjectionRecord::Task(TaskProjection {
+                    task_id: scope.task_id.clone(),
+                    project_id: self.project_id.clone(),
+                    title: goal.to_string(),
+                    capo_execution_status: "blocked".to_string(),
+                    active_session_id: Some(scope.session_id.clone()),
+                    latest_summary: Some(adapter_summary.to_string()),
+                    evidence_id: None,
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Agent(AgentProjection {
+                    agent_id: registration.agent_id.clone(),
+                    project_id: self.project_id.clone(),
+                    name: registration.agent_name.clone(),
+                    status: "paused".to_string(),
+                    current_session_id: Some(scope.session_id.clone()),
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Session(SessionProjection {
+                    session_id: scope.session_id.clone(),
+                    project_id: self.project_id.clone(),
+                    task_id: Some(scope.task_id.clone()),
+                    agent_id: registration.agent_id.clone(),
+                    title: goal.to_string(),
+                    status: "waiting_for_permission".to_string(),
+                    current_goal: goal.to_string(),
+                    latest_summary: Some(adapter_summary.to_string()),
+                    latest_confidence: Some(adapter_confidence),
+                    // The session blocker IS the typed refusal reflected back.
+                    latest_blocker: Some(blocker),
+                    external_session_ref: Some(external_session_ref.to_string()),
+                    updated_sequence: 0,
+                }),
+                ProjectionRecord::Run(RunProjection {
+                    run_id: scope.run_id.clone(),
+                    session_id: scope.session_id.clone(),
+                    status: run_status,
+                    recovery_of_run_id: None,
+                    updated_sequence: 0,
+                }),
+            ],
+        )?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
