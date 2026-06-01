@@ -8,6 +8,7 @@ fn server_dispatch_plan_gate_and_run_local_ingest_codex_fixture_idempotently() {
         &server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(
@@ -194,6 +195,7 @@ fn server_dispatch_gate_blocks_without_deterministic_opt_in() {
         &server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(

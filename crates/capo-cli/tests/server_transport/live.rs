@@ -236,3 +236,146 @@ fn cli_live_runs_codex_mock_output_through_running_server_process() {
     assert!(dashboard.contains("turn_ids=turn-codex-live-run"));
     assert!(server.wait().expect("server wait").success());
 }
+
+/// AI2 END-TO-END (CLI process path): a user can `capo server agent register
+/// --adapter codex` against a RUNNING server and `capo server task send` to get
+/// REAL Codex output back -- here a deterministic absolute-path stub pinned via
+/// `CAPO_CODEX_BIN`, with the live-provider gate opened in the SERVER process.
+///
+/// This is the reachability the AI2 wiring closed: before it,
+/// `capo server agent register --adapter codex` was rejected client-side and the
+/// server only ever bound the fake adapter, so real-Codex chat via SendTask was
+/// unreachable by a user.
+#[cfg(unix)]
+#[test]
+fn cli_registers_codex_agent_and_gets_real_stub_chat_through_running_server() {
+    let state_root = temp_root("transport-codex-chat-e2e-state");
+    let stub = write_codex_stub(
+        &state_root.join("stub"),
+        "{\"type\":\"thread.started\",\"thread_id\":\"cli-codex-thread\"}\n\
+{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"agent_message\",\"text\":\"CLI_CODEX_STUB_CHAT\"}}\n\
+{\"type\":\"turn.completed\"}\n",
+    );
+
+    // The server reads CAPO_CODEX_BIN at open time and the live gate at chat time,
+    // so they are set in the SERVER process (the gate is a server-side concern).
+    let mut server = spawn_server_with_env(
+        &state_root,
+        3,
+        &[
+            ("CAPO_CODEX_BIN", stub.as_str()),
+            ("CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT", "1"),
+            ("CAPO_SERVER_RUN_CODEX_LIVE", "1"),
+        ],
+    );
+    let stdout = server.stdout.take().expect("server stdout");
+    let mut reader = BufReader::new(stdout);
+    let address = read_server_address(&mut reader);
+    let state = state_root.display().to_string();
+
+    // The relaxed `--adapter codex` is now ACCEPTED by the client and binds the
+    // agent's chat adapter on the server.
+    let register = capo([
+        "server",
+        "agent",
+        "register",
+        "--name",
+        "codex-chat",
+        "--adapter",
+        "codex",
+        "--connect",
+        &address,
+        "--state",
+        &state,
+    ]);
+    assert!(register.contains("server_agent_registered=true"));
+
+    let send = capo([
+        "server",
+        "task",
+        "send",
+        "--agent",
+        "codex-chat",
+        "--goal",
+        "Summarize through real Codex",
+        "--connect",
+        &address,
+        "--state",
+        &state,
+    ]);
+    assert!(send.contains("server_task_sent=true"));
+
+    let status = capo([
+        "server",
+        "agent",
+        "status",
+        "--agent",
+        "codex-chat",
+        "--connect",
+        &address,
+        "--state",
+        &state,
+    ]);
+    // The rendered session summary is the STUB's parsed Codex agent_message text,
+    // proving REAL (stub) chat output flowed back, not a fake summary.
+    assert!(
+        status.contains("latest_summary=CLI_CODEX_STUB_CHAT"),
+        "expected real codex stub summary in status output:\n{status}"
+    );
+    assert!(!status.contains("Fake adapter processed goal"));
+
+    assert!(server.wait().expect("server wait").success());
+}
+
+/// AI2: a `--adapter` value other than `fake`/`codex` is rejected by the CLI
+/// before it ever reaches the server.
+#[test]
+fn cli_rejects_unsupported_chat_adapter_on_register() {
+    let state_root = temp_root("transport-codex-bad-adapter-state");
+    let mut server = spawn_server(&state_root, 1);
+    let stdout = server.stdout.take().expect("server stdout");
+    let mut reader = BufReader::new(stdout);
+    let address = read_server_address(&mut reader);
+    let state = state_root.display().to_string();
+
+    let output = std::process::Command::new(capo_bin())
+        .args([
+            "server",
+            "agent",
+            "register",
+            "--name",
+            "bad-adapter",
+            "--adapter",
+            "claude",
+            "--connect",
+            &address,
+            "--state",
+            &state,
+        ])
+        .output()
+        .expect("run capo");
+    assert!(
+        !output.status.success(),
+        "register with an unsupported chat adapter must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("supports `fake` (default) or `codex`"),
+        "expected the chat-adapter rejection message, got: {stderr}"
+    );
+
+    // The server never received a register, so it is still waiting; send one
+    // request to let it reach its budget and exit cleanly.
+    let _ = capo([
+        "server",
+        "agent",
+        "register",
+        "--name",
+        "ok-agent",
+        "--connect",
+        &address,
+        "--state",
+        &state,
+    ]);
+    assert!(server.wait().expect("server wait").success());
+}

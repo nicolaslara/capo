@@ -16,6 +16,12 @@ use capo_core::{BoundaryBinding, BoundaryKind, RunId};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+mod async_runner;
+
+pub use async_runner::{
+    AsyncLocalProcessRunner, AsyncRunningProcess, StreamSource, StreamingOutcome,
+};
+
 /// First runtime variants from the prototype plan.
 pub const PLANNED_RUNTIMES: &[&str] = &["fake", "local-process", "remote-process"];
 /// First tunnel variants from the runtime/tunnel plan.
@@ -200,6 +206,337 @@ pub struct RedactionRule {
     pub replacement: String,
 }
 
+/// The placeholder a credential-shape match is replaced with.
+pub const CREDENTIAL_REDACTION_PLACEHOLDER: &str = "[REDACTED:credential]";
+
+/// A real redaction policy: configurable literal [`RedactionRule`] patterns PLUS
+/// a default credential-shape / high-entropy scan (ACI7).
+///
+/// Today's runner redaction is a literal substring replace of operator-declared
+/// patterns only; that misses any secret the operator did not name (the common
+/// case for tool OUTPUT -- shell stdout/stderr, a read file, a diff -- which is
+/// exactly where credentials leak). This policy keeps the explicit-pattern pass
+/// AND layers a default scan that recognizes credential-shaped tokens (known key
+/// prefixes, bearer headers, and long high-entropy strings) so an unnamed secret
+/// is still scrubbed before it reaches an artifact or the agent. The same policy
+/// is applied at the runtime runner boundary (process stdout/stderr) and at the
+/// tool wrapper boundary (input AND output artifacts), so redaction is uniform.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RedactionPolicy {
+    rules: Vec<RedactionRule>,
+    scan_credentials: bool,
+}
+
+impl RedactionPolicy {
+    /// A policy with the given literal rules and the default credential-shape
+    /// scan enabled.
+    pub fn new(rules: Vec<RedactionRule>) -> Self {
+        Self {
+            rules,
+            scan_credentials: true,
+        }
+    }
+
+    /// A policy with explicit rules but the default credential scan disabled.
+    /// Used where only operator-declared patterns should apply.
+    pub fn rules_only(rules: Vec<RedactionRule>) -> Self {
+        Self {
+            rules,
+            scan_credentials: false,
+        }
+    }
+
+    /// Whether the default credential-shape scan is enabled.
+    pub fn scans_credentials(&self) -> bool {
+        self.scan_credentials
+    }
+
+    /// Apply the policy to `bytes`, returning the redacted bytes and a
+    /// `redaction_state` of `"redacted"` (something matched) or `"safe"`.
+    ///
+    /// The explicit literal rules run first (so an operator pattern always wins
+    /// its exact replacement), then the credential-shape scan rewrites any
+    /// remaining credential-shaped token to [`CREDENTIAL_REDACTION_PLACEHOLDER`].
+    pub fn apply(&self, bytes: &[u8]) -> (Vec<u8>, String) {
+        let mut text = String::from_utf8_lossy(bytes).to_string();
+        let mut redacted = false;
+        for rule in &self.rules {
+            if text.contains(&rule.pattern) {
+                text = text.replace(&rule.pattern, &rule.replacement);
+                redacted = true;
+            }
+        }
+        if self.scan_credentials {
+            let (scanned, scanned_any) = scan_credential_shapes(&text);
+            if scanned_any {
+                text = scanned;
+                redacted = true;
+            }
+        }
+        (
+            text.into_bytes(),
+            if redacted { "redacted" } else { "safe" }.to_string(),
+        )
+    }
+}
+
+/// Rewrite credential-shaped tokens in `text` to the credential placeholder,
+/// returning the rewritten text and whether anything matched (ACI7).
+///
+/// A token is credential-shaped when it carries a known secret prefix
+/// (`AKIA`/`ASIA`, `sk-`, `ghp_`/`gho_`/`github_pat_`, `xox[bap]-`, `AIza`,
+/// `glpat-`), or when it is a long, high-entropy run of credential characters
+/// (>= 20 chars of `[A-Za-z0-9_\-+/=.]` that mixes upper-case, lower-case and
+/// digits -- the shape of an opaque base64/random API key). The shape check
+/// runs against the token AND the candidate substrings extracted from quoting,
+/// `key=value`, JSON, and URL-query wrappers (see [`is_credential_shaped`]), so a
+/// secret leaks through none of those. A `Bearer <token>` header has its token
+/// component scrubbed even if the token itself is short. Ordinary prose words,
+/// file paths, hex digests / git SHAs, and dashed UUIDs are excluded so the scan
+/// does not blank out useful command output.
+fn scan_credential_shapes(text: &str) -> (String, bool) {
+    let mut out = String::with_capacity(text.len());
+    let mut redacted = false;
+    // Split on whitespace boundaries, preserving the exact whitespace so the
+    // redacted output keeps its line/column structure (callers diff and display
+    // it). A "token" is a maximal run of non-whitespace characters.
+    let mut token = String::new();
+    let mut prev_token: Option<String> = None;
+    let flush = |token: &mut String,
+                 prev_token: &mut Option<String>,
+                 out: &mut String,
+                 redacted: &mut bool| {
+        if token.is_empty() {
+            return;
+        }
+        let after_bearer = prev_token
+            .as_deref()
+            .is_some_and(|prev| prev.eq_ignore_ascii_case("bearer"));
+        if is_credential_shaped(token, after_bearer) {
+            out.push_str(CREDENTIAL_REDACTION_PLACEHOLDER);
+            *redacted = true;
+        } else {
+            out.push_str(token);
+        }
+        *prev_token = Some(std::mem::take(token));
+    };
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            flush(&mut token, &mut prev_token, &mut out, &mut redacted);
+            out.push(ch);
+            if ch == '\n' {
+                prev_token = None;
+            }
+        } else {
+            token.push(ch);
+        }
+    }
+    flush(&mut token, &mut prev_token, &mut out, &mut redacted);
+    (out, redacted)
+}
+
+/// Whether `raw` looks like a credential token. `after_bearer` lowers the bar
+/// for a token that directly follows a `Bearer` header.
+///
+/// A whitespace-delimited token rarely arrives as a bare secret: it may be
+/// quoted (`"sk-..."`), part of a `key=value` assignment (`AWS_SECRET=AKIA...`),
+/// embedded in JSON (`{"k":"AKIA..."}`), or a URL query (`?token=AKIA...&x=1`).
+/// We therefore derive a set of CANDIDATE substrings from `raw` -- the trimmed
+/// whole token, the value after a `key=` split, and the pieces between interior
+/// quote/JSON/URL delimiters -- and treat the token as credential-shaped if ANY
+/// candidate matches. This means a secret that the operator did not name still
+/// gets scrubbed regardless of the punctuation it is wrapped in.
+fn is_credential_shaped(raw: &str, after_bearer: bool) -> bool {
+    credential_candidates(raw)
+        .iter()
+        .any(|candidate| candidate_is_credential(candidate, after_bearer))
+}
+
+/// Characters that delimit a credential from surrounding quoting/structure.
+/// Trimmed at candidate ENDS and split on in the interior so quoted, JSON, and
+/// URL-embedded secrets are isolated from their wrapper.
+fn is_credential_boundary(c: char) -> bool {
+    matches!(
+        c,
+        '"' | '\''
+            | '`'
+            | '('
+            | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | ','
+            | ';'
+            | ':'
+            | '?'
+            | '&'
+            | '<'
+            | '>'
+            | '|'
+    )
+}
+
+/// Derive candidate credential substrings from a whitespace-delimited token.
+///
+/// Yields (in addition to the trimmed whole token): the value after a `key=`
+/// assignment prefix, and every interior piece split on quote/JSON/URL
+/// boundaries -- each re-trimmed of surrounding boundary punctuation. The
+/// `key=` value is kept WHOLE (its own `=`, e.g. base64 padding, is preserved)
+/// AND the whole trimmed token is also scanned, so neither a real `key=secret`
+/// nor a bare base64 token whose only `=` is padding can slip past.
+fn credential_candidates(raw: &str) -> Vec<String> {
+    let trim = |s: &str| s.trim_matches(is_credential_boundary).to_string();
+    let mut candidates: Vec<String> = Vec::new();
+    let push = |s: String, candidates: &mut Vec<String>| {
+        if !s.is_empty() && !candidates.contains(&s) {
+            candidates.push(s);
+        }
+    };
+
+    let trimmed = trim(raw);
+
+    // The whole trimmed token: catches a bare secret AND a base64 token whose
+    // only `=` is trailing padding (no real key/value structure).
+    push(trimmed.clone(), &mut candidates);
+
+    // A `key=value` assignment: scan the value after the FIRST `=` when the key
+    // segment is a plausible env-var/identifier name. Keep the value whole so
+    // its own `=` (base64 padding) survives, then re-trim wrapping quotes so
+    // `token="AKIA..."` exposes the bare secret.
+    if let Some(value) = assignment_value(&trimmed) {
+        push(trim(value), &mut candidates);
+    }
+
+    // Interior pieces split on quote/JSON/URL boundaries so a secret embedded in
+    // `{"aws_key":"AKIA..."}` or `https://x/y?token=AKIA...&z=1` is isolated.
+    for piece in raw.split(is_credential_boundary) {
+        // Each piece may still be a `k=v` pair (URL query, env line): take both
+        // the trimmed piece and the post-`=` value.
+        let piece_trimmed = trim(piece);
+        if let Some(value) = assignment_value(&piece_trimmed) {
+            push(trim(value), &mut candidates);
+        }
+        push(piece_trimmed, &mut candidates);
+    }
+
+    candidates
+}
+
+/// If `token` is a `key=value` assignment whose key segment is a plausible
+/// env-var / identifier name, return the value after the FIRST `=` (kept whole,
+/// so the value's own `=`, e.g. base64 padding, is preserved). Returns `None`
+/// when there is no `=` or the key segment is not identifier-shaped, so a bare
+/// base64 token whose only `=` is padding is NOT mistaken for an assignment.
+fn assignment_value(token: &str) -> Option<&str> {
+    let (key, rest) = token.split_once('=')?;
+    let identifier_key = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && key.chars().any(|c| c.is_ascii_alphabetic());
+    identifier_key.then_some(rest)
+}
+
+/// Whether a single, already-isolated candidate string is credential-shaped.
+fn candidate_is_credential(value: &str, after_bearer: bool) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    const KNOWN_PREFIXES: &[&str] = &[
+        "AKIA",
+        "ASIA",
+        "sk-",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "AIza",
+        "glpat-",
+    ];
+    if KNOWN_PREFIXES
+        .iter()
+        .any(|prefix| value.starts_with(prefix) && value.len() > prefix.len() + 4)
+    {
+        return true;
+    }
+    if after_bearer && value.len() >= 8 && value.chars().all(is_credential_char) {
+        return true;
+    }
+    // Long, high-entropy run of credential characters: the shape of a base64/
+    // random API key. Require a minimum length, all credential characters, a mix
+    // of letters and digits, and enough distinct characters that an obvious
+    // structured string does not trip it.
+    //
+    // To keep ordinary command output intact we additionally EXCLUDE the two
+    // structured shapes that pollute git/test output and would otherwise clear
+    // this bar: a hex digest (e.g. a 40-char git commit SHA) and a dashed UUID.
+    // Both are single-case hex; real opaque secrets that reach this fallback
+    // (un-prefixed base64 / random tokens) mix upper-case, lower-case AND
+    // digits, so we require that character-class diversity (or a base64 symbol
+    // `+`/`/`/`=`) and reject pure hex / UUID shapes.
+    if value.len() >= 20 && value.chars().all(is_credential_char) {
+        if is_hex_digest(value) || is_uuid_shaped(value) {
+            return false;
+        }
+        let has_digit = value.chars().any(|c| c.is_ascii_digit());
+        let has_upper = value.chars().any(|c| c.is_ascii_uppercase());
+        let has_lower = value.chars().any(|c| c.is_ascii_lowercase());
+        // `+`/`=` are base64 fingerprints that filesystem paths never carry; `/`
+        // is deliberately EXCLUDED here because it dominates paths and would
+        // otherwise flag `/usr/local/lib/...` as a credential.
+        let has_base64_symbol = value.chars().any(|c| matches!(c, '+' | '='));
+        let distinct = {
+            let mut seen = [false; 128];
+            let mut count = 0usize;
+            for c in value.chars() {
+                let idx = c as usize;
+                if idx < 128 && !seen[idx] {
+                    seen[idx] = true;
+                    count += 1;
+                }
+            }
+            count
+        };
+        // Mixed-case + digit is the random/base64 fingerprint; a base64 symbol
+        // is an equally strong signal (e.g. `+`/`/` in a padded key).
+        let diverse = has_digit && ((has_upper && has_lower) || has_base64_symbol);
+        if diverse && distinct >= 12 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `value` is a pure hexadecimal digest (e.g. a git commit SHA or a
+/// sha256 hex digest), ignoring interior `-` grouping. These are single-case
+/// hex strings that show up constantly in `git_diff`/`git_status` output and
+/// must NOT be mistaken for credentials.
+fn is_hex_digest(value: &str) -> bool {
+    let core: String = value.chars().filter(|&c| c != '-').collect();
+    core.len() >= 12 && core.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Whether `value` has the canonical 8-4-4-4-12 dashed UUID shape (hex digits
+/// in five dash-separated groups). UUIDs appear in logs and test output.
+fn is_uuid_shaped(value: &str) -> bool {
+    let groups: Vec<&str> = value.split('-').collect();
+    let lens = [8usize, 4, 4, 4, 12];
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip(lens.iter())
+            .all(|(group, &len)| group.len() == len && group.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+fn is_credential_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '/' | '=' | '.')
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalProcessRunner {
     config: LocalProcessConfig,
@@ -246,17 +583,20 @@ impl LocalProcessRunner {
             run_id: request.run_id.clone(),
             runtime_process_ref: format!("local-process-{}", request.run_id),
             external_pid: None,
+            boot_id: None,
             status: "exited".to_string(),
             redaction_state: stdout.redaction_state.clone(),
         };
         let stdout_artifact = self.write_artifact(
             &request.run_id,
+            request.turn_id.as_deref(),
             "stdout",
             &stdout.bytes,
             &stdout.redaction_state,
         )?;
         let stderr_artifact = self.write_artifact(
             &request.run_id,
+            request.turn_id.as_deref(),
             "stderr",
             &stderr.bytes,
             &stderr.redaction_state,
@@ -319,7 +659,7 @@ impl LocalProcessRunner {
         self.ensure_cwd_allowed(&request.cwd)?;
         fs::create_dir_all(&self.config.artifact_root)?;
 
-        let run_dir = self.config.artifact_root.join(request.run_id.as_str());
+        let run_dir = self.run_dir_for(&request.run_id, request.turn_id.as_deref());
         fs::create_dir_all(&run_dir)?;
         let stdout_path = run_dir.join("stdout.txt");
         let stderr_path = run_dir.join("stderr.txt");
@@ -348,10 +688,15 @@ impl LocalProcessRunner {
                 run_id: request.run_id.clone(),
                 runtime_process_ref: format!("local-process-{}", request.run_id),
                 external_pid: Some(external_pid),
+                // Stamp the spawning boot id so restart recovery only reaps this
+                // process group within the same boot (a reused PID after a
+                // reboot must not be signalled).
+                boot_id: boot_id(),
                 status: "running".to_string(),
                 redaction_state: "redacted".to_string(),
             },
             child,
+            turn_id: request.turn_id.clone(),
             stdout_path,
             stderr_path,
             events: vec![
@@ -420,6 +765,33 @@ impl LocalProcessRunner {
         })
     }
 
+    /// Hard-kill a live run by terminating its entire process group.
+    ///
+    /// This reuses the same `SIGTERM` then `SIGKILL` process-group teardown the
+    /// timeout path uses ([`Self::terminate_process_group`]), so a hard kill
+    /// reaps the spawned child and all of its descendants rather than only the
+    /// direct child. It is the runtime primitive the RTL6 controller-owned hard
+    /// kill drives mid-run.
+    pub fn kill_running_process_group(
+        &self,
+        process: &mut LocalRunningProcess,
+    ) -> RuntimeResult<RuntimeControlResult> {
+        self.terminate_process_group(process);
+        let _ = process.child.kill();
+        process.process.status = "killed".to_string();
+        Ok(RuntimeControlResult {
+            process: process.process.clone(),
+            events: vec![RuntimeEvent {
+                kind: "runtime.kill_requested".to_string(),
+                status: "killed".to_string(),
+                detail: format!(
+                    "process-group hard-kill: {}",
+                    process.process.runtime_process_ref
+                ),
+            }],
+        })
+    }
+
     pub fn wait_running(
         &self,
         process: &mut LocalRunningProcess,
@@ -445,6 +817,7 @@ impl LocalProcessRunner {
         fs::write(&process.stderr_path, &stderr.bytes)?;
         let stdout_artifact = self.output_artifact_from_path(
             &process.process.run_id,
+            process.turn_id.as_deref(),
             "stdout",
             &process.stdout_path,
             &stdout.bytes,
@@ -452,6 +825,7 @@ impl LocalProcessRunner {
         );
         let stderr_artifact = self.output_artifact_from_path(
             &process.process.run_id,
+            process.turn_id.as_deref(),
             "stderr",
             &process.stderr_path,
             &stderr.bytes,
@@ -565,6 +939,149 @@ impl LocalProcessRunner {
         }
     }
 
+    /// Reap an orphaned process group by its persisted PID after a restart.
+    ///
+    /// On restart Capo no longer owns the spawned [`Child`] handle, so the only
+    /// durable reference to a run that was in-flight when the controller died is
+    /// the PID/process-group reference it persisted *before* the spawn returned
+    /// (RTL10). This probes that PID with a no-op signal (`kill -0`) to observe
+    /// liveness, and if it is still alive sends the same `SIGTERM` then `SIGKILL`
+    /// process-group teardown the timeout/hard-kill paths use
+    /// ([`Self::terminate_process_group`]), so the orphaned child *and all of its
+    /// descendants* are reaped rather than left running.
+    ///
+    /// The returned [`OrphanReap`] carries a stable
+    /// `observed_runtime_state_hash` (over the PID, the recorded boot id, and the
+    /// observed liveness) that the recovery layer folds into its idempotency key,
+    /// so repeated restarts that observe the same runtime state never emit a
+    /// second recovery event.
+    ///
+    /// `recorded_boot_id` is the [`boot_id`] captured at spawn time. Because PIDs
+    /// and process-group ids are recycled by the OS, the persisted PID is only a
+    /// meaningful handle within the boot that recorded it. If the recorded boot
+    /// id is absent or differs from the current boot's id, this does NOT signal
+    /// anything (a recycled PID after a reboot would otherwise SIGKILL an
+    /// unrelated process group) and records the run as `already_gone`.
+    #[cfg(unix)]
+    pub fn reap_orphan_process_group(
+        external_pid: u32,
+        recorded_boot_id: Option<&str>,
+    ) -> OrphanReap {
+        let current_boot_id = boot_id();
+        // Only reap within the same boot: a PID persisted before a reboot is
+        // almost certainly recycled onto an unrelated process group afterwards.
+        let same_boot = match (recorded_boot_id, current_boot_id.as_deref()) {
+            (Some(recorded), Some(current)) => recorded == current,
+            // No recorded or unreadable current boot id => identity cannot be
+            // verified, so we conservatively decline to signal.
+            _ => false,
+        };
+        let alive_before = same_boot && process_group_is_alive(external_pid);
+        if alive_before {
+            kill_process_group(external_pid, "-TERM");
+            thread::sleep(Duration::from_millis(100));
+            kill_process_group(external_pid, "-KILL");
+        }
+        let observed_state = if alive_before {
+            "alive_reaped"
+        } else {
+            "already_gone"
+        };
+        OrphanReap {
+            external_pid,
+            reaped: alive_before,
+            observed_state: observed_state.to_string(),
+            observed_runtime_state_hash: orphan_state_hash(
+                external_pid,
+                recorded_boot_id,
+                observed_state,
+            ),
+        }
+    }
+
+    /// Non-Unix fallback: there is no portable process-group reaping primitive,
+    /// so the orphan is recorded as already gone (Capo never spawns process
+    /// groups off Unix).
+    #[cfg(not(unix))]
+    pub fn reap_orphan_process_group(
+        external_pid: u32,
+        recorded_boot_id: Option<&str>,
+    ) -> OrphanReap {
+        let observed_state = "already_gone";
+        OrphanReap {
+            external_pid,
+            reaped: false,
+            observed_state: observed_state.to_string(),
+            observed_runtime_state_hash: orphan_state_hash(
+                external_pid,
+                recorded_boot_id,
+                observed_state,
+            ),
+        }
+    }
+
+    /// SG9: NON-DESTRUCTIVELY probe the liveness/health of a run that was
+    /// in-flight when the controller died, by its persisted PID/process-group.
+    ///
+    /// This is the liveness-aware counterpart to
+    /// [`Self::reap_orphan_process_group`]: the reaper KILLS a live orphan (the
+    /// RTL10 phase-1 behavior), whereas this probe only OBSERVES it (`kill -0`),
+    /// so the recovery layer can REATTACH to a still-alive run in place rather
+    /// than blindly terminating it (SG9 acceptance / `state-model.md` Restart
+    /// Recovery). A run observed alive within the same boot is classified
+    /// [`RuntimeHealthState::Alive`] (reattachable); a run whose group is gone, or
+    /// whose recorded boot id cannot be confirmed against the current boot (a
+    /// recycled PID after a reboot, which must never be trusted as "our" run), is
+    /// classified [`RuntimeHealthState::Exited`].
+    ///
+    /// The returned [`RunHealthProbe`] carries a stable `observed_state_hash`
+    /// (over the PID, recorded boot id, and observed liveness) that the recovery
+    /// layer folds into its idempotency key, so repeated restarts that observe the
+    /// same runtime state never emit a second recovery event.
+    #[cfg(unix)]
+    pub fn probe_run_health(external_pid: u32, recorded_boot_id: Option<&str>) -> RunHealthProbe {
+        let current_boot_id = boot_id();
+        // Only trust a PID within the boot that recorded it: a PID persisted
+        // before a reboot is almost certainly recycled onto an unrelated group
+        // afterwards, so it must never be read as "our run still alive".
+        let same_boot = match (recorded_boot_id, current_boot_id.as_deref()) {
+            (Some(recorded), Some(current)) => recorded == current,
+            _ => false,
+        };
+        let alive = same_boot && process_group_is_alive(external_pid);
+        let state = if alive {
+            RuntimeHealthState::Alive
+        } else {
+            RuntimeHealthState::Exited
+        };
+        RunHealthProbe {
+            external_pid: Some(external_pid),
+            state,
+            observed_state_hash: orphan_state_hash(
+                external_pid,
+                recorded_boot_id,
+                state.observed_state(),
+            ),
+        }
+    }
+
+    /// Non-Unix fallback: with no portable process-group probe, a previously
+    /// in-flight run is conservatively classified as exited (Capo never spawns
+    /// process groups off Unix).
+    #[cfg(not(unix))]
+    pub fn probe_run_health(external_pid: u32, recorded_boot_id: Option<&str>) -> RunHealthProbe {
+        let state = RuntimeHealthState::Exited;
+        RunHealthProbe {
+            external_pid: Some(external_pid),
+            state,
+            observed_state_hash: orphan_state_hash(
+                external_pid,
+                recorded_boot_id,
+                state.observed_state(),
+            ),
+        }
+    }
+
     fn control(
         &self,
         process: &LocalRuntimeProcessRef,
@@ -612,6 +1129,13 @@ impl LocalProcessRunner {
         }
     }
 
+    /// The runner's immutable configuration (workspace roots, artifact root,
+    /// env allowlist, redaction rules, output cap). Used by the streaming runner
+    /// which reuses the same configuration surface.
+    pub(crate) fn config(&self) -> &LocalProcessConfig {
+        &self.config
+    }
+
     fn apply_request_env(
         &self,
         command: &mut Command,
@@ -633,21 +1157,18 @@ impl LocalProcessRunner {
     }
 
     fn redact_output(&self, bytes: &[u8]) -> RedactedOutput {
-        let mut text = String::from_utf8_lossy(bytes).to_string();
-        let mut redacted = false;
-        for rule in &self.config.redaction_rules {
-            if text.contains(&rule.pattern) {
-                text = text.replace(&rule.pattern, &rule.replacement);
-                redacted = true;
-            }
-        }
+        // ACI7: process stdout/stderr is the classic place credentials leak, so
+        // the runner applies the full redaction policy (operator patterns PLUS
+        // the default credential-shape scan), not only the literal patterns.
+        let (bytes, redaction_state) =
+            RedactionPolicy::new(self.config.redaction_rules.clone()).apply(bytes);
         RedactedOutput {
-            bytes: text.into_bytes(),
-            redaction_state: if redacted { "redacted" } else { "safe" }.to_string(),
+            bytes,
+            redaction_state,
         }
     }
 
-    fn ensure_cwd_allowed(&self, cwd: &Path) -> RuntimeResult<()> {
+    pub(crate) fn ensure_cwd_allowed(&self, cwd: &Path) -> RuntimeResult<()> {
         let cwd = normalize_path(cwd)?;
         let allowed = self.config.workspace_roots.iter().any(|root| {
             normalize_path(root)
@@ -664,40 +1185,57 @@ impl LocalProcessRunner {
         }
     }
 
+    /// Resolve the artifact directory for a run/turn.
+    ///
+    /// With no turn key this is the legacy `artifact_root/run_id`. With a turn
+    /// key the artifacts are nested under `artifact_root/run_id/turns/<turn_id>`
+    /// so multiple turns in the same run keep distinct `stdout.txt`/`stderr.txt`.
+    pub(crate) fn run_dir_for(&self, run_id: &RunId, turn_id: Option<&str>) -> PathBuf {
+        let run_dir = self.config.artifact_root.join(run_id.as_str());
+        match turn_id {
+            Some(turn_id) => run_dir.join("turns").join(sanitize_artifact_key(turn_id)),
+            None => run_dir,
+        }
+    }
+
     fn write_artifact(
         &self,
         run_id: &RunId,
+        turn_id: Option<&str>,
         stream: &str,
         bytes: &[u8],
         redaction_state: &str,
     ) -> RuntimeResult<RuntimeOutputArtifact> {
-        let run_dir = self.config.artifact_root.join(run_id.as_str());
+        let run_dir = self.run_dir_for(run_id, turn_id);
         fs::create_dir_all(&run_dir)?;
         let path = run_dir.join(format!("{stream}.txt"));
         fs::write(&path, bytes)?;
         Ok(RuntimeOutputArtifact {
-            artifact_id: format!("artifact-runtime-{run_id}-{stream}"),
+            artifact_id: artifact_id_for(run_id, turn_id, stream),
             path,
             size_bytes: bytes.len() as i64,
             content_hash: content_hash(bytes),
             redaction_state: redaction_state.to_string(),
+            truncated: false,
         })
     }
 
     fn output_artifact_from_path(
         &self,
         run_id: &RunId,
+        turn_id: Option<&str>,
         stream: &str,
         path: &Path,
         bytes: &[u8],
         redaction_state: &str,
     ) -> RuntimeOutputArtifact {
         RuntimeOutputArtifact {
-            artifact_id: format!("artifact-runtime-{run_id}-{stream}"),
+            artifact_id: artifact_id_for(run_id, turn_id, stream),
             path: path.to_path_buf(),
             size_bytes: bytes.len() as i64,
             content_hash: content_hash(bytes),
             redaction_state: redaction_state.to_string(),
+            truncated: false,
         }
     }
 }
@@ -705,10 +1243,45 @@ impl LocalProcessRunner {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalProcessRequest {
     pub run_id: RunId,
+    /// Optional per-turn key.
+    ///
+    /// When set, the runtime keys the artifact directory and artifact ids per
+    /// `(run_id, turn_id)` so multiple turns in the same run no longer overwrite
+    /// each other's `stdout`/`stderr`. When `None`, the legacy single-turn
+    /// `run_dir = artifact_root/run_id` layout (one `stdout.txt`/`stderr.txt`) is
+    /// preserved byte-for-byte for callers that have no turn (tool wrappers,
+    /// single-turn dispatch runs).
+    pub turn_id: Option<String>,
     pub program: String,
     pub argv: Vec<String>,
     pub cwd: PathBuf,
     pub env: HashMap<String, String>,
+}
+
+impl LocalProcessRequest {
+    /// Construct a request with no per-turn key (legacy single-turn layout).
+    pub fn new(
+        run_id: RunId,
+        program: impl Into<String>,
+        argv: Vec<String>,
+        cwd: PathBuf,
+        env: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            run_id,
+            turn_id: None,
+            program: program.into(),
+            argv,
+            cwd,
+            env,
+        }
+    }
+
+    /// Attach a per-turn key so this request's artifacts are keyed by `turn_id`.
+    pub fn with_turn_id(mut self, turn_id: impl Into<String>) -> Self {
+        self.turn_id = Some(turn_id.into());
+        self
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -722,6 +1295,11 @@ pub struct LocalRuntimeProcessRef {
     pub run_id: RunId,
     pub runtime_process_ref: String,
     pub external_pid: Option<u32>,
+    /// The machine boot id ([`boot_id`]) observed when this process was spawned.
+    /// Persisted alongside the PID so restart recovery only reaps the persisted
+    /// process group within the same boot (a reused PID after a reboot must not
+    /// be signalled). `None` when the boot id was unreadable at spawn time.
+    pub boot_id: Option<String>,
     pub status: String,
     pub redaction_state: String,
 }
@@ -745,6 +1323,8 @@ pub struct RuntimeControlResult {
 pub struct LocalRunningProcess {
     pub process: LocalRuntimeProcessRef,
     child: Child,
+    /// The per-turn artifact key, if this run was spawned for a specific turn.
+    turn_id: Option<String>,
     stdout_path: PathBuf,
     stderr_path: PathBuf,
     pub events: Vec<RuntimeEvent>,
@@ -757,6 +1337,15 @@ pub struct RuntimeOutputArtifact {
     pub size_bytes: i64,
     pub content_hash: String,
     pub redaction_state: String,
+    /// Whether the captured output was truncated at the output cap.
+    ///
+    /// The synchronous runner never truncates (it errors on overflow and the
+    /// tool wrappers buffer the whole output), so it always records `false`.
+    /// The streaming runner ([`AsyncLocalProcessRunner`]) streams-and-truncates:
+    /// a successful run that exceeds the cap keeps its (capped) artifact and
+    /// records `truncated = true` here as artifact metadata rather than failing
+    /// the run.
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -785,6 +1374,69 @@ pub struct OrphanRecovery {
     pub runtime_process_ref: String,
     pub recovered_status: String,
     pub detail: String,
+}
+
+/// The result of probing and reaping an orphaned process group by PID on
+/// restart (RTL10). See [`LocalProcessRunner::reap_orphan_process_group`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OrphanReap {
+    /// The PID Capo persisted before the spawn returned.
+    pub external_pid: u32,
+    /// `true` if the process was still alive and was reaped; `false` if it had
+    /// already exited (a true orphan whose terminal status is unknown).
+    pub reaped: bool,
+    /// The observed runtime state: `alive_reaped` or `already_gone`. A group
+    /// observed under a different boot id than was recorded at spawn time (a
+    /// recycled PID after a reboot) is reported as `already_gone` without being
+    /// signalled.
+    pub observed_state: String,
+    /// A stable hash over `(external_pid, recorded_boot_id, observed_state)` for
+    /// the recovery idempotency key.
+    pub observed_runtime_state_hash: String,
+}
+
+/// SG9: how a restart observed a previously in-flight run's persisted
+/// process-group when probing its liveness NON-destructively
+/// ([`LocalProcessRunner::probe_run_health`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeHealthState {
+    /// The process group is still alive within the recording boot, so the run is
+    /// reattachable in place (the recovery layer records `run.recovered`).
+    Alive,
+    /// The process group is gone (or its boot id could not be confirmed against
+    /// the current boot), so the run terminated while Capo was down (the recovery
+    /// layer records a terminal `run.exited`).
+    Exited,
+}
+
+impl RuntimeHealthState {
+    /// Whether the probed run is still alive and reattachable.
+    pub const fn is_alive(self) -> bool {
+        matches!(self, Self::Alive)
+    }
+
+    /// The stable observed-state token folded into the recovery idempotency hash.
+    pub const fn observed_state(self) -> &'static str {
+        match self {
+            Self::Alive => "alive",
+            Self::Exited => "exited",
+        }
+    }
+}
+
+/// SG9: the result of NON-destructively probing a previously in-flight run's
+/// liveness on restart by its persisted PID. See
+/// [`LocalProcessRunner::probe_run_health`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunHealthProbe {
+    /// The PID Capo persisted before the spawn returned, if one was recorded.
+    pub external_pid: Option<u32>,
+    /// Whether the run is still alive (reattachable) or has exited.
+    pub state: RuntimeHealthState,
+    /// A stable hash over `(external_pid, recorded_boot_id, observed_state)` for
+    /// the recovery idempotency key, so a repeated restart observing the same
+    /// runtime state never emits a second recovery event.
+    pub observed_state_hash: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1367,13 +2019,182 @@ fn normalize_path(path: &Path) -> RuntimeResult<PathBuf> {
     }
 }
 
-fn content_hash(bytes: &[u8]) -> String {
+/// Build the artifact id for a run/turn stream.
+///
+/// With no turn key this is the legacy `artifact-runtime-{run_id}-{stream}`.
+/// With a turn key the turn is folded in so per-turn artifacts in the same run
+/// have distinct ids: `artifact-runtime-{run_id}-turn-{turn_id}-{stream}`.
+pub(crate) fn artifact_id_for(run_id: &RunId, turn_id: Option<&str>, stream: &str) -> String {
+    match turn_id {
+        Some(turn_id) => format!(
+            "artifact-runtime-{run_id}-turn-{}-{stream}",
+            sanitize_artifact_key(turn_id)
+        ),
+        None => format!("artifact-runtime-{run_id}-{stream}"),
+    }
+}
+
+/// Sanitize a turn key for use as a path segment and artifact-id component.
+///
+/// Keeps the key filesystem-safe and free of separators so it cannot escape the
+/// run directory or collide across turns.
+pub(crate) fn sanitize_artifact_key(key: &str) -> String {
+    let sanitized: String = key
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "turn".to_string()
+    } else {
+        sanitized
+    }
+}
+
+pub(crate) fn content_hash(bytes: &[u8]) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("fnv1a64:{hash:016x}")
+}
+
+/// The lowest PID the orphan reaper will ever signal as a process *group*.
+///
+/// `kill -<pid>` targets a process *group*, and the low group ids are
+/// catastrophic to signal: group 0 is the *caller's own* group (so
+/// `kill -KILL -0` would SIGKILL Capo and every child it spawned), and group 1
+/// is init's group. A corrupted/zero/low PID in the durable in-flight marker
+/// must therefore never reach `/bin/kill`; we treat anything `<= 1` as "no
+/// process to reap" (see [`is_reapable_pid`]).
+const MIN_REAPABLE_PID: u32 = 2;
+
+/// Whether `pid` is safe to use as a negative-PID process-*group* signal target.
+///
+/// Guards against `kill -<0|1>` (self-group / init) reaching the reaper from a
+/// corrupted or zero-defaulted marker PID.
+fn is_reapable_pid(pid: u32) -> bool {
+    pid >= MIN_REAPABLE_PID
+}
+
+/// Probe whether the process *group* led by `pid` still has any live member,
+/// without affecting it (`kill -0 -<pid>`).
+#[cfg(unix)]
+pub(crate) fn process_group_is_alive(pid: u32) -> bool {
+    // Never probe (or, downstream, signal) the self/init groups: a low PID from
+    // a corrupted marker must read as "not alive" so the reaper records
+    // `already_gone` rather than `kill -0 -0` (which would succeed against our
+    // own group and lead the reaper to SIGKILL it).
+    if !is_reapable_pid(pid) {
+        return false;
+    }
+    // `kill -0 -<pid>` succeeds iff at least one process in the group exists and
+    // we may signal it; it never delivers a signal. We probe the *group* (not
+    // the leader PID) so a backgrounded descendant whose group leader already
+    // exited still reads as alive -- that descendant is exactly the orphan we
+    // must reap.
+    Command::new("/bin/kill")
+        .arg("-0")
+        .arg(format!("-{pid}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Send `signal` to the whole process group led by `pid` (negative PID target).
+#[cfg(unix)]
+pub(crate) fn kill_process_group(pid: u32, signal: &str) {
+    // Defence in depth alongside `process_group_is_alive`: refuse to signal the
+    // self/init groups even if a caller reaches here with a low PID.
+    if !is_reapable_pid(pid) {
+        return;
+    }
+    let _ = Command::new("/bin/kill")
+        .arg(signal)
+        .arg(format!("-{pid}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// A coarse identity token for the machine's current boot, recorded alongside a
+/// run's PID at spawn time (RTL10) and re-checked on restart before any reap.
+///
+/// PIDs (and process-group ids) are recycled freely by the OS, so a PID
+/// persisted before a crash is only a meaningful handle *within the same boot*.
+/// After a reboot the persisted PID/PGID is almost certainly attached to an
+/// unrelated process group, and reaping it would SIGKILL an innocent group. We
+/// therefore stamp each marker with the boot id and skip reaping (recording the
+/// run as already gone) when it differs from the boot id observed on restart.
+///
+/// The token is derived from the kernel's recorded boot instant
+/// (`/proc/stat`'s `btime` on Linux, `kern.boottime` on macOS). If neither is
+/// readable we return `None`; callers treat an unknown boot id conservatively
+/// (no reap), so an unverifiable identity never escalates to a group kill.
+pub fn boot_id() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = fs::read_to_string("/proc/stat").ok()?;
+        for line in stat.lines() {
+            if let Some(btime) = line.strip_prefix("btime ") {
+                let btime = btime.trim();
+                if !btime.is_empty() {
+                    return Some(format!("linux-btime-{btime}"));
+                }
+            }
+        }
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("/usr/sbin/sysctl")
+            .arg("-n")
+            .arg("kern.boottime")
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        // Format: `{ sec = 1700000000, usec = 0 } Tue ...`; the `sec` field is a
+        // stable per-boot value.
+        let sec = text
+            .split("sec =")
+            .nth(1)?
+            .trim_start()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?;
+        if sec.is_empty() {
+            return None;
+        }
+        Some(format!("macos-boottime-{sec}"))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// A stable hash over the observed orphan runtime state for recovery
+/// idempotency. Stable across restarts that observe the same PID + recorded boot
+/// id + liveness.
+fn orphan_state_hash(pid: u32, recorded_boot_id: Option<&str>, observed_state: &str) -> String {
+    content_hash(
+        format!(
+            "{pid}:{}:{observed_state}",
+            recorded_boot_id.unwrap_or("no-boot-id")
+        )
+        .as_bytes(),
+    )
 }
 
 #[cfg(test)]
@@ -1496,6 +2317,7 @@ mod tests {
         let outcome = runner
             .start_process(LocalProcessRequest {
                 run_id: RunId::new("run-local"),
+                turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec![
                     "-c".to_string(),
@@ -1543,6 +2365,104 @@ mod tests {
     }
 
     #[test]
+    fn local_process_runner_credential_scan_redacts_unnamed_secret_in_output() {
+        // ACI7 regression: the credential scan must run through the REAL runner
+        // boundary (`start_process` -> `redact_output`), not only at the unit
+        // level. Here the process prints an UNNAMED secret (no operator rule),
+        // and the artifact on disk must be scrubbed with redaction_state=redacted.
+        let workspace = temp_root("workspace-credscan");
+        let artifacts = temp_root("artifacts-credscan");
+        fs::create_dir_all(&workspace).unwrap();
+        // No redaction_rules configured: this proves the default credential scan.
+        let runner = LocalProcessRunner::new(LocalProcessConfig::for_test(
+            workspace.clone(),
+            artifacts.clone(),
+        ));
+
+        let outcome = runner
+            .start_process(LocalProcessRequest {
+                run_id: RunId::new("run-credscan"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    "printf 'key AKIAIOSFODNN7EXAMPLE'; \
+                     printf 'tok ghp_abcdEFGH1234ijklMNOP5678qrst' >&2"
+                        .to_string(),
+                ],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("run local process");
+
+        assert_eq!(outcome.process.status, "exited");
+        assert_eq!(outcome.stdout.redaction_state, "redacted");
+        assert_eq!(outcome.stderr.redaction_state, "redacted");
+        let stdout = fs::read_to_string(&outcome.stdout.path).unwrap();
+        let stderr = fs::read_to_string(&outcome.stderr.path).unwrap();
+        assert!(
+            !stdout.contains("AKIAIOSFODNN7EXAMPLE"),
+            "unnamed secret leaked to stdout artifact: {stdout}"
+        );
+        assert!(
+            !stderr.contains("ghp_abcdEFGH1234ijklMNOP5678qrst"),
+            "unnamed secret leaked to stderr artifact: {stderr}"
+        );
+        assert!(stdout.contains(CREDENTIAL_REDACTION_PLACEHOLDER));
+        // The benign words around the secret survive.
+        assert!(stdout.contains("key"));
+
+        runner.cleanup(&outcome.process).expect("cleanup");
+    }
+
+    #[test]
+    fn local_process_runner_credential_scan_keeps_benign_git_output_intact() {
+        // ACI7 regression / false-positive guard at the runner boundary: a
+        // benign command emitting a git SHA and a filesystem path must NOT be
+        // corrupted by the credential scan (redaction_state stays "safe").
+        let workspace = temp_root("workspace-benign");
+        let artifacts = temp_root("artifacts-benign");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner = LocalProcessRunner::new(LocalProcessConfig::for_test(
+            workspace.clone(),
+            artifacts.clone(),
+        ));
+
+        let outcome = runner
+            .start_process(LocalProcessRequest {
+                run_id: RunId::new("run-benign"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    "printf 'commit 9fceb02d0ae598e95dc970b74767f19372d61af8 \
+                     /usr/local/lib/python3.11/site-packages/numpy'"
+                        .to_string(),
+                ],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("run local process");
+
+        assert_eq!(outcome.process.status, "exited");
+        assert_eq!(
+            outcome.stdout.redaction_state, "safe",
+            "benign git output wrongly marked redacted"
+        );
+        let stdout = fs::read_to_string(&outcome.stdout.path).unwrap();
+        assert!(
+            stdout.contains("9fceb02d0ae598e95dc970b74767f19372d61af8"),
+            "git SHA was corrupted by the credential scan: {stdout}"
+        );
+        assert!(
+            stdout.contains("/usr/local/lib/python3.11/site-packages/numpy"),
+            "path was corrupted by the credential scan: {stdout}"
+        );
+
+        runner.cleanup(&outcome.process).expect("cleanup");
+    }
+
+    #[test]
     fn local_process_runner_can_kill_a_live_child_and_collect_artifacts() {
         let workspace = temp_root("workspace-live");
         let artifacts = temp_root("artifacts-live");
@@ -1553,6 +2473,7 @@ mod tests {
         let mut running = runner
             .spawn_process(LocalProcessRequest {
                 run_id: RunId::new("run-live"),
+                turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec![
                     "-c".to_string(),
@@ -1577,6 +2498,130 @@ mod tests {
     }
 
     #[test]
+    fn multiple_turns_in_one_run_keep_distinct_per_turn_artifacts() {
+        let workspace = temp_root("workspace-multi-turn");
+        let artifacts = temp_root("artifacts-multi-turn");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner = LocalProcessRunner::new(LocalProcessConfig::for_test(
+            workspace.clone(),
+            artifacts.clone(),
+        ));
+
+        let run_id = RunId::new("run-multi-turn");
+        let mut outcomes = Vec::new();
+        for turn in ["turn-1", "turn-2"] {
+            let mut running = runner
+                .spawn_process(
+                    LocalProcessRequest::new(
+                        run_id.clone(),
+                        "/bin/sh",
+                        vec![
+                            "-c".to_string(),
+                            format!("printf stdout-{turn}; printf stderr-{turn} >&2"),
+                        ],
+                        workspace.clone(),
+                        HashMap::new(),
+                    )
+                    .with_turn_id(turn),
+                )
+                .expect("spawn turn process");
+            let outcome = runner
+                .wait_running(&mut running)
+                .expect("wait turn process");
+            outcomes.push((turn, outcome));
+        }
+
+        // Each turn keeps a distinct artifact directory, distinct artifact ids,
+        // and its own stdout/stderr content -- no overwriting across turns.
+        let (turn1, outcome1) = &outcomes[0];
+        let (turn2, outcome2) = &outcomes[1];
+        assert_ne!(outcome1.stdout.path, outcome2.stdout.path);
+        assert_ne!(outcome1.stderr.path, outcome2.stderr.path);
+        assert_ne!(outcome1.stdout.artifact_id, outcome2.stdout.artifact_id);
+        assert_ne!(outcome1.stderr.artifact_id, outcome2.stderr.artifact_id);
+        assert!(
+            outcome1
+                .stdout
+                .artifact_id
+                .contains(&format!("turn-{turn1}"))
+        );
+        assert!(
+            outcome2
+                .stdout
+                .artifact_id
+                .contains(&format!("turn-{turn2}"))
+        );
+
+        for (turn, outcome) in &outcomes {
+            assert_eq!(
+                fs::read_to_string(&outcome.stdout.path).unwrap(),
+                format!("stdout-{turn}")
+            );
+            assert_eq!(
+                fs::read_to_string(&outcome.stderr.path).unwrap(),
+                format!("stderr-{turn}")
+            );
+            // Per-turn artifacts are nested under run_id/turns/<turn_id>.
+            let expected_dir = artifacts.join(run_id.as_str()).join("turns").join(turn);
+            assert_eq!(outcome.stdout.path.parent().unwrap(), expected_dir);
+        }
+
+        // Every turn's artifact is reconstructable from the run directory alone
+        // (the replay/rebuild surface): the on-disk layout enumerates each turn.
+        let turns_dir = artifacts.join(run_id.as_str()).join("turns");
+        let mut recorded_turns: Vec<String> = fs::read_dir(&turns_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        recorded_turns.sort();
+        assert_eq!(recorded_turns, vec!["turn-1", "turn-2"]);
+        for turn in &recorded_turns {
+            let turn_dir = turns_dir.join(turn);
+            assert!(turn_dir.join("stdout.txt").exists());
+            assert!(turn_dir.join("stderr.txt").exists());
+        }
+    }
+
+    #[test]
+    fn run_without_a_turn_id_keeps_the_legacy_single_turn_artifact_layout() {
+        let workspace = temp_root("workspace-legacy-layout");
+        let artifacts = temp_root("artifacts-legacy-layout");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner = LocalProcessRunner::new(LocalProcessConfig::for_test(
+            workspace.clone(),
+            artifacts.clone(),
+        ));
+
+        let mut running = runner
+            .spawn_process(LocalProcessRequest::new(
+                RunId::new("run-legacy"),
+                "/bin/sh",
+                vec!["-c".to_string(), "printf legacy-out".to_string()],
+                workspace.clone(),
+                HashMap::new(),
+            ))
+            .expect("spawn legacy process");
+        let outcome = runner
+            .wait_running(&mut running)
+            .expect("wait legacy process");
+
+        // No turn key -> legacy run_dir = artifact_root/run_id and legacy id shape.
+        assert_eq!(
+            outcome.stdout.path,
+            artifacts.join("run-legacy").join("stdout.txt")
+        );
+        assert_eq!(
+            outcome.stdout.artifact_id,
+            "artifact-runtime-run-legacy-stdout"
+        );
+        assert_eq!(
+            outcome.stderr.artifact_id,
+            "artifact-runtime-run-legacy-stderr"
+        );
+        assert!(!artifacts.join("run-legacy").join("turns").exists());
+    }
+
+    #[test]
     fn local_process_runner_times_out_and_collects_partial_artifacts() {
         let workspace = temp_root("workspace-timeout");
         let artifacts = temp_root("artifacts-timeout");
@@ -1587,6 +2632,7 @@ mod tests {
         let mut running = runner
             .spawn_process(LocalProcessRequest {
                 run_id: RunId::new("run-timeout"),
+                turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec![
                     "-c".to_string(),
@@ -1619,6 +2665,7 @@ mod tests {
         let mut running = runner
             .spawn_process(LocalProcessRequest {
                 run_id: RunId::new("run-timeout-tree"),
+                turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec![
                     "-c".to_string(),
@@ -1650,6 +2697,7 @@ mod tests {
         let mut running = runner
             .spawn_process(LocalProcessRequest {
                 run_id: RunId::new("run-output-limit"),
+                turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec![
                     "-c".to_string(),
@@ -1683,6 +2731,7 @@ mod tests {
         let outcome = runner
             .start_process(LocalProcessRequest {
                 run_id: RunId::new("run-remote"),
+                turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec!["-c".to_string(), "printf remote-ok".to_string()],
                 cwd: workspace,
@@ -1758,6 +2807,7 @@ mod tests {
         let error = runner
             .start_process(LocalProcessRequest {
                 run_id: RunId::new("run-env"),
+                turn_id: None,
                 program: "/usr/bin/env".to_string(),
                 argv: Vec::new(),
                 cwd: workspace,
@@ -1785,6 +2835,7 @@ mod tests {
         let error = runner
             .start_process(LocalProcessRequest {
                 run_id: RunId::new("run-reject"),
+                turn_id: None,
                 program: "/bin/echo".to_string(),
                 argv: vec!["nope".to_string()],
                 cwd: outside,
@@ -1795,11 +2846,473 @@ mod tests {
         assert!(matches!(error, RuntimeError::CwdOutsideWorkspace { .. }));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn reap_orphan_process_group_kills_a_live_descendant_tree_by_pid() {
+        // RTL10: simulate a controller crash mid-run. The runtime spawned a
+        // process group with a backgrounded descendant that would survive its
+        // parent; on restart Capo no longer holds the `Child`, only the
+        // persisted PID. Reaping by that PID must terminate the whole group --
+        // so the descendant's delayed marker never appears.
+        let workspace = temp_root("workspace-reap-tree");
+        let artifacts = temp_root("artifacts-reap-tree");
+        fs::create_dir_all(&workspace).unwrap();
+        let marker = workspace.join("orphan-survived.txt");
+        let runner =
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+
+        let mut running = runner
+            .spawn_process(LocalProcessRequest {
+                run_id: RunId::new("run-reap-tree"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    // A backgrounded descendant writes the marker after a delay;
+                    // the parent exits immediately, leaving the descendant as
+                    // the orphan we must reap by the persisted group PID.
+                    format!("(sleep 2; printf survived > {}) &", marker.display()),
+                ],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("spawn orphan tree");
+        let pid = running.process.external_pid.expect("pid recorded");
+        let recorded_boot_id = running.process.boot_id.clone();
+        // Let the parent exit but the descendant keep sleeping.
+        let _ = running.child.wait();
+        thread::sleep(Duration::from_millis(100));
+
+        let reap = LocalProcessRunner::reap_orphan_process_group(pid, recorded_boot_id.as_deref());
+        assert!(reap.reaped, "a live orphan group must be reaped");
+        assert_eq!(reap.observed_state, "alive_reaped");
+        assert_eq!(reap.external_pid, pid);
+
+        // Give the descendant well past its delay; if reaping worked it never
+        // wrote the marker.
+        thread::sleep(Duration::from_millis(2200));
+        assert!(
+            !marker.exists(),
+            "reaping the process group must kill the descendant before it writes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_orphan_process_group_reports_already_gone_for_a_dead_pid() {
+        // A process that has already exited has no group to reap; the reaper
+        // reports `already_gone` so recovery records a terminal exit, and the
+        // observed-state hash is stable for idempotency.
+        let workspace = temp_root("workspace-reap-gone");
+        let artifacts = temp_root("artifacts-reap-gone");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner =
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+        let mut running = runner
+            .spawn_process(LocalProcessRequest {
+                run_id: RunId::new("run-reap-gone"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec!["-c".to_string(), "exit 0".to_string()],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("spawn short process");
+        let pid = running.process.external_pid.expect("pid recorded");
+        let recorded_boot_id = running.process.boot_id.clone();
+        let _ = running.child.wait();
+        thread::sleep(Duration::from_millis(100));
+
+        let reap = LocalProcessRunner::reap_orphan_process_group(pid, recorded_boot_id.as_deref());
+        assert!(!reap.reaped);
+        assert_eq!(reap.observed_state, "already_gone");
+        // Stable hash: re-observing the same gone PID hashes identically.
+        assert_eq!(
+            reap.observed_runtime_state_hash,
+            LocalProcessRunner::reap_orphan_process_group(pid, recorded_boot_id.as_deref())
+                .observed_runtime_state_hash
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_orphan_process_group_does_not_reap_across_a_reboot_boundary() {
+        // RTL10 safety: PIDs/PGIDs are recycled across reboots, so a live group
+        // observed under a *different* boot id than the one recorded at spawn
+        // must NOT be signalled -- it is almost certainly an unrelated process
+        // group. The reaper records it as `already_gone` (no kill).
+        let workspace = temp_root("workspace-reap-reboot");
+        let artifacts = temp_root("artifacts-reap-reboot");
+        fs::create_dir_all(&workspace).unwrap();
+        let marker = workspace.join("survivor-across-reboot.txt");
+        let runner =
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+        let mut running = runner
+            .spawn_process(LocalProcessRequest {
+                run_id: RunId::new("run-reap-reboot"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    format!("(sleep 2; printf survived > {}) &", marker.display()),
+                ],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("spawn process group");
+        let pid = running.process.external_pid.expect("pid recorded");
+        let _ = running.child.wait();
+        thread::sleep(Duration::from_millis(100));
+
+        // Recorded boot id from a *different* boot than the current one.
+        let reap = LocalProcessRunner::reap_orphan_process_group(
+            pid,
+            Some("linux-btime-000000000-stale-reboot"),
+        );
+        assert!(
+            !reap.reaped,
+            "a recycled PID after a reboot must not be reaped"
+        );
+        assert_eq!(reap.observed_state, "already_gone");
+
+        // The live descendant is left alone and writes its marker.
+        thread::sleep(Duration::from_millis(2200));
+        assert!(
+            marker.exists(),
+            "the group under a different boot id must be left untouched"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_orphan_process_group_never_signals_self_or_init_groups() {
+        // RTL10 safety: a corrupted/zero/low PID in the durable marker must never
+        // become `kill -<0|1>` (self group / init). Both report `already_gone`
+        // with no signal, regardless of the recorded boot id.
+        let current = boot_id();
+        for pid in [0u32, 1u32] {
+            let reap = LocalProcessRunner::reap_orphan_process_group(pid, current.as_deref());
+            assert!(!reap.reaped, "pid {pid} must never be reaped");
+            assert_eq!(reap.observed_state, "already_gone");
+        }
+        assert!(!is_reapable_pid(0));
+        assert!(!is_reapable_pid(1));
+        assert!(is_reapable_pid(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_run_health_reports_alive_without_killing_the_process() {
+        // SG9: the liveness-aware probe must OBSERVE a live in-flight run's
+        // process group WITHOUT terminating it (unlike the RTL10 reaper), so the
+        // recovery layer can reattach in place. The backgrounded descendant must
+        // survive the probe and write its marker.
+        let workspace = temp_root("workspace-probe-alive");
+        let artifacts = temp_root("artifacts-probe-alive");
+        fs::create_dir_all(&workspace).unwrap();
+        let marker = workspace.join("probe-survivor.txt");
+        let runner =
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+        let mut running = runner
+            .spawn_process(LocalProcessRequest {
+                run_id: RunId::new("run-probe-alive"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    format!("(sleep 2; printf survived > {}) &", marker.display()),
+                ],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("spawn live group");
+        let pid = running.process.external_pid.expect("pid recorded");
+        let recorded_boot_id = running.process.boot_id.clone();
+        let _ = running.child.wait();
+        thread::sleep(Duration::from_millis(100));
+
+        let probe = LocalProcessRunner::probe_run_health(pid, recorded_boot_id.as_deref());
+        assert_eq!(probe.state, RuntimeHealthState::Alive);
+        assert!(probe.state.is_alive());
+        assert_eq!(probe.external_pid, Some(pid));
+
+        // The probe never signalled, so the descendant survives and writes.
+        thread::sleep(Duration::from_millis(2200));
+        assert!(
+            marker.exists(),
+            "a non-destructive liveness probe must leave the live group running"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_run_health_reports_exited_for_a_dead_pid_and_is_stable() {
+        // SG9: a gone process group classifies as exited, with a stable
+        // observed-state hash so repeated restart probes are idempotent.
+        let workspace = temp_root("workspace-probe-gone");
+        let artifacts = temp_root("artifacts-probe-gone");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner =
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+        let mut running = runner
+            .spawn_process(LocalProcessRequest {
+                run_id: RunId::new("run-probe-gone"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec!["-c".to_string(), "exit 0".to_string()],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("spawn short process");
+        let pid = running.process.external_pid.expect("pid recorded");
+        let recorded_boot_id = running.process.boot_id.clone();
+        let _ = running.child.wait();
+        thread::sleep(Duration::from_millis(100));
+
+        let probe = LocalProcessRunner::probe_run_health(pid, recorded_boot_id.as_deref());
+        assert_eq!(probe.state, RuntimeHealthState::Exited);
+        assert_eq!(
+            probe.observed_state_hash,
+            LocalProcessRunner::probe_run_health(pid, recorded_boot_id.as_deref())
+                .observed_state_hash,
+            "re-probing the same gone PID must hash identically (idempotency)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_run_health_treats_a_recycled_pid_across_reboot_as_exited() {
+        // SG9: a PID observed under a DIFFERENT boot id than was recorded at spawn
+        // is a recycled/unrelated group and must never be trusted as "our run
+        // still alive" -- it classifies as exited (like the reaper declines to
+        // signal it), so recovery never reattaches to an unrelated process.
+        let workspace = temp_root("workspace-probe-reboot");
+        let artifacts = temp_root("artifacts-probe-reboot");
+        fs::create_dir_all(&workspace).unwrap();
+        let marker = workspace.join("probe-reboot-survivor.txt");
+        let runner =
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+        let mut running = runner
+            .spawn_process(LocalProcessRequest {
+                run_id: RunId::new("run-probe-reboot"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec![
+                    "-c".to_string(),
+                    format!("(sleep 2; printf survived > {}) &", marker.display()),
+                ],
+                cwd: workspace,
+                env: HashMap::new(),
+            })
+            .expect("spawn live group");
+        let pid = running.process.external_pid.expect("pid recorded");
+        let _ = running.child.wait();
+        thread::sleep(Duration::from_millis(100));
+
+        let probe =
+            LocalProcessRunner::probe_run_health(pid, Some("linux-btime-000000000-stale-reboot"));
+        assert_eq!(
+            probe.state,
+            RuntimeHealthState::Exited,
+            "a PID under a different boot id must classify as exited (no reattach)"
+        );
+
+        // And it was never signalled: the live descendant is left running.
+        thread::sleep(Duration::from_millis(2200));
+        assert!(
+            marker.exists(),
+            "the probe must not signal a group under a different boot id"
+        );
+    }
+
     fn temp_root(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
         std::env::temp_dir().join(format!("capo-runtime-{name}-{nanos}"))
+    }
+
+    #[test]
+    fn redaction_policy_applies_rules_then_credential_scan() {
+        // ACI7: the explicit operator pattern wins its exact replacement, and the
+        // default credential-shape scan scrubs an UNNAMED credential too.
+        let policy = RedactionPolicy::new(vec![RedactionRule {
+            pattern: "NAMED".to_string(),
+            replacement: "[X]".to_string(),
+        }]);
+        let (bytes, state) = policy.apply(b"token NAMED and key AKIAIOSFODNN7EXAMPLE done");
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(state, "redacted");
+        assert!(text.contains("[X]"), "named rule should apply: {text}");
+        assert!(
+            !text.contains("AKIAIOSFODNN7EXAMPLE"),
+            "credential scan should scrub the unnamed key: {text}"
+        );
+        assert!(text.contains(CREDENTIAL_REDACTION_PLACEHOLDER));
+        // The benign words survive.
+        assert!(text.contains("token") && text.contains("done"));
+    }
+
+    #[test]
+    fn credential_scan_recognizes_credential_shapes() {
+        let policy = RedactionPolicy::new(Vec::new());
+        for secret in [
+            "AKIAIOSFODNN7EXAMPLE",
+            "sk-abcdEFGH1234ijklMNOP5678",
+            "ghp_abcdEFGH1234ijklMNOP5678qrst",
+            "AIzaSyA1b2C3d4E5f6G7h8I9j0KLmnopQRstuv",
+            "dGhpcyBpcyBhIGxvbmcgYmFzZTY0IDEyMzQ1Njc4OTA=",
+        ] {
+            let (bytes, state) = policy.apply(format!("value={secret}").as_bytes());
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(state, "redacted", "expected redaction for {secret}");
+            assert!(
+                !text.contains(secret),
+                "credential {secret} should be scrubbed: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_scan_recognizes_bare_tokens_without_a_key_wrapper() {
+        // ACI7 regression: the scan must fire on a BARE token (no `value=`
+        // wrapper), including a base64 token whose only `=` is trailing padding.
+        // Previously the unconditional `key=` strip turned such a token into an
+        // empty value and the function early-returned `false`, leaking it.
+        let policy = RedactionPolicy::new(Vec::new());
+        for secret in [
+            "AKIAIOSFODNN7EXAMPLE",
+            "ghp_abcdEFGH1234ijklMNOP5678qrst",
+            "Zm9vYmFyMTIzNDU2Nzg5MGFiY2RlZmdoaQ=",
+            "dGhpcyBpcyBhIGxvbmcgYmFzZTY0IDEyMzQ1Njc4OTA=",
+            "QUJDZGVmMTIzNDU2Nzg5MGdoaWprbG1ub3A==",
+        ] {
+            let (bytes, state) = policy.apply(format!("leaked {secret} here").as_bytes());
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(state, "redacted", "expected redaction for bare {secret}");
+            assert!(
+                !text.contains(secret),
+                "bare credential {secret} should be scrubbed: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_scan_redacts_known_prefix_tokens_containing_an_equals() {
+        // ACI7 regression: a known-prefix token with an embedded `=` must still
+        // be redacted. Previously the `key=` strip removed the `github_pat_` /
+        // `AKIA`-bearing prefix before the KNOWN_PREFIXES check ran.
+        let policy = RedactionPolicy::new(Vec::new());
+        for secret in [
+            "github_pat_11ABCDEF=DEF456ghi789jkl",
+            "AKIA1234567890ABCDEF=",
+            "ghp_abcdEFGH1234ijklMNOP=5678qrst",
+        ] {
+            let (bytes, state) = policy.apply(format!("token {secret} end").as_bytes());
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(
+                state, "redacted",
+                "expected redaction for prefix-with-= {secret}"
+            );
+            assert!(
+                !text.contains(secret),
+                "known-prefix credential {secret} should be scrubbed: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_scan_redacts_quoted_json_and_url_embedded_secrets() {
+        // ACI7 regression: secrets do not arrive bare in real OUTPUT. They are
+        // quoted, packed into JSON, or sit in a URL query. Each is exactly a
+        // read-file / shell-stdout / diff shape the policy claims to scrub.
+        let policy = RedactionPolicy::new(Vec::new());
+        let secret = "AKIAIOSFODNN7EXAMPLE";
+        for line in [
+            format!("{{\"aws_key\":\"{secret}\"}}"),
+            format!("token=\"{secret}\""),
+            format!("https://example.com/path?token={secret}&page=1"),
+            format!("export AWS_SECRET='{secret}'"),
+            format!("Authorization: Bearer {secret}"),
+        ] {
+            let (bytes, state) = policy.apply(line.as_bytes());
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(state, "redacted", "expected redaction for: {line}");
+            assert!(
+                !text.contains(secret),
+                "embedded credential should be scrubbed in {line}, got: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_scan_does_not_corrupt_shas_uuids_and_paths() {
+        // ACI7 regression: the high-volume false-positive surface. git SHAs, hex
+        // digests, dashed UUIDs, and long filesystem paths fill git/test output
+        // and must NOT be replaced with the credential placeholder.
+        let policy = RedactionPolicy::new(Vec::new());
+        for benign in [
+            // 40-char git commit SHA.
+            "9fceb02d0ae598e95dc970b74767f19372d61af8",
+            // 64-char sha256 hex digest.
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            // canonical dashed UUID.
+            "550e8400-e29b-41d4-a716-446655440000",
+            // un-dashed UUID (pure hex).
+            "550e8400e29b41d4a716446655440000",
+            // long filesystem path as a single token.
+            "/usr/local/lib/python3.11/site-packages/numpy/core/_multiarray_umath",
+        ] {
+            let (bytes, state) = policy.apply(format!("ref {benign} ok").as_bytes());
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(state, "safe", "benign token wrongly redacted: {benign}");
+            assert!(
+                text.contains(benign),
+                "benign token {benign} must survive untouched: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_scan_leaves_ordinary_text_untouched() {
+        // ACI7: the scan must not blank out ordinary prose, paths, or short
+        // identifiers, or it would hide useful output from the agent.
+        let policy = RedactionPolicy::new(Vec::new());
+        let prose = "the quick brown fox jumps over /usr/local/bin/cargo \
+                     and runs test_case_42 then returns Ok(())";
+        let (bytes, state) = policy.apply(prose.as_bytes());
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(
+            state, "safe",
+            "ordinary text should not be redacted: {text}"
+        );
+        assert_eq!(text, prose);
+    }
+
+    #[test]
+    fn credential_scan_scrubs_a_bearer_token() {
+        let policy = RedactionPolicy::new(Vec::new());
+        let (bytes, state) = policy.apply(b"Authorization: Bearer abc123def456");
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(state, "redacted");
+        assert!(
+            !text.contains("abc123def456"),
+            "bearer token leaked: {text}"
+        );
+    }
+
+    #[test]
+    fn rules_only_policy_skips_the_credential_scan() {
+        // The rules-only policy applies declared patterns but does NOT run the
+        // default credential-shape scan.
+        let policy = RedactionPolicy::rules_only(Vec::new());
+        assert!(!policy.scans_credentials());
+        let (bytes, state) = policy.apply(b"key AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(state, "safe");
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "key AKIAIOSFODNN7EXAMPLE"
+        );
     }
 }

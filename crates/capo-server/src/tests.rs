@@ -14,12 +14,26 @@ use crate::{
     ServerResponse, ServerResponsePayload, send_tcp, serve_tcp,
 };
 
+mod codex_chat;
+mod codex_workspace_write;
+mod contract;
+mod controller_routing;
+mod crash_recovery;
 mod dispatch;
+mod e2e_gate;
+mod event_tail;
 mod foundation;
+mod goal;
 mod live_provider;
+mod live_smoke;
+mod multi_turn_edit;
+mod per_turn_artifacts;
 mod replay;
+mod safety_floor;
 mod sessions;
+mod stream;
 mod transport;
+mod turn_orchestration;
 
 static TEMP_ROOT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 

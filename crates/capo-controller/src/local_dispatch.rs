@@ -96,6 +96,7 @@ impl FakeBoundaryController {
                     latest_summary: None,
                     latest_confidence: None,
                     latest_blocker: None,
+                    external_session_ref: Some(start.external_session_ref.clone()),
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Run(RunProjection {

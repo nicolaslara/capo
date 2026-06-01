@@ -15,6 +15,10 @@ pub enum EventKind {
     PermissionApprovalQueued,
     CapabilityGrantCreated,
     CapabilityGrantUsed,
+    CapabilityGrantRevoked,
+    CapabilityGrantExpired,
+    WorkspaceLeaseAcquired,
+    WorkspaceLeaseReleased,
     ConnectivityExposureRequested,
     ConnectivityExposureChanged,
     ConnectivityExposureRevoked,
@@ -43,6 +47,7 @@ pub enum EventKind {
     TaskOutcomeReportGenerated,
     ReviewFindingRecorded,
     EvidenceRecorded,
+    RunScored,
     WorkpadIndexed,
     WorkpadTaskImported,
     WorkpadProposalWritten,
@@ -51,6 +56,48 @@ pub enum EventKind {
     RecoveryCompleted,
     SessionInterrupted,
     SessionStopped,
+    CheckpointCreated,
+    CheckpointRestored,
+    RunHardKilled,
+    RunAborted,
+    RunOrphaned,
+    RunRecovered,
+    // GA1 (goal-orchestration GO1/GO3): the append-only goal lifecycle,
+    // requirement-status, continuation-decision, and delegated-provider-goal
+    // events. These CITE the `goal-orchestration` schema and do NOT redefine
+    // evidence/review -- those reuse `EvidenceRecorded`/`ReviewFindingRecorded`
+    // and the `tools-aci` `agent_reported` report events.
+    GoalCreated,
+    GoalUpdated,
+    GoalPaused,
+    GoalResumed,
+    GoalBlocked,
+    GoalCleared,
+    RequirementStatusChanged,
+    GoalReportRecorded,
+    ContinuationDecisionRecorded,
+    DelegatedProviderGoalObserved,
+    // GA5 (goal-orchestration GO9): the evidence-gated completion auditor's
+    // decision. The auditor is the ONLY path to a Capo goal-complete verdict;
+    // it decides on OBSERVED evidence, never on agent prose or model confidence.
+    GoalAuditDecisionRecorded,
+}
+
+/// The terminal outcome a projected turn-ending event carries, in the
+/// projected-event vocabulary (`evidence.recorded`/`session.interrupted`/
+/// `session.stopped`/`run.exited`).
+///
+/// This is the single owner of "which projected kinds end a turn and what they
+/// mean". Both the controller's event-sourced turn re-derivation
+/// (`reconstruct_turn_finished`) and the thread read-model projection map their
+/// own outcome type from this one, so the two read models cannot disagree about
+/// a turn's terminal status or drift in which kinds are terminal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectedTurnOutcome {
+    Completed,
+    Interrupted,
+    Stopped,
+    Failed,
 }
 
 impl EventKind {
@@ -69,6 +116,10 @@ impl EventKind {
             Self::PermissionApprovalQueued => "permission.approval_queued",
             Self::CapabilityGrantCreated => "capability.grant_created",
             Self::CapabilityGrantUsed => "capability.grant_used",
+            Self::CapabilityGrantRevoked => "capability.grant_revoked",
+            Self::CapabilityGrantExpired => "capability.grant_expired",
+            Self::WorkspaceLeaseAcquired => "workspace.lease_acquired",
+            Self::WorkspaceLeaseReleased => "workspace.lease_released",
             Self::ConnectivityExposureRequested => "connectivity.exposure_requested",
             Self::ConnectivityExposureChanged => "connectivity.exposure_changed",
             Self::ConnectivityExposureRevoked => "connectivity.exposure_revoked",
@@ -97,6 +148,7 @@ impl EventKind {
             Self::TaskOutcomeReportGenerated => "task.outcome_report_generated",
             Self::ReviewFindingRecorded => "review.finding_recorded",
             Self::EvidenceRecorded => "evidence.recorded",
+            Self::RunScored => "run.scored",
             Self::WorkpadIndexed => "workpad.indexed",
             Self::WorkpadTaskImported => "workpad.task_imported",
             Self::WorkpadProposalWritten => "workpad.proposal_written",
@@ -105,6 +157,152 @@ impl EventKind {
             Self::RecoveryCompleted => "recovery.completed",
             Self::SessionInterrupted => "session.interrupted",
             Self::SessionStopped => "session.stopped",
+            Self::CheckpointCreated => "checkpoint.created",
+            Self::CheckpointRestored => "checkpoint.restored",
+            Self::RunHardKilled => "run.hard_killed",
+            Self::RunAborted => "run.aborted",
+            Self::RunOrphaned => "run.orphaned",
+            Self::RunRecovered => "run.recovered",
+            Self::GoalCreated => "goal.created",
+            Self::GoalUpdated => "goal.updated",
+            Self::GoalPaused => "goal.paused",
+            Self::GoalResumed => "goal.resumed",
+            Self::GoalBlocked => "goal.blocked",
+            Self::GoalCleared => "goal.cleared",
+            Self::RequirementStatusChanged => "goal.requirement_status_changed",
+            Self::GoalReportRecorded => "goal.report_recorded",
+            Self::ContinuationDecisionRecorded => "goal.continuation_decision_recorded",
+            Self::DelegatedProviderGoalObserved => "goal.delegated_provider_observed",
+            Self::GoalAuditDecisionRecorded => "goal.audit_decision_recorded",
+        }
+    }
+
+    /// Parse a persisted projected-kind string back into the typed kind, or
+    /// `None` for an unrecognized kind. The inverse of [`Self::as_str`]; callers
+    /// that read the persisted `EventRecord.kind` string classify through this so
+    /// they share one vocabulary with the append side instead of re-listing kind
+    /// literals.
+    pub fn from_wire(kind: &str) -> Option<Self> {
+        // Enumerate the variants so this stays exhaustive with `as_str`: adding
+        // a kind to the enum makes this match it by construction.
+        const ALL: &[EventKind] = &[
+            EventKind::ProjectRegistered,
+            EventKind::TaskDiscovered,
+            EventKind::AgentRegistered,
+            EventKind::SessionStarted,
+            EventKind::SessionRedirected,
+            EventKind::SessionSummaryUpdated,
+            EventKind::RunStarted,
+            EventKind::RunExited,
+            EventKind::PermissionRequested,
+            EventKind::PermissionDecided,
+            EventKind::PermissionApprovalQueued,
+            EventKind::CapabilityGrantCreated,
+            EventKind::CapabilityGrantUsed,
+            EventKind::CapabilityGrantRevoked,
+            EventKind::CapabilityGrantExpired,
+            EventKind::WorkspaceLeaseAcquired,
+            EventKind::WorkspaceLeaseReleased,
+            EventKind::ConnectivityExposureRequested,
+            EventKind::ConnectivityExposureChanged,
+            EventKind::ConnectivityExposureRevoked,
+            EventKind::ConnectivityHealthChanged,
+            EventKind::RuntimeTargetRegistered,
+            EventKind::RuntimeTargetStatusChanged,
+            EventKind::AdapterReadinessChecked,
+            EventKind::AdapterSmokeRecorded,
+            EventKind::AdapterDispatchPlanned,
+            EventKind::AdapterDispatchGateChecked,
+            EventKind::AdapterDispatchReplayed,
+            EventKind::AdapterDispatchExecutionRequested,
+            EventKind::AdapterDispatchExecuted,
+            EventKind::AdapterDispatchPromptSourceRecorded,
+            EventKind::AdapterDispatchPromptMaterialized,
+            EventKind::ToolCallRequested,
+            EventKind::ToolInvocationStarted,
+            EventKind::ToolObservationRecorded,
+            EventKind::ToolOutputArtifactRecorded,
+            EventKind::ToolOutputObserved,
+            EventKind::ToolCallCompleted,
+            EventKind::ToolResultDelivered,
+            EventKind::MemoryPacketBuilt,
+            EventKind::MemoryRecordIngested,
+            EventKind::MemoryRecordInvalidated,
+            EventKind::TaskOutcomeReportGenerated,
+            EventKind::ReviewFindingRecorded,
+            EventKind::EvidenceRecorded,
+            EventKind::RunScored,
+            EventKind::WorkpadIndexed,
+            EventKind::WorkpadTaskImported,
+            EventKind::WorkpadProposalWritten,
+            EventKind::ServerRequestHandled,
+            EventKind::RecoveryStarted,
+            EventKind::RecoveryCompleted,
+            EventKind::SessionInterrupted,
+            EventKind::SessionStopped,
+            EventKind::CheckpointCreated,
+            EventKind::CheckpointRestored,
+            EventKind::RunHardKilled,
+            EventKind::RunAborted,
+            EventKind::RunOrphaned,
+            EventKind::RunRecovered,
+            EventKind::GoalCreated,
+            EventKind::GoalUpdated,
+            EventKind::GoalPaused,
+            EventKind::GoalResumed,
+            EventKind::GoalBlocked,
+            EventKind::GoalCleared,
+            EventKind::RequirementStatusChanged,
+            EventKind::GoalReportRecorded,
+            EventKind::ContinuationDecisionRecorded,
+            EventKind::DelegatedProviderGoalObserved,
+            EventKind::GoalAuditDecisionRecorded,
+        ];
+        ALL.iter()
+            .copied()
+            .find(|candidate| candidate.as_str() == kind)
+    }
+
+    /// `true` for the projected `tool.*` kinds the dispatch/replay path emits for
+    /// one tool call -- the request, the start, the recorded observation, the
+    /// observed runtime output, the recorded output artifact, the completion, and
+    /// the delivered result. Single owner of the projected tool-kind set, shared
+    /// by the controller's turn re-derivation and the thread read model so the
+    /// two cannot disagree about which kinds are tool content.
+    ///
+    /// This is the projected-event counterpart of
+    /// `capo_adapters::NormalizedAdapterEvent::is_tool_event` (which classifies
+    /// the upstream `adapter.tool_call_*` events the replay path maps onto these
+    /// kinds).
+    pub const fn is_tool_event(self) -> bool {
+        matches!(
+            self,
+            Self::ToolCallRequested
+                | Self::ToolInvocationStarted
+                | Self::ToolObservationRecorded
+                | Self::ToolOutputObserved
+                | Self::ToolOutputArtifactRecorded
+                | Self::ToolCallCompleted
+                | Self::ToolResultDelivered
+        )
+    }
+
+    /// `true` for the projected kind the replay path emits for assistant
+    /// output/summary content (`session.summary_updated`).
+    pub const fn is_summary_event(self) -> bool {
+        matches!(self, Self::SessionSummaryUpdated)
+    }
+
+    /// The terminal turn outcome this projected kind carries, or `None` for a
+    /// non-terminal kind. Single owner of the turn-terminal taxonomy over the
+    /// projected event log.
+    pub const fn terminal_turn_outcome(self) -> Option<ProjectedTurnOutcome> {
+        match self {
+            Self::EvidenceRecorded => Some(ProjectedTurnOutcome::Completed),
+            Self::SessionInterrupted => Some(ProjectedTurnOutcome::Interrupted),
+            Self::SessionStopped => Some(ProjectedTurnOutcome::Stopped),
+            Self::RunExited => Some(ProjectedTurnOutcome::Failed),
+            _ => None,
         }
     }
 }
@@ -124,6 +322,19 @@ impl RedactionState {
             Self::Redacted => "redacted",
             Self::Unknown => "unknown",
             Self::ContainsSensitive => "contains_sensitive",
+        }
+    }
+
+    /// Parse a stored/wire `redaction_state` string back into the enum, the
+    /// inverse of [`Self::as_str`]. Returns `None` for an unrecognized value so
+    /// the egress guard can treat an unknown classification as not-safe.
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "safe" => Some(Self::Safe),
+            "redacted" => Some(Self::Redacted),
+            "unknown" => Some(Self::Unknown),
+            "contains_sensitive" => Some(Self::ContainsSensitive),
+            _ => None,
         }
     }
 

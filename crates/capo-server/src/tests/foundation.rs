@@ -10,6 +10,7 @@ fn client_tracks_mock_agent_through_server_boundary_and_recovers() {
         &server,
         ServerCommand::RegisterAgent {
             name: "mock-codex".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     assert_agent_registered(&registered, "mock-codex");
@@ -103,9 +104,15 @@ fn client_tracks_mock_agent_through_server_boundary_and_recovers() {
         .as_ref()
         .expect("session survives recovery");
     assert_eq!(session.status, "active");
-    assert_eq!(session.run_status.as_deref(), Some("exited_unknown"));
+    // RTL10: restart recovery reaps the orphaned in-flight run and records a
+    // terminal `run.recovered`, so the reconciled run status is `recovered`.
+    assert_eq!(session.run_status.as_deref(), Some("recovered"));
     assert_eq!(session.tool_call_count, 1);
-    assert_eq!(session.tool_observation_count, 0);
+    // AI3: the production default routing now dispatches the per-turn
+    // `capo.session_summary` tool through the REAL `authorize_and_invoke` seam,
+    // which persists one `runtime_output` observed-evidence row for the call
+    // (the ACI9 observation) -- where the legacy fake summary shim recorded none.
+    assert_eq!(session.tool_observation_count, 1);
     assert_eq!(session.memory_packet_count, 1);
 
     let state = SqliteStateStore::open(&root).expect("state");
@@ -143,6 +150,7 @@ fn server_steers_existing_agent_session_through_boundary() {
         &server,
         ServerCommand::RegisterAgent {
             name: "mock-operator".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     let sent = handle(
@@ -220,6 +228,7 @@ fn server_carries_client_origin_and_rejects_unknown_agent_status() {
             },
             command: ServerCommand::RegisterAgent {
                 name: "mock-reviewer".to_string(),
+                adapter: "fake".to_string(),
             },
         })
         .expect("register");
@@ -251,6 +260,7 @@ fn server_rejects_steer_when_agent_has_no_active_session() {
         &server,
         ServerCommand::RegisterAgent {
             name: "idle-agent".to_string(),
+            adapter: "fake".to_string(),
         },
     );
 
@@ -288,6 +298,7 @@ fn server_rejects_unknown_and_repeated_task_sends_before_fake_id_collision() {
         &server,
         ServerCommand::RegisterAgent {
             name: "mock-codex".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(
@@ -330,6 +341,7 @@ fn server_request_idempotency_is_bound_to_command_identity() {
             "same-request-id",
             ServerCommand::RegisterAgent {
                 name: "alpha".to_string(),
+                adapter: "fake".to_string(),
             },
         ))
         .expect("register alpha");
@@ -338,6 +350,7 @@ fn server_request_idempotency_is_bound_to_command_identity() {
             "same-request-id",
             ServerCommand::RegisterAgent {
                 name: "beta".to_string(),
+                adapter: "fake".to_string(),
             },
         ))
         .expect("register beta");

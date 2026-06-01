@@ -6,5 +6,7 @@ mod dispatch;
 mod live;
 #[path = "server_transport/replay.rs"]
 mod replay;
+#[path = "server_transport/stream.rs"]
+mod stream;
 #[path = "server_transport/support.rs"]
 mod support;

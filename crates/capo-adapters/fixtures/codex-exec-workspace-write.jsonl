@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"codex-write-thread-1"}
+{"type":"item.completed","thread_id":"codex-write-thread-1","item":{"id":"codex-write-item-1","type":"message","role":"assistant","content":[{"type":"output_text","text":"I will add a greeting to NOTES.md."}]}}
+{"type":"patch_apply.begin","thread_id":"codex-write-thread-1","call_id":"codex-write-tool-1","tool_name":"apply_patch"}
+{"type":"patch_apply.end","thread_id":"codex-write-thread-1","call_id":"codex-write-tool-1","tool_name":"apply_patch","unified_diff":"--- a/NOTES.md\n+++ b/NOTES.md\n@@\n+hello from codex\n","output":"Applied patch to NOTES.md (1 file changed, 1 insertion).","exit_code":0}
+{"type":"turn.completed","thread_id":"codex-write-thread-1","usage":{"input_tokens":21,"output_tokens":9}}

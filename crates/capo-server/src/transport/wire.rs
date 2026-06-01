@@ -77,6 +77,13 @@ pub(super) fn optional_i64(value: &Value, key: &str) -> TransportResult<Option<i
     }
 }
 
+pub(super) fn required_i64(value: &Value, key: &str) -> TransportResult<i64> {
+    value
+        .get(key)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| TransportError::Protocol(format!("missing {key} integer")))
+}
+
 pub(super) fn required_string_array(value: &Value, key: &str) -> TransportResult<Vec<String>> {
     value
         .get(key)
@@ -114,6 +121,14 @@ pub(super) fn transport_error_wire(error: &TransportError) -> (&'static str, Str
         TransportError::Protocol(message) => ("protocol", message.clone()),
         TransportError::Server(error) => server_error_wire(error),
         TransportError::Remote { kind, message } => ("remote", format!("{kind}: {message}")),
+        TransportError::Cancelled { request_id } => (
+            "cancelled",
+            format!("request {request_id} cancelled by in-band cancel"),
+        ),
+        TransportError::Interrupted { session_id, reason } => (
+            "interrupted",
+            format!("turn for session {session_id} interrupted mid-turn: {reason}"),
+        ),
     }
 }
 
@@ -172,6 +187,37 @@ fn server_error_wire(error: &ServerError) -> (&'static str, String) {
             "adapter_session_mismatch",
             format!(
                 "session {session_id} uses adapter {session_adapter}, not requested adapter {requested_adapter}"
+            ),
+        ),
+        ServerError::UnsupportedChatAdapter { adapter } => (
+            "unsupported_chat_adapter",
+            format!("unsupported chat adapter `{adapter}`; expected `fake` (default) or `codex`"),
+        ),
+        ServerError::UnknownGoal { goal_id } => {
+            ("unknown_goal", format!("unknown goal: {goal_id}"))
+        }
+        ServerError::GoalCompleteNotALifecycleCommand { goal_id } => (
+            "goal_complete_not_a_lifecycle_command",
+            format!(
+                "goal {goal_id} cannot be completed via a lifecycle command; \
+                 completion is reachable only through the evidence-gated auditor"
+            ),
+        ),
+        ServerError::IllegalGoalStatusTransition {
+            goal_id,
+            requested_status,
+        } => (
+            "illegal_goal_status_transition",
+            format!(
+                "goal {goal_id} cannot transition to `{requested_status}`; \
+                 lifecycle statuses are active/paused/blocked/cleared"
+            ),
+        ),
+        ServerError::UnclassifiableReportSource { source } => (
+            "unclassifiable_report_source",
+            format!(
+                "report source `{source}` is neither an agent claim nor a recognized \
+                 observed-evidence source"
             ),
         ),
     }

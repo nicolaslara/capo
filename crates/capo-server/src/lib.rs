@@ -2,8 +2,11 @@
 //!
 //! This crate owns the typed request/response surface that clients should use
 //! before choosing a concrete transport such as a local socket or remote API.
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
+use capo_adapters::{AgentAdapterHandle, CodexLiveAdapter};
 use capo_controller::{FakeBoundaryController, LocalAdapterDispatchRunStart};
 use capo_core::{AgentId, CommandIntent, CommandTarget, ProjectId, RunId, SessionId, TaskId};
 use capo_state::{
@@ -11,17 +14,38 @@ use capo_state::{
     ProjectionRecord, RedactionState,
 };
 
+mod controller_routing;
 mod dashboard;
 mod dispatch;
+mod event_tail;
+mod goal_commands;
 mod live_provider;
+mod safety_floor;
 mod server_core;
 mod transport;
+mod turn_orchestration;
 mod types;
 mod util;
 
+use controller_routing::ControllerRoute;
+pub use controller_routing::{ControllerSelection, REAL_CONTROLLER_OPT_IN_ENV};
 use dispatch::DispatchExecutionOutcome;
+pub use event_tail::{EventStream, TailRecvError};
 use live_provider::{LiveProviderLocalRunRequest, LiveProviderPreflightRequest};
-pub use transport::{TransportError, send_tcp, serve_tcp};
+pub use safety_floor::{
+    LIVE_WRITE_OPT_IN_ENV, RunTurnRef, WorkspaceCheckpoint, WorkspaceWriteOutcome,
+    WorkspaceWriteRequest, WriteMode, resolve_write_mode, resolve_write_mode_with_env,
+};
+pub use transport::contract;
+pub use transport::{
+    CancellationToken, EVENT_TAIL_METHOD, EventNotification, SubscribeStream, TransportError,
+    interrupt_frame, send_interrupt, send_tcp, serve_tcp, subscribe_tcp,
+};
+#[cfg(test)]
+pub(crate) use transport::{jsonrpc_request_roundtrip, jsonrpc_response_roundtrip};
+pub use turn_orchestration::{
+    DispatchTurnMode, DispatchTurnOutcome, DispatchTurnRequest, LiveProviderTurn,
+};
 pub use types::*;
 use util::{
     adapter_label, command_identity_hash, parse_adapter_events, provider_kind_for_adapter, slug,
@@ -30,28 +54,211 @@ use util::{
 
 const MAX_ADAPTER_FIXTURE_BYTES: usize = 256 * 1024;
 
+/// Maximum events returned in a single subscription catch-up backlog page (ST4).
+/// A subscriber reconnecting against a long log reads a bounded page rather than
+/// the entire history in one query; it pages by advancing `from_sequence` to the
+/// backlog's `next_sequence` and re-subscribing. Generous enough that an ordinary
+/// session's whole history fits in one page.
+const EVENT_TAIL_BACKLOG_LIMIT: usize = 4096;
+
 #[derive(Clone, Debug)]
 pub struct CapoServer {
     project_id: ProjectId,
     controller: FakeBoundaryController,
+    controller_selection: ControllerSelection,
+    /// AI2: the per-agent Codex chat binding registry + the config a Codex-bound
+    /// turn needs.
+    codex_chat: CodexChatBindings,
+}
+
+/// AI2: the server's record of which registered agents are bound to the real
+/// Codex chat adapter, plus the workspace/artifact roots and (optional) program
+/// override a Codex-bound `SendTask`/`SteerAgent` turn needs.
+///
+/// Binding is PER-AGENT, recorded at `RegisterAgent` time, and consulted at chat
+/// time. A non-Codex agent never appears here and keeps the shared (fake/default)
+/// adapter, so Codex is never a global chat default. The bound set is shared
+/// across the server's cloned views (register and chat arrive on different
+/// connections of the same server process) behind a [`Mutex`]. The Codex chat
+/// turn itself is fail-closed-fast: even a bound agent's turn returns an immediate
+/// typed error (no spawn) when [`capo_adapters::codex_live_chat_gate_open`] is off.
+#[derive(Clone, Debug)]
+struct CodexChatBindings {
+    bound_agents: Arc<Mutex<HashSet<String>>>,
+    workspace_root: PathBuf,
+    artifact_root: PathBuf,
+    /// Absolute path to a codex binary (ops `CAPO_CODEX_BIN`; tests a stub). Only
+    /// honored when absolute -- the runtime spawns with `env_clear()`.
+    program_override: Option<String>,
+}
+
+impl CodexChatBindings {
+    /// Derive the Codex chat config from the server `state_root`: the one-shot
+    /// runs confined to `<state_root>/codex-chat/workspace` and writes artifacts
+    /// under `<state_root>/codex-chat/artifacts`. An absolute `CAPO_CODEX_BIN`
+    /// pins the codex program; a relative value is ignored (env_clear spawn).
+    fn from_state_root(state_root: &Path) -> Self {
+        let base = state_root.join("codex-chat");
+        let program_override = std::env::var("CAPO_CODEX_BIN")
+            .ok()
+            .filter(|path| Path::new(path).is_absolute());
+        Self {
+            bound_agents: Arc::new(Mutex::new(HashSet::new())),
+            workspace_root: base.join("workspace"),
+            artifact_root: base.join("artifacts"),
+            program_override,
+        }
+    }
+
+    /// Record that `agent_name` is bound to the Codex chat adapter.
+    fn bind(&self, agent_name: &str) {
+        self.bound_agents
+            .lock()
+            .expect("codex chat binding lock")
+            .insert(agent_name.to_string());
+    }
+
+    /// Whether `agent_name` is bound to the Codex chat adapter.
+    fn is_bound(&self, agent_name: &str) -> bool {
+        self.bound_agents
+            .lock()
+            .expect("codex chat binding lock")
+            .contains(agent_name)
+    }
+
+    /// Build the per-agent Codex chat handle. The handle drives the real one-shot
+    /// only when the live-provider gate is open; otherwise it fails closed-fast.
+    fn codex_handle(&self) -> AgentAdapterHandle {
+        let mut adapter =
+            CodexLiveAdapter::new(self.workspace_root.clone(), self.artifact_root.clone());
+        if let Some(program) = self.program_override.as_deref() {
+            adapter = adapter.with_codex_program_override(program);
+        }
+        AgentAdapterHandle::codex(adapter)
+    }
 }
 
 impl CapoServer {
+    /// Open the server with the default routing.
+    ///
+    /// After the RTL12 cutover the default is [`ControllerSelection::Real`]: the
+    /// real controller passes the parity suite, so default chat/steer now route
+    /// through it. The [`REAL_CONTROLLER_OPT_IN_ENV`] env gate is honored here as
+    /// the single rollback knob -- setting `CAPO_SERVER_REAL_CONTROLLER=0` forces
+    /// the fake routing back on without scattering the decision across call
+    /// sites.
     pub fn open(project_id: ProjectId, state_root: impl AsRef<Path>) -> ServerResult<Self> {
+        Self::open_with_controller(project_id, state_root, ControllerSelection::from_env())
+    }
+
+    /// Open the server with an explicit [`ControllerSelection`] -- the single
+    /// typed switch (RTL11) that routes `SendTask`/`SteerAgent` and the rest of
+    /// the command surface through either the fake or the real controller. The
+    /// orchestration core is one [`FakeBoundaryController`]; the real routing is
+    /// a zero-cost view over it (see `controller_routing.rs`).
+    pub fn open_with_controller(
+        project_id: ProjectId,
+        state_root: impl AsRef<Path>,
+        controller_selection: ControllerSelection,
+    ) -> ServerResult<Self> {
+        let codex_chat = CodexChatBindings::from_state_root(state_root.as_ref());
         let controller = FakeBoundaryController::open(project_id.clone(), state_root)
             .map_err(ServerError::State)?;
         Ok(Self {
             project_id,
             controller,
+            controller_selection,
+            codex_chat,
         })
+    }
+
+    /// Open the server with an explicit [`ControllerSelection`] and an injected
+    /// [`AgentAdapterHandle`].
+    ///
+    /// This is the adapter-injection seam for RTL12/RTL13: the default
+    /// `open`/`open_with_controller` build the core with the default
+    /// ([`AgentAdapterHandle::fake`]) adapter, so with that core the `Real`
+    /// selection cannot observably differ from `Fake` -- both views drive the
+    /// same fake-backed core. This constructor instead builds the one shared
+    /// orchestration core over `adapter`, so a scripted-mock handle backs the
+    /// deterministic parity suites and a real Codex/Claude/ACP handle plugs in
+    /// unchanged. Because the core is the real control flow and the `Real`
+    /// routing is a view over it, the injected adapter backs BOTH the routed
+    /// command surface and the (shared-core) loop ingestion, giving RTL12's
+    /// parity suite and RTL13's live smoke a server-level seam to drive a
+    /// genuinely-real controller through the switch.
+    pub fn open_with_controller_and_adapter(
+        project_id: ProjectId,
+        state_root: impl AsRef<Path>,
+        controller_selection: ControllerSelection,
+        adapter: AgentAdapterHandle,
+    ) -> ServerResult<Self> {
+        let codex_chat = CodexChatBindings::from_state_root(state_root.as_ref());
+        let controller =
+            FakeBoundaryController::open_with_adapter(project_id.clone(), state_root, adapter)
+                .map_err(ServerError::State)?;
+        Ok(Self {
+            project_id,
+            controller,
+            controller_selection,
+            codex_chat,
+        })
+    }
+
+    /// The controller routing in effect (the RTL11 single-switch value).
+    pub fn controller_selection(&self) -> ControllerSelection {
+        self.controller_selection
+    }
+
+    /// The command-routing view bound to the selected controller. Command
+    /// handling (`register`/`send`/`steer`/`interrupt`/`stop`/`recover`) flows
+    /// through this; state/dispatch/projection helpers continue to use the one
+    /// orchestration core directly, since those persist identically regardless
+    /// of which handle drove the command.
+    fn command_controller(&self) -> ControllerRoute<'_> {
+        ControllerRoute::new(self.controller_selection, &self.controller)
+    }
+
+    /// AI2: the chat-routing view for `agent_name`'s `SendTask`/`SteerAgent`.
+    ///
+    /// If the agent registered with `--adapter codex` it is in the per-agent
+    /// Codex binding registry, so its chat turn routes through a Codex-bound view
+    /// of the shared core (the real read-only one-shot when the live-provider gate
+    /// is open; an immediate fail-closed-fast typed error when it is off). Every
+    /// other (fake/default) agent routes through the ordinary
+    /// [`Self::command_controller`], so Codex is never a global chat default.
+    fn chat_controller(&self, agent_name: &str) -> ControllerRoute<'_> {
+        if self.codex_chat.is_bound(agent_name) {
+            ControllerRoute::new_codex_bound(
+                self.controller_selection,
+                &self.controller,
+                self.codex_chat.codex_handle(),
+            )
+        } else {
+            self.command_controller()
+        }
     }
 
     pub fn handle(&self, request: ServerRequest) -> ServerResult<ServerResponse> {
         let request_id = request.request_id.clone();
         let origin = request.origin.clone();
         match request.command {
-            ServerCommand::RegisterAgent { name } => {
-                let command_hash = command_identity_hash(format!("register_agent:{name}"));
+            ServerCommand::RegisterAgent { name, adapter } => {
+                // AI2: resolve the agent's chat adapter binding. `fake` (default)
+                // keeps the deterministic adapter; `codex` binds the real Codex
+                // chat handle for THIS agent only (fail-closed-fast on chat).
+                // Anything else is rejected before the agent is created.
+                let codex_bound = match adapter.as_str() {
+                    "fake" => false,
+                    "codex" => true,
+                    other => {
+                        return Err(ServerError::UnsupportedChatAdapter {
+                            adapter: other.to_string(),
+                        });
+                    }
+                };
+                let command_hash =
+                    command_identity_hash(format!("register_agent:{name}:{adapter}"));
                 let command = self.command_envelope(
                     &request_id,
                     &origin,
@@ -61,9 +268,12 @@ impl CapoServer {
                     Some(name),
                 );
                 let registration = self
-                    .controller
+                    .command_controller()
                     .register_agent_command(&command)
                     .map_err(ServerError::State)?;
+                if codex_bound {
+                    self.codex_chat.bind(&registration.agent_name);
+                }
                 self.record_server_request_handled(&command, &origin, "register_agent", None, None)
                     .map_err(ServerError::State)?;
                 self.response(
@@ -104,14 +314,17 @@ impl CapoServer {
                     CommandIntent::SendTask,
                     Some(goal),
                 );
+                // AI2: pick the chat route by the agent's binding BEFORE moving the
+                // name into the command args -- a Codex-bound agent drives the real
+                // Codex handle; every other agent keeps the default adapter.
+                let chat_controller = self.chat_controller(&agent_name);
                 command
                     .structured_args
                     .push(("agent".to_string(), agent_name));
                 command
                     .structured_args
                     .push(("scenario".to_string(), scenario));
-                let run = self
-                    .controller
+                let run = chat_controller
                     .send_task_command(&command)
                     .map_err(ServerError::State)?;
                 self.record_server_request_handled(
@@ -162,7 +375,10 @@ impl CapoServer {
                 command
                     .structured_args
                     .push(("agent".to_string(), agent_name.clone()));
-                self.controller
+                // AI2: SteerAgent routes by the agent's binding too -- a Codex-bound
+                // agent's steer turn drives the real Codex handle (fail-closed-fast
+                // when the live-provider gate is off); others keep the default.
+                self.chat_controller(&agent_name)
                     .redirect_command(&command)
                     .map_err(ServerError::State)?;
                 self.record_server_request_handled(
@@ -219,7 +435,7 @@ impl CapoServer {
                 command
                     .structured_args
                     .push(("agent".to_string(), agent_name.clone()));
-                self.controller
+                self.command_controller()
                     .interrupt_command(&command)
                     .map_err(ServerError::State)?;
                 self.record_server_request_handled(
@@ -276,7 +492,7 @@ impl CapoServer {
                 command
                     .structured_args
                     .push(("agent".to_string(), agent_name.clone()));
-                self.controller
+                self.command_controller()
                     .stop_command(&command)
                     .map_err(ServerError::State)?;
                 self.record_server_request_handled(
@@ -722,7 +938,25 @@ impl CapoServer {
                 mock_provider_output_name,
                 mock_provider_output_jsonl,
                 timeout_seconds,
+                codex_program_override,
+                unattended,
             } => {
+                // Spawn-path codex-binary override: prefer the explicit command
+                // field (threaded in-process by the loop / tests); otherwise fall
+                // back to an absolute `CAPO_CODEX_BIN` so ops can pin an exact
+                // codex build for a live smoke. A bare/relative value is ignored
+                // downstream (the runtime spawns with `env_clear()`).
+                let codex_program_override = codex_program_override.or_else(|| {
+                    std::env::var("CAPO_CODEX_BIN")
+                        .ok()
+                        .filter(|path| std::path::Path::new(path.trim()).is_absolute())
+                });
+                // RTL9: resolve the write mode through the RTL6 gate. A live
+                // workspace write requires the caller opt-in AND
+                // `CAPO_SERVER_RUN_CODEX_LIVE` AND an attended run; anything short
+                // of all three stays read-only/dry-run. The mock-output path never
+                // spawns a provider, so its profile is irrelevant.
+                let write_mode = resolve_write_mode(live_execution_opt_in, unattended);
                 let summary = self.run_live_provider_local(
                     &origin,
                     LiveProviderLocalRunRequest {
@@ -733,6 +967,9 @@ impl CapoServer {
                         mock_provider_output_name: mock_provider_output_name.as_deref(),
                         mock_provider_output_jsonl: mock_provider_output_jsonl.as_deref(),
                         timeout_seconds,
+                        codex_program_override: codex_program_override.as_deref().map(str::trim),
+                        write_mode,
+                        record_selected_argv: None,
                     },
                 )?;
                 let command_hash = command_identity_hash(format!(
@@ -958,6 +1195,105 @@ impl CapoServer {
                     )),
                 )
             }
+            ServerCommand::RunDispatchTurn {
+                agent_name,
+                adapter,
+                goal,
+                workspace,
+                artifacts,
+                session_id,
+                run_id,
+                turn_id,
+                capability_profile,
+                runtime_scope,
+                credential_scan_policy,
+                raw_prompt_policy,
+                raw_output_policy,
+                tool_wrapper_policy,
+                live_provider_opt_in,
+                live_execution_opt_in,
+                mock_runtime_opt_in,
+                mock_provider_output_name,
+                mock_provider_output_jsonl,
+                timeout_seconds,
+                max_turns,
+                max_token_cost,
+                turns_taken_before,
+                token_cost_before,
+                turn_token_cost,
+                unattended,
+            } => {
+                // AI1: the single production orchestration path. The loop DRIVES
+                // the existing preflight/run dispatch primitives and ANNOTATES the
+                // run with a `TurnFinished`; the operator/live-run flow issues this
+                // command instead of hand-sequencing those primitives beside the
+                // loop, so the path the design claims is the path that executes.
+                //
+                // A live turn must run inside a wall-clock-bounded ceiling
+                // (`run_dispatch_turn` rejects a turn whose ceiling does not bound
+                // wall-clock); a zero timeout cannot satisfy that, so reject it
+                // here with a clear message rather than letting the loop reject a
+                // degenerate ceiling.
+                if timeout_seconds == 0 {
+                    return Err(ServerError::AdapterFixture(
+                        "RunDispatchTurn requires a non-zero wall-clock timeout (the live turn \
+                         runs inside a wall-clock-bounded resource ceiling)"
+                            .to_string(),
+                    ));
+                }
+                let ceiling = capo_controller::RunResourceCeiling::for_live_provider(
+                    max_turns,
+                    std::time::Duration::from_secs(timeout_seconds),
+                    max_token_cost,
+                );
+                let usage_before = capo_controller::RunResourceUsage {
+                    turns_taken: turns_taken_before,
+                    wall_clock_elapsed: std::time::Duration::ZERO,
+                    token_cost: token_cost_before,
+                };
+                let outcome = self.run_dispatch_turn(DispatchTurnRequest {
+                    agent_name,
+                    adapter,
+                    goal,
+                    workspace,
+                    artifacts,
+                    session_id,
+                    run_id,
+                    turn_id,
+                    mode: DispatchTurnMode::LiveProvider(Box::new(LiveProviderTurn {
+                        capability_profile,
+                        runtime_scope,
+                        credential_scan_policy,
+                        raw_prompt_policy,
+                        raw_output_policy,
+                        tool_wrapper_policy,
+                        live_provider_opt_in,
+                        live_execution_opt_in,
+                        mock_runtime_opt_in,
+                        mock_provider_output_name,
+                        mock_provider_output_jsonl,
+                        ceiling,
+                        usage_before,
+                        turn_token_cost,
+                        // The spawn-path codex binary is resolved server-side from
+                        // `CAPO_CODEX_BIN`; the command carries no explicit override.
+                        codex_program_override: None,
+                        unattended,
+                    })),
+                })?;
+                let summary = DispatchTurnSummary {
+                    run: outcome.run,
+                    finished: TurnFinishedSummary::from_finished(&outcome.finished),
+                    ceiling_breach_code: outcome
+                        .ceiling_breach
+                        .map(|breach| breach.code().to_string()),
+                };
+                self.response(
+                    request_id,
+                    origin,
+                    ServerResponsePayload::DispatchTurn(summary),
+                )
+            }
             ServerCommand::Recover => {
                 let recovery = self.recover_server(&request_id, &origin)?;
                 self.response(
@@ -966,7 +1302,295 @@ impl CapoServer {
                     ServerResponsePayload::Recovery(recovery),
                 )
             }
+            ServerCommand::Subscribe {
+                session_id,
+                from_sequence,
+            } => {
+                // The request/response transport returns the catch-up backlog
+                // here; the live tail is delivered as JSON-RPC notifications
+                // through the persistent connection (the broadcast subscription
+                // is obtained via `CapoServer::subscribe`). `Subscribe` is
+                // read-only: it reads the log and registers a subscriber, never
+                // appending an event.
+                let backlog = self.read_subscription_backlog(session_id, from_sequence)?;
+                self.response(
+                    request_id,
+                    origin,
+                    ServerResponsePayload::Subscribed(backlog),
+                )
+            }
+            ServerCommand::ReadThread {
+                session_id,
+                from_sequence,
+            } => {
+                // ReadThread is read-only: it projects the multi-turn thread read
+                // model from the event log strictly after `from_sequence`, never
+                // appending an event. The projection rebuilds identically from
+                // the durable log, so a read after restart reconstructs the same
+                // thread, and its `next_sequence` watermark composes with a
+                // `Subscribe` tail over the same watermark.
+                let thread = self.read_thread(session_id, from_sequence)?;
+                self.response(request_id, origin, ServerResponsePayload::Thread(thread))
+            }
+            // GA2 (goal-orchestration GO4/GO6): the typed goal lifecycle mutations
+            // all flow through the server/controller boundary here.
+            ServerCommand::SetGoal { spec } => {
+                self.handle_goal_command_set(request_id, origin, spec)
+            }
+            ServerCommand::PauseGoal { goal_id } => self.handle_goal_lifecycle(
+                request_id,
+                origin,
+                goal_id,
+                capo_state::GoalProjection::PAUSED,
+                "",
+                EventKind::GoalPaused,
+                "goal.paused",
+            ),
+            ServerCommand::ResumeGoal { goal_id } => self.handle_goal_lifecycle(
+                request_id,
+                origin,
+                goal_id,
+                capo_state::GoalProjection::ACTIVE,
+                "",
+                EventKind::GoalResumed,
+                "goal.resumed",
+            ),
+            ServerCommand::BlockGoal { goal_id, reason } => self.handle_goal_lifecycle(
+                request_id,
+                origin,
+                goal_id,
+                capo_state::GoalProjection::BLOCKED,
+                &reason,
+                EventKind::GoalBlocked,
+                "goal.blocked",
+            ),
+            ServerCommand::ClearGoal { goal_id, reason } => self.handle_goal_lifecycle(
+                request_id,
+                origin,
+                goal_id,
+                capo_state::GoalProjection::CLEARED,
+                &reason,
+                EventKind::GoalCleared,
+                "goal.cleared",
+            ),
+            ServerCommand::SetRequirementStatus { record } => {
+                self.handle_set_requirement_status(request_id, origin, record)
+            }
+            ServerCommand::RecordGoalReport { report } => {
+                self.handle_record_goal_report(request_id, origin, report)
+            }
+            // GA2 (goal-orchestration GO9): a direct mark-complete is rejected by
+            // construction -- completion is the GA5 auditor's verdict.
+            ServerCommand::MarkGoalComplete { goal_id } => self.reject_mark_goal_complete(&goal_id),
+            ServerCommand::ListGoals => self.handle_list_goals(request_id, origin),
+            ServerCommand::ViewGoal { goal_id } => {
+                self.handle_view_goal(request_id, origin, goal_id)
+            }
+            ServerCommand::GoalStory { goal_id } => self.handle_goal_report_listing(
+                request_id,
+                origin,
+                goal_id,
+                goal_commands::GoalReportSurface::Story,
+            ),
+            ServerCommand::GoalEvidence { goal_id } => self.handle_goal_report_listing(
+                request_id,
+                origin,
+                goal_id,
+                goal_commands::GoalReportSurface::Evidence,
+            ),
+            ServerCommand::GoalValidations { goal_id } => self.handle_goal_report_listing(
+                request_id,
+                origin,
+                goal_id,
+                goal_commands::GoalReportSurface::Validations,
+            ),
+            ServerCommand::GoalReviews { goal_id } => self.handle_goal_report_listing(
+                request_id,
+                origin,
+                goal_id,
+                goal_commands::GoalReportSurface::Reviews,
+            ),
+            ServerCommand::GoalRisks { goal_id } => self.handle_goal_report_listing(
+                request_id,
+                origin,
+                goal_id,
+                goal_commands::GoalReportSurface::Risks,
+            ),
+            ServerCommand::GoalTimeline { goal_id } => {
+                self.handle_goal_timeline(request_id, origin, goal_id)
+            }
+            ServerCommand::GoalReport { goal_id, format } => {
+                self.handle_goal_report_rendering(request_id, origin, goal_id, format)
+            }
         }
+    }
+
+    /// Test-only access to the underlying event store, so a test can append a
+    /// seeded event through the *same* broadcaster the server's `subscribe`
+    /// reads from (a separately-opened store would have its own broadcast hub).
+    #[cfg(test)]
+    pub(crate) fn state_for_test(&self) -> &capo_state::SqliteStateStore {
+        self.controller.state()
+    }
+
+    /// Open an event tail (ST4): the catch-up backlog plus a live [`EventStream`]
+    /// over newly-committed events.
+    ///
+    /// The broadcast subscription is taken **before** the backlog snapshot is
+    /// read, so no event committed between the snapshot and the first live poll
+    /// is missed (no gap). The returned [`SubscriptionBacklog::next_sequence`]
+    /// seeds the stream's delivery watermark, so a live event already present in
+    /// the backlog is dropped at the seam (no duplicate). A `None` `session_id`
+    /// tails every committed event; `Some(id)` tails one session.
+    pub fn subscribe(
+        &self,
+        session_id: Option<String>,
+        from_sequence: i64,
+    ) -> ServerResult<(SubscriptionBacklog, EventStream)> {
+        // Subscribe first, then snapshot the backlog: any event committed after
+        // this point is captured live, and the seam watermark below drops the
+        // overlap.
+        let subscription = self.controller.state().event_broadcaster().subscribe();
+        let backlog = self.read_subscription_backlog(session_id.clone(), from_sequence)?;
+        let stream = EventStream::new(subscription, backlog.next_sequence, session_id);
+        Ok((backlog, stream))
+    }
+
+    /// Read the catch-up backlog for a subscription: every committed event
+    /// strictly after `from_sequence` (optionally one session), in order, plus
+    /// the watermark the live tail resumes from.
+    fn read_subscription_backlog(
+        &self,
+        session_id: Option<String>,
+        from_sequence: i64,
+    ) -> ServerResult<SubscriptionBacklog> {
+        let records = match &session_id {
+            Some(session_id) => self
+                .controller
+                .state()
+                .events_after_for_session(
+                    &SessionId::new(session_id.clone()),
+                    from_sequence,
+                    EVENT_TAIL_BACKLOG_LIMIT,
+                )
+                .map_err(ServerError::State)?,
+            None => self
+                .controller
+                .state()
+                .events_after(from_sequence, EVENT_TAIL_BACKLOG_LIMIT)
+                .map_err(ServerError::State)?,
+        };
+        // The live tail resumes strictly after the highest backlog sequence;
+        // with an empty backlog it resumes from the caller's watermark.
+        let next_sequence = records
+            .last()
+            .map(|record| record.sequence)
+            .unwrap_or(from_sequence);
+        let events = records.into_iter().map(ServerEvent::from_record).collect();
+        Ok(SubscriptionBacklog {
+            session_id,
+            from_sequence,
+            next_sequence,
+            events,
+        })
+    }
+
+    /// Read a session's multi-turn conversation thread (ST5) incrementally from
+    /// `from_sequence`.
+    ///
+    /// This delegates to the pure `capo_state::SqliteStateStore::session_thread`
+    /// projection over the durable event log (the same forward read the ST4
+    /// backlog uses), so the thread is a rebuildable read model and composes
+    /// gap-free with a `Subscribe` resuming from the returned `next_sequence`.
+    fn read_thread(&self, session_id: String, from_sequence: i64) -> ServerResult<ServerThread> {
+        let thread = self
+            .controller
+            .state()
+            .session_thread(
+                &SessionId::new(session_id),
+                from_sequence,
+                EVENT_TAIL_BACKLOG_LIMIT,
+            )
+            .map_err(ServerError::State)?;
+        Ok(ServerThread::from_thread(thread))
+    }
+
+    /// Abort the live turn for a session by a typed mid-turn interrupt (ST6).
+    ///
+    /// This is the server handler the transport's in-band `interrupt` frame
+    /// drives (via [`transport::RequestHandler::interrupt`]). It is distinct from
+    /// the coarse `StopAgent` command: it records the turn-keyed
+    /// `session.interrupted` event through the existing
+    /// `FakeBoundaryController::interrupt_command` (the SAME mechanism
+    /// `ServerCommand::InterruptAgent` uses), so the event is keyed to the
+    /// session's active turn and the thread read model renders that turn as
+    /// `Interrupted` -- on the SAME serialization point as every other write, so
+    /// the interrupt never opens a second writer.
+    ///
+    /// The runtime process-group kill that reaps descendants is driven by the
+    /// transport signaling the in-flight request's [`transport::CancellationToken`]
+    /// as interrupted; this method records the durable abort truth that pairs
+    /// with that kill.
+    pub fn interrupt_session(&self, session_id: &str, reason: &str) -> ServerResult<()> {
+        let session_id = SessionId::new(session_id.to_string());
+        let session = self
+            .controller
+            .state()
+            .session(&session_id)
+            .map_err(ServerError::State)?
+            .ok_or_else(|| ServerError::UnknownSession {
+                session_id: session_id.to_string(),
+            })?;
+        let agent = self
+            .controller
+            .state()
+            .agent(&session.agent_id)
+            .map_err(ServerError::State)?
+            .ok_or_else(|| {
+                ServerError::AdapterFixture(format!(
+                    "missing agent for session: {}",
+                    session.agent_id
+                ))
+            })?;
+        let reason_hash = stable_hash(reason.as_bytes());
+        let command_hash =
+            command_identity_hash(format!("interrupt_session:{}:{reason_hash}", session_id));
+        let origin = ServerClientOrigin {
+            client_id: "local-cli".to_string(),
+            actor_id: "local-user".to_string(),
+            input_origin: ServerInputOrigin::Cli,
+        };
+        let mut command = self.command_envelope(
+            &format!(
+                "server-interrupt-session-{}-{reason_hash}",
+                slug(session_id.as_str())
+            ),
+            &origin,
+            &command_hash,
+            CommandTarget::Agent(agent.agent_id.clone()),
+            CommandIntent::InterruptSession,
+            Some(reason.to_string()),
+        );
+        command
+            .structured_args
+            .push(("agent".to_string(), agent.name.clone()));
+        self.command_controller()
+            .interrupt_command(&command)
+            .map_err(ServerError::State)?;
+        self.record_server_request_handled(
+            &command,
+            &origin,
+            "interrupt_session",
+            None,
+            Some(serde_json::json!({
+                "session_id": session_id.to_string(),
+                "reason_hash": reason_hash,
+                "raw_reason_policy": "not_rendered",
+                "interrupt_kind": "typed_mid_turn",
+            })),
+        )
+        .map_err(ServerError::State)?;
+        Ok(())
     }
 }
 

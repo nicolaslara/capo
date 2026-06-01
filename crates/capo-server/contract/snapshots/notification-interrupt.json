@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"interrupt","params":{"reason":"operator ctrl-c","session_id":"session-demo"}}

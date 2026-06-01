@@ -1,6 +1,6 @@
 use std::env;
 
-use capo_controller::FakeBoundaryController;
+use capo_controller::{FakeBoundaryController, RealBoundaryController};
 use capo_core::{CommandEnvelope, CommandId, CommandIntent, CommandTarget, InputOrigin, ProjectId};
 use capo_state::SqliteStateStore;
 
@@ -74,7 +74,7 @@ use server_client::{
     server_adapter_replay_fixture, server_agent_list, server_agent_register, server_agent_status,
     server_agent_steer, server_dashboard, server_dispatch_gate, server_dispatch_live_preflight,
     server_dispatch_live_run_local, server_dispatch_plan, server_dispatch_run_local,
-    server_recover, server_serve, server_session_start, server_task_send,
+    server_recover, server_serve, server_session_interrupt, server_session_start, server_task_send,
 };
 use tool_wrapper::run_wrapper_tool;
 use voice::submit_voice;
@@ -223,6 +223,11 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
             if area == "server" && domain == "session" && command == "start" =>
         {
             server_session_start(&parsed, rest)
+        }
+        [area, domain, command, rest @ ..]
+            if area == "server" && domain == "session" && command == "interrupt" =>
+        {
+            server_session_interrupt(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "server" && command == "dashboard" => {
             server_dashboard(&parsed, rest)
@@ -426,6 +431,21 @@ pub(crate) fn stable_cli_hash(value: &str) -> String {
 
 pub(crate) fn controller(parsed: &ParsedArgs) -> Result<FakeBoundaryController, String> {
     FakeBoundaryController::open(project_id(), &parsed.state_root).map_err(debug_error)
+}
+
+/// AI3: the production-tools controller for the direct (non-server) `SendTask`
+/// surfaces (`capo task send`, `capo workpad-next` / `project memory
+/// start-next`, `capo adapter-replay`). It wraps the same SQLite-backed
+/// orchestration core as [`controller`] but routes the per-turn
+/// `capo.session_summary` tool through the REAL `authorize_and_invoke` dispatch
+/// seam (`RealBoundaryController::send_task*` -> `self.tools.capo`) instead of the
+/// fake `ToolExposure::fake()` summary shim. This keeps the direct CLI send path
+/// on the same real tool-dispatch seam the server `task send` path uses, so a
+/// local send produces a real dispatched tool result (canonical observed audit
+/// sequence + `ToolCall`/`ToolObservation` projection) rather than a fabricated
+/// fake summary.
+pub(crate) fn real_controller(parsed: &ParsedArgs) -> Result<RealBoundaryController, String> {
+    RealBoundaryController::open(project_id(), &parsed.state_root).map_err(debug_error)
 }
 
 pub(crate) fn state(parsed: &ParsedArgs) -> Result<SqliteStateStore, String> {

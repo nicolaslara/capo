@@ -59,9 +59,45 @@ typed_id!(TurnId);
 typed_id!(ToolCallId);
 typed_id!(MemoryPacketId);
 typed_id!(EvidenceId);
+// GA1 (goal-orchestration GO1): the Capo-owned goal and requirement identities.
+// A `GoalAttempt` references the existing dispatch `RunId` rather than a second
+// run-completion identity, so these stay narrow to the goal/requirement model.
+typed_id!(GoalId);
+typed_id!(RequirementId);
 typed_id!(CommandId);
 typed_id!(CapabilityProfileId);
 typed_id!(ArtifactId);
+
+/// The source tag for an agent-submitted report: a CLAIM, not observed proof.
+///
+/// This is the load-bearing classification of the goal-autonomy feature: a report
+/// tagged `agent_reported` is structurally distinct from observed tool evidence,
+/// so a goal-complete verdict is never reachable by agent assertion alone.
+pub const EVIDENCE_SOURCE_AGENT_REPORTED: &str = "agent_reported";
+
+/// The source tag for evidence OBSERVED from runtime process output (the typed
+/// wrapper/test results), distinct from an agent report.
+pub const EVIDENCE_SOURCE_RUNTIME_OUTPUT: &str = "runtime_output";
+
+/// The source tag for evidence OBSERVED from a provider/adapter tool event,
+/// distinct from an agent report.
+pub const EVIDENCE_SOURCE_ADAPTER_EVENT: &str = "adapter_event";
+
+/// Whether a `source` tag denotes OBSERVED evidence (runtime output or an adapter
+/// event) rather than an agent-submitted claim. Adapter-event sources may be
+/// sub-tagged (`adapter_event:<adapter>`), so this matches the prefix.
+///
+/// This is the SINGLE owner of the observed-vs-claim classification. The auditor
+/// (`capo-controller` via `capo-tools`), the goal read models / historical report
+/// (`capo-state`), and the server goal surface all classify a `source` through
+/// this one function, so the load-bearing "agents propose, the auditor decides on
+/// observed evidence" invariant cannot drift between crates. `capo-tools` and
+/// `capo-state` re-export this rather than defining their own copy.
+pub fn source_is_observed_evidence(source: &str) -> bool {
+    source == EVIDENCE_SOURCE_RUNTIME_OUTPUT
+        || source == EVIDENCE_SOURCE_ADAPTER_EVENT
+        || source.starts_with(&format!("{EVIDENCE_SOURCE_ADAPTER_EVENT}:"))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InputOrigin {

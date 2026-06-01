@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use capo_core::{AgentId, ProjectId, RunId, SessionId, ToolCallId};
 use capo_state::{
     AgentProjection, ArtifactRecord, EventKind, NewEvent, ProjectionRecord, RedactionState,
-    RunProjection, SessionProjection, ToolCallProjection,
+    RunProjection, SessionProjection, ToolCallProjection, ToolCallProvenance,
 };
 use capo_tools::{
     PermissionPolicy, RuntimeToolConfig, RuntimeToolWrappers, WrapperArtifact, WrapperToolRequest,
@@ -175,6 +175,7 @@ fn record_wrapper_tool_result(
                     latest_summary: Some(result.summary.clone()),
                     latest_confidence: Some(if result.status == "denied" { 40 } else { 80 }),
                     latest_blocker: (result.status == "denied").then(|| result.summary.clone()),
+                    external_session_ref: None,
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Run(RunProjection {
@@ -196,6 +197,24 @@ fn record_wrapper_tool_result(
                         .as_ref()
                         .map(|artifact| artifact.artifact_id.clone()),
                     output_artifact_id,
+                    // ACI7: the queryable per-call permission/grant/timing chain
+                    // is carried by the loop's `dispatch_tool_call`; the CLI
+                    // wrapper records the call but ties provenance only to the
+                    // tool_call_id correlation, leaving the timing/grant fields to
+                    // the loop path.
+                    provenance: ToolCallProvenance {
+                        correlation_id: Some(format!("corr-cli-{}", result.tool_call_id)),
+                        permission_decision_id: Some(format!(
+                            "decision-{}",
+                            result.permission_decision.capability_grant_id
+                        )),
+                        capability_grant_use_id: Some(format!(
+                            "grant-use-{}-{}",
+                            result.tool_call_id, result.permission_decision.capability_grant_id
+                        )),
+                        started_at: None,
+                        completed_at: None,
+                    },
                     updated_sequence: 0,
                 }),
             ],

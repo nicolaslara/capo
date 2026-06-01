@@ -174,7 +174,16 @@ impl TaskOutcomeReport {
 fn is_terminal_outcome(status: &str) -> bool {
     matches!(
         status,
-        "completed" | "canceled" | "failed" | "interrupted" | "exited" | "exited_unknown"
+        // `recovered` (RTL10): a crashed in-flight run reaped and reconciled on
+        // restart is terminal and no longer active-looking, so it is a valid
+        // outcome to report on, like the other terminal run statuses.
+        "completed"
+            | "canceled"
+            | "failed"
+            | "interrupted"
+            | "exited"
+            | "exited_unknown"
+            | "recovered"
     )
 }
 
@@ -311,6 +320,7 @@ mod tests {
                 latest_summary: Some("done".to_string()),
                 latest_confidence: Some(82),
                 latest_blocker: Some("review found no blockers".to_string()),
+                external_session_ref: Some("adapter-session-me2".to_string()),
                 updated_sequence: 6,
             },
             run: RunProjection {
@@ -340,6 +350,7 @@ mod tests {
                 status: "completed".to_string(),
                 input_artifact_id: None,
                 output_artifact_id: Some("artifact-tool".to_string()),
+                provenance: Default::default(),
                 updated_sequence: 4,
             }],
             memory_packets: vec![MemoryPacketProjection {

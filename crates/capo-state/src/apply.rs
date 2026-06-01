@@ -1,4 +1,4 @@
-use capo_core::{AgentId, EvidenceId, RunId, SessionId, TaskId, ToolCallId};
+use capo_core::{AgentId, EvidenceId, GoalId, RequirementId, RunId, SessionId, TaskId, ToolCallId};
 use rusqlite::{Transaction, params};
 
 use crate::codec::validate_projection_json;
@@ -83,8 +83,9 @@ pub(crate) fn apply_projection_record(
         ProjectionRecord::Session(session) => transaction.execute(
             "INSERT INTO sessions(
                 session_id, project_id, task_id, agent_id, title, status, current_goal,
-                latest_summary, latest_confidence, latest_blocker, updated_sequence
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                latest_summary, latest_confidence, latest_blocker, external_session_ref,
+                updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(session_id) DO UPDATE SET
                 project_id = excluded.project_id,
                 task_id = excluded.task_id,
@@ -95,6 +96,7 @@ pub(crate) fn apply_projection_record(
                 latest_summary = excluded.latest_summary,
                 latest_confidence = excluded.latest_confidence,
                 latest_blocker = excluded.latest_blocker,
+                external_session_ref = excluded.external_session_ref,
                 updated_sequence = excluded.updated_sequence",
             params![
                 session.session_id.as_str(),
@@ -107,6 +109,7 @@ pub(crate) fn apply_projection_record(
                 session.latest_summary,
                 session.latest_confidence,
                 session.latest_blocker,
+                session.external_session_ref,
                 sequence,
             ],
         )?,
@@ -142,8 +145,9 @@ pub(crate) fn apply_projection_record(
             transaction.execute(
                 "INSERT INTO capability_grants(
                 capability_grant_id, capability_profile_id, scope_json, effect,
-                subject_json, decision_source, persistence, explanation, updated_sequence
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                subject_json, decision_source, persistence, explanation,
+                created_at, expires_at, revoked_at, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(capability_grant_id) DO UPDATE SET
                 capability_profile_id = excluded.capability_profile_id,
                 scope_json = excluded.scope_json,
@@ -152,6 +156,9 @@ pub(crate) fn apply_projection_record(
                 decision_source = excluded.decision_source,
                 persistence = excluded.persistence,
                 explanation = excluded.explanation,
+                created_at = excluded.created_at,
+                expires_at = excluded.expires_at,
+                revoked_at = excluded.revoked_at,
                 updated_sequence = excluded.updated_sequence",
             params![
                 grant.capability_grant_id,
@@ -162,10 +169,39 @@ pub(crate) fn apply_projection_record(
                 grant.decision_source,
                 grant.persistence,
                 grant.explanation,
+                grant.created_at,
+                grant.expires_at,
+                grant.revoked_at,
                 sequence,
             ],
             )?
         }
+        ProjectionRecord::WorkspaceLease(lease) => transaction.execute(
+            "INSERT INTO workspace_leases(
+                workspace_lease_id, project_id, holder_session_id, holder_run_id,
+                status, acquired_at, released_at, release_reason, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(workspace_lease_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                holder_session_id = excluded.holder_session_id,
+                holder_run_id = excluded.holder_run_id,
+                status = excluded.status,
+                acquired_at = excluded.acquired_at,
+                released_at = excluded.released_at,
+                release_reason = excluded.release_reason,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                lease.workspace_lease_id,
+                lease.project_id.as_str(),
+                lease.holder_session_id.as_str(),
+                lease.holder_run_id.as_ref().map(RunId::as_str),
+                lease.status,
+                lease.acquired_at,
+                lease.released_at,
+                lease.release_reason,
+                sequence,
+            ],
+        )?,
         ProjectionRecord::PermissionApproval(approval) => {
             validate_projection_json(
                 "permission_approval",
@@ -634,8 +670,10 @@ pub(crate) fn apply_projection_record(
         ProjectionRecord::ToolCall(tool_call) => transaction.execute(
             "INSERT INTO tool_calls(
                 tool_call_id, session_id, turn_id, tool_name, tool_origin, status,
-                input_artifact_id, output_artifact_id, updated_sequence
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                input_artifact_id, output_artifact_id, correlation_id,
+                permission_decision_id, capability_grant_use_id, started_at,
+                completed_at, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(tool_call_id) DO UPDATE SET
                 session_id = excluded.session_id,
                 turn_id = excluded.turn_id,
@@ -644,6 +682,11 @@ pub(crate) fn apply_projection_record(
                 status = excluded.status,
                 input_artifact_id = excluded.input_artifact_id,
                 output_artifact_id = excluded.output_artifact_id,
+                correlation_id = excluded.correlation_id,
+                permission_decision_id = excluded.permission_decision_id,
+                capability_grant_use_id = excluded.capability_grant_use_id,
+                started_at = excluded.started_at,
+                completed_at = excluded.completed_at,
                 updated_sequence = excluded.updated_sequence",
             params![
                 tool_call.tool_call_id.as_str(),
@@ -654,6 +697,11 @@ pub(crate) fn apply_projection_record(
                 tool_call.status,
                 tool_call.input_artifact_id,
                 tool_call.output_artifact_id,
+                tool_call.provenance.correlation_id,
+                tool_call.provenance.permission_decision_id,
+                tool_call.provenance.capability_grant_use_id,
+                tool_call.provenance.started_at,
+                tool_call.provenance.completed_at,
                 sequence,
             ],
         )?,
@@ -835,6 +883,90 @@ pub(crate) fn apply_projection_record(
                 sequence,
             ],
         )?,
+        ProjectionRecord::RunScore(score) => {
+            validate_projection_json(
+                "run_score",
+                &score.run_score_id,
+                "score_inputs_json",
+                &score.score_inputs_json,
+            )?;
+            transaction.execute(
+                "INSERT INTO run_scores(
+                    run_score_id, project_id, task_id, session_id, run_id, outcome,
+                    passed, criteria_total, criteria_met, observed_evidence_count,
+                    started_at, completed_at, duration_millis, score_inputs_json,
+                    updated_sequence
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                    ?14, ?15)
+                 ON CONFLICT(run_score_id) DO UPDATE SET
+                    project_id = excluded.project_id,
+                    task_id = excluded.task_id,
+                    session_id = excluded.session_id,
+                    run_id = excluded.run_id,
+                    outcome = excluded.outcome,
+                    passed = excluded.passed,
+                    criteria_total = excluded.criteria_total,
+                    criteria_met = excluded.criteria_met,
+                    observed_evidence_count = excluded.observed_evidence_count,
+                    started_at = excluded.started_at,
+                    completed_at = excluded.completed_at,
+                    duration_millis = excluded.duration_millis,
+                    score_inputs_json = excluded.score_inputs_json,
+                    updated_sequence = excluded.updated_sequence",
+                params![
+                    score.run_score_id,
+                    score.project_id.as_str(),
+                    score.task_id.as_ref().map(TaskId::as_str),
+                    score.session_id.as_str(),
+                    score.run_id.as_str(),
+                    score.outcome,
+                    score.passed as i64,
+                    score.criteria_total,
+                    score.criteria_met,
+                    score.observed_evidence_count,
+                    score.started_at,
+                    score.completed_at,
+                    score.duration_millis,
+                    score.score_inputs_json,
+                    sequence,
+                ],
+            )?
+        }
+        ProjectionRecord::Checkpoint(checkpoint) => transaction.execute(
+            "INSERT INTO checkpoints(
+                checkpoint_id, project_id, session_id, run_id, turn_id, kind,
+                commit_ref, workspace_root, shadow_git_dir, content_hash,
+                created_at, restored_at, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(checkpoint_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                session_id = excluded.session_id,
+                run_id = excluded.run_id,
+                turn_id = excluded.turn_id,
+                kind = excluded.kind,
+                commit_ref = excluded.commit_ref,
+                workspace_root = excluded.workspace_root,
+                shadow_git_dir = excluded.shadow_git_dir,
+                content_hash = excluded.content_hash,
+                created_at = excluded.created_at,
+                restored_at = excluded.restored_at,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                checkpoint.checkpoint_id,
+                checkpoint.project_id.as_str(),
+                checkpoint.session_id.as_str(),
+                checkpoint.run_id.as_str(),
+                checkpoint.turn_id,
+                checkpoint.kind,
+                checkpoint.commit_ref,
+                checkpoint.workspace_root,
+                checkpoint.shadow_git_dir,
+                checkpoint.content_hash,
+                checkpoint.created_at,
+                checkpoint.restored_at,
+                sequence,
+            ],
+        )?,
         ProjectionRecord::TaskOutcomeReport(report) => transaction.execute(
             "INSERT INTO task_outcome_reports(
                 task_outcome_report_id, project_id, task_id, session_id, run_id,
@@ -1004,6 +1136,206 @@ pub(crate) fn apply_projection_record(
                 task.observed_status,
                 task.capo_execution_status,
                 task.observed_unix,
+                sequence,
+            ],
+        )?,
+        // GA1 (goal-orchestration GO1): the goal lifecycle read model, projected
+        // in-transaction like every projection above. `status` is whatever the
+        // lifecycle event carried; the auditor (GA5) owns any `complete`.
+        ProjectionRecord::Goal(goal) => {
+            // The GO6 structured fields are stored as JSON; validate before
+            // persisting so a malformed payload cannot poison a projection rebuild.
+            let goal_id = goal.goal_id.as_str();
+            for (field, value) in [
+                ("success_criteria_json", &goal.success_criteria_json),
+                ("constraints_json", &goal.constraints_json),
+                ("verification_surface_json", &goal.verification_surface_json),
+                ("budget_json", &goal.budget_json),
+                ("stop_conditions_json", &goal.stop_conditions_json),
+            ] {
+                validate_projection_json("goal", goal_id, field, value)?;
+            }
+            transaction.execute(
+            "INSERT INTO goals(
+                goal_id, project_id, task_id, agent_id, session_id, parent_goal_id,
+                attempt_run_id, objective, status, success_criteria_json, constraints_json,
+                verification_surface_json, budget_json, stop_conditions_json, blocker_reason,
+                updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             ON CONFLICT(goal_id) DO UPDATE SET
+                project_id = excluded.project_id,
+                task_id = excluded.task_id,
+                agent_id = excluded.agent_id,
+                session_id = excluded.session_id,
+                parent_goal_id = excluded.parent_goal_id,
+                attempt_run_id = excluded.attempt_run_id,
+                objective = excluded.objective,
+                status = excluded.status,
+                success_criteria_json = excluded.success_criteria_json,
+                constraints_json = excluded.constraints_json,
+                verification_surface_json = excluded.verification_surface_json,
+                budget_json = excluded.budget_json,
+                stop_conditions_json = excluded.stop_conditions_json,
+                blocker_reason = excluded.blocker_reason,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                goal.goal_id.as_str(),
+                goal.project_id.as_str(),
+                goal.task_id.as_ref().map(TaskId::as_str),
+                goal.agent_id.as_ref().map(AgentId::as_str),
+                goal.session_id.as_ref().map(SessionId::as_str),
+                goal.parent_goal_id.as_ref().map(GoalId::as_str),
+                goal.attempt_run_id.as_ref().map(RunId::as_str),
+                goal.objective,
+                goal.status,
+                goal.success_criteria_json,
+                goal.constraints_json,
+                goal.verification_surface_json,
+                goal.budget_json,
+                goal.stop_conditions_json,
+                goal.blocker_reason,
+                sequence,
+            ],
+            )?
+        }
+        // GA1 (goal-orchestration GO3): the per-requirement status ledger.
+        ProjectionRecord::RequirementLedger(ledger) => transaction.execute(
+            "INSERT INTO requirement_ledgers(
+                requirement_id, goal_id, project_id, summary, status, last_status_source,
+                updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(requirement_id) DO UPDATE SET
+                goal_id = excluded.goal_id,
+                project_id = excluded.project_id,
+                summary = excluded.summary,
+                status = excluded.status,
+                last_status_source = excluded.last_status_source,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                ledger.requirement_id.as_str(),
+                ledger.goal_id.as_str(),
+                ledger.project_id.as_str(),
+                ledger.summary,
+                ledger.status,
+                ledger.last_status_source,
+                sequence,
+            ],
+        )?,
+        // GA1 (goal-orchestration GO3): the agent-report / story ledger. `source`
+        // distinguishes an agent claim from observed evidence.
+        ProjectionRecord::GoalReport(report) => transaction.execute(
+            "INSERT INTO goal_reports(
+                goal_report_id, goal_id, project_id, session_id, requirement_id, report_kind,
+                source, confidence, summary, body_artifact_id, evidence_id, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(goal_report_id) DO UPDATE SET
+                goal_id = excluded.goal_id,
+                project_id = excluded.project_id,
+                session_id = excluded.session_id,
+                requirement_id = excluded.requirement_id,
+                report_kind = excluded.report_kind,
+                source = excluded.source,
+                confidence = excluded.confidence,
+                summary = excluded.summary,
+                body_artifact_id = excluded.body_artifact_id,
+                evidence_id = excluded.evidence_id,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                report.goal_report_id,
+                report.goal_id.as_str(),
+                report.project_id.as_str(),
+                report.session_id.as_ref().map(SessionId::as_str),
+                report.requirement_id.as_ref().map(RequirementId::as_str),
+                report.report_kind,
+                report.source,
+                report.confidence,
+                report.summary,
+                report.body_artifact_id,
+                report.evidence_id.as_ref().map(EvidenceId::as_str),
+                sequence,
+            ],
+        )?,
+        // GA1 (goal-orchestration GO3/GO8): a recorded continuation decision.
+        ProjectionRecord::GoalContinuation(continuation) => transaction.execute(
+            "INSERT INTO goal_continuations(
+                continuation_id, goal_id, project_id, attempt_run_id, decision, reason,
+                updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(continuation_id) DO UPDATE SET
+                goal_id = excluded.goal_id,
+                project_id = excluded.project_id,
+                attempt_run_id = excluded.attempt_run_id,
+                decision = excluded.decision,
+                reason = excluded.reason,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                continuation.continuation_id,
+                continuation.goal_id.as_str(),
+                continuation.project_id.as_str(),
+                continuation.attempt_run_id.as_ref().map(RunId::as_str),
+                continuation.decision,
+                continuation.reason,
+                sequence,
+            ],
+        )?,
+        // GA1 (goal-orchestration GO12): observed delegated-provider goal state,
+        // recorded as observed-not-authoritative evidence only.
+        ProjectionRecord::DelegatedProviderGoal(delegated) => transaction.execute(
+            "INSERT INTO delegated_provider_goals(
+                delegated_goal_id, goal_id, project_id, session_id, provider_kind,
+                provider_goal_ref, provider_state, source, body_artifact_id, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(delegated_goal_id) DO UPDATE SET
+                goal_id = excluded.goal_id,
+                project_id = excluded.project_id,
+                session_id = excluded.session_id,
+                provider_kind = excluded.provider_kind,
+                provider_goal_ref = excluded.provider_goal_ref,
+                provider_state = excluded.provider_state,
+                source = excluded.source,
+                body_artifact_id = excluded.body_artifact_id,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                delegated.delegated_goal_id,
+                delegated.goal_id.as_str(),
+                delegated.project_id.as_str(),
+                delegated.session_id.as_ref().map(SessionId::as_str),
+                delegated.provider_kind,
+                delegated.provider_goal_ref,
+                delegated.provider_state,
+                delegated.source,
+                delegated.body_artifact_id,
+                sequence,
+            ],
+        )?,
+        // GA5 (goal-orchestration GO9): the completion auditor's verdict, the ONLY
+        // path to a Capo goal-complete transition.
+        ProjectionRecord::GoalAuditDecision(audit) => transaction.execute(
+            "INSERT INTO goal_audit_decisions(
+                audit_id, goal_id, project_id, attempt_run_id, verdict, reason,
+                requirements_total, requirements_complete, requirement_detail_json,
+                updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(audit_id) DO UPDATE SET
+                goal_id = excluded.goal_id,
+                project_id = excluded.project_id,
+                attempt_run_id = excluded.attempt_run_id,
+                verdict = excluded.verdict,
+                reason = excluded.reason,
+                requirements_total = excluded.requirements_total,
+                requirements_complete = excluded.requirements_complete,
+                requirement_detail_json = excluded.requirement_detail_json,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                audit.audit_id,
+                audit.goal_id.as_str(),
+                audit.project_id.as_str(),
+                audit.attempt_run_id.as_ref().map(RunId::as_str),
+                audit.verdict,
+                audit.reason,
+                audit.requirements_total,
+                audit.requirements_complete,
+                audit.requirement_detail_json,
                 sequence,
             ],
         )?,

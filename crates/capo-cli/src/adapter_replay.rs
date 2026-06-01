@@ -11,7 +11,7 @@ use capo_state::{
 
 use crate::cli_surface::{ParsedArgs, optional_arg, required_arg};
 use crate::evidence::export_evidence;
-use crate::{controller, debug_error, escape_json, project_id, stable_cli_hash, state};
+use crate::{debug_error, escape_json, project_id, real_controller, stable_cli_hash, state};
 
 pub(crate) fn replay_adapter_fixture(
     parsed: &ParsedArgs,
@@ -23,7 +23,12 @@ pub(crate) fn replay_adapter_fixture(
     let goal = required_arg(args, "--goal")?;
     let fixture = fs::read_to_string(&fixture_path).map_err(|error| error.to_string())?;
     let adapter_events = parse_adapter_fixture(&adapter, &fixture)?;
-    let controller = controller(parsed)?;
+    // AI3: open the real-tools controller so the seed `send_task` dispatches the
+    // per-turn summary tool through the REAL `authorize_and_invoke` seam, not the
+    // fake summary shim. The adapter-native replay (`apply_normalized_adapter_events`)
+    // runs over the same shared core, since adapter-native tool provenance is the
+    // adapter dedup's concern, not the locally-dispatched seam.
+    let controller = real_controller(parsed)?;
     let registration = if state(parsed)?
         .agent_by_name(&agent)
         .map_err(debug_error)?
@@ -39,6 +44,7 @@ pub(crate) fn replay_adapter_fixture(
         .send_task(&registration, &goal)
         .map_err(debug_error)?;
     let report = controller
+        .core()
         .apply_normalized_adapter_events(&refs, &adapter_events)
         .map_err(debug_error)?;
     let mut output = format!(
@@ -102,7 +108,10 @@ pub(crate) fn replay_adapter_dispatch_fixture(
     })?;
     let fixture = fs::read_to_string(&fixture_path).map_err(|error| error.to_string())?;
     let adapter_events = parse_adapter_fixture(&plan.adapter_kind, &fixture)?;
-    let controller = controller(parsed)?;
+    // AI3: the real-tools controller routes the seed `send_task` summary tool
+    // through the REAL `authorize_and_invoke` seam (not the fake shim); the
+    // adapter-native dispatch replay runs over the shared core.
+    let controller = real_controller(parsed)?;
     let registration = controller
         .registration_for_agent_name(&plan.agent_name)
         .map_err(debug_error)?;
@@ -120,6 +129,7 @@ pub(crate) fn replay_adapter_dispatch_fixture(
         ));
     }
     let report = controller
+        .core()
         .apply_normalized_adapter_events(&refs, &adapter_events)
         .map_err(debug_error)?;
     let replay = AdapterDispatchReplayProjection {

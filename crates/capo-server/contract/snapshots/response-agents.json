@@ -1,0 +1,1 @@
+{"id":"req-list-agents-1","jsonrpc":"2.0","result":{"actor_id":"local-user","client_id":"local-cli","input_origin":"cli","payload":{"agents":[{"agent_id":"agent-demo","current_session_id":null,"name":"demo","session":null,"status":"available"}],"type":"agents"}}}

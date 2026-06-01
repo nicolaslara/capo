@@ -175,6 +175,9 @@ pub(crate) fn decide_permission_approval(
         decision_source: "user".to_string(),
         persistence: persistence.to_string(),
         explanation: format!("user approval decision {decision} for {approval_id}"),
+        created_at: None,
+        expires_at: None,
+        revoked_at: None,
         updated_sequence: 0,
     });
     let decided_approval = PermissionApprovalProjection {

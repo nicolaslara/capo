@@ -1,19 +1,23 @@
 use std::{error as std_error, fmt};
 
 use capo_core::{
-    AgentId, EvidenceId, MemoryPacketId, ProjectId, RunId, SessionId, TaskId, ToolCallId,
+    AgentId, EvidenceId, GoalId, MemoryPacketId, ProjectId, RequirementId, RunId, SessionId,
+    TaskId, ToolCallId,
 };
 use serde_json::Value;
 
 use crate::codec_adapter::decode_adapter_projection;
 use crate::{
-    AgentProjection, CapabilityGrantProjection, ConnectivityExposureProjection, EvidenceProjection,
+    AgentProjection, CapabilityGrantProjection, CheckpointProjection,
+    ConnectivityExposureProjection, DelegatedProviderGoalProjection, EvidenceProjection,
+    GoalAuditDecisionProjection, GoalContinuationProjection, GoalProjection, GoalReportProjection,
     MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
-    PermissionApprovalProjection, ProjectProjection, ProjectionRecord, ReviewFindingProjection,
-    RunProjection, RuntimeTargetProjection, SessionProjection, SourceBindingProjection, StateError,
-    StateResult, TaskOutcomeReportProjection, TaskProjection, ToolCallProjection,
+    PermissionApprovalProjection, ProjectProjection, ProjectionRecord, RequirementLedgerProjection,
+    ReviewFindingProjection, RunProjection, RunScoreProjection, RuntimeTargetProjection,
+    SessionProjection, SourceBindingProjection, StateError, StateResult,
+    TaskOutcomeReportProjection, TaskProjection, ToolCallProjection, ToolCallProvenance,
     ToolObservationProjection, WorkpadFileProjection, WorkpadIndexResetProjection,
-    WorkpadTaskProjection, optional_id,
+    WorkpadTaskProjection, WorkspaceLeaseProjection, optional_id,
 };
 
 #[derive(Debug)]
@@ -71,24 +75,33 @@ pub(crate) fn projection_record_from_row(
             current_session_id: optional_id(d),
             updated_sequence: 0,
         })),
-        "session" => Ok(ProjectionRecord::Session(SessionProjection {
-            session_id: SessionId::new(record_id),
-            project_id: ProjectId::new(required_field(
-                &projection_kind,
-                "session",
-                a,
-                "project_id",
-            )?),
-            task_id: optional_id(b),
-            agent_id: AgentId::new(required_field(&projection_kind, "session", c, "agent_id")?),
-            title: required_field(&projection_kind, "session", d, "title")?,
-            status: required_field(&projection_kind, "session", e, "status")?,
-            current_goal: required_field(&projection_kind, "session", f, "current_goal")?,
-            latest_summary: g,
-            latest_confidence: optional_i64(&projection_kind, "session", h, "latest_confidence")?,
-            latest_blocker: None,
-            updated_sequence: 0,
-        })),
+        "session" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::Session(SessionProjection {
+                session_id: SessionId::new(record_id),
+                project_id: ProjectId::new(required_field(
+                    &projection_kind,
+                    "session",
+                    a,
+                    "project_id",
+                )?),
+                task_id: optional_id(b),
+                agent_id: AgentId::new(required_field(&projection_kind, "session", c, "agent_id")?),
+                title: required_field(&projection_kind, "session", d, "title")?,
+                status: required_field(&projection_kind, "session", e, "status")?,
+                current_goal: required_field(&projection_kind, "session", f, "current_goal")?,
+                latest_summary: g,
+                latest_confidence: optional_i64(
+                    &projection_kind,
+                    "session",
+                    h,
+                    "latest_confidence",
+                )?,
+                latest_blocker: None,
+                external_session_ref: payload_string(&payload, "external_session_ref"),
+                updated_sequence: 0,
+            }))
+        }
         "run" => Ok(ProjectionRecord::Run(RunProjection {
             run_id: RunId::new(record_id),
             session_id: SessionId::new(required_field(&projection_kind, "run", a, "session_id")?),
@@ -96,29 +109,65 @@ pub(crate) fn projection_record_from_row(
             recovery_of_run_id: optional_id(c),
             updated_sequence: 0,
         })),
-        "capability_grant" => Ok(ProjectionRecord::CapabilityGrant(
-            CapabilityGrantProjection {
-                capability_grant_id: record_id,
-                capability_profile_id: required_field(
-                    &projection_kind,
-                    "capability_grant",
-                    a,
-                    "capability_profile_id",
-                )?,
-                scope_json: required_field(&projection_kind, "capability_grant", b, "scope_json")?,
-                effect: required_field(&projection_kind, "capability_grant", c, "effect")?,
-                subject_json: required_field(
-                    &projection_kind,
-                    "capability_grant",
-                    d,
-                    "subject_json",
-                )?,
-                decision_source: e.unwrap_or_else(|| "unknown".to_string()),
-                persistence: f.unwrap_or_else(|| "unknown".to_string()),
-                explanation: g.unwrap_or_default(),
-                updated_sequence: 0,
-            },
-        )),
+        "capability_grant" => {
+            // SG3: the grant lifecycle timestamps (created_at/expires_at/
+            // revoked_at) ride in the payload -- positional slots a..g are taken
+            // by the grant body -- so a replay rebuilds revoked/expired state
+            // identically from the event log.
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::CapabilityGrant(
+                CapabilityGrantProjection {
+                    capability_grant_id: record_id,
+                    capability_profile_id: required_field(
+                        &projection_kind,
+                        "capability_grant",
+                        a,
+                        "capability_profile_id",
+                    )?,
+                    scope_json: required_field(
+                        &projection_kind,
+                        "capability_grant",
+                        b,
+                        "scope_json",
+                    )?,
+                    effect: required_field(&projection_kind, "capability_grant", c, "effect")?,
+                    subject_json: required_field(
+                        &projection_kind,
+                        "capability_grant",
+                        d,
+                        "subject_json",
+                    )?,
+                    decision_source: e.unwrap_or_else(|| "unknown".to_string()),
+                    persistence: f.unwrap_or_else(|| "unknown".to_string()),
+                    explanation: g.unwrap_or_default(),
+                    created_at: payload_optional_string(&payload, "created_at"),
+                    expires_at: payload_optional_string(&payload, "expires_at"),
+                    revoked_at: payload_optional_string(&payload, "revoked_at"),
+                    updated_sequence: 0,
+                },
+            ))
+        }
+        "workspace_lease" => Ok(ProjectionRecord::WorkspaceLease(WorkspaceLeaseProjection {
+            workspace_lease_id: record_id,
+            project_id: ProjectId::new(required_field(
+                &projection_kind,
+                "workspace_lease",
+                a,
+                "project_id",
+            )?),
+            holder_session_id: SessionId::new(required_field(
+                &projection_kind,
+                "workspace_lease",
+                b,
+                "holder_session_id",
+            )?),
+            holder_run_id: optional_id(c),
+            status: required_field(&projection_kind, "workspace_lease", d, "status")?,
+            acquired_at: e,
+            released_at: f,
+            release_reason: g.unwrap_or_default(),
+            updated_sequence: 0,
+        })),
         "permission_approval" => {
             let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
             Ok(ProjectionRecord::PermissionApproval(
@@ -282,22 +331,48 @@ pub(crate) fn projection_record_from_row(
             h,
             payload_json,
         ),
-        "tool_call" => Ok(ProjectionRecord::ToolCall(ToolCallProjection {
-            tool_call_id: ToolCallId::new(record_id),
-            session_id: SessionId::new(required_field(
-                &projection_kind,
-                "tool_call",
-                a,
-                "session_id",
-            )?),
-            turn_id: b,
-            tool_name: required_field(&projection_kind, "tool_call", c, "tool_name")?,
-            tool_origin: required_field(&projection_kind, "tool_call", d, "tool_origin")?,
-            status: required_field(&projection_kind, "tool_call", e, "status")?,
-            input_artifact_id: f,
-            output_artifact_id: g,
-            updated_sequence: 0,
-        })),
+        "tool_call" => {
+            // ACI7: the per-call provenance + timing rides in the payload; parse
+            // it back so a replay rebuilds the queryable chain identically.
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            let provenance = ToolCallProvenance {
+                correlation_id: payload_optional_string(&payload, "correlation_id"),
+                permission_decision_id: payload_optional_string(&payload, "permission_decision_id"),
+                capability_grant_use_id: payload_optional_string(
+                    &payload,
+                    "capability_grant_use_id",
+                ),
+                started_at: payload_optional_i64(
+                    &projection_kind,
+                    &record_id,
+                    &payload,
+                    "started_at",
+                )?,
+                completed_at: payload_optional_i64(
+                    &projection_kind,
+                    &record_id,
+                    &payload,
+                    "completed_at",
+                )?,
+            };
+            Ok(ProjectionRecord::ToolCall(ToolCallProjection {
+                tool_call_id: ToolCallId::new(record_id),
+                session_id: SessionId::new(required_field(
+                    &projection_kind,
+                    "tool_call",
+                    a,
+                    "session_id",
+                )?),
+                turn_id: b,
+                tool_name: required_field(&projection_kind, "tool_call", c, "tool_name")?,
+                tool_origin: required_field(&projection_kind, "tool_call", d, "tool_origin")?,
+                status: required_field(&projection_kind, "tool_call", e, "status")?,
+                input_artifact_id: f,
+                output_artifact_id: g,
+                provenance,
+                updated_sequence: 0,
+            }))
+        }
         "tool_observation" => {
             let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
             Ok(ProjectionRecord::ToolObservation(
@@ -503,6 +578,99 @@ pub(crate) fn projection_record_from_row(
             confidence: required_i64(&projection_kind, "evidence", g, "confidence")?,
             updated_sequence: 0,
         })),
+        "run_score" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            let id = record_id.clone();
+            Ok(ProjectionRecord::RunScore(RunScoreProjection {
+                run_score_id: record_id,
+                project_id: ProjectId::new(required_field(
+                    &projection_kind,
+                    "run_score",
+                    a,
+                    "project_id",
+                )?),
+                session_id: SessionId::new(required_field(
+                    &projection_kind,
+                    "run_score",
+                    b,
+                    "session_id",
+                )?),
+                run_id: RunId::new(required_field(&projection_kind, "run_score", c, "run_id")?),
+                task_id: optional_id(d),
+                outcome: required_field(&projection_kind, "run_score", e, "outcome")?,
+                started_at: required_i64(&projection_kind, "run_score", f, "started_at")?,
+                completed_at: required_i64(&projection_kind, "run_score", g, "completed_at")?,
+                passed: payload
+                    .get("passed")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                criteria_total: required_payload_i64(
+                    &projection_kind,
+                    &id,
+                    &payload,
+                    "criteria_total",
+                )?,
+                criteria_met: required_payload_i64(
+                    &projection_kind,
+                    &id,
+                    &payload,
+                    "criteria_met",
+                )?,
+                observed_evidence_count: required_payload_i64(
+                    &projection_kind,
+                    &id,
+                    &payload,
+                    "observed_evidence_count",
+                )?,
+                duration_millis: required_payload_i64(
+                    &projection_kind,
+                    &id,
+                    &payload,
+                    "duration_millis",
+                )?,
+                score_inputs_json: required_field(
+                    &projection_kind,
+                    "run_score",
+                    h,
+                    "score_inputs_json",
+                )?,
+                updated_sequence: 0,
+            }))
+        }
+        "checkpoint" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::Checkpoint(CheckpointProjection {
+                checkpoint_id: record_id,
+                project_id: ProjectId::new(required_field(
+                    &projection_kind,
+                    "checkpoint",
+                    a,
+                    "project_id",
+                )?),
+                session_id: SessionId::new(required_field(
+                    &projection_kind,
+                    "checkpoint",
+                    b,
+                    "session_id",
+                )?),
+                run_id: RunId::new(required_field(&projection_kind, "checkpoint", c, "run_id")?),
+                turn_id: d,
+                kind: required_field(&projection_kind, "checkpoint", e, "kind")?,
+                commit_ref: required_field(&projection_kind, "checkpoint", f, "commit_ref")?,
+                workspace_root: required_field(
+                    &projection_kind,
+                    "checkpoint",
+                    g,
+                    "workspace_root",
+                )?,
+                content_hash: required_field(&projection_kind, "checkpoint", h, "content_hash")?,
+                shadow_git_dir: payload_optional_string(&payload, "shadow_git_dir")
+                    .unwrap_or_default(),
+                created_at: payload_optional_string(&payload, "created_at"),
+                restored_at: payload_optional_string(&payload, "restored_at"),
+                updated_sequence: 0,
+            }))
+        }
         "task_outcome_report" => {
             let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
             Ok(ProjectionRecord::TaskOutcomeReport(
@@ -737,6 +905,207 @@ pub(crate) fn projection_record_from_row(
             observed_unix: required_i64(&projection_kind, "workpad_task", g, "observed_unix")?,
             updated_sequence: 0,
         })),
+        // GA1 (goal-orchestration GO1): rebuild the goal lifecycle read model. The
+        // GO6 structured fields and the current blocker come back from the payload.
+        "goal" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::Goal(GoalProjection {
+                goal_id: GoalId::new(record_id),
+                project_id: ProjectId::new(required_field(
+                    &projection_kind,
+                    "goal",
+                    a,
+                    "project_id",
+                )?),
+                task_id: optional_id(f),
+                agent_id: optional_id(g),
+                session_id: optional_id(h),
+                parent_goal_id: optional_id(d),
+                attempt_run_id: optional_id(e),
+                objective: required_field(&projection_kind, "goal", c, "objective")?,
+                status: required_field(&projection_kind, "goal", b, "status")?,
+                success_criteria_json: payload_optional_string(&payload, "success_criteria_json")
+                    .unwrap_or_default(),
+                constraints_json: payload_optional_string(&payload, "constraints_json")
+                    .unwrap_or_default(),
+                verification_surface_json: payload_optional_string(
+                    &payload,
+                    "verification_surface_json",
+                )
+                .unwrap_or_default(),
+                budget_json: payload_optional_string(&payload, "budget_json").unwrap_or_default(),
+                stop_conditions_json: payload_optional_string(&payload, "stop_conditions_json")
+                    .unwrap_or_default(),
+                blocker_reason: payload_optional_string(&payload, "blocker_reason")
+                    .unwrap_or_default(),
+                updated_sequence: 0,
+            }))
+        }
+        // GA1 (goal-orchestration GO3): rebuild the per-requirement status ledger.
+        "requirement_ledger" => Ok(ProjectionRecord::RequirementLedger(
+            RequirementLedgerProjection {
+                requirement_id: RequirementId::new(record_id),
+                goal_id: GoalId::new(required_field(
+                    &projection_kind,
+                    "requirement_ledger",
+                    a,
+                    "goal_id",
+                )?),
+                project_id: ProjectId::new(required_field(
+                    &projection_kind,
+                    "requirement_ledger",
+                    b,
+                    "project_id",
+                )?),
+                summary: required_field(&projection_kind, "requirement_ledger", c, "summary")?,
+                status: required_field(&projection_kind, "requirement_ledger", d, "status")?,
+                last_status_source: required_field(
+                    &projection_kind,
+                    "requirement_ledger",
+                    e,
+                    "last_status_source",
+                )?,
+                updated_sequence: 0,
+            },
+        )),
+        // GA1 (goal-orchestration GO3): rebuild the agent-report / story ledger,
+        // preserving the load-bearing observed-vs-reported `source` tag.
+        "goal_report" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::GoalReport(GoalReportProjection {
+                goal_report_id: record_id,
+                goal_id: GoalId::new(required_field(
+                    &projection_kind,
+                    "goal_report",
+                    a,
+                    "goal_id",
+                )?),
+                project_id: ProjectId::new(required_field(
+                    &projection_kind,
+                    "goal_report",
+                    b,
+                    "project_id",
+                )?),
+                session_id: optional_id(f),
+                requirement_id: optional_id(g),
+                report_kind: required_field(&projection_kind, "goal_report", c, "report_kind")?,
+                source: required_field(&projection_kind, "goal_report", d, "source")?,
+                confidence: optional_i64(&projection_kind, "goal_report", h, "confidence")?,
+                summary: required_field(&projection_kind, "goal_report", e, "summary")?,
+                body_artifact_id: payload_optional_string(&payload, "body_artifact_id"),
+                evidence_id: payload_optional_string(&payload, "evidence_id").map(EvidenceId::new),
+                updated_sequence: 0,
+            }))
+        }
+        // GA1 (goal-orchestration GO3/GO8): rebuild a recorded continuation decision.
+        "goal_continuation" => Ok(ProjectionRecord::GoalContinuation(
+            GoalContinuationProjection {
+                continuation_id: record_id,
+                goal_id: GoalId::new(required_field(
+                    &projection_kind,
+                    "goal_continuation",
+                    a,
+                    "goal_id",
+                )?),
+                project_id: ProjectId::new(required_field(
+                    &projection_kind,
+                    "goal_continuation",
+                    b,
+                    "project_id",
+                )?),
+                attempt_run_id: optional_id(e),
+                decision: required_field(&projection_kind, "goal_continuation", c, "decision")?,
+                reason: required_field(&projection_kind, "goal_continuation", d, "reason")?,
+                updated_sequence: 0,
+            },
+        )),
+        // GA1 (goal-orchestration GO12): rebuild observed delegated-provider state.
+        "delegated_provider_goal" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::DelegatedProviderGoal(
+                DelegatedProviderGoalProjection {
+                    delegated_goal_id: record_id,
+                    goal_id: GoalId::new(required_field(
+                        &projection_kind,
+                        "delegated_provider_goal",
+                        a,
+                        "goal_id",
+                    )?),
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "delegated_provider_goal",
+                        b,
+                        "project_id",
+                    )?),
+                    session_id: optional_id(f),
+                    provider_kind: required_field(
+                        &projection_kind,
+                        "delegated_provider_goal",
+                        c,
+                        "provider_kind",
+                    )?,
+                    provider_goal_ref: g,
+                    provider_state: required_field(
+                        &projection_kind,
+                        "delegated_provider_goal",
+                        d,
+                        "provider_state",
+                    )?,
+                    source: required_field(
+                        &projection_kind,
+                        "delegated_provider_goal",
+                        e,
+                        "source",
+                    )?,
+                    body_artifact_id: payload_optional_string(&payload, "body_artifact_id"),
+                    updated_sequence: 0,
+                },
+            ))
+        }
+        // GA5 (goal-orchestration GO9): rebuild the completion auditor's verdict.
+        // The requirement counts and per-requirement detail come back from payload.
+        "goal_audit_decision" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::GoalAuditDecision(
+                GoalAuditDecisionProjection {
+                    audit_id: record_id.clone(),
+                    goal_id: GoalId::new(required_field(
+                        &projection_kind,
+                        "goal_audit_decision",
+                        a,
+                        "goal_id",
+                    )?),
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "goal_audit_decision",
+                        b,
+                        "project_id",
+                    )?),
+                    attempt_run_id: optional_id(e),
+                    verdict: required_field(&projection_kind, "goal_audit_decision", c, "verdict")?,
+                    reason: required_field(&projection_kind, "goal_audit_decision", d, "reason")?,
+                    requirements_total: required_payload_i64(
+                        &projection_kind,
+                        &record_id,
+                        &payload,
+                        "requirements_total",
+                    )?,
+                    requirements_complete: required_payload_i64(
+                        &projection_kind,
+                        &record_id,
+                        &payload,
+                        "requirements_complete",
+                    )?,
+                    requirement_detail_json: required_payload_string(
+                        &projection_kind,
+                        &record_id,
+                        &payload,
+                        "requirement_detail_json",
+                    )?,
+                    updated_sequence: 0,
+                },
+            ))
+        }
         other => Err(ProjectionDecodeError(format!(
             "unknown projection kind: {other}"
         ))),

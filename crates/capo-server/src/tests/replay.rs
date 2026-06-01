@@ -8,6 +8,7 @@ fn server_replays_codex_fixture_through_server_boundary() {
         &server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     let session_id = "session-codex-local-1";
@@ -113,6 +114,7 @@ fn server_replays_acp_fixture_into_server_native_session() {
         &server,
         ServerCommand::RegisterAgent {
             name: "acp-mock".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(
@@ -173,6 +175,7 @@ fn server_rejects_adapter_replay_and_dispatch_that_mismatch_session_adapter() {
         &server,
         ServerCommand::RegisterAgent {
             name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
         },
     );
     handle(

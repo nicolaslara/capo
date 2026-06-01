@@ -18,7 +18,9 @@ use crate::cli_surface::{ParsedArgs, has_flag, optional_arg, required_arg};
 use crate::project_memory_flow::{
     SourceTaskImportRequest, default_source_task_task_id, import_markdown_source_task,
 };
-use crate::{controller, debug_error, envelope, escape_json, project_id, stable_cli_hash, state};
+use crate::{
+    debug_error, envelope, escape_json, project_id, real_controller, stable_cli_hash, state,
+};
 
 pub(crate) fn index_workpads(parsed: &ParsedArgs, args: &[String]) -> Result<String, String> {
     let root = PathBuf::from(required_arg(args, "--root")?);
@@ -179,7 +181,10 @@ pub(crate) fn start_next_workpad_task(
     command
         .structured_args
         .push(("task_id".to_string(), task_id.clone()));
-    let refs = controller(parsed)?
+    // AI3: `capo workpad-next` (and `project memory start-next`, which delegates
+    // here) dispatches the per-turn summary tool through the REAL
+    // `authorize_and_invoke` seam, not the fake summary shim.
+    let refs = real_controller(parsed)?
         .send_task_command(&command)
         .map_err(debug_error)?;
     Ok(format!(

@@ -6,28 +6,39 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use capo_core::{
-    AgentId, BoundaryBinding, BoundaryKind, EvidenceId, MemoryPacketId, ProjectId, RunId,
-    SessionId, TaskId, ToolCallId,
+    AgentId, BoundaryBinding, BoundaryKind, EvidenceId, GoalId, MemoryPacketId, ProjectId,
+    RequirementId, RunId, SessionId, TaskId, ToolCallId,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 mod apply;
+mod broadcast;
 mod codec;
 mod codec_adapter;
 mod codec_encode;
 mod error;
 mod event;
+mod goal_report;
 mod projections;
 mod queries;
 mod schema;
+mod thread;
 
+pub use broadcast::{EventBroadcaster, EventSubscription};
 pub use error::{StateError, StateResult};
 pub use event::{
-    ArtifactRecord, EventKind, EventRecord, NewEvent, RecoveryAttempt, RedactionState,
+    ArtifactRecord, EventKind, EventRecord, NewEvent, ProjectedTurnOutcome, RecoveryAttempt,
+    RedactionState,
+};
+pub use goal_report::{
+    GoalReportInputs, RenderedGoalReport, render_goal_report_json, render_goal_report_markdown,
+    source_is_observed_evidence,
 };
 pub use projections::*;
+pub use thread::{SessionThread, ThreadItem, ThreadItemKind, ThreadTurn, ThreadTurnStatus};
 
 use apply::{apply_projection_record, update_watermark};
 use codec::projection_record_from_row;
@@ -65,11 +76,39 @@ impl FakeStateStore {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// SQLite-backed event store.
+///
+/// Identity is the database path: two handles to the same `db_path` are equal
+/// and a clone shares the same path and the same event-broadcast hub. The
+/// [`EventBroadcaster`] is deliberately excluded from equality and the `Debug`
+/// rendering -- it is a runtime fan-out side-channel (ST4), not part of the
+/// store's persisted identity -- so the manual impls below mirror the old
+/// derived behavior (path equality) while carrying the broadcaster.
+#[derive(Clone)]
 pub struct SqliteStateStore {
     root: PathBuf,
     db_path: PathBuf,
+    /// Process-local fan-out of committed events (ST4). Shared across clones so
+    /// every handle to this store publishes to and subscribes from one hub.
+    event_broadcaster: Arc<EventBroadcaster>,
 }
+
+impl std::fmt::Debug for SqliteStateStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteStateStore")
+            .field("root", &self.root)
+            .field("db_path", &self.db_path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for SqliteStateStore {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root && self.db_path == other.db_path
+    }
+}
+
+impl Eq for SqliteStateStore {}
 
 impl SqliteStateStore {
     pub fn open(root: impl AsRef<Path>) -> StateResult<Self> {
@@ -77,8 +116,45 @@ impl SqliteStateStore {
         fs::create_dir_all(root.join("artifacts"))?;
         let db_path = root.join("capo.sqlite");
         let mut connection = Connection::open(&db_path)?;
+        // WAL is a persistent, database-level mode: setting it once here applies
+        // to every later connection opened against this file. It lets a reader
+        // proceed concurrently with an open write, which (together with the
+        // per-connection `busy_timeout` in `connect`) hardens the store against
+        // the concurrent-writer race the ST3 review flagged.
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&mut connection)?;
-        Ok(Self { root, db_path })
+        Ok(Self {
+            root,
+            db_path,
+            event_broadcaster: Arc::new(EventBroadcaster::new()),
+        })
+    }
+
+    /// The process-local event-broadcast hub (ST4). A subscriber created here
+    /// receives every event committed through this store handle or any of its
+    /// clones, fanned out *after* the write commits. The transport's `Subscribe`
+    /// pairs this live tail with the [`Self::events_after`] catch-up backlog.
+    pub fn event_broadcaster(&self) -> &Arc<EventBroadcaster> {
+        &self.event_broadcaster
+    }
+
+    /// Open a fresh connection to the store with the concurrency pragmas every
+    /// write path relies on. The transport serializes writers in-process (one
+    /// handler call at a time), but this is the defense-in-depth layer the ST3
+    /// review asked for: if two connections ever do contend (e.g. a future
+    /// second writer, or a reader overlapping a writer), `busy_timeout` makes the
+    /// loser *block* and retry up to the timeout instead of failing immediately
+    /// with `SQLITE_BUSY`, and WAL lets readers proceed while a write is open.
+    /// Every per-call `Connection::open` goes through here so no write path can
+    /// silently skip these.
+    fn connect(&self) -> StateResult<Connection> {
+        let connection = Connection::open(self.db_path.as_path())?;
+        // 5s is generous for the in-process-serialized writes this store sees;
+        // it bounds the wait so a genuinely stuck lock still surfaces an error
+        // rather than hanging forever.
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(connection)
     }
 
     pub fn binding(&self) -> BoundaryBinding {
@@ -97,12 +173,20 @@ impl SqliteStateStore {
         self.root.join("artifacts")
     }
 
+    /// The controller-owned root under which per-workspace shadow `.git`
+    /// directories live (SG8 checkpoint/rollback). Mirrors [`Self::artifact_root`]
+    /// so the shadow-git checkpoint store hangs off the same durable state root
+    /// and survives restart alongside the event log.
+    pub fn shadow_git_root(&self) -> PathBuf {
+        self.root.join("shadow-git")
+    }
+
     pub fn append_event(
         &self,
         event: NewEvent,
         projection_records: &[ProjectionRecord],
     ) -> StateResult<i64> {
-        let mut connection = Connection::open(&self.db_path)?;
+        let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         if let (Some(project_id), Some(idempotency_key)) =
             (&event.project_id, &event.idempotency_key)
@@ -149,7 +233,21 @@ impl SqliteStateStore {
         }
         update_watermark(&transaction, "default", sequence)?;
         transaction.commit()?;
+        // Fan the committed event out to live subscribers only after the write
+        // is durable (ST4): a subscriber must never see an event ahead of the
+        // watermark a reconnecting subscriber would later read from the log.
+        self.publish_committed_event(sequence, &event);
         Ok(sequence)
+    }
+
+    /// Fan a just-committed [`NewEvent`] out to live subscribers (ST4). The
+    /// record built here mirrors the row the read queries (`events_after`,
+    /// `recent_events_for_session`) reconstruct from the `events` table, so a
+    /// live-tailed event is the same record a catch-up backlog read would return
+    /// for the same sequence.
+    fn publish_committed_event(&self, sequence: i64, event: &NewEvent) {
+        self.event_broadcaster
+            .publish(&committed_event_record(sequence, event));
     }
 
     pub fn decide_permission_approval(
@@ -160,7 +258,7 @@ impl SqliteStateStore {
         decided_approval: PermissionApprovalProjection,
         grant: Option<CapabilityGrantProjection>,
     ) -> StateResult<i64> {
-        let mut connection = Connection::open(&self.db_path)?;
+        let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         let guarded = transaction.execute(
             "UPDATE permission_approvals
@@ -209,6 +307,10 @@ impl SqliteStateStore {
             ],
         )?;
         let sequence = transaction.last_insert_rowid();
+        // Capture the committed event shapes to fan out *after* commit (ST4); the
+        // `decided_event`/`grant_event` are only borrowed by `params!` above, so
+        // they are still readable here.
+        let mut committed = vec![committed_event_record(sequence, &decided_event)];
         let approval_record = ProjectionRecord::PermissionApproval(decided_approval);
         insert_projection_record(&transaction, sequence, &approval_record)?;
         apply_projection_record(&transaction, sequence, &approval_record)?;
@@ -236,6 +338,7 @@ impl SqliteStateStore {
                 ],
             )?;
             let grant_sequence = transaction.last_insert_rowid();
+            committed.push(committed_event_record(grant_sequence, &grant_event));
             let grant_record = ProjectionRecord::CapabilityGrant(grant);
             insert_projection_record(&transaction, grant_sequence, &grant_record)?;
             apply_projection_record(&transaction, grant_sequence, &grant_record)?;
@@ -245,6 +348,9 @@ impl SqliteStateStore {
         };
         update_watermark(&transaction, "default", final_sequence)?;
         transaction.commit()?;
+        for event in &committed {
+            self.event_broadcaster.publish(event);
+        }
         Ok(final_sequence)
     }
 
@@ -291,6 +397,379 @@ impl SqliteStateStore {
         Ok(recovered)
     }
 
+    /// Reap orphaned in-flight runs on restart and record the outcome (RTL10).
+    ///
+    /// This improves on [`Self::mark_active_runs_exited_unknown`], which blindly
+    /// marks *every* live-looking run `exited_unknown` and orphans any children
+    /// still running. The recovery layer first probes (and, if alive, reaps via
+    /// the runtime's process-group reaper) the PID each run persisted before its
+    /// spawn returned, then hands the per-run [`RunReapObservation`]s here. For
+    /// each run this emits the events the `state-model.md` Restart Recovery
+    /// section prescribes:
+    ///
+    /// - a still-alive (now reaped) orphan: `run.orphaned` then a terminal
+    ///   `run.exited` (unknown exit) and finally `run.recovered` recovery
+    ///   metadata for the reconciled run;
+    /// - an already-gone run with no terminal event, or a run that never
+    ///   spawned: a terminal `run.exited` (unknown exit) then `run.recovered`.
+    ///
+    /// Every event carries an idempotency key of
+    /// `(run_id, recovery_observation_kind, observed_runtime_state_hash)`
+    /// (intentionally excluding `recovery_attempt_id`), so a repeated restart
+    /// that observes the same runtime state appends nothing. Returns the final
+    /// `Run` projections.
+    pub fn reap_orphaned_runs(
+        &self,
+        project_id: &ProjectId,
+        recovery_attempt_id: &str,
+        observations: &[RunReapObservation],
+    ) -> StateResult<Vec<RunProjection>> {
+        let mut recovered = Vec::new();
+        for observation in observations {
+            let RunReapObservation {
+                run_id,
+                session_id,
+                previous_status,
+                kind,
+                external_pid,
+                observed_runtime_state_hash,
+            } = observation;
+            let observation_kind = kind.observation_kind();
+
+            // A still-alive orphan is recorded as orphaned first (a restart
+            // found a process without an owner), before its terminal exit.
+            if matches!(kind, RunReapKind::AliveReaped) {
+                self.append_recovery_event(
+                    project_id,
+                    recovery_attempt_id,
+                    EventKind::RunOrphaned,
+                    "orphaned",
+                    "orphaned",
+                    observation,
+                    observation_kind,
+                    observed_runtime_state_hash,
+                    *external_pid,
+                    previous_status,
+                )?;
+            }
+
+            // Phase 1 reaps and records; it never reattaches, so every reaped or
+            // gone run reaches a terminal `run.exited` with unknown exit detail.
+            self.append_recovery_event(
+                project_id,
+                recovery_attempt_id,
+                EventKind::RunExited,
+                "exited_unknown",
+                "exited_unknown",
+                observation,
+                observation_kind,
+                observed_runtime_state_hash,
+                *external_pid,
+                previous_status,
+            )?;
+
+            // Recovery metadata for the reconciled run, closing the loop.
+            let recovered_run = RunProjection {
+                run_id: run_id.clone(),
+                session_id: session_id.clone(),
+                status: "recovered".to_string(),
+                recovery_of_run_id: None,
+                updated_sequence: 0,
+            };
+            self.append_recovery_event(
+                project_id,
+                recovery_attempt_id,
+                EventKind::RunRecovered,
+                "recovered",
+                "recovered",
+                observation,
+                observation_kind,
+                observed_runtime_state_hash,
+                *external_pid,
+                previous_status,
+            )?;
+            recovered.push(recovered_run);
+        }
+        Ok(recovered)
+    }
+
+    /// SG9: LIVENESS-AWARE restart recovery, replacing
+    /// [`Self::mark_active_runs_exited_unknown`] (which blindly marked EVERY
+    /// live-looking run `exited_unknown`) and going beyond
+    /// [`Self::reap_orphaned_runs`] (which always KILLS a live orphan).
+    ///
+    /// The controller probes each in-flight run's persisted process group via the
+    /// runtime's NON-destructive health probe and classifies it
+    /// ([`RunRecoveryKind`]). This records the events the `state-model.md` Restart
+    /// Recovery section prescribes, per run:
+    ///
+    /// - `Reattached` (still alive, an attachable handle held): a single
+    ///   `run.recovered` event reattaches to the run IN PLACE -- the live process
+    ///   keeps running and is NOT terminated, distinct from relaunching a fresh
+    ///   run with `recovery_of_run_id`.
+    /// - `Orphaned` (still alive, no attachable handle): a `run.orphaned` event,
+    ///   then a terminal `run.exited`, then `run.recovered` recovery metadata for
+    ///   the reconciled run.
+    /// - `Exited` (gone / never spawned): a terminal `run.exited` then
+    ///   `run.recovered` recovery metadata.
+    ///
+    /// Every event carries an idempotency key of
+    /// `(run_id, recovery_observation_kind, observed_runtime_state_hash)`
+    /// (intentionally excluding `recovery_attempt_id`), so a repeated restart that
+    /// observes the same runtime state appends nothing. Returns the reconciled
+    /// `Run` projections.
+    pub fn recover_inflight_runs(
+        &self,
+        project_id: &ProjectId,
+        recovery_attempt_id: &str,
+        observations: &[RunRecoveryObservation],
+    ) -> StateResult<Vec<RunProjection>> {
+        let mut recovered = Vec::new();
+        for observation in observations {
+            let RunRecoveryObservation {
+                run_id,
+                session_id,
+                previous_status,
+                kind,
+                external_pid,
+                runtime_process_ref: _,
+                observed_runtime_state_hash,
+            } = observation;
+            let observation_kind = kind.observation_kind();
+
+            match kind {
+                RunRecoveryKind::Reattached => {
+                    // The run is still alive and reattachable: a SINGLE
+                    // `run.recovered` reattaches in place. No `run.exited` is
+                    // emitted -- the process keeps running.
+                    self.append_run_recovery_event(
+                        project_id,
+                        recovery_attempt_id,
+                        EventKind::RunRecovered,
+                        "recovered",
+                        "recovered",
+                        observation,
+                        observation_kind,
+                        observed_runtime_state_hash,
+                        *external_pid,
+                        previous_status,
+                    )?;
+                }
+                RunRecoveryKind::Orphaned => {
+                    // A live but unowned orphan: record it orphaned, then its
+                    // terminal exit, then the reconciled recovery metadata.
+                    self.append_run_recovery_event(
+                        project_id,
+                        recovery_attempt_id,
+                        EventKind::RunOrphaned,
+                        "orphaned",
+                        "orphaned",
+                        observation,
+                        observation_kind,
+                        observed_runtime_state_hash,
+                        *external_pid,
+                        previous_status,
+                    )?;
+                    self.append_run_recovery_event(
+                        project_id,
+                        recovery_attempt_id,
+                        EventKind::RunExited,
+                        "exited",
+                        "exited",
+                        observation,
+                        observation_kind,
+                        observed_runtime_state_hash,
+                        *external_pid,
+                        previous_status,
+                    )?;
+                    self.append_run_recovery_event(
+                        project_id,
+                        recovery_attempt_id,
+                        EventKind::RunRecovered,
+                        "recovered",
+                        "recovered",
+                        observation,
+                        observation_kind,
+                        observed_runtime_state_hash,
+                        *external_pid,
+                        previous_status,
+                    )?;
+                }
+                RunRecoveryKind::Exited => {
+                    // The run terminated while Capo was down: a terminal
+                    // `run.exited` then the reconciled recovery metadata.
+                    self.append_run_recovery_event(
+                        project_id,
+                        recovery_attempt_id,
+                        EventKind::RunExited,
+                        "exited",
+                        "exited",
+                        observation,
+                        observation_kind,
+                        observed_runtime_state_hash,
+                        *external_pid,
+                        previous_status,
+                    )?;
+                    self.append_run_recovery_event(
+                        project_id,
+                        recovery_attempt_id,
+                        EventKind::RunRecovered,
+                        "recovered",
+                        "recovered",
+                        observation,
+                        observation_kind,
+                        observed_runtime_state_hash,
+                        *external_pid,
+                        previous_status,
+                    )?;
+                }
+            }
+
+            recovered.push(RunProjection {
+                run_id: run_id.clone(),
+                session_id: session_id.clone(),
+                status: kind.run_status().to_string(),
+                recovery_of_run_id: None,
+                updated_sequence: 0,
+            });
+        }
+        Ok(recovered)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_run_recovery_event(
+        &self,
+        project_id: &ProjectId,
+        recovery_attempt_id: &str,
+        kind: EventKind,
+        status: &str,
+        event_slug: &str,
+        observation: &RunRecoveryObservation,
+        observation_kind: &str,
+        observed_runtime_state_hash: &str,
+        external_pid: Option<u32>,
+        previous_status: &str,
+    ) -> StateResult<i64> {
+        let run = RunProjection {
+            run_id: observation.run_id.clone(),
+            session_id: observation.session_id.clone(),
+            status: status.to_string(),
+            recovery_of_run_id: None,
+            updated_sequence: 0,
+        };
+        // Idempotency intentionally excludes `recovery_attempt_id`: a repeated
+        // restart that observes the same `(run, observation_kind, state_hash)`
+        // appends nothing.
+        let idempotency_key = format!(
+            "recovery:run:{}:{}:{}:{}",
+            observation.run_id, event_slug, observation_kind, observed_runtime_state_hash
+        );
+        let event_id = format!(
+            "event-recovery-{}-{}-{}-{}",
+            event_slug,
+            observation.run_id,
+            observation_kind,
+            &observed_runtime_state_hash
+                .strip_prefix("fnv1a64:")
+                .unwrap_or(observed_runtime_state_hash)
+        );
+        let payload = serde_json::json!({
+            "recovery_attempt_id": recovery_attempt_id,
+            "previous_status": previous_status,
+            "status": status,
+            "recovery_observation_kind": observation_kind,
+            "observed_runtime_state_hash": observed_runtime_state_hash,
+            "external_pid": external_pid,
+            "runtime_process_ref": observation.runtime_process_ref,
+            "reattached": matches!(kind, EventKind::RunRecovered)
+                && observation.kind == RunRecoveryKind::Reattached,
+        })
+        .to_string();
+        self.append_event(
+            NewEvent {
+                event_id,
+                kind,
+                actor: "capo-recovery".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(observation.session_id.clone()),
+                run_id: Some(observation.run_id.clone()),
+                turn_id: None,
+                item_id: None,
+                payload_json: payload,
+                idempotency_key: Some(idempotency_key),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Run(run)],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_recovery_event(
+        &self,
+        project_id: &ProjectId,
+        recovery_attempt_id: &str,
+        kind: EventKind,
+        status: &str,
+        event_slug: &str,
+        observation: &RunReapObservation,
+        observation_kind: &str,
+        observed_runtime_state_hash: &str,
+        external_pid: Option<u32>,
+        previous_status: &str,
+    ) -> StateResult<i64> {
+        let run = RunProjection {
+            run_id: observation.run_id.clone(),
+            session_id: observation.session_id.clone(),
+            status: status.to_string(),
+            recovery_of_run_id: None,
+            updated_sequence: 0,
+        };
+        // Idempotency intentionally excludes `recovery_attempt_id`: a repeated
+        // restart that observes the same `(run, observation_kind, state_hash)`
+        // appends nothing. The attempt id stays payload/correlation metadata.
+        let idempotency_key = format!(
+            "recovery:run:{}:{}:{}:{}",
+            observation.run_id, event_slug, observation_kind, observed_runtime_state_hash
+        );
+        let event_id = format!(
+            "event-recovery-{}-{}-{}",
+            event_slug,
+            observation.run_id,
+            &observed_runtime_state_hash
+                .strip_prefix("fnv1a64:")
+                .unwrap_or(observed_runtime_state_hash)
+        );
+        let payload = serde_json::json!({
+            "recovery_attempt_id": recovery_attempt_id,
+            "previous_status": previous_status,
+            "status": status,
+            "recovery_observation_kind": observation_kind,
+            "observed_runtime_state_hash": observed_runtime_state_hash,
+            "external_pid": external_pid,
+        })
+        .to_string();
+        self.append_event(
+            NewEvent {
+                event_id,
+                kind,
+                actor: "capo-recovery".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(observation.session_id.clone()),
+                run_id: Some(observation.run_id.clone()),
+                turn_id: None,
+                item_id: None,
+                payload_json: payload,
+                idempotency_key: Some(idempotency_key),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Run(run)],
+        )
+    }
+
     pub fn record_artifact(&self, artifact: ArtifactRecord) -> StateResult<()> {
         if !artifact.redaction_state.is_persistable_artifact() {
             return Err(StateError::UnsafeArtifactRedactionState(
@@ -298,7 +777,7 @@ impl SqliteStateStore {
             ));
         }
 
-        let connection = Connection::open(&self.db_path)?;
+        let connection = self.connect()?;
         connection.execute(
             "INSERT OR REPLACE INTO artifacts (
                 artifact_id, project_id, session_id, run_id, kind, uri, content_hash,
@@ -320,7 +799,7 @@ impl SqliteStateStore {
     }
 
     pub fn rebuild_projections(&self) -> StateResult<()> {
-        let mut connection = Connection::open(&self.db_path)?;
+        let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         clear_projection_tables(&transaction)?;
 
@@ -363,7 +842,7 @@ impl SqliteStateStore {
     }
 
     pub fn begin_recovery(&self, recovery_attempt_id: &str) -> StateResult<RecoveryAttempt> {
-        let connection = Connection::open(&self.db_path)?;
+        let connection = self.connect()?;
         let last_sequence = self.last_sequence()?;
         connection.execute(
             "INSERT INTO recovery_attempts (
@@ -380,7 +859,7 @@ impl SqliteStateStore {
     }
 
     pub fn complete_recovery(&self, recovery_attempt_id: &str) -> StateResult<RecoveryAttempt> {
-        let mut connection = Connection::open(&self.db_path)?;
+        let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         let started_sequence = transaction
             .query_row(
@@ -409,13 +888,13 @@ impl SqliteStateStore {
     }
 
     pub fn event_count(&self) -> StateResult<i64> {
-        let connection = Connection::open(&self.db_path)?;
+        let connection = self.connect()?;
         let count = connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
         Ok(count)
     }
 
     pub fn last_sequence(&self) -> StateResult<i64> {
-        let connection = Connection::open(&self.db_path)?;
+        let connection = self.connect()?;
         self.last_sequence_with_connection(&connection)
     }
 
@@ -475,6 +954,31 @@ fn escape_json(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Build the [`EventRecord`] for a just-committed [`NewEvent`] at `sequence`
+/// (ST4 broadcast fan-out). It reconstructs exactly the columns the `events`
+/// table read queries (`events_after`, `recent_events_for_session`) project, so
+/// an event delivered live is identical to the one a later catch-up read would
+/// return for the same sequence -- which is what makes the backlog-to-live seam
+/// dedupe by sequence sound.
+fn committed_event_record(sequence: i64, event: &NewEvent) -> EventRecord {
+    EventRecord {
+        sequence,
+        event_id: event.event_id.clone(),
+        kind: event.kind.as_str().to_string(),
+        actor: event.actor.clone(),
+        project_id: event.project_id.clone(),
+        task_id: event.task_id.clone(),
+        agent_id: event.agent_id.clone(),
+        session_id: event.session_id.clone(),
+        run_id: event.run_id.clone(),
+        turn_id: event.turn_id.clone(),
+        item_id: event.item_id.clone(),
+        payload_json: event.payload_json.clone(),
+        idempotency_key: event.idempotency_key.clone(),
+        redaction_state: event.redaction_state.as_str().to_string(),
+    }
+}
+
 trait FromStringId {
     fn from_string_id(value: String) -> Self;
 }
@@ -494,8 +998,10 @@ macro_rules! impl_from_string_id {
 impl_from_string_id!(
     AgentId,
     EvidenceId,
+    GoalId,
     MemoryPacketId,
     ProjectId,
+    RequirementId,
     RunId,
     SessionId,
     TaskId,

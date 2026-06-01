@@ -80,12 +80,33 @@ Design rationale:
   (`preflight_live_provider`, `live_provider.rs:62`). No `RealBoundaryController`
   method may run a provider without passing through that gate/preflight - this is
   recorded as a code-review non-goal assertion, not just prose.
-- Open question resolved-leaning: the loop invokes the dispatch
-  `ServerCommand`s/server methods rather than re-implementing them, so the typed
-  boundary stays the single definition of plan/gate/run. The alternative
-  (demoting the dispatch primitives to internal loop functions) is recorded as
-  the fallback if the call shape proves awkward; the chosen shape is documented
-  here in `knowledge.md` per RTL4.
+- Open question RESOLVED (RTL4): the loop INVOKES the dispatch
+  `ServerCommand`s rather than re-implementing them, so the typed boundary stays
+  the single definition of plan/gate/run. The RTL4 reconciliation point is
+  `CapoServer::run_dispatch_turn` (`crates/capo-server/src/turn_orchestration.rs`):
+  a thin orchestrator that sequences the existing commands through
+  `CapoServer::handle` (deterministic: `PlanDispatch` -> `GateDispatch` ->
+  `RunDispatchLocal`; live: `PreflightLiveProvider` -> `RunLiveProviderLocal`)
+  and then ANNOTATES the run it just drove with a `TurnFinished` derived from the
+  SAME normalized batch the dispatch run ingested
+  (`FakeBoundaryController::derive_turn_finished`, the public outcome classifier
+  shared with `run_turn`). It adds no new event kind, no second gate, and no
+  second run-completion model. A loop turn produces the IDENTICAL dispatch
+  plan/gate/execution event sequence as the direct command path for a scripted
+  run (proven by `loop_turn_drives_the_same_dispatch_sequence_as_the_direct_command_path`).
+  The alternative (demoting the dispatch primitives to internal loop functions)
+  remains the documented fallback if the call shape proves awkward, but the
+  command-driving shape held: the orchestrator owns no provider-spawn or
+  gate-bypass path of its own, only command forwarding.
+- NON-GOAL ASSERTION (code-review contract, RTL4): no `run_dispatch_turn` path --
+  and, by inheritance, no future `RealBoundaryController` method -- runs a
+  provider without passing through the existing gate/preflight. The deterministic
+  arm goes through `dispatch_gate_for_plan` via `GateDispatch`; the live arm goes
+  through `preflight_live_provider` via `PreflightLiveProvider`. Both reuse the
+  existing checks unchanged. This is enforced by construction (the orchestrator
+  only forwards `ServerCommand`s) and exercised by
+  `loop_turn_does_not_run_provider_without_passing_the_gate` (a gate-blocked turn
+  ingests no batch, runs no provider, and emits a no-ref `TurnFinished`).
 
 ## The AgentAdapter Trait Seam
 
@@ -217,11 +238,16 @@ to clients.
 
 ## Parity Cutover And The Verification Invariant
 
-The default routing flip is gated, not assumed. `RealBoundaryController` must
-pass the IDENTICAL deterministic suite (`send`/`steer`/`interrupt`/`stop`,
+The default routing flip is gated, not assumed. `RealBoundaryController` passes
+the IDENTICAL deterministic suite (`send`/`steer`/`interrupt`/`stop`,
 restart/replay) that `FakeBoundaryController` passes, plus a parity-equivalence
 test asserting the fake and real paths produce equivalent event sequences for a
-scripted turn (modulo adapter-identity fields). Routing selects the controller
+scripted turn. Note the honest reading of "passes the identical suite": the real
+handle is a zero-cost pass-through over the same orchestration core (see
+`real_controller.rs`), so this parity holds BY CONSTRUCTION -- the suites are a
+regression guard that the real handle keeps delegating to the one core (that the
+core is never forked into a divergent real path), not an independent validation
+of two separate implementations that happen to agree. Routing selects the controller
 behind a single typed config switch (not scattered booleans); the scripted-mock
 adapter stays an explicit fallback so the parity suite can run the real
 controller over scripted input. Before the flip, the fake remains default and
@@ -239,6 +265,130 @@ artifacts pass the existing credential scan
 (`scan_artifacts_for_sensitive_markers`) with `unknown`/`contains_sensitive`
 artifacts quarantined per the `state-model.md` artifact privacy contract.
 
+### The Single-Switch Controller Cutover (RTL11)
+
+The controller routing is exactly one typed value, not a constellation of
+booleans. `ControllerSelection` (`crates/capo-server/src/controller_routing.rs`)
+is a two-variant enum -- `Fake` (the phase-1 default) and `Real` -- and it is
+the whole routing decision. `CapoServer` carries one
+`controller_selection: ControllerSelection`, chosen once at construction:
+`CapoServer::open` resolves it from `ControllerSelection::from_env()` (the opt-in
+gate `CAPO_SERVER_REAL_CONTROLLER`, mirroring the live-provider opt-in posture),
+and `CapoServer::open_with_controller` takes it explicitly so deterministic
+suites pin a routing without touching the environment.
+
+The command surface (`register`/`send`/`steer`/`interrupt`/`stop`/`recover`)
+routes through `ControllerRoute`, a per-call view bound to the selection. The
+orchestration core remains one `FakeBoundaryController`; the real routing wraps a
+clone of that same core via `RealBoundaryController::from_core` (a path-only
+`SqliteStateStore` clone, so both share one database and one event log). The
+real handle's control flow IS the real one (see `real_controller.rs`) -- routing
+a command through it persists through the exact same `append_event`/projection
+path, so the parity invariant holds by construction. State/dispatch/projection
+helpers keep using the one core directly because those persist identically
+regardless of which handle drove the command. The typed
+`ServerCommand`/`ServerResponse` boundary is unchanged; clients cannot observe
+which handle served a command (`crates/capo-server/src/tests/controller_routing.rs`
+asserts the two routings produce equivalent observable lifecycles for
+`send`/`steer`/`interrupt` and `send`/`steer`/`stop`).
+
+Scope -- what the switch routes (and what RTL12 still owns): RTL11 routes the
+**command-envelope surface** only -- the `register`/`send`/`steer`/`interrupt`/
+`stop`/`recover` methods on `ControllerRoute`, exactly the set the RTL11
+acceptance criteria name. It does NOT yet route the RTL3 turn-loop *ingestion*
+entry points: `apply_normalized_adapter_events_with_turn` (fixture replay and
+live-provider ingest), `prepare_local_adapter_dispatch_run` (session start), and
+`abort_run_for_ceiling` still drive the one shared orchestration core directly
+(`self.controller.<method>` in `lib.rs`/`live_provider.rs`/
+`turn_orchestration.rs`). That is deliberate: the loop is where a genuinely-real
+adapter's output would diverge from the fake adapter's, and RTL12 owns the parity
+criterion and the parity-equivalence suite that must pass before a real adapter
+drives the loop in production. With the phase-1 `Fake` default the shared core is
+fake-backed, so loop ingestion staying on it is correct, not a divergence. The
+RTL11 server tests in `tests/controller_routing.rs` are boundary-wiring/smoke
+tests; the byte-level parity invariant is owned by RTL5
+(`crates/capo-controller/src/tests.rs::real_controller_read_models_match_fake_path_for_identical_scripted_output`)
+and the loop-level criterion by RTL12.
+
+Adapter-injection seam (for RTL12/RTL13): the default `open`/`open_with_controller`
+build the core with the default `AgentAdapterHandle::fake` adapter, so with that
+core a `Real` selection cannot observably differ from `Fake` -- both views drive
+the same fake-backed core. `CapoServer::open_with_controller_and_adapter` builds
+the one shared core over an injected `AgentAdapterHandle`, so a scripted-mock
+handle backs the deterministic parity suites and a real Codex/Claude/ACP handle
+plugs in unchanged; the injected adapter then backs both the routed command
+surface and the shared-core loop ingestion.
+`real_routing_over_injected_scripted_mock_drives_that_adapter` exercises this seam
+and asserts the persisted projection payloads reflect the injected adapter's
+output, not the default fake echo.
+
+Default-chat safety: the phase-1 default is `ControllerSelection::Fake`, so until
+the RTL12 cutover default chat keeps routing through the fake controller and the
+real path is strictly opt-in (env or explicit construction). Default chat never
+silently routes to a fake echo behind the operator's back after the switch flips,
+because the flip is the one visible `ControllerSelection` value.
+
+Rollback (documented for the RTL12 flip): the cutover changes exactly one value
+-- the default `ControllerSelection` (and/or the operator's
+`CAPO_SERVER_REAL_CONTROLLER` opt-in). To roll back, restore the default to
+`ControllerSelection::Fake` (or unset `CAPO_SERVER_REAL_CONTROLLER`). No event
+schema, projection, or `ServerCommand` change is involved, so rollback is a
+one-value revert with no data migration.
+
+### The RTL12 Cutover (Done)
+
+The RTL12 parity suite now passes, so the single switch has been flipped: the
+`ControllerSelection` default is `Real` (the `#[default]` moved from `Fake` to
+`Real`), and `ControllerSelection::from_env()` resolves an absent
+`CAPO_SERVER_REAL_CONTROLLER` to that default. Default chat/steer now route
+through `RealBoundaryController` (a zero-cost view over the one orchestration
+core), so a real adapter handle plugs into the production routing unchanged.
+Because the real handle persists through the same `append_event`/projection
+path, default-chat safety is preserved by construction -- the flip is the one
+visible `ControllerSelection` value, and the parity criterion below guards that
+the real handle stays observably equivalent to the fake handle for a scripted
+turn (equivalent because both drive the one shared core, not because two
+implementations were independently validated to agree).
+
+What the cutover was gated on (the RTL12 parity criterion, all green):
+
+- The multi-turn EDIT suite over the real loop
+  (`crates/capo-server/src/tests/multi_turn_edit.rs`): two turns through
+  `CapoServer::run_dispatch_turn` (the RTL4 reconciliation point), each a
+  distinct workspace edit, asserting distinct per-turn artifacts (the RTL8
+  `run_id/turns/<turn_id>` keying) and distinct projected items (two observed
+  `apply_patch` results anchored to distinct content artifacts), plus the
+  multi-turn restart/replay rebuilding the thread, per-turn artifacts, dispatch
+  executions, and run-exit events identically.
+- The parity criterion + parity-equivalence tests
+  (`crates/capo-controller/src/tests.rs`): `RealBoundaryController` passes the
+  IDENTICAL `send`/`steer`/`interrupt`/`stop` + restart/replay suite the fake
+  handle passes (`real_controller_passes_the_identical_send_steer_interrupt_stop_suite`),
+  and for a scripted turn the fake and real paths produce equivalent event
+  sequences (`fake_and_real_paths_produce_equivalent_event_sequences_for_a_scripted_turn`).
+  Both are regression guards over the shared core (the real handle delegates to
+  the same `FakeBoundaryController` core), so they prove the core has not forked,
+  not that two independent implementations agree -- the parity is by construction.
+  Both runs use the identical adapter/session label, so there are no
+  adapter-identity fields to factor out; the comparison is over the full
+  persisted sequence/projection/outcome.
+
+Rollback knob, post-cutover: `CAPO_SERVER_REAL_CONTROLLER=0` (or
+`false`/`no`/`off`) forces the fake routing back on -- a single falsey env value,
+no schema/projection/`ServerCommand` change.
+
+An RTL8/RTL12 correctness fix landed alongside the suite: the adapter-replay
+fallback idempotency key
+(`adapter_replay_fallback_key`, `crates/capo-controller/src/adapter_replay.rs`)
+is now scoped by `(session, turn, index)` when the loop drives an explicit turn,
+so a SECOND turn in the same session/run no longer dedups against the first
+turn's terminal/summary/tool events at the same batch index (re-running the same
+turn stays idempotent). The loop's live-SPAWN `TurnFinished` is now reconstructed
+from the persisted turn-keyed event log when the ingested stdout batch is not
+threaded back in memory (`FakeBoundaryController::reconstruct_turn_finished`,
+promoted from test-only), so the annotation honestly reflects what the dispatch
+run projected rather than collapsing to a no-ref `Completed`.
+
 ## Non-Goals
 
 - Do not create a second execution pipeline beside the dispatch state machine;
@@ -253,10 +403,11 @@ artifacts quarantined per the `state-model.md` artifact privacy contract.
 
 ## Open Questions
 
-- Does the loop call the dispatch `ServerCommand`s directly, or are the dispatch
-  primitives demoted to internal loop functions? The decision leans toward the
-  loop driving the commands so the typed boundary stays the single definition;
-  RTL4 records the final chosen shape.
+- RESOLVED (RTL4): the loop calls the dispatch `ServerCommand`s directly via
+  `CapoServer::run_dispatch_turn`, so the typed boundary stays the single
+  definition of plan/gate/run. See "The Loop Drives Dispatch Rather Than Running
+  Beside It" above for the recorded shape, the non-goal assertion, and the
+  parity test.
 - Is the pre-write checkpoint a git-stash, a tar copy, or a worktree snapshot for
   Phase 1? Full shadow-git is `safety-gates`; this floor only needs one
   reversible single-snapshot mechanism with a documented restore.

@@ -1,0 +1,1 @@
+{"id":"req-list-agents-1","jsonrpc":"2.0","method":"list_agents","params":{"origin":{"actor_id":"local-user","client_id":"local-cli","input_origin":"cli"}}}

@@ -13,3 +13,18 @@ capo-memory.workspace = true
 capo-runtime.workspace = true
 capo-state.workspace = true
 capo-tools.workspace = true
+serde_json = "1.0.150"
+# SG6 note: the VerificationRunner drives the streaming runtime runner
+# (`AsyncLocalProcessRunner`), but the tokio runtime and the spawn -> drain ->
+# wait bridging are owned BEHIND the `capo-runtime` seam
+# (`AsyncLocalProcessRunner::run_to_completion`). The controller calls that one
+# synchronous method, so it needs no direct tokio dependency of its own.
+
+[dev-dependencies]
+serde_json = "1.0.150"
+# GA9 restart/replay test only: open the on-disk store directly to CLEAR the
+# read-model (projection) tables before a reopen, so the post-restart assertions
+# can only pass via `rebuild_projections()` replaying the durable log -- i.e. the
+# restart-survival property is genuinely load-bearing, not satisfied by stale
+# projection rows that a cold open would have served regardless.
+rusqlite = { version = "0.39.0", features = ["bundled"] }

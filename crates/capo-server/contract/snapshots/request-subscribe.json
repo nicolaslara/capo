@@ -1,0 +1,1 @@
+{"id":"req-subscribe-1","jsonrpc":"2.0","method":"subscribe","params":{"from_sequence":42,"origin":{"actor_id":"local-user","client_id":"local-cli","input_origin":"cli"},"session_id":"session-demo"}}

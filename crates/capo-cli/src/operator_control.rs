@@ -1,10 +1,12 @@
+use std::collections::HashMap;
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use capo_adapters::CodexExecAdapter;
 use capo_server::{
-    AgentSummary, DispatchRunSummary, ServerCommand, ServerRequest, ServerResponsePayload,
-    TaskRunSummary, send_tcp,
+    AgentSummary, DispatchRunSummary, ServerCommand, ServerEvent, ServerRequest,
+    ServerResponsePayload, TaskRunSummary, TransportError, send_tcp, subscribe_tcp,
 };
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
@@ -24,7 +26,7 @@ use render::{
     AgentRenderer, AgentResultRenderer, ConciseResultRenderer, DetailsRenderer, EvidenceRenderer,
     RecentWorkRenderer, ResultsAndEvidenceRenderer, ReviewNeedsRenderer, ToolActivityRenderer,
     display_text, render_agent_result_body, render_dashboard, render_human_agent,
-    render_human_agent_with_marker, render_recent_work,
+    render_human_agent_with_marker, render_recent_work, render_thread,
 };
 use server_process::{AutoServer, ensure_server_running, require_loopback_address, server_address};
 
@@ -32,10 +34,10 @@ pub(crate) fn operator_control(parsed: &ParsedArgs, args: &[String]) -> Result<S
     reject_unknown_control_flags(args)?;
     let planner = control_planner(args)?;
     let address = server_address(args)?;
-    require_loopback_address(&address)?;
+    require_loopback_address(&address.address)?;
     let server = ensure_server_running(&address, parsed)?;
 
-    let mut repl = ControlRepl::new(address, server, planner, parsed.state_root.clone());
+    let mut repl = ControlRepl::new(address.address, server, planner, parsed.state_root.clone());
     if std::io::stdin().is_terminal() {
         repl.run_interactive()
     } else {
@@ -78,6 +80,13 @@ fn control_planner(args: &[String]) -> Result<Box<dyn Planner>, String> {
     }
 }
 
+/// How long a `thread` tail drains immediately-available live events before it
+/// returns to the REPL prompt (ST11). The thread command is incremental, not a
+/// blocking long-lived follow: it renders the catch-up thread, then folds in any
+/// events that arrived in this short window. A committed event wakes the tail
+/// read immediately, so this only bounds the trailing idle wait.
+const THREAD_TAIL_DRAIN: Duration = Duration::from_millis(150);
+
 struct ControlRepl {
     address: String,
     server_started: bool,
@@ -86,6 +95,11 @@ struct ControlRepl {
     state_root: PathBuf,
     attached_agent: Option<String>,
     request_counter: usize,
+    /// Per-session sequence watermark for the incremental `thread` tail (ST11):
+    /// the highest event sequence already rendered for a session. A repeated
+    /// `thread` resumes a `Subscribe` from here, so it renders only what is new
+    /// since the last read instead of re-fetching the whole snapshot every time.
+    thread_watermarks: HashMap<String, i64>,
 }
 
 impl ControlRepl {
@@ -104,6 +118,7 @@ impl ControlRepl {
             state_root,
             attached_agent: None,
             request_counter: 0,
+            thread_watermarks: HashMap::new(),
         }
     }
 
@@ -134,7 +149,17 @@ impl ControlRepl {
             let line = match editor.readline(&self.prompt()) {
                 Ok(line) => line,
                 Err(ReadlineError::Interrupted) => {
-                    println!("Use `quit` to exit.");
+                    // ST6: Ctrl-C does NOT kill the client process. When a
+                    // session is live, it emits the typed mid-turn interrupt
+                    // frame on the open connection so the server aborts that
+                    // turn (reaping its runtime process group) and records the
+                    // turn-aborted event. With no live session it is a no-op
+                    // hint and the REPL keeps running.
+                    match self.interrupt_active_session() {
+                        Ok(Some(message)) => println!("{message}"),
+                        Ok(None) => println!("Use `quit` to exit."),
+                        Err(error) => println!("interrupt failed: {error}"),
+                    }
                     continue;
                 }
                 Err(ReadlineError::Eof) => {
@@ -183,6 +208,7 @@ impl ControlRepl {
         if !agents.iter().any(|agent| agent.name == CAPO_PLANNER_AGENT) {
             let response = self.send_request(ServerCommand::RegisterAgent {
                 name: CAPO_PLANNER_AGENT.to_string(),
+                adapter: "fake".to_string(),
             })?;
             if !matches!(response, ServerResponsePayload::AgentRegistered(_)) {
                 return Err(
@@ -362,6 +388,7 @@ Operator input: {line}
             OperatorAction::Status { agent } => self.status(agent),
             OperatorAction::RecentWork { agent } => self.recent_work(agent),
             OperatorAction::ResultsAndEvidence { agent } => self.results_and_evidence(agent),
+            OperatorAction::Thread { agent } => self.thread(agent),
             OperatorAction::Details { agent } => self.details(agent),
             OperatorAction::ToolActivity { agent } => self.tool_activity(agent),
             OperatorAction::Evidence { agent } => self.evidence(agent),
@@ -416,6 +443,62 @@ Operator input: {line}
 
     fn results_and_evidence(&mut self, agent: Option<String>) -> Result<String, String> {
         self.read_agent_or_all(agent, ResultsAndEvidenceRenderer)
+    }
+
+    /// Render the agent's multi-turn conversation thread (ST5/ST11) by driving
+    /// sequence-driven incremental updates over the persistent connection, not a
+    /// `latest_summary` snapshot poll.
+    ///
+    /// The flow is the `Subscribe { from_sequence }` event-tail contract: it opens
+    /// a tail from the session's last-rendered watermark, reads the catch-up
+    /// backlog, then folds in any live events that stream in a short window,
+    /// advancing the per-session watermark by sequence. A repeated `thread`
+    /// therefore renders only what is new since the last read (the incremental
+    /// tail), while the full multi-turn structure is rendered from the projected
+    /// read model (`ReadThread`) the client never authors. The first `thread` for
+    /// a session resumes from `0` (the whole thread); the next resumes from the
+    /// watermark this call advanced to.
+    fn thread(&mut self, agent: Option<String>) -> Result<String, String> {
+        let summary = self.resolved_agent_status(agent)?;
+        let Some(session) = summary.session.as_ref() else {
+            return Ok(format!("{} has no active session.\n", summary.name));
+        };
+        let session_id = session.session_id.to_string();
+        let from_sequence = self
+            .thread_watermarks
+            .get(&session_id)
+            .copied()
+            .unwrap_or(0);
+
+        // Open the event tail over the persistent connection from the watermark:
+        // the catch-up backlog plus the live tail, keyed by sequence.
+        let (backlog, mut stream) =
+            subscribe_tcp(&self.address, Some(session_id.clone()), from_sequence)
+                .map_err(debug_error)?;
+        // Fold the catch-up backlog and any events streaming in now, so the tail
+        // is genuinely incremental (events strictly after the watermark), advancing
+        // the watermark as we go.
+        let mut new_events: Vec<ServerEvent> = backlog.events;
+        let mut watermark = backlog.next_sequence;
+        drain_live_thread_events(&mut stream, &mut new_events, &mut watermark)?;
+        drop(stream);
+
+        // Render the full multi-turn structure from the projected read model (the
+        // client never authors thread ordering), then the incremental tail of new
+        // events since the last read.
+        let response = self.send_request(ServerCommand::ReadThread {
+            session_id: session_id.clone(),
+            from_sequence: 0,
+        })?;
+        let ServerResponsePayload::Thread(thread) = response else {
+            return Err("server returned unexpected response for thread".to_string());
+        };
+        let mut output = render_thread(&summary.name, &thread);
+        output.push_str(&render_thread_tail(from_sequence, &new_events));
+
+        // Advance the watermark so the next `thread` renders only newer events.
+        self.thread_watermarks.insert(session_id, watermark);
+        Ok(output)
     }
 
     fn details(&mut self, agent: Option<String>) -> Result<String, String> {
@@ -607,6 +690,7 @@ Operator input: {line}
         }
         let response = self.send_request(ServerCommand::RegisterAgent {
             name: agent.to_string(),
+            adapter: "fake".to_string(),
         })?;
         if matches!(response, ServerResponsePayload::AgentRegistered(_)) {
             Ok(())
@@ -653,6 +737,35 @@ Operator input: {line}
         mock_provider_output_jsonl: Option<&str>,
         timeout_seconds: u64,
     ) -> Result<capo_server::DispatchRunSummary, String> {
+        // The operator surfaces only render the run; the loop's `TurnFinished`
+        // annotation is carried alongside it (and asserted by the production-path
+        // test). Return the run so the existing callers/renderers are unchanged.
+        Ok(self
+            .run_codex_dispatch_turn(
+                agent,
+                goal,
+                session_id,
+                run_id,
+                mock_provider_output_jsonl,
+                timeout_seconds,
+            )?
+            .run)
+    }
+
+    /// Drive ONE operator turn through the single production orchestration command
+    /// and return the loop's full outcome (the run summary PLUS the loop's
+    /// `TurnFinished` annotation). The operator REPL renders only the run, but the
+    /// `TurnFinished` is what proves a real operator invocation flowed THROUGH
+    /// `run_dispatch_turn` rather than hand-sequencing the dispatch primitives.
+    fn run_codex_dispatch_turn(
+        &mut self,
+        agent: &str,
+        goal: &str,
+        session_id: &str,
+        run_id: &str,
+        mock_provider_output_jsonl: Option<&str>,
+        timeout_seconds: u64,
+    ) -> Result<capo_server::DispatchTurnSummary, String> {
         let turn_id = format!("turn-{}-{}", slug(agent), stable_cli_hash(goal));
         let workspace = std::env::current_dir()
             .map_err(debug_error)?
@@ -663,7 +776,21 @@ Operator input: {line}
             .join("control-live-artifacts")
             .display()
             .to_string();
-        let preflight = self.send_request(ServerCommand::PreflightLiveProvider {
+        // AI1: the operator/live-run flow issues the single production
+        // orchestration command (`RunDispatchTurn`) instead of hand-sequencing
+        // `PreflightLiveProvider` + `RunLiveProviderLocal` beside the loop. The
+        // server routes this through `run_dispatch_turn`, which drives the same
+        // preflight/run dispatch primitives AND annotates the run with the loop's
+        // `TurnFinished`, so the path the design is built around is the path that
+        // a real operator invocation executes.
+        //
+        // This is a single operator turn, so the per-run ceiling bounds one turn:
+        // `max_turns = 1` with no prior usage. The wall-clock bound is the caller's
+        // `timeout_seconds`; the token/cost ceiling is left effectively unbounded
+        // here (no provider token source on this phase-1 path -- RTL9 wires the
+        // real Codex token round-trip), so a single operator turn never trips a
+        // token breach.
+        let response = self.send_request(ServerCommand::RunDispatchTurn {
             agent_name: agent.to_string(),
             adapter: "codex".to_string(),
             goal: goal.to_string(),
@@ -679,24 +806,23 @@ Operator input: {line}
             raw_output_policy: "artifacts_scanned_redacted".to_string(),
             tool_wrapper_policy: "capo_wrapped_required".to_string(),
             live_provider_opt_in: true,
-        })?;
-        let ServerResponsePayload::LiveProviderPreflighted(preflight) = preflight else {
-            return Err("server returned unexpected response for Codex preflight".to_string());
-        };
-        let run = self.send_request(ServerCommand::RunLiveProviderLocal {
-            dispatch_plan_id: preflight.dispatch_plan_id,
-            goal: goal.to_string(),
             live_execution_opt_in: mock_provider_output_jsonl.is_none(),
             mock_runtime_opt_in: mock_provider_output_jsonl.is_some(),
             mock_provider_output_name: mock_provider_output_jsonl
                 .map(|_| "capo-control-planner-mock-codex.jsonl".to_string()),
             mock_provider_output_jsonl: mock_provider_output_jsonl.map(ToString::to_string),
             timeout_seconds,
+            max_turns: 1,
+            max_token_cost: u64::MAX,
+            turns_taken_before: 0,
+            token_cost_before: 0,
+            turn_token_cost: 0,
+            unattended: true,
         })?;
-        let ServerResponsePayload::DispatchRun(run) = run else {
-            return Err("server returned unexpected response for Codex live run".to_string());
+        let ServerResponsePayload::DispatchTurn(turn) = response else {
+            return Err("server returned unexpected response for Codex dispatch turn".to_string());
         };
-        Ok(run)
+        Ok(turn)
     }
 
     fn agent_status(&mut self, agent: &str) -> Result<AgentSummary, String> {
@@ -735,6 +861,40 @@ Operator input: {line}
         )
         .map_err(debug_error)?;
         Ok(response.payload)
+    }
+
+    /// Emit the typed mid-turn interrupt (ST6) for the attached agent's active
+    /// session on the open connection, the Ctrl-C action.
+    ///
+    /// Returns `Ok(Some(message))` when an interrupt frame was sent for a live
+    /// session, `Ok(None)` when there is nothing to interrupt (no attached agent
+    /// or no active session), and `Err` only on a transport failure. This sends
+    /// the interrupt frame rather than killing the client process: the server
+    /// aborts the matching in-flight turn (reaping its runtime process group)
+    /// and records the turn-aborted event.
+    fn interrupt_active_session(&mut self) -> Result<Option<String>, String> {
+        let Some(agent) = self.attached_agent.clone() else {
+            return Ok(None);
+        };
+        let status = self.agent_status(&agent)?;
+        let Some(session_id) = status
+            .current_session_id
+            .as_ref()
+            .map(ToString::to_string)
+            .or_else(|| {
+                status
+                    .session
+                    .as_ref()
+                    .map(|session| session.session_id.to_string())
+            })
+        else {
+            return Ok(None);
+        };
+        let reason = "operator ctrl-c interrupt";
+        capo_server::send_interrupt(&self.address, &session_id, reason).map_err(debug_error)?;
+        Ok(Some(format!(
+            "interrupt sent for session {session_id} (turn aborted)"
+        )))
     }
 
     fn resolve_agent(&self, agent: Option<String>) -> Result<String, String> {
@@ -782,6 +942,67 @@ enum LineResult {
     Quit(String),
 }
 
+/// Drain the live event tail (ST11) for a short window, folding each newly
+/// streamed event into `new_events` and advancing `watermark` by sequence. This
+/// is the incremental tail the `thread` command renders: a committed event wakes
+/// the read immediately, and the bounded read timeout returns control to the REPL
+/// once the tail goes quiet. EOF (the server closed the tail) ends the drain.
+fn drain_live_thread_events(
+    stream: &mut capo_server::SubscribeStream,
+    new_events: &mut Vec<ServerEvent>,
+    watermark: &mut i64,
+) -> Result<(), String> {
+    stream
+        .set_read_timeout(Some(THREAD_TAIL_DRAIN))
+        .map_err(debug_error)?;
+    let deadline = Instant::now() + THREAD_TAIL_DRAIN;
+    loop {
+        match stream.next_event() {
+            Ok(Some(event)) => {
+                if event.sequence > *watermark {
+                    *watermark = event.sequence;
+                }
+                new_events.push(event);
+                if Instant::now() >= deadline {
+                    return Ok(());
+                }
+            }
+            // Clean EOF: the server tail ended.
+            Ok(None) => return Ok(()),
+            // The bounded read window elapsed with no further event: stop draining.
+            Err(TransportError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(debug_error(error)),
+        }
+    }
+}
+
+/// Render the incremental tail of events streamed since the last `thread` read
+/// (ST11). A first read (`from_sequence == 0`) does not print a tail header (the
+/// whole thread is already the structural render); a repeated read prints the new
+/// events that arrived strictly after the prior watermark.
+fn render_thread_tail(from_sequence: i64, new_events: &[ServerEvent]) -> String {
+    if from_sequence == 0 {
+        // First read: the structural thread render already covers the backlog, so
+        // there is nothing incremental to append.
+        return String::new();
+    }
+    if new_events.is_empty() {
+        return "Streamed (no new events since last read)\n".to_string();
+    }
+    let mut output = format!("Streamed ({} new events)\n", new_events.len());
+    for event in new_events {
+        output.push_str(&format!("  + [{}] {}\n", event.sequence, event.kind));
+    }
+    output
+}
+
 fn help_text() -> String {
     "\
 Commands:
@@ -790,6 +1011,7 @@ Commands:
   status [AGENT]
   state [AGENT] | result [AGENT]
   results [AGENT] | responses [AGENT]
+  thread [AGENT] | conversation [AGENT]
   recent [AGENT] | work [AGENT]
   details [AGENT]
   tools [AGENT]
@@ -999,6 +1221,7 @@ mod tests {
             tool_event_count: 0,
             summary_event_count: 1,
             completed_turn_count: 1,
+            observed_token_cost: None,
         };
 
         assert_eq!(
@@ -1006,5 +1229,123 @@ mod tests {
             Some("| Number | Double |\n|---:|---:|\n| 1 | 2 |\n| 2 | 4 |")
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    const CODEX_FIXTURE: &str = include_str!("../../capo-adapters/fixtures/codex-exec.jsonl");
+
+    /// AI1: the PRODUCTION operator/live-run caller flows THROUGH
+    /// `run_dispatch_turn` and emits the loop's `TurnFinished`.
+    ///
+    /// This drives the real operator entry point
+    /// (`ControlRepl::run_codex_dispatch_turn`, the same code
+    /// `run_codex_live_turn`/`start`/`send`/the capo planner call) against a real
+    /// loopback server -- not the in-process `run_dispatch_turn` harness -- with a
+    /// deterministic mock-runtime Codex turn (no real provider binary). It asserts
+    /// the production caller (a) gets back the loop's `TurnFinished` annotation keyed
+    /// to the turn it drove, and (b) the server persisted the live dispatch substrate
+    /// (the live preflight gate + the mock-ingest `run.exited`). Both are produced
+    /// ONLY by the loop path, so a green test pins the acceptance to the real
+    /// production surface, not to the `RunDispatchTurn` command in isolation.
+    #[test]
+    fn operator_live_run_caller_flows_through_run_dispatch_turn_and_emits_turn_finished() {
+        use capo_core::ProjectId;
+        use std::net::TcpListener;
+
+        let server_root = std::env::temp_dir().join(format!(
+            "capo-operator-loop-path-{}",
+            stable_cli_hash("operator-loop-path")
+        ));
+        let _ = std::fs::remove_dir_all(&server_root);
+        std::fs::create_dir_all(&server_root).expect("mkdir server root");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address").to_string();
+        let serve_root = server_root.clone();
+        // The operator caller issues exactly one connection per `send_request`:
+        // RegisterAgent, StartSession, then RunDispatchTurn -> three connections.
+        // Size the bounded server to match so the thread drains and joins.
+        let server_thread = std::thread::spawn(move || {
+            capo_server::serve_tcp(
+                listener,
+                ProjectId::new("project-capo"),
+                serve_root,
+                Some(3),
+            )
+            .expect("serve tcp")
+        });
+
+        let mut repl = ControlRepl::new(
+            address.clone(),
+            None,
+            Box::new(NonePlanner),
+            server_root.clone(),
+        );
+
+        let goal = "Drive a live operator turn through the production loop";
+        repl.send_request(ServerCommand::RegisterAgent {
+            name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
+        })
+        .expect("register agent");
+        let started = repl
+            .start_agent_session("codex-local", "codex", goal)
+            .expect("start session");
+
+        let turn = repl
+            .run_codex_dispatch_turn(
+                "codex-local",
+                goal,
+                &started.session_id.to_string(),
+                &started.run_id.to_string(),
+                Some(CODEX_FIXTURE),
+                30,
+            )
+            .expect("run codex dispatch turn");
+
+        // The production caller got back the loop's TurnFinished annotation, keyed
+        // to the turn it drove -- the loop's emission, not a raw run summary. Only
+        // the run_dispatch_turn path produces this; the old hand-sequenced
+        // preflight+run path returned a bare DispatchRun with no TurnFinished.
+        let expected_turn_id = format!("turn-{}-{}", slug("codex-local"), stable_cli_hash(goal));
+        assert_eq!(turn.finished.turn_id, expected_turn_id);
+        assert!(
+            turn.finished.observed_terminal_event,
+            "the loop's TurnFinished must observe the turn's terminal event"
+        );
+        assert_eq!(turn.finished.stop_reason, "completed");
+        assert!(turn.ceiling_breach_code.is_none());
+        assert_eq!(turn.run.status, "mocked_live_provider_output_ingested");
+        assert!(!turn.run.provider_cli_executed);
+
+        // The server persisted the LIVE dispatch substrate the loop drives: the
+        // live preflight gate and the mock-ingest run completion. This is the same
+        // event shape the in-process loop test asserts -- one path, one event shape.
+        let state = capo_state::SqliteStateStore::open(&server_root).expect("state");
+        let events = state
+            .recent_events_for_session(&started.session_id, 64)
+            .expect("session events");
+        assert!(
+            events.iter().any(|event| {
+                event.kind == "adapter.dispatch_gate_checked"
+                    && event
+                        .payload_json
+                        .contains("\"preflight_kind\":\"live_provider\"")
+            }),
+            "the operator caller must drive the live preflight gate through the loop"
+        );
+        assert!(
+            events.iter().any(|event| {
+                event.kind == "run.exited"
+                    && event
+                        .payload_json
+                        .contains("mock_live_provider_output_ingested_without_provider_cli")
+            }),
+            "the operator caller's run.exited must carry the loop's mock-ingest completion"
+        );
+
+        // The three operator requests are exactly the bounded server's connection
+        // budget, so it has already drained; join the thread (no leaked server).
+        let _ = server_thread.join();
+        let _ = std::fs::remove_dir_all(&server_root);
     }
 }

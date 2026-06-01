@@ -37,3 +37,4 @@ capo-tools = { path = "crates/capo-tools" }
 capo-voice = { path = "crates/capo-voice" }
 capo-web = { path = "crates/capo-web" }
 capo-workpads = { path = "crates/capo-workpads" }
+tokio = { version = "1", default-features = false }

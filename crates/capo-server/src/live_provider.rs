@@ -13,6 +13,7 @@ use capo_state::{
 };
 
 use crate::dispatch::{DispatchExecutionOutcome, DispatchReplayMetadata};
+use crate::safety_floor::{RunTurnRef, WriteMode};
 use crate::util::{
     adapter_label, command_identity_hash, parse_adapter_events, provider_kind_for_adapter,
     stable_hash,
@@ -49,6 +50,25 @@ pub(crate) struct LiveProviderLocalRunRequest<'a> {
     pub(crate) mock_provider_output_name: Option<&'a str>,
     pub(crate) mock_provider_output_jsonl: Option<&'a str>,
     pub(crate) timeout_seconds: u64,
+    /// Absolute path to a codex binary to run on the spawn path instead of
+    /// resolving `codex` from PATH. Ops set it from `CAPO_CODEX_BIN`; tests pass
+    /// a stub so the spawn path is deterministic. `None` keeps `codex`.
+    pub(crate) codex_program_override: Option<&'a str>,
+    /// RTL9: the resolved write mode for this turn. `DryRun` (the default) runs
+    /// Codex with the read-only profile and touches nothing; `LiveWrite` runs the
+    /// workspace-write profile inside the confined, pre-write-checkpointed
+    /// workspace. The handler resolves this via the RTL6
+    /// [`crate::resolve_write_mode`] gate (caller opt-in AND
+    /// `CAPO_SERVER_RUN_CODEX_LIVE` env AND attended), so the live spawn arm only
+    /// ever applies edits when all three hold.
+    pub(crate) write_mode: WriteMode,
+    /// Test-only seam: when set, the run path records the argv of the launch
+    /// plan it actually selected for the spawn (after the write-mode profile
+    /// choice and any program override). This is what lets a test assert that
+    /// `WriteMode::LiveWrite` truly drives the `--sandbox workspace-write`
+    /// profile -- proving the selection, not just the plan's content elsewhere.
+    /// Production callers leave this `None`.
+    pub(crate) record_selected_argv: Option<&'a std::cell::RefCell<Vec<String>>>,
 }
 
 struct LiveExecutionContext<'a> {
@@ -434,8 +454,82 @@ impl CapoServer {
             );
         }
 
-        let launch_plan =
-            CodexExecAdapter::local_launch_plan(workspace, artifacts, request.goal.to_string());
+        // RTL9: choose the Codex profile from the resolved write mode. The
+        // default (`DryRun`) keeps the read-only one-shot profile and touches
+        // nothing; a `LiveWrite` (caller opt-in AND `CAPO_SERVER_RUN_CODEX_LIVE`
+        // AND attended -- all resolved by the RTL6 gate before this runs) uses
+        // the workspace-write profile so Codex can apply edits inside the
+        // confined workspace. The provider never spawns without passing the
+        // preflight/execution gate above regardless of profile.
+        let mut launch_plan = match request.write_mode {
+            WriteMode::DryRun => CodexExecAdapter::local_launch_plan(
+                workspace.clone(),
+                artifacts.clone(),
+                request.goal.to_string(),
+            ),
+            WriteMode::LiveWrite => CodexExecAdapter::local_workspace_write_launch_plan(
+                workspace.clone(),
+                artifacts.clone(),
+                request.goal.to_string(),
+            ),
+        };
+        // Test/operations seam: when an absolute codex-binary override is supplied
+        // (ops set it via `CAPO_CODEX_BIN`, threaded in at the command handler;
+        // tests pass it directly), run THAT binary instead of resolving `codex`
+        // from PATH. The runtime spawns with `env_clear()`, so only an absolute
+        // path is honored. This is not a gate bypass: preflight, the execution
+        // gate, credential scanning, and the per-turn artifact keying are
+        // unchanged regardless of which binary runs -- it only swaps the program
+        // so the spawn path can be driven deterministically against a stub.
+        if let Some(codex_bin) = request
+            .codex_program_override
+            .filter(|path| Path::new(path).is_absolute())
+        {
+            launch_plan.program = codex_bin.to_string();
+        }
+        // Test-only seam: surface the argv of the plan we actually selected so a
+        // test can assert the write-mode->profile link (e.g. `LiveWrite` selects
+        // `--sandbox workspace-write`). No-op in production (`None`).
+        if let Some(sink) = request.record_selected_argv {
+            *sink.borrow_mut() = launch_plan.argv.clone();
+        }
+
+        // RTL6/RTL9: a live write is confined and reversible. Drive the SAME
+        // safety-floor sequence the RTL6 floor (`run_workspace_write_turn`) uses
+        // -- confine the write target under the workspace, then capture the
+        // single pre-write checkpoint BEFORE the provider spawns -- through the
+        // one shared `confine_and_checkpoint_for_write` method, so the live arm
+        // and the floor cannot drift. A dry run touches nothing (read-only
+        // `--cd` confines it and `execute_codex_live_provider` creates the
+        // workspace just-in-time), so it skips this entirely.
+        if request.write_mode == WriteMode::LiveWrite {
+            // The confined workspace must exist before it can be confined and
+            // snapshotted; creating it here (rather than only in
+            // `execute_codex_live_provider`) keeps confinement+checkpoint
+            // strictly before any spawn.
+            fs::create_dir_all(&launch_plan.workspace_root).map_err(|error| {
+                ServerError::AdapterFixture(format!(
+                    "failed to create dispatch workspace before checkpoint: {error}"
+                ))
+            })?;
+            let workspace_str = launch_plan.workspace_root.to_string_lossy().to_string();
+            self.confine_and_checkpoint_for_write(
+                origin,
+                RunTurnRef {
+                    session_id: plan.session_id.as_str(),
+                    run_id: plan.run_id.as_str(),
+                    turn_id: &target_turn_id,
+                },
+                &workspace_str,
+                &launch_plan.artifact_root.to_string_lossy(),
+                // Codex confines its own edits to the workspace via `--cd`; the
+                // floor's per-target containment here confines the workspace
+                // root itself before any spawn.
+                &workspace_str,
+                request.write_mode,
+            )?;
+        }
+
         let context = LiveExecutionContext {
             plan: &plan,
             gate: &gate,
@@ -565,10 +659,19 @@ impl CapoServer {
         })?;
         let runner = LocalProcessRunner::new(launch_plan.runtime_config());
         let mut process = runner
-            .spawn_process(launch_plan.runtime_request(RunId::new(context.plan.run_id.to_string())))
+            .spawn_process(launch_plan.runtime_request_for_turn(
+                RunId::new(context.plan.run_id.to_string()),
+                context.turn_id,
+            ))
             .map_err(|error| {
                 ServerError::AdapterFixture(format!("runtime spawn failed: {error:?}"))
             })?;
+        // RTL10: persist the in-flight marker (start-requested + the
+        // pid/process-group reference) the instant the spawn returns, BEFORE we
+        // wait on it. A crash mid-run can then find this run via the durable
+        // event log and reap its orphaned process group by the persisted PID on
+        // restart, instead of leaving the child running.
+        self.append_run_started_inflight(origin, context.plan, context.turn_id, &process.process)?;
         let outcome = runner
             .wait_running_with_timeout(&mut process, Duration::from_secs(timeout_seconds))
             .map_err(|error| {

@@ -74,6 +74,7 @@ fn project_dashboard_aggregates_agents_sessions_runs_evidence_and_events() {
                     latest_summary: Some("working".to_string()),
                     latest_confidence: Some(80),
                     latest_blocker: None,
+                    external_session_ref: Some("adapter-session-demo".to_string()),
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Run(RunProjection {
@@ -103,6 +104,7 @@ fn project_dashboard_aggregates_agents_sessions_runs_evidence_and_events() {
                     status: "completed".to_string(),
                     input_artifact_id: None,
                     output_artifact_id: Some("artifact-tool-demo".to_string()),
+                    provenance: Default::default(),
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::ToolObservation(ToolObservationProjection {
@@ -1229,6 +1231,7 @@ fn append_minimal_session(
                     latest_summary: None,
                     latest_confidence: None,
                     latest_blocker: None,
+                    external_session_ref: None,
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::Run(RunProjection {

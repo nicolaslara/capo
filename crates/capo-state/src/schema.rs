@@ -94,6 +94,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             latest_summary TEXT,
             latest_confidence INTEGER,
             latest_blocker TEXT,
+            external_session_ref TEXT,
             updated_sequence INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS runs (
@@ -112,6 +113,20 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             decision_source TEXT NOT NULL DEFAULT 'unknown',
             persistence TEXT NOT NULL DEFAULT 'unknown',
             explanation TEXT NOT NULL DEFAULT '',
+            created_at TEXT,
+            expires_at TEXT,
+            revoked_at TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS workspace_leases (
+            workspace_lease_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            holder_session_id TEXT NOT NULL,
+            holder_run_id TEXT,
+            status TEXT NOT NULL,
+            acquired_at TEXT,
+            released_at TEXT,
+            release_reason TEXT NOT NULL DEFAULT '',
             updated_sequence INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS permission_approvals (
@@ -315,6 +330,11 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             status TEXT NOT NULL,
             input_artifact_id TEXT,
             output_artifact_id TEXT,
+            correlation_id TEXT,
+            permission_decision_id TEXT,
+            capability_grant_use_id TEXT,
+            started_at INTEGER,
+            completed_at INTEGER,
             updated_sequence INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS tool_observations (
@@ -393,6 +413,38 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             confidence INTEGER NOT NULL,
             updated_sequence INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS run_scores (
+            run_score_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            task_id TEXT,
+            session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            passed INTEGER NOT NULL,
+            criteria_total INTEGER NOT NULL,
+            criteria_met INTEGER NOT NULL,
+            observed_evidence_count INTEGER NOT NULL,
+            started_at INTEGER NOT NULL,
+            completed_at INTEGER NOT NULL,
+            duration_millis INTEGER NOT NULL,
+            score_inputs_json TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS checkpoints (
+            checkpoint_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            turn_id TEXT,
+            kind TEXT NOT NULL,
+            commit_ref TEXT NOT NULL,
+            workspace_root TEXT NOT NULL,
+            shadow_git_dir TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            created_at TEXT,
+            restored_at TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS task_outcome_reports (
             task_outcome_report_id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -469,6 +521,87 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             completed_sequence INTEGER,
             notes TEXT NOT NULL
         );
+        -- GA1 (goal-orchestration GO1/GO3): the goal-domain read models. These
+        -- are projected in-transaction like the existing projections and rebuild
+        -- identically from `projection_records`. None of them carry a `complete`
+        -- goal status: completion is the GA5 auditor's verdict, never a write.
+        CREATE TABLE IF NOT EXISTS goals (
+            goal_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            task_id TEXT,
+            agent_id TEXT,
+            session_id TEXT,
+            parent_goal_id TEXT,
+            attempt_run_id TEXT,
+            objective TEXT NOT NULL,
+            status TEXT NOT NULL,
+            success_criteria_json TEXT NOT NULL,
+            constraints_json TEXT NOT NULL,
+            verification_surface_json TEXT NOT NULL,
+            budget_json TEXT NOT NULL,
+            stop_conditions_json TEXT NOT NULL,
+            blocker_reason TEXT NOT NULL DEFAULT '',
+            updated_sequence INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS requirement_ledgers (
+            requirement_id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            status TEXT NOT NULL,
+            last_status_source TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS goal_reports (
+            goal_report_id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            session_id TEXT,
+            requirement_id TEXT,
+            report_kind TEXT NOT NULL,
+            source TEXT NOT NULL,
+            confidence INTEGER,
+            summary TEXT NOT NULL,
+            body_artifact_id TEXT,
+            evidence_id TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS goal_continuations (
+            continuation_id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            attempt_run_id TEXT,
+            decision TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS delegated_provider_goals (
+            delegated_goal_id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            session_id TEXT,
+            provider_kind TEXT NOT NULL,
+            provider_goal_ref TEXT,
+            provider_state TEXT NOT NULL,
+            source TEXT NOT NULL,
+            body_artifact_id TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
+        -- GA5 (goal-orchestration GO9): the evidence-gated completion auditor's
+        -- verdict. One row per (goal, audit). `verdict = complete` is reachable
+        -- ONLY through the auditor, never a lifecycle write on `goals`.
+        CREATE TABLE IF NOT EXISTS goal_audit_decisions (
+            audit_id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            attempt_run_id TEXT,
+            verdict TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            requirements_total INTEGER NOT NULL,
+            requirements_complete INTEGER NOT NULL,
+            requirement_detail_json TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
         ",
     )?;
     add_missing_column(
@@ -489,6 +622,17 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
         "explanation",
         "TEXT NOT NULL DEFAULT ''",
     )?;
+    // SG3: grant lifecycle timestamp columns. Nullable so grants created before
+    // the lifecycle landed (and observational decisions) back-fill as NULL.
+    add_missing_column(connection, "capability_grants", "created_at", "TEXT")?;
+    add_missing_column(connection, "capability_grants", "expires_at", "TEXT")?;
+    add_missing_column(connection, "capability_grants", "revoked_at", "TEXT")?;
+    // GA5 (GO9): the STRUCTURED validation/review outcome (e.g. `passed` / `weak` /
+    // `skipped`) from a `capo.record_validation` / `capo.record_review` report.
+    // Nullable so reports recorded before this landed back-fill as NULL, and so
+    // non-validation reports (which carry no outcome) stay NULL. The auditor keys
+    // its weak/skipped downgrade on this enum, NOT on free-text summary prose.
+    add_missing_column(connection, "goal_reports", "outcome", "TEXT")?;
     Ok(())
 }
 
@@ -519,6 +663,7 @@ pub(crate) fn clear_projection_tables(transaction: &Transaction<'_>) -> StateRes
         "sessions",
         "runs",
         "capability_grants",
+        "workspace_leases",
         "permission_approvals",
         "connectivity_exposures",
         "runtime_targets",
@@ -537,11 +682,20 @@ pub(crate) fn clear_projection_tables(transaction: &Transaction<'_>) -> StateRes
         "memory_records",
         "memory_sources",
         "evidence",
+        "run_scores",
+        "checkpoints",
         "task_outcome_reports",
         "review_findings",
         "source_bindings",
         "workpad_files",
         "workpad_tasks",
+        // GA1 goal-domain read models.
+        "goals",
+        "requirement_ledgers",
+        "goal_reports",
+        "goal_continuations",
+        "delegated_provider_goals",
+        "goal_audit_decisions",
         "projection_watermarks",
     ] {
         transaction.execute(&format!("DELETE FROM {table}"), [])?;

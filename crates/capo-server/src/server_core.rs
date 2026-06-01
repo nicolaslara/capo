@@ -24,7 +24,7 @@ impl CapoServer {
             None,
         );
         let report = self
-            .controller
+            .command_controller()
             .recover_command(&command)
             .map_err(ServerError::State)?;
         self.record_server_request_handled(&command, origin, "recover", None, None)

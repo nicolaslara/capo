@@ -8,3 +8,14 @@ version.workspace = true
 
 [dependencies]
 capo-core.workspace = true
+tokio = { workspace = true, features = [
+    "rt",
+    "process",
+    "io-util",
+    "macros",
+    "time",
+    "sync",
+] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time", "io-util"] }

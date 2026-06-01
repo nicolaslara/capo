@@ -1,0 +1,682 @@
+//! RTL5: `RealBoundaryController`, the production consumer behind the server
+//! boundary.
+//!
+//! The control flow this crate already implements is real (see the crate doc):
+//! the controller calls each boundary through the RTL1 [`AgentAdapter`] trait,
+//! persists Capo-owned events/projections via
+//! [`SqliteStateStore::append_event`], and answers inspection requests from the
+//! SQLite read models. What "fake" denotes is the DEFAULT injected dependency
+//! set ([`AgentAdapterHandle::fake`] et al.), not the orchestration.
+//!
+//! RTL5 therefore does NOT fork the orchestration into a parallel
+//! implementation -- that would be a second persistence/projection model the
+//! restart/replay invariant would then have to police twice. Instead
+//! [`RealBoundaryController`] is the production-facing handle that drives the
+//! SAME orchestration core ([`FakeBoundaryController`], whose control flow is
+//! the real one) as the RTL3 loop's production consumer. The consequences the
+//! task requires fall out by construction:
+//!
+//! - The constructor surface mirrors [`FakeBoundaryController`]
+//!   (`open`/`open_with_permission_policy`/`open_with_adapter`), and the
+//!   production constructors inject the real provider/runtime/tool boundaries
+//!   so a real adapter handle (Codex/Claude/ACP) plugs in unchanged at RTL9.
+//! - The server-called methods (`register_agent`, `send_task_command`,
+//!   `redirect_command`, `interrupt_command`, `stop_command`, `recover_command`)
+//!   and the RTL3 loop entry (`run_turn`) delegate to the one core, so the
+//!   typed [`capo_server`] `ServerCommand`/`ServerResponse` boundary is
+//!   untouched and the controller swap is invisible to clients.
+//! - Read models are byte-compatible with the fake path wherever the scripted
+//!   adapter output is identical, because both handles persist through the
+//!   exact same `append_event`/projection path -- there is no second writer.
+//! - It coexists with [`FakeBoundaryController`]; the RTL12 cutover flipped the
+//!   default routing to this handle (the rollback is the one falsey
+//!   `CAPO_SERVER_REAL_CONTROLLER` value). Neither handle is deleted.
+//!
+//! The typed return values are re-exported under real-controller names
+//! ([`RealRunRefs`], [`RealReadModelObservation`], [`RealAgentRegistration`])
+//! so call sites can read as production code; they are aliases of the shared
+//! structs so the read models stay one shape.
+
+use std::path::{Path, PathBuf};
+
+use capo_adapters::{AgentAdapterHandle, CodexLiveAdapter, NormalizedAdapterEvent};
+use capo_core::{CommandEnvelope, TaskId, TurnId};
+use capo_state::{SqliteStateStore, StateResult};
+use capo_tools::{
+    CapoToolRegistry, PermissionPolicy, RuntimeToolConfig, ToolExposure, ToolExposureRequest,
+};
+
+use capo_adapters::{AdapterPermissionRequest, AdapterPermissionResponse};
+
+use crate::{
+    ControllerInit, FakeAgentRegistration, FakeBoundaryController, FakeReadModelObservation,
+    FakeRunRefs, PermissionCancellation, PermissionRoundTripOutcome, PermissionRoundTripScope,
+    ProjectId, RecoveryReport, ToolDispatchOutcome, ToolDispatchScope, TurnFinished,
+};
+
+/// Run references returned by the real controller. Alias of [`FakeRunRefs`] so
+/// the persisted read-model shape is identical to the fake path.
+pub type RealRunRefs = FakeRunRefs;
+/// Read-model observation returned by the real controller. Alias of
+/// [`FakeReadModelObservation`] so projections stay one shape.
+pub type RealReadModelObservation = FakeReadModelObservation;
+/// Agent registration returned by the real controller. Alias of
+/// [`FakeAgentRegistration`].
+pub type RealAgentRegistration = FakeAgentRegistration;
+
+/// The production-facing boundary controller.
+///
+/// A thin handle over the shared orchestration core. It exists to be the
+/// production consumer of the RTL3 loop and the RTL1 trait behind the server
+/// boundary; it adds no second persistence or projection path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RealBoundaryController {
+    core: FakeBoundaryController,
+    /// The REAL tool exposures the loop dispatches through (ACI1). `capo` is the
+    /// Capo-owned registry; `runtime` is the workspace-confined runtime wrappers
+    /// once a workspace config is wired. Both are non-fake by construction --
+    /// the test-only [`ToolExposure::fake`] is never installed here, so a real
+    /// loop turn cannot silently default to the fake summary shim.
+    tools: RealToolExposures,
+}
+
+/// The real, non-fake tool exposures the production controller dispatches
+/// through. Kept as a pair because the `ToolExposure` enum is single-variant per
+/// handle and the loop dispatches Capo-owned and runtime-wrapper tools through
+/// distinct registries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RealToolExposures {
+    capo: ToolExposure,
+    runtime: Option<ToolExposure>,
+    /// ACI8: the `GO2` agent-reporting / evidence tool surface, always live (like
+    /// the Capo registry) and never the fake default.
+    agent_reports: ToolExposure,
+}
+
+impl RealToolExposures {
+    /// The default real exposures: the Capo registry and the agent-report
+    /// surface are always live; the runtime wrappers are wired only once a
+    /// workspace config is provided
+    /// ([`RealBoundaryController::with_runtime_tools`]).
+    fn default_real() -> Self {
+        Self {
+            capo: ToolExposure::capo(),
+            runtime: None,
+            agent_reports: ToolExposure::agent_reports(),
+        }
+    }
+}
+
+impl RealBoundaryController {
+    /// Open the real controller with the default production dependency set.
+    pub fn open(project_id: ProjectId, state_root: impl AsRef<Path>) -> StateResult<Self> {
+        Ok(Self {
+            core: FakeBoundaryController::open(project_id, state_root)?,
+            tools: RealToolExposures::default_real(),
+        })
+    }
+
+    /// Wrap an already-opened orchestration core as the production handle.
+    ///
+    /// The core IS the real control flow (see the module doc); this is the
+    /// zero-cost view a host (e.g. the server boundary) uses to drive the SAME
+    /// store/projection path through the real handle without re-opening the
+    /// SQLite state. Because [`SqliteStateStore`] is just a path handle, the
+    /// wrapped core and its source share one database, so routing a command
+    /// through this view persists byte-identically to driving the core
+    /// directly.
+    pub fn from_core(core: FakeBoundaryController) -> Self {
+        Self {
+            core,
+            tools: RealToolExposures::default_real(),
+        }
+    }
+
+    /// Open the real controller with an explicit permission policy, mirroring
+    /// [`FakeBoundaryController::open_with_permission_policy`].
+    pub fn open_with_permission_policy(
+        project_id: ProjectId,
+        state_root: impl AsRef<Path>,
+        permission_policy: PermissionPolicy,
+    ) -> StateResult<Self> {
+        Ok(Self {
+            core: FakeBoundaryController::open_with_permission_policy(
+                project_id,
+                state_root,
+                permission_policy,
+            )?,
+            tools: RealToolExposures::default_real(),
+        })
+    }
+
+    /// AI2: open the production controller BOUND to the real Codex chat adapter.
+    ///
+    /// This is the binding-respecting production seam: a host opens this handle
+    /// ONLY for an agent explicitly bound to the Codex adapter. It does NOT make
+    /// Codex a global default -- fake/mock agents keep their fake/scripted handle
+    /// via [`Self::open`]/[`Self::open_with_adapter`]. The installed
+    /// [`CodexLiveAdapter`] drives the real read-only one-shot Codex on a chat
+    /// turn when [`capo_adapters::codex_live_chat_gate_open`] is true, and fails
+    /// CLOSED-FAST (an immediate typed error, no spawn) when it is off. An
+    /// absolute `CAPO_CODEX_BIN` override (ops) or an explicit test stub is
+    /// honored; otherwise `codex` resolves from PATH. Claude live stays blocked
+    /// because no Claude chat handle exists.
+    pub fn open_codex_chat(
+        project_id: ProjectId,
+        state_root: impl AsRef<Path>,
+        workspace_root: impl Into<PathBuf>,
+        artifact_root: impl Into<PathBuf>,
+    ) -> StateResult<Self> {
+        let mut adapter = CodexLiveAdapter::new(workspace_root, artifact_root);
+        if let Ok(codex_bin) = std::env::var("CAPO_CODEX_BIN")
+            && Path::new(&codex_bin).is_absolute()
+        {
+            adapter = adapter.with_codex_program_override(codex_bin);
+        }
+        Self::open_with_adapter(project_id, state_root, AgentAdapterHandle::codex(adapter))
+    }
+
+    /// Open the real controller over an injected adapter handle.
+    ///
+    /// The controller drives the adapter purely through the RTL1
+    /// [`capo_adapters::AgentAdapter`] trait, so the concrete handle is
+    /// substitutable: a scripted-mock handle backs the deterministic parity
+    /// suites, and a real Codex/Claude/ACP handle plugs in unchanged.
+    pub fn open_with_adapter(
+        project_id: ProjectId,
+        state_root: impl AsRef<Path>,
+        adapter: AgentAdapterHandle,
+    ) -> StateResult<Self> {
+        Ok(Self {
+            core: FakeBoundaryController::open_with_adapter(project_id, state_root, adapter)?,
+            tools: RealToolExposures::default_real(),
+        })
+    }
+
+    /// AI2: return this production handle with the underlying core's chat adapter
+    /// swapped (a per-agent view, not a global default).
+    ///
+    /// The server uses this to route a Codex-BOUND agent's `SendTask`/`SteerAgent`
+    /// through the [`CodexLiveAdapter`] while every other agent keeps the shared
+    /// (fake) adapter. The core clone shares the one SQLite store (it is a path
+    /// handle), so this changes only which handle drives the chat turn; the
+    /// persisted store and projection path are identical. The Codex chat turn
+    /// itself fails CLOSED-FAST when [`capo_adapters::codex_live_chat_gate_open`]
+    /// is off, so this binding never spawns or blocks unless the operator opts in.
+    #[must_use]
+    pub fn with_adapter(mut self, adapter: AgentAdapterHandle) -> Self {
+        self.core = self.core.with_adapter(adapter);
+        self
+    }
+
+    /// Open the real controller with an explicit permission policy and adapter.
+    pub fn open_with_permission_policy_and_adapter(
+        project_id: ProjectId,
+        state_root: impl AsRef<Path>,
+        permission_policy: PermissionPolicy,
+        adapter: AgentAdapterHandle,
+    ) -> StateResult<Self> {
+        Ok(Self {
+            core: FakeBoundaryController::open_with_permission_policy_and_adapter(
+                project_id,
+                state_root,
+                permission_policy,
+                adapter,
+            )?,
+            tools: RealToolExposures::default_real(),
+        })
+    }
+
+    /// The shared SQLite state store. Identical to the fake path's store so
+    /// dashboards/recovery read the same rows.
+    pub fn state(&self) -> &SqliteStateStore {
+        self.core.state()
+    }
+
+    /// Borrow the underlying orchestration core. The control flow it implements
+    /// is the real one; this accessor lets the production handle reuse the
+    /// existing typed helpers without re-exposing every method.
+    pub fn core(&self) -> &FakeBoundaryController {
+        &self.core
+    }
+
+    /// Wire the workspace-confined runtime wrappers (ACI1).
+    ///
+    /// The Capo registry is always live; the runtime wrappers
+    /// (`capo.shell_run`/`capo.file_read`/...) need a workspace + artifact root,
+    /// so they are wired here. The installed exposure is the REAL
+    /// [`RuntimeToolWrappers`](capo_tools::RuntimeToolWrappers), never the fake.
+    #[must_use]
+    pub fn with_runtime_tools(mut self, config: RuntimeToolConfig) -> Self {
+        self.tools.runtime = Some(ToolExposure::runtime_wrappers(config));
+        self
+    }
+
+    /// Whether the Capo-owned tool exposure routes through the real registry
+    /// rather than the test-only fake shim. ACI1 invariant: this is always
+    /// `true` for the production controller.
+    pub fn capo_tools_are_real(&self) -> bool {
+        !self.tools.capo.binding().fake
+    }
+
+    /// Whether a real runtime-wrapper exposure has been wired (and, if so, that
+    /// it is non-fake).
+    pub fn runtime_tools_are_real(&self) -> bool {
+        self.tools
+            .runtime
+            .as_ref()
+            .map(|exposure| !exposure.binding().fake)
+            .unwrap_or(false)
+    }
+
+    /// Dispatch a real tool call through the loop (ACI1).
+    ///
+    /// Routes the typed request to the matching REAL exposure
+    /// (`ToolExposureRequest::Capo` -> the Capo registry,
+    /// `ToolExposureRequest::Runtime` -> the runtime wrappers), runs
+    /// `authorize_and_invoke`, and persists the canonical tool-call event
+    /// sequence keyed to the turn via the core's
+    /// [`FakeBoundaryController::dispatch_tool_call`]. The fake summary shim is
+    /// unreachable from this path.
+    ///
+    /// Scope (ACI1): this is the REAL dispatch SEAM and is the only entrypoint
+    /// into real tool execution. The autonomous observe->decide->emit turn loop
+    /// does not yet auto-select/auto-invoke tools on a model's behalf -- the
+    /// loop's per-turn memory-packet summary still uses `ToolExposure::fake()`.
+    /// Promoting this seam into the loop's decision step is owned by the later
+    /// ACI tasks + `safety-gates`; ACI1 proves the seam is real and driveable.
+    pub fn dispatch_tool_call(
+        &self,
+        scope: &ToolDispatchScope,
+        request: ToolExposureRequest,
+    ) -> StateResult<ToolDispatchOutcome> {
+        let exposure = match &request {
+            ToolExposureRequest::Capo(_) => &self.tools.capo,
+            ToolExposureRequest::Runtime(_) => self.tools.runtime.as_ref().expect(
+                "runtime tool exposure not wired; call RealBoundaryController::with_runtime_tools",
+            ),
+            ToolExposureRequest::AgentReport(_) => &self.tools.agent_reports,
+            ToolExposureRequest::Fake(_) => panic!(
+                "RealBoundaryController::dispatch_tool_call refuses fake tool requests; \
+                 the real loop dispatches Capo/Runtime/AgentReport tools only"
+            ),
+        };
+        self.core.dispatch_tool_call(exposure, scope, request)
+    }
+
+    /// SG2: decide one adapter permission round-trip and return the ACP outcome.
+    ///
+    /// Drives the SAME orchestration core as the fake handle: the adapter raises
+    /// the request, the controller decides it through `PermissionPolicy` + the
+    /// ACP option mapping, persists the lifecycle, and returns the chosen
+    /// `optionId` (or `cancelled`) to the adapter. Fixture/option-mapping only;
+    /// the live ACP JSON-RPC wire is the depth workpad.
+    pub fn decide_adapter_permission(
+        &self,
+        scope: &PermissionRoundTripScope,
+        request: &AdapterPermissionRequest,
+    ) -> StateResult<AdapterPermissionResponse> {
+        self.core.decide_adapter_permission(scope, request)
+    }
+
+    /// SG2: cancel a pending adapter permission round-trip (operator cancel),
+    /// recording `permission.decided` with `decision = cancel` and returning the
+    /// ACP `cancelled` outcome.
+    pub fn cancel_adapter_permission(
+        &self,
+        scope: &PermissionRoundTripScope,
+        request: &AdapterPermissionRequest,
+        cancellation: PermissionCancellation,
+    ) -> StateResult<AdapterPermissionResponse> {
+        self.core
+            .cancel_adapter_permission(scope, request, cancellation)
+    }
+
+    /// SG2: drive one full adapter permission round-trip (raise -> decide ->
+    /// deliver) THROUGH the loop, pulling the raised request from the bound
+    /// adapter and delivering the decided response back to it. Fixture-only; the
+    /// depth ACP adapter reuses this hook with a real adapter behind the seam.
+    pub fn run_adapter_permission_round_trip(
+        &self,
+        scope: &PermissionRoundTripScope,
+    ) -> StateResult<Option<PermissionRoundTripOutcome>> {
+        self.core.run_adapter_permission_round_trip(scope)
+    }
+
+    /// SG3: decide a permission request with durable grant read-back -- a valid
+    /// existing grant authorizes; a revoked/expired grant is treated as absent and
+    /// the policy decides. Delegates to the shared core.
+    pub fn decide_with_grant_read_back(
+        &self,
+        request: capo_tools::PermissionRequest,
+    ) -> StateResult<crate::GrantReadBackDecision> {
+        self.core.decide_with_grant_read_back(request)
+    }
+
+    /// SG3: revoke a durable grant by id, emitting `capability.grant_revoked` with
+    /// a revocation reason; old grant-created/used events stay unchanged.
+    pub fn revoke_capability_grant(
+        &self,
+        scope: &crate::GrantRevocationScope,
+        capability_grant_id: &str,
+        reason: &str,
+    ) -> StateResult<crate::GrantRevocation> {
+        self.core
+            .revoke_capability_grant(scope, capability_grant_id, reason)
+    }
+
+    /// SG5: acquire the single-writer workspace write lease for the scope's
+    /// session; rejects a second concurrent writer with a typed conflict.
+    pub fn acquire_workspace_write_lease(
+        &self,
+        scope: &crate::WorkspaceLeaseScope,
+    ) -> StateResult<crate::WorkspaceWriteLeaseOutcome> {
+        self.core.acquire_workspace_write_lease(scope)
+    }
+
+    /// SG5: release the workspace write lease the scope's session holds, freeing
+    /// it for the next writer; records `reason`.
+    pub fn release_workspace_write_lease(
+        &self,
+        scope: &crate::WorkspaceLeaseScope,
+        reason: &str,
+    ) -> StateResult<crate::WorkspaceWriteLeaseOutcome> {
+        self.core.release_workspace_write_lease(scope, reason)
+    }
+
+    /// SG5: gate one tool/workspace operation through the single-writer lock.
+    /// Reads pass through; a write is allowed only for the lease holder.
+    pub fn gate_workspace_write(
+        &self,
+        scope: &crate::WorkspaceLeaseScope,
+        is_write: bool,
+    ) -> StateResult<crate::WorkspaceWriteGate> {
+        self.core.gate_workspace_write(scope, is_write)
+    }
+
+    /// SG5: the current holder of the workspace write lease, or `None` when free.
+    pub fn workspace_lease_holder(
+        &self,
+        scope: &crate::WorkspaceLeaseScope,
+    ) -> StateResult<Option<capo_state::WorkspaceLeaseProjection>> {
+        self.core.workspace_lease_holder(scope)
+    }
+
+    /// SG8: create a shadow-git checkpoint of the workspace BEFORE a real write,
+    /// so the write is reversible by one `Restore` command.
+    pub fn create_checkpoint(
+        &self,
+        scope: &crate::CheckpointScope,
+    ) -> StateResult<Result<crate::CheckpointCreated, crate::CheckpointError>> {
+        self.core.create_checkpoint(scope)
+    }
+
+    /// SG8: restore a checkpoint -- the `Restore` command. Returns the workspace
+    /// to the exact state captured by the checkpoint's shadow commit.
+    pub fn restore_checkpoint(
+        &self,
+        scope: &crate::CheckpointScope,
+        checkpoint_id: &str,
+    ) -> StateResult<Result<crate::CheckpointRestored, crate::CheckpointError>> {
+        self.core.restore_checkpoint(scope, checkpoint_id)
+    }
+
+    /// SG8: read one checkpoint back by id (`None` when absent).
+    pub fn checkpoint(
+        &self,
+        checkpoint_id: &str,
+    ) -> StateResult<Option<capo_state::CheckpointProjection>> {
+        self.core.checkpoint(checkpoint_id)
+    }
+
+    /// SG8: every checkpoint for a run, oldest first.
+    pub fn checkpoints_for_run(
+        &self,
+        run_id: &capo_core::RunId,
+    ) -> StateResult<Vec<capo_state::CheckpointProjection>> {
+        self.core.checkpoints_for_run(run_id)
+    }
+
+    /// Borrow the Capo registry behind the real exposure, for callers that need
+    /// the tool definitions (schemas/scopes) directly.
+    pub fn capo_registry(&self) -> Option<&CapoToolRegistry> {
+        match &self.tools.capo {
+            ToolExposure::Capo(registry) => Some(registry),
+            _ => None,
+        }
+    }
+
+    // --- The methods the server boundary calls -----------------------------
+
+    pub fn initialize(&self, command: &CommandEnvelope) -> StateResult<ControllerInit> {
+        self.core.initialize(command)
+    }
+
+    pub fn register_agent_command(
+        &self,
+        command: &CommandEnvelope,
+    ) -> StateResult<RealAgentRegistration> {
+        self.core.register_agent_command(command)
+    }
+
+    pub fn spawn_agent_command(
+        &self,
+        command: &CommandEnvelope,
+    ) -> StateResult<RealAgentRegistration> {
+        self.core.spawn_agent_command(command)
+    }
+
+    pub fn register_agent(&self, agent_name: &str) -> StateResult<RealAgentRegistration> {
+        self.core.register_agent(agent_name)
+    }
+
+    /// AI3: the default chat/send-task command path dispatches the per-turn
+    /// summary tool through the REAL `dispatch_tool_call` seam
+    /// (`authorize_and_invoke` over this controller's live Capo exposure), so a
+    /// real production turn's tool call produces the canonical `ACI1` observed
+    /// audit sequence + `ToolCall`/`ToolObservation` projection keyed to the
+    /// turn -- never the fake `ToolExposure::fake()` / `self.tools.invoke` shim.
+    pub fn send_task_command(&self, command: &CommandEnvelope) -> StateResult<RealRunRefs> {
+        self.core
+            .send_task_command_with_real_tools(command, &self.tools.capo)
+    }
+
+    pub fn redirect_command(
+        &self,
+        command: &CommandEnvelope,
+    ) -> StateResult<RealReadModelObservation> {
+        self.core.redirect_command(command)
+    }
+
+    pub fn interrupt_command(
+        &self,
+        command: &CommandEnvelope,
+    ) -> StateResult<RealReadModelObservation> {
+        self.core.interrupt_command(command)
+    }
+
+    pub fn stop_command(&self, command: &CommandEnvelope) -> StateResult<RealReadModelObservation> {
+        self.core.stop_command(command)
+    }
+
+    pub fn recover_command(&self, command: &CommandEnvelope) -> StateResult<RecoveryReport> {
+        self.core.recover_command(command)
+    }
+
+    /// SG9: liveness-aware restart recovery -- probes each in-flight run's
+    /// persisted process group, reattaches a still-alive run in place, and marks a
+    /// gone run exited, reclaiming any single-writer lease a dead run held.
+    pub fn recover_command_liveness_aware(
+        &self,
+        command: &CommandEnvelope,
+    ) -> StateResult<RecoveryReport> {
+        self.core.recover_command_liveness_aware(command)
+    }
+
+    /// SG9: probe + classify + reconcile in-flight runs for a single recovery
+    /// attempt. Exposed for deterministic restart-sweep tests.
+    pub fn recover_inflight_runs(
+        &self,
+        recovery_attempt_id: &str,
+    ) -> StateResult<Vec<capo_state::RunProjection>> {
+        self.core.recover_inflight_runs(recovery_attempt_id)
+    }
+
+    /// SG9: reclaim every held workspace lease whose holding run is in
+    /// `dead_run_ids`, freeing a stale lease left by a dead holder on restart.
+    pub fn reclaim_stale_workspace_leases(
+        &self,
+        dead_run_ids: &[capo_core::RunId],
+        reason: &str,
+    ) -> StateResult<Vec<String>> {
+        self.core
+            .reclaim_stale_workspace_leases(dead_run_ids, reason)
+    }
+
+    // --- Convenience surface mirroring the fake handle ---------------------
+
+    pub fn send_task(
+        &self,
+        registration: &RealAgentRegistration,
+        goal: &str,
+    ) -> StateResult<RealRunRefs> {
+        let task_id = TaskId::new(format!("task-{}", crate::slug(goal)));
+        self.send_task_with_task_id(registration, task_id, goal)
+    }
+
+    pub fn send_task_with_task_id(
+        &self,
+        registration: &RealAgentRegistration,
+        task_id: TaskId,
+        goal: &str,
+    ) -> StateResult<RealRunRefs> {
+        // AI3: route the convenience send-task surface through the real Capo
+        // exposure too, so the deterministic suites that drive `send_task`
+        // directly on the real handle exercise the same real dispatch seam the
+        // command path uses.
+        self.core
+            .send_task_with_real_tools(registration, task_id, goal, &self.tools.capo)
+    }
+
+    pub fn registration_for_agent_name(
+        &self,
+        agent_name: &str,
+    ) -> StateResult<RealAgentRegistration> {
+        self.core.registration_for_agent_name(agent_name)
+    }
+
+    pub fn refs_for_agent_name(&self, agent_name: &str) -> StateResult<RealRunRefs> {
+        self.core.refs_for_agent_name(agent_name)
+    }
+
+    pub fn observe(&self, refs: &RealRunRefs) -> StateResult<RealReadModelObservation> {
+        self.core.observe(refs)
+    }
+
+    pub fn observe_agent_name(&self, agent_name: &str) -> StateResult<RealReadModelObservation> {
+        self.core.observe_agent_name(agent_name)
+    }
+
+    // --- The session-control convenience surface ---------------------------
+    //
+    // RTL12 parity criterion: the real handle exposes the SAME
+    // `redirect`/`interrupt`/`stop` surface the fake handle does, so the
+    // identical deterministic suite (`send`/`steer`/`interrupt`/`stop`,
+    // restart/replay) runs over both handles. Each delegates to the one core, so
+    // a sequence driven through the real handle persists byte-identically to the
+    // same sequence driven through the fake handle (proven by
+    // `real_controller_passes_the_identical_send_steer_interrupt_stop_suite`).
+
+    pub fn redirect(
+        &self,
+        registration: &RealAgentRegistration,
+        refs: &RealRunRefs,
+        goal: &str,
+    ) -> StateResult<RealReadModelObservation> {
+        self.core.redirect(registration, refs, goal)
+    }
+
+    pub fn redirect_agent_name(
+        &self,
+        agent_name: &str,
+        goal: &str,
+    ) -> StateResult<RealReadModelObservation> {
+        self.core.redirect_agent_name(agent_name, goal)
+    }
+
+    pub fn interrupt(
+        &self,
+        registration: &RealAgentRegistration,
+        refs: &RealRunRefs,
+        reason: &str,
+    ) -> StateResult<RealReadModelObservation> {
+        self.core.interrupt(registration, refs, reason)
+    }
+
+    pub fn interrupt_agent_name(
+        &self,
+        agent_name: &str,
+        reason: &str,
+    ) -> StateResult<RealReadModelObservation> {
+        self.core.interrupt_agent_name(agent_name, reason)
+    }
+
+    pub fn stop(
+        &self,
+        registration: &RealAgentRegistration,
+        refs: &RealRunRefs,
+        reason: &str,
+    ) -> StateResult<RealReadModelObservation> {
+        self.core.stop(registration, refs, reason)
+    }
+
+    pub fn stop_agent_name(
+        &self,
+        agent_name: &str,
+        reason: &str,
+    ) -> StateResult<RealReadModelObservation> {
+        self.core.stop_agent_name(agent_name, reason)
+    }
+
+    // --- The RTL3 loop entry, driven as the production consumer ------------
+
+    /// Run one turn of the RTL3 loop over a normalized adapter batch.
+    ///
+    /// This is the production consumer of the RTL3 contract: observe -> project
+    /// -> emit [`TurnFinished`], over the SAME projection path the fake handle
+    /// uses, so a turn driven here persists byte-identically to a turn driven
+    /// through the fake handle for an identical scripted batch.
+    pub fn run_turn(
+        &self,
+        refs: &RealRunRefs,
+        turn_id: &TurnId,
+        adapter_events: &[NormalizedAdapterEvent],
+    ) -> StateResult<TurnFinished> {
+        self.core.run_turn(refs, turn_id, adapter_events)
+    }
+
+    /// Map the controller `interrupt` command onto the loop, emitting a
+    /// [`TurnFinished`] keyed to `turn_id`.
+    pub fn interrupt_turn(
+        &self,
+        registration: &RealAgentRegistration,
+        refs: &RealRunRefs,
+        turn_id: &TurnId,
+        reason: &str,
+    ) -> StateResult<TurnFinished> {
+        self.core
+            .interrupt_turn(registration, refs, turn_id, reason)
+    }
+
+    /// Map the controller `stop` command onto the loop, emitting a
+    /// [`TurnFinished`] keyed to `turn_id`.
+    pub fn stop_turn(
+        &self,
+        registration: &RealAgentRegistration,
+        refs: &RealRunRefs,
+        turn_id: &TurnId,
+        reason: &str,
+    ) -> StateResult<TurnFinished> {
+        self.core.stop_turn(registration, refs, turn_id, reason)
+    }
+}

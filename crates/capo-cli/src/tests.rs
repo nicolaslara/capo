@@ -3386,9 +3386,16 @@ fn cli_drives_fake_controller_and_exports_evidence() {
     assert!(exported.starts_with("<!-- capo:evidence-export -->"));
     assert!(exported.contains("## State Refs"));
     assert!(exported.contains("- Session status: `canceled`"));
-    assert!(exported.contains("- Run status: `exited_unknown`"));
+    // RTL10: restart recovery reaps the orphaned in-flight run and records a
+    // terminal `run.recovered`, so the reconciled run status is `recovered`
+    // (replacing the blunt `exited_unknown` the old recovery sweep wrote).
+    assert!(exported.contains("- Run status: `recovered`"));
     assert!(exported.contains("- `evidence-fake-codex`"));
-    assert!(exported.contains("artifact=`artifact-tool-session-fake-codex`"));
+    // AI3: the direct `task send` summary tool now flows through the REAL
+    // `authorize_and_invoke` seam, so its output artifact is the dispatch-issued
+    // `artifact-{tool_call_id}-{tool_id}` id rather than the fake shim's
+    // `artifact-tool-{session}`.
+    assert!(exported.contains("artifact=`artifact-tool-fake-codex-capo-session_summary`"));
     assert!(exported.contains("## Tool Calls"));
     assert!(exported.contains("origin=`capo` status=`completed`"));
     assert!(exported.contains("## Memory Packets"));
@@ -3774,7 +3781,9 @@ fn server_cli_routes_agent_work_through_server_boundary() {
         state_root.display().to_string(),
     ])
     .expect("server recovered status");
-    assert!(recovered_status.contains("run_status=exited_unknown"));
+    // RTL10: the orphan reaper records a terminal `run.recovered`, so the
+    // reconciled run reports `recovered` rather than the old `exited_unknown`.
+    assert!(recovered_status.contains("run_status=recovered"));
 }
 
 #[test]
@@ -5257,8 +5266,13 @@ fn adapter_fixture_replay_cli_exports_evidence_without_raw_provider_text() {
         state_root.display().to_string(),
     ])
     .expect("dashboard after adapter replay");
-    assert!(dashboard.contains("tool_observations=1"));
+    // AI3: the replay seed `send_task` now dispatches the per-turn summary tool
+    // through the REAL seam, which records its own `runtime_output` observation
+    // alongside the adapter-native `adapter_event:codex_exec` observation -- two
+    // observations rather than the one the fake summary shim produced.
+    assert!(dashboard.contains("tool_observations=2"));
     assert!(dashboard.contains("source=adapter_event:codex_exec"));
+    assert!(dashboard.contains("source=runtime_output"));
     assert_text_absent_in_tree(&state_root, "Codex fixture response.");
     assert_text_absent_in_tree(&state_root, "cargo test");
     assert_text_absent_in_tree(&evidence_dir, "Codex fixture response.");
@@ -5330,6 +5344,7 @@ fn voice_recent_work_reads_project_and_agent_work_without_mutating() {
                     status: "completed".to_string(),
                     input_artifact_id: None,
                     output_artifact_id: Some("artifact-voice-tool-output".to_string()),
+                    provenance: Default::default(),
                     updated_sequence: 0,
                 }),
                 ProjectionRecord::ToolObservation(ToolObservationProjection {
@@ -5369,7 +5384,10 @@ fn voice_recent_work_reads_project_and_agent_work_without_mutating() {
     assert!(project_output.contains("spoken_active_sessions=2"));
     assert!(project_output.contains("spoken_agent=fake-codex agent_status=running"));
     assert!(project_output.contains("spoken_agent=fake-reviewer agent_status=running"));
-    assert!(project_output.contains("tool_observations=1"));
+    // AI3: the seeded `task send` dispatches the per-turn summary tool through the
+    // REAL seam, adding a `runtime_output` observation to fake-codex's session
+    // (now 2 with the manually-appended `adapter_event:codex_exec` one).
+    assert!(project_output.contains("tool_observations=2"));
     assert!(project_output.contains("spoken_tool_call=tool-voice-recent-work"));
     assert!(
         project_output.contains(
@@ -5397,7 +5415,8 @@ fn voice_recent_work_reads_project_and_agent_work_without_mutating() {
     assert!(agent_output.contains("spoken_agent=fake-codex agent_status=running"));
     assert!(agent_output.contains("current_goal=Inspect the project"));
     assert!(agent_output.contains("latest_summary=Fake adapter processed goal for fake-codex"));
-    assert!(agent_output.contains("tool_observations=1"));
+    // AI3: real summary dispatch adds the `runtime_output` observation.
+    assert!(agent_output.contains("tool_observations=2"));
     assert!(agent_output.contains("spoken_tool_call=tool-voice-recent-work"));
     assert!(agent_output.contains("spoken_tool_observation=tool-observation-voice-recent-work"));
     assert!(!agent_output.contains("What has fake-codex done?"));
@@ -5417,7 +5436,10 @@ fn voice_recent_work_reads_project_and_agent_work_without_mutating() {
     assert!(project_tool_output.contains("read_scope=project_tool_activity"));
     assert!(project_tool_output.contains("spoken_tool_activity_agents=2"));
     assert!(project_tool_output.contains("spoken_tool_calls=3"));
-    assert!(project_tool_output.contains("spoken_tool_observations=1"));
+    // AI3: both seeded `task send` calls dispatch the summary tool through the real
+    // seam, so the project-wide observation count is 3 (two `runtime_output` rows
+    // plus the manually-appended `adapter_event` one) -- was 1 under the fake shim.
+    assert!(project_tool_output.contains("spoken_tool_observations=3"));
     assert!(project_tool_output.contains("spoken_tool_activity_agent=fake-codex"));
     assert!(project_tool_output.contains("spoken_tool_call=tool-voice-recent-work"));
     assert!(
@@ -5441,7 +5463,9 @@ fn voice_recent_work_reads_project_and_agent_work_without_mutating() {
     assert!(agent_tool_output.contains("read_scope=agent_tool_activity"));
     assert!(agent_tool_output.contains("spoken_tool_activity_agents=1"));
     assert!(agent_tool_output.contains("spoken_tool_calls=2"));
-    assert!(agent_tool_output.contains("spoken_tool_observations=1"));
+    // AI3: fake-codex's session carries the real dispatch's `runtime_output`
+    // observation in addition to the manually-appended `adapter_event` one.
+    assert!(agent_tool_output.contains("spoken_tool_observations=2"));
     assert!(agent_tool_output.contains("spoken_tool_activity_agent=fake-codex"));
     assert!(agent_tool_output.contains("spoken_tool_call=tool-voice-recent-work"));
     assert!(
@@ -6515,7 +6539,11 @@ fn prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence() {
     assert!(dashboard.contains("tool_activity_agents=2"));
     assert!(dashboard.contains("tool_activity_active_sessions=2"));
     assert!(dashboard.contains("tool_calls=2"));
-    assert!(dashboard.contains("tool_observations=1"));
+    // AI3: both direct `task send` calls now dispatch the per-turn summary tool
+    // through the REAL seam, each recording a `runtime_output` observation. With
+    // the manually-appended `adapter_event` observation on fake-codex, the
+    // project-wide observation count is 3 (was 1 under the fake summary shim).
+    assert!(dashboard.contains("tool_observations=3"));
     assert!(dashboard.contains("agent=fake-codex agent_status=running"));
     assert!(dashboard.contains("session=session-fake-codex session_status=active"));
     assert!(dashboard.contains("goal=Inspect the project"));
@@ -6523,10 +6551,16 @@ fn prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence() {
     assert!(dashboard.contains("evidence_refs=evidence-fake-codex"));
     assert!(dashboard.contains("tool_calls=1"));
     assert!(dashboard.contains("tool_call=tool-fake-codex tool=capo.session_summary"));
-    assert!(dashboard.contains("tool_observations=1"));
+    // fake-codex carries the real dispatch's `runtime_output` observation plus the
+    // manually-appended `adapter_event` one.
+    assert!(dashboard.contains("tool_observations=2"));
     assert!(
         dashboard
             .contains("tool_observation=tool-observation-fake-codex tool=provider.native_search")
+    );
+    assert!(
+        dashboard
+            .contains("tool_observation=runtime-obs-tool-fake-codex tool=capo.session_summary")
     );
     assert!(dashboard.contains("instrumentation=observed_only confidence=high"));
     assert!(dashboard.contains("memory_packet_refs=1"));
@@ -6550,10 +6584,16 @@ fn prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence() {
     assert!(codex_status.contains("current_goal=Inspect the project"));
     assert!(codex_status.contains("tool_calls=1"));
     assert!(codex_status.contains("tool_call=tool-fake-codex tool=capo.session_summary"));
-    assert!(codex_status.contains("tool_observations=1"));
+    // AI3: the real summary dispatch records a `runtime_output` observation in
+    // addition to the manually-appended `adapter_event` one.
+    assert!(codex_status.contains("tool_observations=2"));
     assert!(
         codex_status
             .contains("tool_observation=tool-observation-fake-codex tool=provider.native_search")
+    );
+    assert!(
+        codex_status
+            .contains("tool_observation=runtime-obs-tool-fake-codex tool=capo.session_summary")
     );
     assert!(codex_status.contains("instrumentation=observed_only confidence=high"));
     assert!(codex_status.contains("kind=permission.decided"));
@@ -6645,7 +6685,9 @@ fn prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence() {
     let reviewer_evidence = fs::read_to_string(evidence_dir.join("session-fake-reviewer.md"))
         .expect("reviewer evidence");
     assert!(codex_evidence.contains("- Session status: `canceled`"));
-    assert!(codex_evidence.contains("- Run status: `exited_unknown`"));
+    // RTL10: restart recovery reaps the orphaned in-flight run and records a
+    // terminal `run.recovered`, so the reconciled run status is `recovered`.
+    assert!(codex_evidence.contains("- Run status: `recovered`"));
     assert!(codex_evidence.contains("tool.result_delivered"));
     assert!(codex_evidence.contains("## Tool Observations"));
     assert!(codex_evidence.contains("`tool-observation-fake-codex` name=`provider.native_search`"));
@@ -6671,7 +6713,7 @@ fn prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence() {
             .expect("read codex run")
             .expect("codex run")
             .status,
-        "exited_unknown"
+        "recovered"
     );
     assert_eq!(
         reopened
@@ -6707,8 +6749,11 @@ fn prototype_e2e_smoke_tracks_two_agents_recovers_and_exports_evidence() {
         reopened
             .tool_observations_for_session(&SessionId::new("session-fake-codex"))
             .expect("codex tool observations")
+            // AI3: the real summary dispatch records its own `runtime_output`
+            // observation, so fake-codex's session carries 2 (that one plus the
+            // manually-appended `adapter_event` observation) instead of 1.
             .len(),
-        1
+        2
     );
     assert_eq!(
         reopened

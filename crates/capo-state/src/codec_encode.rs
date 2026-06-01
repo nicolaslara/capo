@@ -68,7 +68,10 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             f: Some(session.current_goal.clone()),
             g: session.latest_summary.clone(),
             h: session.latest_confidence.map(|value| value.to_string()),
-            payload_json: "{}".to_string(),
+            // Positional slots a..h are exhausted, so the adapter-owned external
+            // session ref rides in the payload to survive projection rebuilds.
+            payload_json: json!({ "external_session_ref": session.external_session_ref })
+                .to_string(),
         },
         ProjectionRecord::Run(run) => ProjectionRecordRow {
             kind: "run",
@@ -93,6 +96,26 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             e: Some(grant.decision_source.clone()),
             f: Some(grant.persistence.clone()),
             g: Some(grant.explanation.clone()),
+            h: None,
+            // SG3: positional slots a..g are exhausted, so the grant lifecycle
+            // timestamps ride in the payload to survive projection rebuilds.
+            payload_json: json!({
+                "created_at": grant.created_at,
+                "expires_at": grant.expires_at,
+                "revoked_at": grant.revoked_at,
+            })
+            .to_string(),
+        },
+        ProjectionRecord::WorkspaceLease(lease) => ProjectionRecordRow {
+            kind: "workspace_lease",
+            record_id: lease.workspace_lease_id.clone(),
+            a: Some(lease.project_id.to_string()),
+            b: Some(lease.holder_session_id.to_string()),
+            c: lease.holder_run_id.as_ref().map(ToString::to_string),
+            d: Some(lease.status.clone()),
+            e: lease.acquired_at.clone(),
+            f: lease.released_at.clone(),
+            g: Some(lease.release_reason.clone()),
             h: None,
             payload_json: "{}".to_string(),
         },
@@ -335,7 +358,17 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             f: tool_call.input_artifact_id.clone(),
             g: tool_call.output_artifact_id.clone(),
             h: None,
-            payload_json: "{}".to_string(),
+            // ACI7: the per-call provenance + timing travels in the payload (the
+            // `a..h` slots are spent), so a replay rebuilds the queryable chain
+            // identically.
+            payload_json: json!({
+                "correlation_id": tool_call.provenance.correlation_id,
+                "permission_decision_id": tool_call.provenance.permission_decision_id,
+                "capability_grant_use_id": tool_call.provenance.capability_grant_use_id,
+                "started_at": tool_call.provenance.started_at,
+                "completed_at": tool_call.provenance.completed_at,
+            })
+            .to_string(),
         },
         ProjectionRecord::ToolObservation(observation) => ProjectionRecordRow {
             kind: "tool_observation",
@@ -424,6 +457,53 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             g: Some(evidence.confidence.to_string()),
             h: None,
             payload_json: "{}".to_string(),
+        },
+        ProjectionRecord::RunScore(score) => ProjectionRecordRow {
+            kind: "run_score",
+            record_id: score.run_score_id.clone(),
+            a: Some(score.project_id.to_string()),
+            b: Some(score.session_id.to_string()),
+            c: Some(score.run_id.to_string()),
+            d: score.task_id.as_ref().map(ToString::to_string),
+            e: Some(score.outcome.clone()),
+            f: Some(score.started_at.to_string()),
+            g: Some(score.completed_at.to_string()),
+            // The score-inputs digest is the reproducibility anchor; it rides in
+            // its own positional slot so a rebuild reconstructs the exact inputs.
+            h: Some(score.score_inputs_json.clone()),
+            // The numeric verdict counts ride in the payload (positional slots
+            // a..h are exhausted), so a rebuild reconstructs the score row
+            // identically. `duration_millis` is derivable but persisted so the
+            // rebuilt row is byte-identical without recomputation.
+            payload_json: json!({
+                "passed": score.passed,
+                "criteria_total": score.criteria_total,
+                "criteria_met": score.criteria_met,
+                "observed_evidence_count": score.observed_evidence_count,
+                "duration_millis": score.duration_millis,
+            })
+            .to_string(),
+        },
+        ProjectionRecord::Checkpoint(checkpoint) => ProjectionRecordRow {
+            kind: "checkpoint",
+            record_id: checkpoint.checkpoint_id.clone(),
+            a: Some(checkpoint.project_id.to_string()),
+            b: Some(checkpoint.session_id.to_string()),
+            c: Some(checkpoint.run_id.to_string()),
+            d: checkpoint.turn_id.clone(),
+            e: Some(checkpoint.kind.clone()),
+            f: Some(checkpoint.commit_ref.clone()),
+            g: Some(checkpoint.workspace_root.clone()),
+            h: Some(checkpoint.content_hash.clone()),
+            // Positional slots a..h are exhausted, so the shadow-git dir and the
+            // lifecycle timestamps ride in the payload, so a rebuild reconstructs
+            // the checkpoint row identically.
+            payload_json: json!({
+                "shadow_git_dir": checkpoint.shadow_git_dir,
+                "created_at": checkpoint.created_at,
+                "restored_at": checkpoint.restored_at,
+            })
+            .to_string(),
         },
         ProjectionRecord::TaskOutcomeReport(report) => ProjectionRecordRow {
             kind: "task_outcome_report",
@@ -519,6 +599,120 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             g: Some(task.observed_unix.to_string()),
             h: None,
             payload_json: "{}".to_string(),
+        },
+        // GA1 (goal-orchestration GO1): the goal lifecycle read model. The
+        // structured GO6 fields (success criteria/constraints/verification/budget/
+        // stop conditions) and the current blocker exceed the positional slots, so
+        // they ride in the payload to survive a projection rebuild.
+        ProjectionRecord::Goal(goal) => ProjectionRecordRow {
+            kind: "goal",
+            record_id: goal.goal_id.to_string(),
+            a: Some(goal.project_id.to_string()),
+            b: Some(goal.status.clone()),
+            c: Some(goal.objective.clone()),
+            d: goal.parent_goal_id.as_ref().map(ToString::to_string),
+            e: goal.attempt_run_id.as_ref().map(ToString::to_string),
+            f: goal.task_id.as_ref().map(ToString::to_string),
+            g: goal.agent_id.as_ref().map(ToString::to_string),
+            h: goal.session_id.as_ref().map(ToString::to_string),
+            payload_json: json!({
+                "success_criteria_json": goal.success_criteria_json,
+                "constraints_json": goal.constraints_json,
+                "verification_surface_json": goal.verification_surface_json,
+                "budget_json": goal.budget_json,
+                "stop_conditions_json": goal.stop_conditions_json,
+                "blocker_reason": goal.blocker_reason,
+            })
+            .to_string(),
+        },
+        // GA1 (goal-orchestration GO3): the per-requirement status ledger.
+        ProjectionRecord::RequirementLedger(ledger) => ProjectionRecordRow {
+            kind: "requirement_ledger",
+            record_id: ledger.requirement_id.to_string(),
+            a: Some(ledger.goal_id.to_string()),
+            b: Some(ledger.project_id.to_string()),
+            c: Some(ledger.summary.clone()),
+            d: Some(ledger.status.clone()),
+            e: Some(ledger.last_status_source.clone()),
+            f: None,
+            g: None,
+            h: None,
+            payload_json: "{}".to_string(),
+        },
+        // GA1 (goal-orchestration GO3): the agent-report / story ledger. The
+        // load-bearing `source` tag (`agent_reported` vs observed) is preserved so
+        // a claim is never stored indistinguishably from observed evidence.
+        ProjectionRecord::GoalReport(report) => ProjectionRecordRow {
+            kind: "goal_report",
+            record_id: report.goal_report_id.clone(),
+            a: Some(report.goal_id.to_string()),
+            b: Some(report.project_id.to_string()),
+            c: Some(report.report_kind.clone()),
+            d: Some(report.source.clone()),
+            e: Some(report.summary.clone()),
+            f: report.session_id.as_ref().map(ToString::to_string),
+            g: report.requirement_id.as_ref().map(ToString::to_string),
+            h: report.confidence.map(|value| value.to_string()),
+            payload_json: json!({
+                "body_artifact_id": report.body_artifact_id,
+                "evidence_id": report.evidence_id.as_ref().map(ToString::to_string),
+            })
+            .to_string(),
+        },
+        // GA1 (goal-orchestration GO3/GO8): a recorded continuation decision.
+        ProjectionRecord::GoalContinuation(continuation) => ProjectionRecordRow {
+            kind: "goal_continuation",
+            record_id: continuation.continuation_id.clone(),
+            a: Some(continuation.goal_id.to_string()),
+            b: Some(continuation.project_id.to_string()),
+            c: Some(continuation.decision.clone()),
+            d: Some(continuation.reason.clone()),
+            e: continuation
+                .attempt_run_id
+                .as_ref()
+                .map(ToString::to_string),
+            f: None,
+            g: None,
+            h: None,
+            payload_json: "{}".to_string(),
+        },
+        // GA1 (goal-orchestration GO12): observed delegated-provider goal state.
+        ProjectionRecord::DelegatedProviderGoal(delegated) => ProjectionRecordRow {
+            kind: "delegated_provider_goal",
+            record_id: delegated.delegated_goal_id.clone(),
+            a: Some(delegated.goal_id.to_string()),
+            b: Some(delegated.project_id.to_string()),
+            c: Some(delegated.provider_kind.clone()),
+            d: Some(delegated.provider_state.clone()),
+            e: Some(delegated.source.clone()),
+            f: delegated.session_id.as_ref().map(ToString::to_string),
+            g: delegated.provider_goal_ref.clone(),
+            h: None,
+            payload_json: json!({
+                "body_artifact_id": delegated.body_artifact_id,
+            })
+            .to_string(),
+        },
+        // GA5 (goal-orchestration GO9): the completion auditor's verdict. The
+        // requirement counts and the per-requirement detail JSON exceed the
+        // positional slots, so they ride in the payload to survive a rebuild.
+        ProjectionRecord::GoalAuditDecision(audit) => ProjectionRecordRow {
+            kind: "goal_audit_decision",
+            record_id: audit.audit_id.clone(),
+            a: Some(audit.goal_id.to_string()),
+            b: Some(audit.project_id.to_string()),
+            c: Some(audit.verdict.clone()),
+            d: Some(audit.reason.clone()),
+            e: audit.attempt_run_id.as_ref().map(ToString::to_string),
+            f: None,
+            g: None,
+            h: None,
+            payload_json: json!({
+                "requirements_total": audit.requirements_total,
+                "requirements_complete": audit.requirements_complete,
+                "requirement_detail_json": audit.requirement_detail_json,
+            })
+            .to_string(),
         },
     }
 }

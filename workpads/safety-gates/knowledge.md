@@ -116,6 +116,44 @@ with `cancel` and fail the adapter request rather than inventing an ACP outcome.
 The live ACP JSON-RPC wire round-trip is explicitly out of scope; it lands in
 the depth workpad.
 
+Fixture-only verification standard (SG2): SG2 is verified ENTIRELY against
+scripted/fake adapters and asserted option mappings -- never the live ACP
+JSON-RPC wire. The provider-neutral types live in `capo-adapters`
+(`AdapterPermissionRequest` carrying the ACP `PermissionOption[]`,
+`AdapterPermissionResponse` carrying the chosen `optionId` / `cancelled`
+outcome, and the pure `map_acp_options_trusted_local` mapping function); the
+`AgentAdapter` trait gains a `scripted_permission_request` raise seam that
+`ScriptedMockAgent::with_permission_request` scripts. The controller owns the
+decide + persistence (`FakeBoundaryController::decide_adapter_permission` /
+`cancel_adapter_permission`, re-exported on `RealBoundaryController`): it runs
+`PermissionPolicy::decide` over the requested scope (the policy is the authority
+-- a policy deny over-rules an adapter allow option), applies the ACP mapping,
+persists `permission.requested` -> `permission.decided` with the offered
+`adapter_options` and the chosen `adapter_response` on the decision payload, and
+materializes the durable grant on an allow (or a durable `reject_always` deny).
+Each ACP option kind is covered by a deterministic controller test plus a replay
+test proving the round-trip grant rebuilds identically from the event log. The
+live wire round-trip stays in depth.
+
+SG2 review-fix invariants (2026-05-31): the central safety semantic is that a
+policy deny ALWAYS halts the adapter, even when an allow option was offered. The
+ACP wire outcome returned to (and persisted for) the adapter must therefore never
+be the allow option's `selected{optionId}` on a policy over-rule -- an ACP adapter
+consuming `response.outcome` reads `selected` as "permitted, proceed". The
+controller rewrites the over-rule outcome to a reject option's id (when offered)
+else `cancelled`, and `AdapterPermissionResponse` carries an explicit
+`must_not_proceed` halt flag that is the single safe signal an adapter consumes
+(`may_proceed()` = allowed AND not halted). The round-trip's grant materialization
+and durable-deny rule are NOT a second copy: it builds a canonical
+`PermissionDecision` and funnels through the SAME `decision_creates_grant` +
+`append_capability_grant_created_event` machinery the SG1 tool dispatch path owns,
+so SG3 grant read-back reads ONE grant model. The round-trip is also a loop-driven
+step (`run_adapter_permission_round_trip`: pull the raised request from the
+`AgentAdapter` seam -> decide -> deliver the response back through
+`AgentAdapter::deliver_permission_response`, capturing a `PermissionDeliveryAck`),
+not a sibling API invoked beside the loop; the depth ACP adapter reuses this same
+hook with a real adapter behind the seam.
+
 ## Grant Lifecycle: Read-Back, Revoke, Expiry (SG3)
 
 Grants must authorize, not just record. Today the grant store is write-only: the
@@ -167,8 +205,8 @@ also participate: a deny grant blocks even non-critical scopes.
 
 ## Single-Writer Workspace Lock (SG5)
 
-A controller-owned single-writer workspace lock (a session-scoped write lease)
-gates all tool writes and workspace mutations in the real loop. It REJECTS a
+A controller-owned single-writer workspace lock (a session-scoped write lease) +
+its decide-style gate seam (`gate_workspace_write`). It REJECTS a
 second concurrent writer rather than interleaving: while a session holds the
 lease, a write request from another session/run is denied with a typed conflict
 outcome. Acquire/release is event-sourced so the lock survives restart and
@@ -178,6 +216,30 @@ blocked. This is necessary because `streaming-transport` delivers a multi-client
 broadcast surface and `tools-aci` delivers `file_write`/edit/patch, so two
 clients or a client plus a continuation can drive concurrent writes; without the
 lock those interleave silently.
+
+SCOPE (corrected after review): SG5 builds the lock primitive and its gate seam
+and proves both with contention/replay/regression tests. SG5 does NOT itself
+rewrite `dispatch_tool_call` to call `gate_workspace_write` on every write tool,
+and it does NOT replace the server's process-global `WriteSerializer`
+(`capo-server::transport`), which remains the ACTIVE in-process write serializer
+that today defends the multi-client concurrent-writer scenario above. The
+session-scoped lease is the finer-grained primitive the `WriteSerializer`
+placeholder anticipated and that `goal-autonomy` `GO8` drives from the live
+loop's write classification; the actual loop/transport wiring lands with that
+consumer, not in SG5.
+
+Lease key (corrected after review): the lease is keyed on a COLLISION-FREE
+lower-hex encoding of the LEXICALLY-NORMALIZED workspace root (`.`/`..`/`//`/
+trailing-separator resolved), not the human-readable `slug` (which dropped path
+separators and collapsed distinct roots like `/srv/a/b` and `/srv/ab` to one
+key). The same root spelled differently keys one lease; distinct roots never
+collide. Normalization is lexical, not `fs::canonicalize` (no symlink
+resolution, no on-disk existence required).
+
+Concurrency caveat: acquire is a read-then-write across two connections (no
+`BEGIN IMMEDIATE`, no DB uniqueness on `status='held'`), so the single-writer
+guarantee relies on the transport serializing writers in-process; it is not a
+hard cross-process mutex until SG9's liveness-aware reclaim lands.
 
 Contract for `goal-autonomy`: this is the primitive `GO8` consumes as its "no
 conflicting workspace lock" continuation precondition. `GO8` names the lock but
@@ -228,6 +290,31 @@ the `real-turn-loop` single-snapshot safety floor: the RTL pre-write snapshot
 restorable per-turn and survive restart. Checkpoint artifacts and restore are
 recorded as observed evidence/events so a rollback is auditable.
 
+Floor wiring (corrected after review): the RTL floor is not left running its own
+parallel checkpoint mechanism. `capo-server`'s `create_pre_write_checkpoint`
+DELEGATES to the controller's `FakeBoundaryController::create_checkpoint` (and
+the new `CapoServer::restore_pre_write_checkpoint` delegates to
+`restore_checkpoint`), so there is exactly ONE checkpoint mechanism and ONE
+`checkpoint.created` payload contract (`checkpoint_kind = "shadow_git"`, carrying
+`commit_ref`/`shadow_git_dir`/`content_hash` plus a `CheckpointProjection`) across
+the floor and the loop. The old directory-copy `WorkspaceCheckpoint`
+(`single_snapshot_directory_copy`, no projection) is retired: `WorkspaceCheckpoint`
+is now a shadow-git view (commit SHA + shadow `.git` dir) and the floor's
+`run_workspace_write_turn` live arm and `live_provider` both take the shadow-git
+checkpoint. The shadow `.git` lives under the controller state root
+(`SqliteStateStore::shadow_git_root()` = `<state_root>/shadow-git`), so the floor
+checkpoint survives restart exactly like a loop checkpoint.
+
+`.git` protection (locked in by test): the destructive restore path
+(`git checkout --force <sha> -- .` then `git clean -fdx`) is now exercised over a
+work tree that contains the workspace's OWN top-level `.git` AND a nested
+sub-repo `.git`. git special-cases the top-level `.git` (it survives the
+checkout+clean), which is pinned as a regression guard. A NESTED `.git` is NOT
+top-level-protected by git, so `clean -fdx` removes it as untracked content
+during restore; this is intentional and asserted (not silently relied upon).
+Full OS-level worktree ISOLATION that would protect nested sub-repos stays a
+depth-workpad non-goal.
+
 ## Liveness-Aware Restart Recovery (SG9)
 
 Recovery is liveness-aware, replacing the blunt path that marks all live-looking
@@ -266,12 +353,59 @@ state-model.md:1179).
 
 ## Open Questions
 
-- Is shadow-git a separate `.git` worktree/index or a stash-ring? Either way the
-  chosen mechanism must be restorable per-turn and survive a server restart;
-  resolve in SG8.
+- Is shadow-git a separate `.git` worktree/index or a stash-ring? RESOLVED (SG8):
+  a SEPARATE shadow `.git` directory, NOT a stash-ring. Each workspace gets a bare
+  shadow repo whose `GIT_DIR` lives under the controller's state root
+  (`<shadow_git_root>/<workspace-key>`, keyed by the SAME collision-free lower-hex
+  encoding of the lexically-normalized workspace root the SG5 lock uses) and whose
+  `GIT_WORK_TREE` is the workspace itself, so the user's own `.git` is NEVER
+  touched. A checkpoint is a commit in that shadow repo; the commit SHA is the
+  restorable ref, recorded on a durable `checkpoint.created` event +
+  `CheckpointProjection`. This satisfies both hard requirements: restorable
+  per-turn (each checkpoint is its own commit, keyed `(run, turn, content tree
+  SHA)`) and survives restart (the shadow repo + commits are on disk and the
+  commit SHA rebuilds from the event log). A stash-ring was rejected because it is
+  bounded, harder to address per-turn, and entangled with the workspace's own
+  index. Restore is `git checkout --force <sha> -- .` then `git clean -fdx`
+  (removing files added after the checkpoint), leaving the workspace
+  byte-identical to the checkpointed state, recorded as an auditable
+  `checkpoint.restored` event. The mechanism lives in
+  `crates/capo-controller/src/checkpoint.rs` (the LOOP owner, beside the other SG
+  gates); it UPGRADES the RTL single-snapshot floor
+  (`capo-server::safety_floor::WorkspaceCheckpoint`, a directory copy under the
+  artifact root with no projection), which is neither restorable per-turn nor
+  restart-surviving. OS-level git-worktree ISOLATION (a separate checked-out
+  worktree) stays a depth-workpad non-goal; SG8 is the shadow-commit checkpoint
+  ring only.
 - Does `score_run` live in `capo-eval` (currently a stub at
-  `crates/capo-eval/src/lib.rs`) or in `capo-server`? The `VerificationRunner`
-  placement is the same decision; resolve in SG6/SG7.
+  `crates/capo-eval/src/lib.rs`) or in `capo-server`? RESOLVED for the
+  `VerificationRunner` half (SG6): the verification GATE lives in
+  `capo-controller` (`crates/capo-controller/src/verification.rs`), beside the
+  other safety gates SG1-SG5, because the LOOP owner is what decides whether a
+  run passed and so must own the gate that derives that verdict from real exit
+  status. The tokio runtime + spawn/drain/wait bridging stay BEHIND the
+  `capo-runtime` seam (`AsyncLocalProcessRunner::run_to_completion`), so the
+  controller calls one synchronous method and process execution does not leak
+  into the loop owner. `capo-eval` is the descriptive reporting layer and
+  `capo-server` is transport; neither produces the verdict. `score_run` (SG7)
+  CONSUMES the observed `evidence.recorded(kind=test/smoke)` this gate persists;
+  its own placement is resolved in SG7. RESOLVED for `score_run` (SG7): it ALSO
+  lives in `capo-controller` (`crates/capo-controller/src/score_run.rs`), beside
+  the SG6 gate that produces the observed evidence it scores. Same rationale as
+  SG6: the score is the loop's verdict over observed evidence, so the computation
+  that derives the verdict belongs with the loop owner, not the descriptive
+  report. `score_run` reads ONLY the observed `evidence.recorded` events stamped
+  by the SG6 runner (actor `capo-controller-verification` AND payload
+  `source = observed-runner`) -- agent-reported evidence is filtered out before it
+  can influence the score -- compares them to typed `AcceptanceCriterion`s,
+  derives a `passed`/`failed`/`inconclusive` `RunScoreOutcome`, stamps REAL
+  wall-clock `started_at`/`completed_at`/`duration_millis` from a caller-supplied
+  clock (replacing the `capo-eval` event-sequence-delta "duration"), and persists
+  a durable `run.scored` event + `RunScoreProjection` (new in `capo-state`) keyed
+  on `(run, score-inputs digest)` so a re-score of the same observed evidence is
+  idempotent and a rebuild from the event log reconstructs the score identically.
+  `capo-eval` may later RENDER the stored projection into its markdown roll-up but
+  does not compute it.
 - Should `CapabilityGrantExpired` be a distinct materialized event, or should
   expiry be evaluated purely from `expires_at` at decide time with no event? The
   SG3 acceptance allows it as optional; the replay test must reconstruct expired

@@ -1,0 +1,9 @@
+event: event
+data: {"jsonrpc":"2.0","method":"event","params":{"event":{"actor":"fake-agent","agent_id":"agent-demo","event_id":"event-0000000045","item_id":null,"kind":"session.summary_updated","payload_json":"{\"summary\":\"starting the scripted turn\"}","project_id":"project-capo","redaction_state":"safe","run_id":"run-demo","sequence":45,"session_id":"session-demo","task_id":null,"turn_id":"turn-2"}}}
+
+event: event
+data: {"jsonrpc":"2.0","method":"event","params":{"event":{"actor":"fake-agent","agent_id":"agent-demo","event_id":"event-0000000046","item_id":null,"kind":"tool.observation_recorded","payload_json":"{\"observation\":\"ran the scripted tool\"}","project_id":"project-capo","redaction_state":"safe","run_id":"run-demo","sequence":46,"session_id":"session-demo","task_id":null,"turn_id":"turn-2"}}}
+
+event: event
+data: {"jsonrpc":"2.0","method":"event","params":{"event":{"actor":"fake-agent","agent_id":"agent-demo","event_id":"event-0000000047","item_id":null,"kind":"evidence.recorded","payload_json":"{\"summary\":\"scripted turn finished\"}","project_id":"project-capo","redaction_state":"safe","run_id":"run-demo","sequence":47,"session_id":"session-demo","task_id":null,"turn_id":"turn-2"}}}
+

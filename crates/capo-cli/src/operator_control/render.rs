@@ -1,6 +1,6 @@
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-use capo_server::{AgentSummary, ServerDashboardSnapshot};
+use capo_server::{AgentSummary, ServerDashboardSnapshot, ServerThread};
 
 pub(super) trait AgentRenderer {
     fn render(&self, agent: &AgentSummary) -> String;
@@ -61,6 +61,40 @@ pub(super) struct EvidenceRenderer;
 
 #[derive(Clone, Copy)]
 pub(super) struct ReviewNeedsRenderer;
+
+/// Render the multi-turn conversation thread (ST5) for an agent: a projected,
+/// ordered view of turns and their items, replacing the single `latest_summary`
+/// line. The thread is read-only here; the REPL renders it and never authors the
+/// ordering.
+pub(super) fn render_thread(agent_name: &str, thread: &ServerThread) -> String {
+    if thread.turns.is_empty() {
+        return format!("Thread\n- {agent_name}: no turns yet\n");
+    }
+    let mut output = format!("Thread ({} turns)\n", thread.turns.len());
+    for (index, turn) in thread.turns.iter().enumerate() {
+        output.push_str(&format!(
+            "Turn {} [{}] {}\n",
+            index + 1,
+            turn.status,
+            turn.turn_id
+        ));
+        if turn.items.is_empty() {
+            output.push_str("  (no items)\n");
+            continue;
+        }
+        for item in &turn.items {
+            let body = item
+                .text
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| display_text(text, 280))
+                .or_else(|| item.item_ref.clone())
+                .unwrap_or_else(|| item.event_kind.clone());
+            output.push_str(&format!("  - {}: {}\n", item.kind, body));
+        }
+    }
+    output
+}
 
 pub(super) fn render_dashboard(snapshot: &ServerDashboardSnapshot) -> String {
     let mut output = format!(

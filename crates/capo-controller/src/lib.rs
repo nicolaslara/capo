@@ -7,40 +7,101 @@
 use std::path::{Path, PathBuf};
 
 use capo_adapters::{
-    AdapterToolObservation, AgentAdapter, ClaudeCodeAdapter, CodexExecAdapter,
-    FakeAdapterSessionRequest, FakeAdapterTurnRequest, LocalAdapterLaunchPlan,
-    NormalizedAdapterEvent, ProviderConnector, ScriptedMockAgent, ScriptedMockTurn,
+    AdapterSessionRequest, AdapterToolObservation, AgentAdapter, AgentAdapterHandle,
+    ClaudeCodeAdapter, CodexExecAdapter, LocalAdapterLaunchPlan, NormalizedAdapterEvent,
+    ProviderConnector, ScriptedMockAgent, ScriptedMockTurn, TurnRequest,
 };
 use capo_core::{
-    AgentId, CommandEnvelope, CommandIntent, EvidenceId, MemoryPacketId, ProjectId, RunId,
+    AgentId, CommandEnvelope, CommandIntent, EvidenceId, GoalId, MemoryPacketId, ProjectId, RunId,
     SessionId, TaskId, ToolCallId, TurnId,
 };
 use capo_memory::{
     MemoryBackend, MemoryCandidate, MemoryReviewState, MemorySensitivity, MemorySourceKind,
     MemorySourceRef, SourceLinkedMemoryPacketRequest,
 };
-use capo_runtime::{FakeRuntimeStartRequest, RuntimeRunner};
+use capo_runtime::{FakeRuntimeStartRequest, LocalProcessRunner, RuntimeRunner};
 use capo_state::{
     AgentProjection, ArtifactRecord, EventKind, EventRecord, NewEvent, ProjectProjection,
-    ProjectionRecord, RedactionState, RunProjection, SessionProjection, SqliteStateStore,
-    StateError, StateResult, TaskProjection,
+    ProjectedTurnOutcome, ProjectionRecord, RedactionState, RunProjection, RunReapKind,
+    RunReapObservation, RunRecoveryKind, RunRecoveryObservation, SessionProjection,
+    SqliteStateStore, StateError, StateResult, TaskProjection,
 };
 use capo_tools::{
     FakeToolRequest, PermissionDecision, PermissionPolicy, PermissionRequest, ToolExposure,
 };
 
 mod adapter_replay;
+mod checkpoint;
+mod completion_auditor;
+mod continuation_context;
+mod continuation_scheduler;
 mod fake_session;
+mod goal_autonomy_e2e;
+mod grant_lifecycle;
 mod local_dispatch;
+mod parent_child;
+mod permission_round_trip;
+mod real_controller;
+mod reattach;
+mod resource_ceiling;
+mod score_run;
 mod session_control;
+mod tool_dispatch;
+mod turn_loop;
+mod verification;
+mod workspace_lock;
 
+pub use checkpoint::{CheckpointCreated, CheckpointError, CheckpointRestored, CheckpointScope};
+pub use completion_auditor::{
+    AuditDecision, AuditInputs, AuditVerdict, CompletionAuditor, RequirementAudit,
+    RequirementAuditState, RequirementInput,
+};
+pub use continuation_context::{
+    ContinuationAuditContract, ContinuationContextFragment, ContinuationContextLimits,
+    ContinuationContextPacket, ContinuationRequirement, ContinuationSourceKind,
+};
+pub use continuation_scheduler::{
+    ContinuationConditions, ContinuationDecision, ContinuationOutcome, ContinuationScheduler,
+    GoalBudget, SchedulerInputs,
+};
+pub use grant_lifecycle::{
+    GrantReadBackDecision, GrantReadBackSource, GrantRevocation, GrantRevocationScope,
+};
 pub use local_dispatch::LocalAdapterDispatchRunStart;
+pub use parent_child::{
+    ChildCompletionClaim, ParentMergeDecision, ParentMergeGate, ParentMergeInputs,
+    ParentMergeOutcome, ParentSubgoalStoryEntry, ProviderGoalCapability, ProviderGoalSupport,
+    SubgoalResultContract,
+};
+pub use permission_round_trip::{
+    PermissionCancellation, PermissionRoundTripOutcome, PermissionRoundTripScope,
+};
+pub use real_controller::{
+    RealAgentRegistration, RealBoundaryController, RealReadModelObservation, RealRunRefs,
+};
+pub use resource_ceiling::{
+    CeilingBreach, CeilingTurnOutcome, RunResourceCeiling, RunResourceUsage,
+};
+pub use score_run::{
+    AcceptanceCriterion, RunScore, RunScoreOutcome, RunScoreScope, ScoredCriterion,
+};
+pub use tool_dispatch::{
+    PermissionDecideOutcome, ToolDispatchOutcome, ToolDispatchScope, ToolRefusal,
+};
+pub use turn_loop::{TurnFinished, TurnStopReason};
+pub use verification::{
+    TestRunRecord, VERIFICATION_EVIDENCE_ACTOR, VERIFICATION_EVIDENCE_SOURCE, VerificationCommand,
+    VerificationKind, VerificationOutcome, VerificationScope,
+};
+pub use workspace_lock::{
+    WorkspaceLeaseScope, WorkspaceLockConflict, WorkspaceWriteGate, WorkspaceWriteLeaseOutcome,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FakeBoundaryController {
     project_id: ProjectId,
     state: SqliteStateStore,
-    adapter: AgentAdapter,
+    adapter: AgentAdapterHandle,
     runtime: RuntimeRunner,
     provider: ProviderConnector,
     permission_policy: PermissionPolicy,
@@ -62,10 +123,45 @@ impl FakeBoundaryController {
         state_root: impl AsRef<Path>,
         permission_policy: PermissionPolicy,
     ) -> StateResult<Self> {
+        Self::open_with_permission_policy_and_adapter(
+            project_id,
+            state_root,
+            permission_policy,
+            AgentAdapterHandle::fake(),
+        )
+    }
+
+    /// Open the controller over an injected adapter handle.
+    ///
+    /// The controller drives the adapter purely through the [`AgentAdapter`]
+    /// trait (`open_session`/`send_turn`/`attach_session`/`interrupt`/`stop`),
+    /// so the concrete implementation behind [`AgentAdapterHandle`] is
+    /// substitutable. The default constructors inject
+    /// [`AgentAdapterHandle::fake`]; the scripted-mock handle is the explicit
+    /// deterministic fallback used by the parity suites.
+    pub fn open_with_adapter(
+        project_id: ProjectId,
+        state_root: impl AsRef<Path>,
+        adapter: AgentAdapterHandle,
+    ) -> StateResult<Self> {
+        Self::open_with_permission_policy_and_adapter(
+            project_id,
+            state_root,
+            PermissionPolicy::allow_trusted_local(),
+            adapter,
+        )
+    }
+
+    pub fn open_with_permission_policy_and_adapter(
+        project_id: ProjectId,
+        state_root: impl AsRef<Path>,
+        permission_policy: PermissionPolicy,
+        adapter: AgentAdapterHandle,
+    ) -> StateResult<Self> {
         Ok(Self {
             project_id,
             state: SqliteStateStore::open(state_root)?,
-            adapter: AgentAdapter::fake(),
+            adapter,
             runtime: RuntimeRunner::fake(),
             provider: ProviderConnector::fake(),
             permission_policy,
@@ -76,6 +172,28 @@ impl FakeBoundaryController {
 
     pub fn state(&self) -> &SqliteStateStore {
         &self.state
+    }
+
+    /// SG8: the controller-owned root under which per-workspace shadow `.git`
+    /// directories live. A [`CheckpointScope`] keys its shadow repo under this
+    /// root, so the floor and the loop take checkpoints into ONE store.
+    pub fn shadow_git_root(&self) -> std::path::PathBuf {
+        self.state.shadow_git_root()
+    }
+
+    /// AI2: return a clone of this core with its chat adapter handle swapped.
+    ///
+    /// The core's [`SqliteStateStore`] is a path handle, so the clone shares one
+    /// database with the source -- swapping the adapter changes ONLY which handle
+    /// drives the chat turn (`send_task`/`redirect`), never the persisted store.
+    /// The server uses this to drive a Codex-BOUND agent's chat turn through the
+    /// [`AgentAdapterHandle::codex`] handle while leaving the shared default
+    /// (fake) core untouched for every other agent. This is the binding-respecting
+    /// seam: it is a per-agent view, not a new global default.
+    #[must_use]
+    pub fn with_adapter(mut self, adapter: AgentAdapterHandle) -> Self {
+        self.adapter = adapter;
+        self
     }
 
     pub fn initialize(&self, command: &CommandEnvelope) -> StateResult<ControllerInit> {
@@ -154,7 +272,28 @@ impl FakeBoundaryController {
         self.stop_agent_name(agent_name, reason)
     }
 
+    /// Restart recovery: the one production restart-recovery seam (driven by
+    /// `ServerCommand::Recover`).
+    ///
+    /// SG9 makes this delegate to [`Self::recover_command_liveness_aware`], so the
+    /// live restart path is now LIVENESS-AWARE: it probes each in-flight run's
+    /// persisted process group NON-destructively, REATTACHES a still-alive
+    /// attachable run in place (instead of killing it like the RTL10 reaper did),
+    /// classifies the rest into `run.orphaned`/`run.exited`/`run.recovered`, and
+    /// reclaims any single-writer lease a dead holder left. The blunt
+    /// `mark_active_runs_exited_unknown` path is fully replaced in production.
     pub fn recover_command(&self, command: &CommandEnvelope) -> StateResult<RecoveryReport> {
+        self.recover_command_liveness_aware(command)
+    }
+
+    /// RTL10 phase-1 reaper: probe each in-flight run's persisted process group
+    /// and KILL it if still alive, marking it terminal. Retained as the
+    /// destructive fallback and exercised by the RTL10 reaper tests; the live
+    /// restart path uses [`Self::recover_command_liveness_aware`] instead.
+    pub fn recover_command_reaping(
+        &self,
+        command: &CommandEnvelope,
+    ) -> StateResult<RecoveryReport> {
         require_intent(command, CommandIntent::Recover);
         let recovery_attempt_id = format!(
             "recovery-{}-after-{}",
@@ -163,9 +302,176 @@ impl FakeBoundaryController {
         );
         let started = self.state.begin_recovery(&recovery_attempt_id)?;
         self.state.rebuild_projections()?;
-        let recovered_runs = self
-            .state
-            .mark_active_runs_exited_unknown(&self.project_id, &recovery_attempt_id)?;
+        let recovered_runs = self.reap_orphaned_runs(&recovery_attempt_id)?;
+        let completed = self.state.complete_recovery(&recovery_attempt_id)?;
+        Ok(RecoveryReport {
+            recovery_attempt_id,
+            started_sequence: started.started_sequence,
+            completed_sequence: completed.completed_sequence.unwrap_or_default(),
+            watermark: self.state.watermark("default")?,
+            recovered_run_count: recovered_runs.len(),
+        })
+    }
+
+    /// Probe (and, if alive within the same boot, reap) every in-flight run's
+    /// persisted process group, then record the per-run recovery outcome.
+    ///
+    /// Returns the reconciled `Run` projections. Must run inside a recovery
+    /// attempt bracket ([`Self::recover_command`]); exposed separately so tests
+    /// can drive a restart sweep deterministically.
+    pub fn reap_orphaned_runs(&self, recovery_attempt_id: &str) -> StateResult<Vec<RunProjection>> {
+        let inflight = self.state.inflight_runs_for_project(&self.project_id)?;
+        let observations: Vec<RunReapObservation> = inflight
+            .into_iter()
+            .map(|run| {
+                let (kind, observed_runtime_state_hash) = match run.external_pid {
+                    Some(pid) => {
+                        let reap = LocalProcessRunner::reap_orphan_process_group(
+                            pid,
+                            run.boot_id.as_deref(),
+                        );
+                        let kind = if reap.reaped {
+                            RunReapKind::AliveReaped
+                        } else {
+                            RunReapKind::AlreadyGone
+                        };
+                        (kind, reap.observed_runtime_state_hash)
+                    }
+                    None => (
+                        RunReapKind::NoProcess,
+                        stable_hash(format!("no-process:{}", run.run_id).as_bytes()),
+                    ),
+                };
+                RunReapObservation {
+                    run_id: run.run_id,
+                    session_id: run.session_id,
+                    previous_status: run.status,
+                    kind,
+                    external_pid: run.external_pid,
+                    observed_runtime_state_hash,
+                }
+            })
+            .collect();
+        self.state
+            .reap_orphaned_runs(&self.project_id, recovery_attempt_id, &observations)
+    }
+
+    /// SG9: LIVENESS-AWARE restart recovery, replacing the blunt path that marked
+    /// every live-looking run `exited_unknown` and improving on the RTL10 reaper
+    /// (which KILLS a live orphan).
+    ///
+    /// For each in-flight run it loads the PID/boot-id its spawn persisted before
+    /// returning (the `runtime.start_requested` in-flight marker) and probes that
+    /// process group NON-destructively via [`LocalProcessRunner::probe_run_health`]
+    /// (the `RuntimeRunner` health probe). It then classifies:
+    ///
+    /// - a still-alive run WITH an attachable runtime ref ->
+    ///   [`RunRecoveryKind::Reattached`] (the live process is REATTACHED in place,
+    ///   not killed; `run.recovered`);
+    /// - a still-alive run with no attachable ref -> [`RunRecoveryKind::Orphaned`]
+    ///   (`run.orphaned` then terminal `run.exited` then `run.recovered`);
+    /// - a gone / never-spawned run -> [`RunRecoveryKind::Exited`] (terminal
+    ///   `run.exited` then `run.recovered`).
+    ///
+    /// After classifying, any single-writer workspace lease (SG5) held by a run
+    /// that did NOT reattach (exited/orphaned) is RECLAIMED, so a dead holder no
+    /// longer blocks the next writer. Recovery is idempotent: a repeated restart
+    /// observing the same runtime state appends nothing (keyed on
+    /// `(run_id, recovery_observation_kind, observed_runtime_state_hash)`).
+    ///
+    /// Must run inside a recovery attempt bracket
+    /// ([`Self::recover_command_liveness_aware`]); exposed separately so tests can
+    /// drive a restart sweep deterministically.
+    pub fn recover_inflight_runs(
+        &self,
+        recovery_attempt_id: &str,
+    ) -> StateResult<Vec<RunProjection>> {
+        let inflight = self.state.inflight_runs_for_project(&self.project_id)?;
+        let observations: Vec<RunRecoveryObservation> = inflight
+            .into_iter()
+            .map(|run| {
+                let (kind, observed_runtime_state_hash) = match run.external_pid {
+                    Some(pid) => {
+                        let probe =
+                            LocalProcessRunner::probe_run_health(pid, run.boot_id.as_deref());
+                        let kind = if probe.state.is_alive() {
+                            // A live run reattaches in place only when an
+                            // attachable runtime handle was persisted; a live run
+                            // with no such handle is an unowned orphan.
+                            if run.runtime_process_ref.is_some() {
+                                RunRecoveryKind::Reattached
+                            } else {
+                                RunRecoveryKind::Orphaned
+                            }
+                        } else {
+                            RunRecoveryKind::Exited
+                        };
+                        (kind, probe.observed_state_hash)
+                    }
+                    None => (
+                        // No process was ever spawned: nothing live to reattach.
+                        RunRecoveryKind::Exited,
+                        stable_hash(format!("no-process:{}", run.run_id).as_bytes()),
+                    ),
+                };
+                RunRecoveryObservation {
+                    run_id: run.run_id,
+                    session_id: run.session_id,
+                    previous_status: run.status,
+                    kind,
+                    external_pid: run.external_pid,
+                    runtime_process_ref: run.runtime_process_ref,
+                    observed_runtime_state_hash,
+                }
+            })
+            .collect();
+
+        let recovered = self.state.recover_inflight_runs(
+            &self.project_id,
+            recovery_attempt_id,
+            &observations,
+        )?;
+
+        // SG5/SG9: reclaim any single-writer lease held by a run that has
+        // TERMINATED (`Exited`). A reattached run is still alive (keeps its lease),
+        // and -- critically -- an `Orphaned` run is ALSO still alive: its process
+        // group keeps running and could still write the workspace, so freeing its
+        // write lease (and handing it to a new writer) would put two live writers
+        // on the same root and break the SG5 single-writer invariant. Only a run
+        // whose process is confirmed gone is safe to reclaim from.
+        let dead_run_ids: Vec<RunId> = observations
+            .iter()
+            .filter(|observation| observation.kind == RunRecoveryKind::Exited)
+            .map(|observation| observation.run_id.clone())
+            .collect();
+        if !dead_run_ids.is_empty() {
+            self.reclaim_stale_workspace_leases(
+                &dead_run_ids,
+                "reclaimed from dead holder during restart recovery",
+            )?;
+        }
+
+        Ok(recovered)
+    }
+
+    /// SG9: the liveness-aware restart-recovery sweep, bracketed as a single
+    /// recovery attempt (the same `begin_recovery`/`complete_recovery` bracket the
+    /// RTL10 [`Self::recover_command`] uses), so it projects into
+    /// `recovery_attempts` identically but reattaches live runs instead of marking
+    /// everything `exited_unknown`.
+    pub fn recover_command_liveness_aware(
+        &self,
+        command: &CommandEnvelope,
+    ) -> StateResult<RecoveryReport> {
+        require_intent(command, CommandIntent::Recover);
+        let recovery_attempt_id = format!(
+            "recovery-{}-after-{}",
+            command.command_id,
+            self.state.last_sequence()?
+        );
+        let started = self.state.begin_recovery(&recovery_attempt_id)?;
+        self.state.rebuild_projections()?;
+        let recovered_runs = self.recover_inflight_runs(&recovery_attempt_id)?;
         let completed = self.state.complete_recovery(&recovery_attempt_id)?;
         Ok(RecoveryReport {
             recovery_attempt_id,
@@ -246,6 +552,30 @@ impl FakeBoundaryController {
         let registration = self.registration_for_agent_name(agent_name)?;
         self.send_task_with_task_id(&registration, task_id, goal)
     }
+
+    /// AI3: the production `send_task` command path that routes the per-turn
+    /// summary tool through the REAL dispatch seam (the supplied live Capo
+    /// `exposure`'s `authorize_and_invoke`) instead of the fake summary shim.
+    /// `RealBoundaryController::send_task_command` calls this with its own real
+    /// Capo exposure so a real chat turn's tool call is a real dispatched result.
+    pub(crate) fn send_task_command_with_real_tools(
+        &self,
+        command: &CommandEnvelope,
+        exposure: &ToolExposure,
+    ) -> StateResult<FakeRunRefs> {
+        require_intent(command, CommandIntent::SendTask);
+        let agent_name = required_structured_arg(command, "agent")?;
+        let goal = command
+            .text
+            .as_deref()
+            .ok_or_else(|| missing_read_model("command.text", &command.command_id))?;
+        let registration = self.registration_for_agent_name(agent_name)?;
+        let task_id = match optional_structured_arg(command, "task_id") {
+            Some(task_id) => TaskId::new(task_id),
+            None => TaskId::new(format!("task-{}", slug(goal))),
+        };
+        self.send_task_with_real_tools(&registration, task_id, goal, exposure)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -288,7 +618,7 @@ pub struct RecoveryReport {
     pub recovered_run_count: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AdapterReplayReport {
     pub input_event_count: usize,
     pub appended_event_count: usize,
@@ -338,6 +668,7 @@ fn scoped_event(
 trait EventBuilder {
     fn with_payload(self, payload_json: String) -> Self;
     fn with_turn(self, turn_id: impl ToString) -> Self;
+    fn with_item(self, item_id: impl ToString) -> Self;
 }
 
 impl EventBuilder for NewEvent {
@@ -348,6 +679,11 @@ impl EventBuilder for NewEvent {
 
     fn with_turn(mut self, turn_id: impl ToString) -> Self {
         self.turn_id = Some(turn_id.to_string());
+        self
+    }
+
+    fn with_item(mut self, item_id: impl ToString) -> Self {
+        self.item_id = Some(item_id.to_string());
         self
     }
 }

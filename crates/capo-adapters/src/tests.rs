@@ -20,7 +20,7 @@ fn planned_adapters_include_fake_and_first_real_targets() {
 #[test]
 fn fake_adapter_reports_adapter_boundary() {
     assert_eq!(
-        AgentAdapter::fake().binding().kind,
+        AgentAdapterHandle::fake().binding().kind,
         BoundaryKind::AgentAdapter
     );
 }
@@ -63,6 +63,124 @@ fn codex_jsonl_fixture_maps_to_normalized_events() {
             && event.input_tokens == Some(11)
             && event.output_tokens == Some(7)
     }));
+}
+
+#[test]
+fn codex_workspace_write_fixture_maps_a_tool_result_round_trip() {
+    // RTL9: the workspace-write round-trip parses into a tool-call observation
+    // that carries the OBSERVED applied result (the diff/output), distinct from
+    // the agent's own `item.completed` message claim.
+    let parsed =
+        CodexExecAdapter::parse_jsonl(include_str!("../fixtures/codex-exec-workspace-write.jsonl"))
+            .unwrap();
+
+    // The agent's reported claim is an item message, not the observed tool result.
+    let claim = parsed
+        .events
+        .iter()
+        .find(|event| event.kind == "adapter.item_completed")
+        .expect("agent message claim");
+    assert_eq!(claim.role.as_deref(), Some("assistant"));
+    assert_eq!(
+        claim.content.as_deref(),
+        Some("I will add a greeting to NOTES.md.")
+    );
+
+    // The OBSERVED tool result is the `apply_patch` completion, carrying the
+    // applied diff/output -- separate from the agent's message above.
+    let observed_write = parsed
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == "adapter.tool_call_completed"
+                && event.tool_name.as_deref() == Some("apply_patch")
+        })
+        .expect("observed apply_patch tool result");
+    assert_eq!(
+        observed_write.external_item_ref.as_deref(),
+        Some("codex-write-tool-1")
+    );
+    let observed_content = observed_write.content.as_deref().expect("observed result");
+    assert!(observed_content.contains("Applied patch to NOTES.md"));
+
+    // The observed tool result projects into a tool observation distinct from
+    // the agent claim (the summary path), which is exactly the RTL9 contract.
+    let observation = observed_write
+        .tool_observation()
+        .expect("tool observation for the observed write");
+    assert_eq!(observation.tool_name, "apply_patch");
+    assert_eq!(observation.observed_status, "completed");
+    assert_eq!(observation.instrumentation_level, "observed_only");
+}
+
+#[test]
+fn codex_live_file_change_item_maps_to_an_observed_apply_patch_tool_result() {
+    // RTL13: the LIVE `codex exec --json` workspace-write stream (codex 0.134)
+    // reports an applied edit as an `item.completed` whose `item.type` is
+    // `file_change` (carrying the applied `changes`), NOT a `patch_apply.*` tool
+    // event. The parser must still record this as an OBSERVED `apply_patch` tool
+    // result distinct from the agent's `agent_message` claim, so the live
+    // round-trip produces the identical normalized shape the deterministic
+    // `patch_apply.*` fixture does -- the paired-assertion invariant.
+    let parsed = CodexExecAdapter::parse_jsonl(include_str!(
+        "../fixtures/codex-exec-workspace-write-file-change.jsonl"
+    ))
+    .unwrap();
+
+    // The agent's reported claim is an `agent_message` item, not the observed
+    // tool result.
+    let claim = parsed
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == "adapter.item_completed" && event.role.as_deref() == Some("assistant")
+        })
+        .expect("agent message claim");
+    assert!(
+        claim
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("create only the requested file")
+    );
+
+    // The OBSERVED tool result is the `file_change` completion routed to
+    // `apply_patch`, carrying the applied changes -- separate from the agent
+    // message above.
+    let observed_write = parsed
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == "adapter.tool_call_completed"
+                && event.tool_name.as_deref() == Some("apply_patch")
+        })
+        .expect("observed apply_patch tool result from a file_change item");
+    assert_eq!(observed_write.external_item_ref.as_deref(), Some("item_1"));
+    let observed_content = observed_write.content.as_deref().expect("observed result");
+    assert!(
+        observed_content.contains("CAPO_RTL13.txt"),
+        "the observed result must carry the applied file change, got: {observed_content}"
+    );
+
+    // It projects into a tool observation distinct from the agent claim.
+    let observation = observed_write
+        .tool_observation()
+        .expect("tool observation for the observed write");
+    assert_eq!(observation.tool_name, "apply_patch");
+    assert_eq!(observation.observed_status, "completed");
+    assert_eq!(observation.instrumentation_level, "observed_only");
+
+    // The in-progress `item.started` file_change maps to a tool_call_started for
+    // the SAME tool call id (so begin/end dedup to one observation).
+    let started = parsed
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == "adapter.tool_call_started"
+                && event.tool_name.as_deref() == Some("apply_patch")
+        })
+        .expect("observed apply_patch tool start from the in-progress file_change item");
+    assert_eq!(started.external_item_ref.as_deref(), Some("item_1"));
 }
 
 #[test]
@@ -360,6 +478,62 @@ fn codex_launch_plan_builds_subscription_safe_runtime_request() {
         Some("Summarize this project state.")
     );
     assert_eq!(plan.artifact_root, artifacts);
+}
+
+#[test]
+fn codex_workspace_write_launch_plan_uses_workspace_write_sandbox_without_ephemeral() {
+    // RTL6: the workspace-write profile can apply edits inside the confined
+    // workspace. It moves Codex off `--sandbox read-only --ephemeral` to
+    // `--sandbox workspace-write` (no `--ephemeral`) while staying
+    // subscription-safe and confined via `--cd`.
+    let workspace = temp_root("codex-write-workspace");
+    let artifacts = temp_root("codex-write-artifacts");
+    let plan = CodexExecAdapter::local_workspace_write_launch_plan(
+        workspace.clone(),
+        artifacts.clone(),
+        "Apply the requested edit.",
+    );
+
+    plan.assert_subscription_safe().unwrap();
+    assert_eq!(plan.provider_kind, "codex_subscription");
+    assert_eq!(plan.credential_scope, "user_local_subscription");
+    let request = plan.runtime_request(RunId::new("run-codex-write"));
+    assert_eq!(request.program, "codex");
+    assert_eq!(request.cwd, workspace);
+    assert!(
+        request
+            .argv
+            .windows(2)
+            .any(|args| args == ["--sandbox", "workspace-write"]),
+        "workspace-write profile must request the workspace-write sandbox"
+    );
+    assert!(
+        request.argv.iter().all(|arg| arg != "--ephemeral"),
+        "workspace-write profile must not be ephemeral so edits persist"
+    );
+    assert!(
+        request.argv.iter().all(|arg| arg != "read-only"),
+        "workspace-write profile must not be read-only"
+    );
+    assert!(
+        request
+            .argv
+            .iter()
+            .any(|arg| arg == "--skip-git-repo-check"),
+        "the RTL6-confined workspace is a fresh non-git dir, so the workspace-write \
+         profile must pass --skip-git-repo-check or `codex exec` refuses to run"
+    );
+    assert!(
+        request
+            .argv
+            .windows(2)
+            .any(|args| args == ["--cd", workspace.to_string_lossy().as_ref()]),
+        "writes stay confined to the workspace via --cd"
+    );
+    assert_eq!(
+        request.argv.last().map(String::as_str),
+        Some("Apply the requested edit.")
+    );
 }
 
 #[test]

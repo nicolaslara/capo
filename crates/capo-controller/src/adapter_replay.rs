@@ -57,25 +57,30 @@ impl FakeBoundaryController {
             event.turn_id = adapter_replay_turn_id(adapter_event, turn_id_override);
             event.item_id = adapter_event.external_item_ref.clone();
             event.payload_json = adapter_event_payload_json(adapter_event);
-            event.idempotency_key = adapter_event
-                .idempotency_key
-                .clone()
-                .or_else(|| Some(format!("adapter-replay:{}:{index}", refs.session_id)));
+            event.idempotency_key = adapter_event.idempotency_key.clone().or_else(|| {
+                Some(adapter_replay_fallback_key(
+                    &refs.session_id,
+                    turn_id_override,
+                    index,
+                    None,
+                ))
+            });
             event.redaction_state = RedactionState::Safe;
             let before = self.state.event_count()?;
             self.state.append_event(event, &[projection])?;
             if self.state.event_count()? > before {
                 appended_event_count += 1;
-                match adapter_event.kind.as_str() {
-                    "adapter.tool_call_requested"
-                    | "adapter.tool_call_started"
-                    | "adapter.tool_call_completed"
-                    | "adapter.tool_call_failed" => tool_event_count += 1,
-                    "adapter.item_completed" | "adapter.item_delta" | "adapter.plan_replaced" => {
-                        summary_event_count += 1
-                    }
-                    "adapter.turn_completed" => completed_turn_count += 1,
-                    _ => {}
+                // Classify the appended event through the SAME taxonomy the
+                // turn-loop outcome uses (NormalizedAdapterEvent::is_*), so the
+                // two classifiers cannot drift.
+                if adapter_event.is_tool_event() {
+                    tool_event_count += 1;
+                } else if adapter_event.is_summary_event() {
+                    summary_event_count += 1;
+                } else if adapter_event.terminal_outcome()
+                    == Some(capo_adapters::AdapterTerminalOutcome::Completed)
+                {
+                    completed_turn_count += 1;
                 }
             }
             if let Some(observation_projection) =
@@ -103,9 +108,11 @@ impl FakeBoundaryController {
                     .as_ref()
                     .map(|key| format!("{key}:tool-observation"))
                     .or_else(|| {
-                        Some(format!(
-                            "adapter-replay:{}:{index}:tool-observation",
-                            refs.session_id
+                        Some(adapter_replay_fallback_key(
+                            &refs.session_id,
+                            turn_id_override,
+                            index,
+                            Some("tool-observation"),
                         ))
                     });
                 observation_event.redaction_state = RedactionState::Safe;
@@ -132,7 +139,7 @@ impl FakeBoundaryController {
         refs: &FakeRunRefs,
         turn: &ScriptedMockTurn,
     ) -> StateResult<AdapterReplayReport> {
-        let adapter = AgentAdapter::scripted_mock(
+        let adapter = AgentAdapterHandle::scripted_mock(
             ScriptedMockAgent::new(refs.external_session_ref.clone()).with_turn(turn.clone()),
         );
         let events = adapter
@@ -146,7 +153,7 @@ impl FakeBoundaryController {
         refs: &FakeRunRefs,
         turn: &ScriptedMockTurn,
     ) -> StateResult<AdapterReplayReport> {
-        let adapter = AgentAdapter::scripted_mock(
+        let adapter = AgentAdapterHandle::scripted_mock(
             ScriptedMockAgent::acp_shaped(refs.external_session_ref.clone())
                 .with_turn(turn.clone()),
         );
@@ -192,6 +199,7 @@ impl FakeBoundaryController {
                             capo_adapters::AdapterTimelineConfidence::None => 40,
                         }),
                         latest_blocker: None,
+                        external_session_ref: session.external_session_ref.clone(),
                         updated_sequence: 0,
                     }),
                 )))
@@ -241,6 +249,11 @@ impl FakeBoundaryController {
                         output_artifact_id: adapter_event.content.as_ref().map(|_| {
                             format!("artifact-adapter-output-{}", adapter_event.raw_event_hash)
                         }),
+                        // ACI7: adapter-native tool provenance/timing is the
+                        // adapter dedup's concern (ACI9); the locally-dispatched
+                        // path is what carries the queryable permission/grant/timing
+                        // chain, so this defaults cleanly.
+                        provenance: capo_state::ToolCallProvenance::default(),
                         updated_sequence: 0,
                     }),
                 )))
@@ -248,10 +261,20 @@ impl FakeBoundaryController {
             "adapter.turn_completed" => Ok(Some((
                 EventKind::EvidenceRecorded,
                 ProjectionRecord::Evidence(capo_state::EvidenceProjection {
+                    // GA6 (GO13): the evidence row id is keyed PER TURN, not just by
+                    // `(adapter_kind, session_id)`. A session takes many provider
+                    // turns; keying only by session collapses every turn's
+                    // `adapter.turn_completed` evidence onto ONE row, so the
+                    // `ON CONFLICT(evidence_id) DO UPDATE` of the next turn destroys
+                    // the prior turn's observed evidence -- exactly the overwrite the
+                    // auditor and historical report must not suffer (the observed
+                    // `stdout.txt`-reuse pattern). Per-turn keying keeps each turn's
+                    // evidence recoverable after restart/rebuild.
                     evidence_id: EvidenceId::new(format!(
-                        "evidence-adapter-replay-{}-{}",
+                        "evidence-adapter-replay-{}-{}-{}",
                         adapter_event.adapter_kind.as_str(),
-                        refs.session_id
+                        refs.session_id,
+                        adapter_replay_evidence_discriminator(adapter_event, turn_id_override),
                     )),
                     project_id: self.project_id.clone(),
                     task_id: Some(refs.task_id.clone()),
@@ -288,6 +311,7 @@ impl FakeBoundaryController {
                             .map(|content| stable_hash(content.as_bytes()))
                             .unwrap_or_else(|| adapter_event.raw_event_hash.clone())
                     )),
+                    external_session_ref: session.external_session_ref.clone(),
                     updated_sequence: 0,
                 }),
             ))),
@@ -330,6 +354,7 @@ impl FakeBoundaryController {
                                 stable_hash(content.as_bytes())
                             )
                         }),
+                        external_session_ref: session.external_session_ref.clone(),
                         updated_sequence: 0,
                     }),
                 )))
@@ -420,6 +445,59 @@ fn adapter_tool_call_id(adapter_event: &NormalizedAdapterEvent) -> ToolCallId {
                 .unwrap_or(&adapter_event.raw_event_hash)
         )
     ))
+}
+
+/// The fallback idempotency key for an adapter-replay event that carries no
+/// provider-supplied key.
+///
+/// RTL8/RTL12: when a turn id is supplied (the loop drives a turn explicitly),
+/// the key is scoped by `(session, turn, index)` so DISTINCT turns in the same
+/// session/run no longer collide -- a second turn's terminal/summary/tool events
+/// would otherwise dedup against the first turn's at the same batch index and be
+/// silently dropped. Re-running the SAME turn keeps the same key, so per-turn
+/// replay stays idempotent. With no turn id (a single logical replay) the key
+/// stays `(session, index)`, preserving the prior single-turn behavior.
+fn adapter_replay_fallback_key(
+    session_id: &SessionId,
+    turn_id_override: Option<&str>,
+    index: usize,
+    suffix: Option<&str>,
+) -> String {
+    let mut key = match turn_id_override {
+        Some(turn) => format!("adapter-replay:{session_id}:{turn}:{index}"),
+        None => format!("adapter-replay:{session_id}:{index}"),
+    };
+    if let Some(suffix) = suffix {
+        key.push(':');
+        key.push_str(suffix);
+    }
+    key
+}
+
+/// GA6 (GO13): the per-turn discriminator for an `adapter.turn_completed` evidence
+/// row id, so successive provider turns in the same session DO NOT overwrite each
+/// other's observed evidence.
+///
+/// It mirrors [`adapter_replay_turn_id`] / [`adapter_event_identity`]: when the loop
+/// drives a turn explicitly the turn id is the stable key (so re-replaying the SAME
+/// turn stays idempotent on one row); otherwise the event's own timeline/item key
+/// (falling back to its raw-event hash) discriminates one turn from the next. The
+/// result is slugged so it is a safe, stable id fragment.
+fn adapter_replay_evidence_discriminator(
+    adapter_event: &NormalizedAdapterEvent,
+    turn_id_override: Option<&str>,
+) -> String {
+    let raw = turn_id_override
+        .map(ToString::to_string)
+        .or_else(|| adapter_event.timeline_key.clone())
+        .or_else(|| adapter_event.external_item_ref.clone())
+        .unwrap_or_else(|| adapter_event.raw_event_hash.clone());
+    let discriminator = slug(&raw);
+    if discriminator.is_empty() {
+        adapter_event.raw_event_hash.clone()
+    } else {
+        discriminator
+    }
 }
 
 fn adapter_replay_turn_id(
