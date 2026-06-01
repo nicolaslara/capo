@@ -10,11 +10,14 @@ use super::{
     },
 };
 use crate::{
-    AdapterReplaySummary, AgentSummary, DispatchGateSummary, DispatchPlanSummary,
-    DispatchRunSummary, DispatchTurnSummary, LiveProviderPreflightSummary, RecoverySummary,
-    ServerClientOrigin, ServerCommand, ServerEvent, ServerResponse, ServerResponsePayload,
-    ServerThread, ServerThreadItem, ServerThreadTurn, SessionSummary, SubscriptionBacklog,
-    TaskRunSummary, TurnFinishedSummary,
+    AdapterReplaySummary, AgentSummary, DelegatedProviderGoalView, DispatchGateSummary,
+    DispatchPlanSummary, DispatchRunSummary, DispatchTurnSummary, GoalContinuationView,
+    GoalReportFormat, GoalReportListing, GoalReportRecord, GoalReportRendering, GoalReportView,
+    GoalRequirementSpec, GoalRequirementView, GoalSpec, GoalStatusSummary, GoalTimelineEntry,
+    GoalTimelineView, GoalView, LiveProviderPreflightSummary, RecoverySummary,
+    RequirementStatusRecord, ServerClientOrigin, ServerCommand, ServerEvent, ServerResponse,
+    ServerResponsePayload, ServerThread, ServerThreadItem, ServerThreadTurn, SessionSummary,
+    SubscriptionBacklog, TaskRunSummary, TurnFinishedSummary,
 };
 
 pub(super) fn encode_origin(origin: &ServerClientOrigin) -> Value {
@@ -303,6 +306,87 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             "session_id": session_id,
             "from_sequence": from_sequence,
         }),
+        ServerCommand::SetGoal { spec } => json!({
+            "type": "set_goal",
+            "spec": encode_goal_spec(spec),
+        }),
+        ServerCommand::PauseGoal { goal_id } => json!({
+            "type": "pause_goal",
+            "goal_id": goal_id,
+        }),
+        ServerCommand::ResumeGoal { goal_id } => json!({
+            "type": "resume_goal",
+            "goal_id": goal_id,
+        }),
+        ServerCommand::BlockGoal { goal_id, reason } => json!({
+            "type": "block_goal",
+            "goal_id": goal_id,
+            "reason": reason,
+        }),
+        ServerCommand::ClearGoal { goal_id, reason } => json!({
+            "type": "clear_goal",
+            "goal_id": goal_id,
+            "reason": reason,
+        }),
+        ServerCommand::SetRequirementStatus { record } => json!({
+            "type": "set_requirement_status",
+            "requirement_id": record.requirement_id,
+            "goal_id": record.goal_id,
+            "summary": record.summary,
+            "status": record.status,
+            "source": record.source,
+        }),
+        ServerCommand::RecordGoalReport { report } => json!({
+            "type": "record_goal_report",
+            "goal_report_id": report.goal_report_id,
+            "goal_id": report.goal_id,
+            "session_id": report.session_id,
+            "requirement_id": report.requirement_id,
+            "report_kind": report.report_kind,
+            "source": report.source,
+            "confidence": report.confidence,
+            "summary": report.summary,
+            "body_artifact_id": report.body_artifact_id,
+            "evidence_id": report.evidence_id,
+        }),
+        ServerCommand::MarkGoalComplete { goal_id } => json!({
+            "type": "mark_goal_complete",
+            "goal_id": goal_id,
+        }),
+        ServerCommand::ListGoals => json!({ "type": "list_goals" }),
+        ServerCommand::ViewGoal { goal_id } => json!({
+            "type": "view_goal",
+            "goal_id": goal_id,
+        }),
+        ServerCommand::GoalStory { goal_id } => json!({
+            "type": "goal_story",
+            "goal_id": goal_id,
+        }),
+        ServerCommand::GoalTimeline { goal_id } => json!({
+            "type": "goal_timeline",
+            "goal_id": goal_id,
+        }),
+        ServerCommand::GoalEvidence { goal_id } => json!({
+            "type": "goal_evidence",
+            "goal_id": goal_id,
+        }),
+        ServerCommand::GoalValidations { goal_id } => json!({
+            "type": "goal_validations",
+            "goal_id": goal_id,
+        }),
+        ServerCommand::GoalReviews { goal_id } => json!({
+            "type": "goal_reviews",
+            "goal_id": goal_id,
+        }),
+        ServerCommand::GoalRisks { goal_id } => json!({
+            "type": "goal_risks",
+            "goal_id": goal_id,
+        }),
+        ServerCommand::GoalReport { goal_id, format } => json!({
+            "type": "goal_report",
+            "goal_id": goal_id,
+            "format": format.as_str(),
+        }),
     }
 }
 
@@ -440,6 +524,75 @@ pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
         "read_thread" => Ok(ServerCommand::ReadThread {
             session_id: required_string(value, "session_id")?,
             from_sequence: required_i64(value, "from_sequence")?,
+        }),
+        "set_goal" => Ok(ServerCommand::SetGoal {
+            spec: decode_goal_spec(required_value(value, "spec")?)?,
+        }),
+        "pause_goal" => Ok(ServerCommand::PauseGoal {
+            goal_id: required_string(value, "goal_id")?,
+        }),
+        "resume_goal" => Ok(ServerCommand::ResumeGoal {
+            goal_id: required_string(value, "goal_id")?,
+        }),
+        "block_goal" => Ok(ServerCommand::BlockGoal {
+            goal_id: required_string(value, "goal_id")?,
+            reason: required_string(value, "reason")?,
+        }),
+        "clear_goal" => Ok(ServerCommand::ClearGoal {
+            goal_id: required_string(value, "goal_id")?,
+            reason: required_string(value, "reason")?,
+        }),
+        "set_requirement_status" => Ok(ServerCommand::SetRequirementStatus {
+            record: RequirementStatusRecord {
+                requirement_id: required_string(value, "requirement_id")?,
+                goal_id: required_string(value, "goal_id")?,
+                summary: required_string(value, "summary")?,
+                status: required_string(value, "status")?,
+                source: required_string(value, "source")?,
+            },
+        }),
+        "record_goal_report" => Ok(ServerCommand::RecordGoalReport {
+            report: GoalReportRecord {
+                goal_report_id: required_string(value, "goal_report_id")?,
+                goal_id: required_string(value, "goal_id")?,
+                session_id: optional_string(value, "session_id")?,
+                requirement_id: optional_string(value, "requirement_id")?,
+                report_kind: required_string(value, "report_kind")?,
+                source: required_string(value, "source")?,
+                confidence: optional_i64(value, "confidence")?,
+                summary: required_string(value, "summary")?,
+                body_artifact_id: optional_string(value, "body_artifact_id")?,
+                evidence_id: optional_string(value, "evidence_id")?,
+            },
+        }),
+        "mark_goal_complete" => Ok(ServerCommand::MarkGoalComplete {
+            goal_id: required_string(value, "goal_id")?,
+        }),
+        "list_goals" => Ok(ServerCommand::ListGoals),
+        "view_goal" => Ok(ServerCommand::ViewGoal {
+            goal_id: required_string(value, "goal_id")?,
+        }),
+        "goal_story" => Ok(ServerCommand::GoalStory {
+            goal_id: required_string(value, "goal_id")?,
+        }),
+        "goal_timeline" => Ok(ServerCommand::GoalTimeline {
+            goal_id: required_string(value, "goal_id")?,
+        }),
+        "goal_evidence" => Ok(ServerCommand::GoalEvidence {
+            goal_id: required_string(value, "goal_id")?,
+        }),
+        "goal_validations" => Ok(ServerCommand::GoalValidations {
+            goal_id: required_string(value, "goal_id")?,
+        }),
+        "goal_reviews" => Ok(ServerCommand::GoalReviews {
+            goal_id: required_string(value, "goal_id")?,
+        }),
+        "goal_risks" => Ok(ServerCommand::GoalRisks {
+            goal_id: required_string(value, "goal_id")?,
+        }),
+        "goal_report" => Ok(ServerCommand::GoalReport {
+            goal_id: required_string(value, "goal_id")?,
+            format: decode_goal_report_format(&required_string(value, "format")?)?,
         }),
         other => Err(TransportError::Protocol(format!(
             "unknown command type: {other}"
@@ -579,6 +732,39 @@ pub(super) fn encode_payload(payload: &ServerResponsePayload) -> Value {
             "from_sequence": thread.from_sequence,
             "next_sequence": thread.next_sequence,
             "turns": thread.turns.iter().map(encode_thread_turn).collect::<Vec<_>>(),
+        }),
+        ServerResponsePayload::Goals(goals) => json!({
+            "type": "goals",
+            "goals": goals.iter().map(encode_goal_summary).collect::<Vec<_>>(),
+        }),
+        ServerResponsePayload::GoalView(view) => json!({
+            "type": "goal_view",
+            "view": encode_goal_view(view),
+        }),
+        ServerResponsePayload::GoalReports(listing) => json!({
+            "type": "goal_reports",
+            "goal_id": listing.goal_id,
+            "surface": listing.surface,
+            "blocker_reason": listing.blocker_reason,
+            "reports": listing.reports.iter().map(encode_goal_report_view).collect::<Vec<_>>(),
+        }),
+        ServerResponsePayload::GoalTimeline(timeline) => json!({
+            "type": "goal_timeline",
+            "goal_id": timeline.goal_id,
+            "entries": timeline.entries.iter().map(|entry| json!({
+                "sequence": entry.sequence,
+                "event_id": entry.event_id,
+                "kind": entry.kind,
+                "actor": entry.actor,
+                "redaction_state": entry.redaction_state,
+            })).collect::<Vec<_>>(),
+        }),
+        ServerResponsePayload::GoalReport(rendering) => json!({
+            "type": "goal_report",
+            "goal_id": rendering.goal_id,
+            "format": rendering.format,
+            "body": rendering.body,
+            "degraded": rendering.degraded,
         }),
     }
 }
@@ -869,10 +1055,313 @@ pub(super) fn decode_payload(value: &Value) -> TransportResult<ServerResponsePay
                 .map(decode_thread_turn)
                 .collect::<TransportResult<Vec<_>>>()?,
         })),
+        "goals" => Ok(ServerResponsePayload::Goals(
+            required_value(value, "goals")?
+                .as_array()
+                .ok_or_else(|| TransportError::Protocol("goals must be an array".to_string()))?
+                .iter()
+                .map(decode_goal_summary)
+                .collect::<TransportResult<Vec<_>>>()?,
+        )),
+        "goal_view" => Ok(ServerResponsePayload::GoalView(Box::new(decode_goal_view(
+            required_value(value, "view")?,
+        )?))),
+        "goal_reports" => Ok(ServerResponsePayload::GoalReports(GoalReportListing {
+            goal_id: required_string(value, "goal_id")?,
+            surface: required_string(value, "surface")?,
+            blocker_reason: required_string(value, "blocker_reason")?,
+            reports: required_value(value, "reports")?
+                .as_array()
+                .ok_or_else(|| TransportError::Protocol("reports must be an array".to_string()))?
+                .iter()
+                .map(decode_goal_report_view)
+                .collect::<TransportResult<Vec<_>>>()?,
+        })),
+        "goal_timeline" => Ok(ServerResponsePayload::GoalTimeline(GoalTimelineView {
+            goal_id: required_string(value, "goal_id")?,
+            entries: required_value(value, "entries")?
+                .as_array()
+                .ok_or_else(|| TransportError::Protocol("entries must be an array".to_string()))?
+                .iter()
+                .map(|entry| {
+                    Ok(GoalTimelineEntry {
+                        sequence: required_i64(entry, "sequence")?,
+                        event_id: required_string(entry, "event_id")?,
+                        kind: required_string(entry, "kind")?,
+                        actor: required_string(entry, "actor")?,
+                        redaction_state: required_string(entry, "redaction_state")?,
+                    })
+                })
+                .collect::<TransportResult<Vec<_>>>()?,
+        })),
+        "goal_report" => Ok(ServerResponsePayload::GoalReport(GoalReportRendering {
+            goal_id: required_string(value, "goal_id")?,
+            format: required_string(value, "format")?,
+            body: required_string(value, "body")?,
+            degraded: required_bool(value, "degraded")?,
+        })),
         other => Err(TransportError::Protocol(format!(
             "unknown payload type: {other}"
         ))),
     }
+}
+
+/// GA2: encode the structured [`GoalSpec`] a `SetGoal` carries. Every structured
+/// field is preserved verbatim so the round-trip reproduces the spec exactly --
+/// the goal is durable, rebuildable state, not transcript text.
+fn encode_goal_spec(spec: &GoalSpec) -> Value {
+    json!({
+        "goal_id": spec.goal_id,
+        "objective": spec.objective,
+        "task_id": spec.task_id,
+        "agent_id": spec.agent_id,
+        "session_id": spec.session_id,
+        "parent_goal_id": spec.parent_goal_id,
+        "attempt_run_id": spec.attempt_run_id,
+        "requirements": spec.requirements.iter().map(|requirement| json!({
+            "requirement_id": requirement.requirement_id,
+            "summary": requirement.summary,
+        })).collect::<Vec<_>>(),
+        "success_criteria_json": spec.success_criteria_json,
+        "constraints_json": spec.constraints_json,
+        "verification_surface_json": spec.verification_surface_json,
+        "budget_json": spec.budget_json,
+        "stop_conditions_json": spec.stop_conditions_json,
+    })
+}
+
+/// GA2: decode a [`GoalSpec`]; the inverse of [`encode_goal_spec`].
+fn decode_goal_spec(value: &Value) -> TransportResult<GoalSpec> {
+    Ok(GoalSpec {
+        goal_id: required_string(value, "goal_id")?,
+        objective: required_string(value, "objective")?,
+        task_id: optional_string(value, "task_id")?,
+        agent_id: optional_string(value, "agent_id")?,
+        session_id: optional_string(value, "session_id")?,
+        parent_goal_id: optional_string(value, "parent_goal_id")?,
+        attempt_run_id: optional_string(value, "attempt_run_id")?,
+        requirements: required_value(value, "requirements")?
+            .as_array()
+            .ok_or_else(|| TransportError::Protocol("requirements must be an array".to_string()))?
+            .iter()
+            .map(|requirement| {
+                Ok(GoalRequirementSpec {
+                    requirement_id: required_string(requirement, "requirement_id")?,
+                    summary: required_string(requirement, "summary")?,
+                })
+            })
+            .collect::<TransportResult<Vec<_>>>()?,
+        success_criteria_json: required_string(value, "success_criteria_json")?,
+        constraints_json: required_string(value, "constraints_json")?,
+        verification_surface_json: required_string(value, "verification_surface_json")?,
+        budget_json: required_string(value, "budget_json")?,
+        stop_conditions_json: required_string(value, "stop_conditions_json")?,
+    })
+}
+
+/// GA2: decode the historical-report [`GoalReportFormat`] from its wire string.
+fn decode_goal_report_format(value: &str) -> TransportResult<GoalReportFormat> {
+    match value {
+        "markdown" => Ok(GoalReportFormat::Markdown),
+        "json" => Ok(GoalReportFormat::Json),
+        other => Err(TransportError::Protocol(format!(
+            "unknown goal report format: {other}"
+        ))),
+    }
+}
+
+/// GA2: encode a concise [`GoalStatusSummary`] for the `goals` listing.
+fn encode_goal_summary(summary: &GoalStatusSummary) -> Value {
+    json!({
+        "goal_id": summary.goal_id,
+        "objective": summary.objective,
+        "status": summary.status,
+        "parent_goal_id": summary.parent_goal_id,
+        "attempt_run_id": summary.attempt_run_id,
+        "requirement_count": summary.requirement_count,
+        "requirements_supported": summary.requirements_supported,
+        "blocked_requirement_count": summary.blocked_requirement_count,
+        "contradicted_requirement_count": summary.contradicted_requirement_count,
+        "report_count": summary.report_count,
+        "blocker_reason": summary.blocker_reason,
+        "updated_sequence": summary.updated_sequence,
+    })
+}
+
+/// GA2: decode a [`GoalStatusSummary`]; the inverse of [`encode_goal_summary`].
+fn decode_goal_summary(value: &Value) -> TransportResult<GoalStatusSummary> {
+    Ok(GoalStatusSummary {
+        goal_id: required_string(value, "goal_id")?,
+        objective: required_string(value, "objective")?,
+        status: required_string(value, "status")?,
+        parent_goal_id: optional_string(value, "parent_goal_id")?,
+        attempt_run_id: optional_string(value, "attempt_run_id")?,
+        requirement_count: required_usize(value, "requirement_count")?,
+        requirements_supported: required_usize(value, "requirements_supported")?,
+        blocked_requirement_count: required_usize(value, "blocked_requirement_count")?,
+        contradicted_requirement_count: required_usize(value, "contradicted_requirement_count")?,
+        report_count: required_usize(value, "report_count")?,
+        blocker_reason: required_string(value, "blocker_reason")?,
+        updated_sequence: required_i64(value, "updated_sequence")?,
+    })
+}
+
+/// GA2: encode one requirement-ledger row for the goal view.
+fn encode_goal_requirement_view(requirement: &GoalRequirementView) -> Value {
+    json!({
+        "requirement_id": requirement.requirement_id,
+        "summary": requirement.summary,
+        "status": requirement.status,
+        "last_status_source": requirement.last_status_source,
+        "observed": requirement.observed,
+    })
+}
+
+/// GA2: decode one requirement-ledger row for the goal view.
+fn decode_goal_requirement_view(value: &Value) -> TransportResult<GoalRequirementView> {
+    Ok(GoalRequirementView {
+        requirement_id: required_string(value, "requirement_id")?,
+        summary: required_string(value, "summary")?,
+        status: required_string(value, "status")?,
+        last_status_source: required_string(value, "last_status_source")?,
+        observed: required_bool(value, "observed")?,
+    })
+}
+
+/// GA2: encode one report/evidence/review/validation row. Observed-vs-reported is
+/// carried on the wire so a client never reconstructs it from prose.
+fn encode_goal_report_view(report: &GoalReportView) -> Value {
+    json!({
+        "goal_report_id": report.goal_report_id,
+        "requirement_id": report.requirement_id,
+        "report_kind": report.report_kind,
+        "source": report.source,
+        "observed": report.observed,
+        "confidence": report.confidence,
+        "summary": report.summary,
+        "body_artifact_id": report.body_artifact_id,
+        "evidence_id": report.evidence_id,
+    })
+}
+
+/// GA2: decode one report row; the inverse of [`encode_goal_report_view`].
+fn decode_goal_report_view(value: &Value) -> TransportResult<GoalReportView> {
+    Ok(GoalReportView {
+        goal_report_id: required_string(value, "goal_report_id")?,
+        requirement_id: optional_string(value, "requirement_id")?,
+        report_kind: required_string(value, "report_kind")?,
+        source: required_string(value, "source")?,
+        observed: required_bool(value, "observed")?,
+        confidence: optional_i64(value, "confidence")?,
+        summary: required_string(value, "summary")?,
+        body_artifact_id: optional_string(value, "body_artifact_id")?,
+        evidence_id: optional_string(value, "evidence_id")?,
+    })
+}
+
+/// GA2: encode one continuation-decision row for the goal view.
+fn encode_goal_continuation_view(continuation: &GoalContinuationView) -> Value {
+    json!({
+        "continuation_id": continuation.continuation_id,
+        "decision": continuation.decision,
+        "reason": continuation.reason,
+        "attempt_run_id": continuation.attempt_run_id,
+    })
+}
+
+/// GA2: decode one continuation-decision row for the goal view.
+fn decode_goal_continuation_view(value: &Value) -> TransportResult<GoalContinuationView> {
+    Ok(GoalContinuationView {
+        continuation_id: required_string(value, "continuation_id")?,
+        decision: required_string(value, "decision")?,
+        reason: required_string(value, "reason")?,
+        attempt_run_id: optional_string(value, "attempt_run_id")?,
+    })
+}
+
+/// GA2: encode one delegated-provider goal row (observed, never authoritative).
+fn encode_delegated_provider_goal_view(delegated: &DelegatedProviderGoalView) -> Value {
+    json!({
+        "delegated_goal_id": delegated.delegated_goal_id,
+        "provider_kind": delegated.provider_kind,
+        "provider_goal_ref": delegated.provider_goal_ref,
+        "provider_state": delegated.provider_state,
+        "source": delegated.source,
+    })
+}
+
+/// GA2: decode one delegated-provider goal row.
+fn decode_delegated_provider_goal_view(
+    value: &Value,
+) -> TransportResult<DelegatedProviderGoalView> {
+    Ok(DelegatedProviderGoalView {
+        delegated_goal_id: required_string(value, "delegated_goal_id")?,
+        provider_kind: required_string(value, "provider_kind")?,
+        provider_goal_ref: optional_string(value, "provider_goal_ref")?,
+        provider_state: required_string(value, "provider_state")?,
+        source: required_string(value, "source")?,
+    })
+}
+
+/// GA2: encode a full [`GoalView`], assembled from the goal, requirement-ledger,
+/// story, continuation, and delegated-provider projections.
+fn encode_goal_view(view: &GoalView) -> Value {
+    json!({
+        "summary": encode_goal_summary(&view.summary),
+        "success_criteria_json": view.success_criteria_json,
+        "constraints_json": view.constraints_json,
+        "verification_surface_json": view.verification_surface_json,
+        "budget_json": view.budget_json,
+        "stop_conditions_json": view.stop_conditions_json,
+        "task_id": view.task_id,
+        "agent_id": view.agent_id,
+        "session_id": view.session_id,
+        "requirements": view.requirements.iter().map(encode_goal_requirement_view).collect::<Vec<_>>(),
+        "reports": view.reports.iter().map(encode_goal_report_view).collect::<Vec<_>>(),
+        "continuations": view.continuations.iter().map(encode_goal_continuation_view).collect::<Vec<_>>(),
+        "delegated_provider_goals": view.delegated_provider_goals.iter().map(encode_delegated_provider_goal_view).collect::<Vec<_>>(),
+    })
+}
+
+/// GA2: decode a full [`GoalView`]; the inverse of [`encode_goal_view`].
+fn decode_goal_view(value: &Value) -> TransportResult<GoalView> {
+    Ok(GoalView {
+        summary: decode_goal_summary(required_value(value, "summary")?)?,
+        success_criteria_json: required_string(value, "success_criteria_json")?,
+        constraints_json: required_string(value, "constraints_json")?,
+        verification_surface_json: required_string(value, "verification_surface_json")?,
+        budget_json: required_string(value, "budget_json")?,
+        stop_conditions_json: required_string(value, "stop_conditions_json")?,
+        task_id: optional_string(value, "task_id")?,
+        agent_id: optional_string(value, "agent_id")?,
+        session_id: optional_string(value, "session_id")?,
+        requirements: required_value(value, "requirements")?
+            .as_array()
+            .ok_or_else(|| TransportError::Protocol("requirements must be an array".to_string()))?
+            .iter()
+            .map(decode_goal_requirement_view)
+            .collect::<TransportResult<Vec<_>>>()?,
+        reports: required_value(value, "reports")?
+            .as_array()
+            .ok_or_else(|| TransportError::Protocol("reports must be an array".to_string()))?
+            .iter()
+            .map(decode_goal_report_view)
+            .collect::<TransportResult<Vec<_>>>()?,
+        continuations: required_value(value, "continuations")?
+            .as_array()
+            .ok_or_else(|| TransportError::Protocol("continuations must be an array".to_string()))?
+            .iter()
+            .map(decode_goal_continuation_view)
+            .collect::<TransportResult<Vec<_>>>()?,
+        delegated_provider_goals: required_value(value, "delegated_provider_goals")?
+            .as_array()
+            .ok_or_else(|| {
+                TransportError::Protocol("delegated_provider_goals must be an array".to_string())
+            })?
+            .iter()
+            .map(decode_delegated_provider_goal_view)
+            .collect::<TransportResult<Vec<_>>>()?,
+    })
 }
 
 fn encode_agent(agent: &AgentSummary) -> Value {

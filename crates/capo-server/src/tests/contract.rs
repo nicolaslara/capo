@@ -249,6 +249,23 @@ fn schema_enumerations_cover_every_wire_variant() {
             ServerCommand::Recover => "recover",
             ServerCommand::Subscribe { .. } => "subscribe",
             ServerCommand::ReadThread { .. } => "read_thread",
+            ServerCommand::SetGoal { .. } => "set_goal",
+            ServerCommand::PauseGoal { .. } => "pause_goal",
+            ServerCommand::ResumeGoal { .. } => "resume_goal",
+            ServerCommand::BlockGoal { .. } => "block_goal",
+            ServerCommand::ClearGoal { .. } => "clear_goal",
+            ServerCommand::SetRequirementStatus { .. } => "set_requirement_status",
+            ServerCommand::RecordGoalReport { .. } => "record_goal_report",
+            ServerCommand::MarkGoalComplete { .. } => "mark_goal_complete",
+            ServerCommand::ListGoals => "list_goals",
+            ServerCommand::ViewGoal { .. } => "view_goal",
+            ServerCommand::GoalStory { .. } => "goal_story",
+            ServerCommand::GoalTimeline { .. } => "goal_timeline",
+            ServerCommand::GoalEvidence { .. } => "goal_evidence",
+            ServerCommand::GoalValidations { .. } => "goal_validations",
+            ServerCommand::GoalReviews { .. } => "goal_reviews",
+            ServerCommand::GoalRisks { .. } => "goal_risks",
+            ServerCommand::GoalReport { .. } => "goal_report",
         }
     }
 
@@ -269,6 +286,11 @@ fn schema_enumerations_cover_every_wire_variant() {
             ServerResponsePayload::Recovery(_) => "recovery",
             ServerResponsePayload::Subscribed(_) => "subscribed",
             ServerResponsePayload::Thread(_) => "thread",
+            ServerResponsePayload::Goals(_) => "goals",
+            ServerResponsePayload::GoalView(_) => "goal_view",
+            ServerResponsePayload::GoalReports(_) => "goal_reports",
+            ServerResponsePayload::GoalTimeline(_) => "goal_timeline",
+            ServerResponsePayload::GoalReport(_) => "goal_report",
         }
     }
 
@@ -289,6 +311,12 @@ fn schema_enumerations_cover_every_wire_variant() {
             ServerError::RunSessionMismatch { .. } => "run_session_mismatch",
             ServerError::AdapterSessionMismatch { .. } => "adapter_session_mismatch",
             ServerError::UnsupportedChatAdapter { .. } => "unsupported_chat_adapter",
+            ServerError::UnknownGoal { .. } => "unknown_goal",
+            ServerError::GoalCompleteNotALifecycleCommand { .. } => {
+                "goal_complete_not_a_lifecycle_command"
+            }
+            ServerError::IllegalGoalStatusTransition { .. } => "illegal_goal_status_transition",
+            ServerError::UnclassifiableReportSource { .. } => "unclassifiable_report_source",
         }
     }
 
@@ -760,5 +788,13 @@ fn sample_errors() -> Vec<ServerError> {
             session_adapter: s(),
             requested_adapter: s(),
         },
+        ServerError::UnsupportedChatAdapter { adapter: s() },
+        ServerError::UnknownGoal { goal_id: s() },
+        ServerError::GoalCompleteNotALifecycleCommand { goal_id: s() },
+        ServerError::IllegalGoalStatusTransition {
+            goal_id: s(),
+            requested_status: s(),
+        },
+        ServerError::UnclassifiableReportSource { source: s() },
     ]
 }

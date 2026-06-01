@@ -23,6 +23,7 @@ mod dispatch;
 mod e2e_gate;
 mod event_tail;
 mod foundation;
+mod goal;
 mod live_provider;
 mod live_smoke;
 mod multi_turn_edit;

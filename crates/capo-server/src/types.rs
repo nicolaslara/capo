@@ -51,6 +51,32 @@ pub enum ServerError {
     UnsupportedChatAdapter {
         adapter: String,
     },
+    /// GA2: a goal lifecycle mutation referenced a goal that does not exist.
+    UnknownGoal {
+        goal_id: String,
+    },
+    /// GA2 (goal-orchestration GO9): a request tried to drive a goal to a Capo
+    /// goal-complete transition through an ordinary lifecycle command. Completion
+    /// is reachable ONLY through the GA5 evidence-gated auditor; an agent claim or
+    /// a direct "mark complete" is recorded as evidence and never flips goal
+    /// state. Rejected by construction so completion is never reachable by
+    /// assertion alone.
+    GoalCompleteNotALifecycleCommand {
+        goal_id: String,
+    },
+    /// GA2: a goal lifecycle mutation requested a status the lifecycle surface
+    /// does not own (e.g. `complete`, or an unrecognized status). The lifecycle
+    /// statuses are `active` / `paused` / `blocked` / `cleared` only.
+    IllegalGoalStatusTransition {
+        goal_id: String,
+        requested_status: String,
+    },
+    /// GA2: a goal report/evidence/review/validation record carried a `source`
+    /// tag that is neither an agent claim nor a recognized observed-evidence
+    /// source, so it could not be classified observed-vs-reported.
+    UnclassifiableReportSource {
+        source: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -284,6 +310,190 @@ pub enum ServerCommand {
         session_id: String,
         from_sequence: i64,
     },
+    // GA2 (goal-orchestration GO4/GO6): the typed goal lifecycle mutations. Every
+    // goal mutation flows through this server/controller boundary -- the CLI and
+    // any other client are read-only over goals and never own goal state. None of
+    // these can transition a goal to `complete`: completion is the GA5 auditor's
+    // verdict (see [`ServerCommand::MarkGoalComplete`], which is rejected).
+    /// Create or set a goal (GO6). Links the goal to its project, task, agent,
+    /// session, and parent goal, seeds its requirements, and stores the
+    /// structured success criteria, constraints, verification surface, budget,
+    /// and stop conditions. Idempotent on `goal_id`: re-issuing updates in place.
+    SetGoal {
+        spec: GoalSpec,
+    },
+    /// Pause an active goal (GO4): it stops being eligible for continuation until
+    /// resumed. Does not clear requirements or evidence.
+    PauseGoal {
+        goal_id: String,
+    },
+    /// Resume a paused or blocked goal (GO4) back to `active`.
+    ResumeGoal {
+        goal_id: String,
+    },
+    /// Mark a goal blocked with a reason (GO4). The reason is stored as
+    /// current-blocker state on the goal projection.
+    BlockGoal {
+        goal_id: String,
+        reason: String,
+    },
+    /// Clear / cancel a goal (GO4): a terminal-but-not-complete lifecycle state.
+    ClearGoal {
+        goal_id: String,
+        reason: String,
+    },
+    /// Record a per-requirement status transition (GO3). GA2 RECORDS the
+    /// transition; the GA5 auditor owns deciding which transition observed
+    /// evidence warrants. A `validated`/`reviewed` status backed only by an
+    /// `agent_reported` source is rejected here (the read model must never show a
+    /// requirement validated by a claim alone).
+    SetRequirementStatus {
+        record: RequirementStatusRecord,
+    },
+    /// Record a report / evidence / review / validation event against a goal
+    /// (GO4), source-tagged `agent_reported` (a claim) vs an observed source
+    /// (`runtime_output` / `adapter_event`). This is the spine behind the story,
+    /// evidence, review, validation, and risk read surfaces. The raw body is kept
+    /// in an artifact, not as authoritative read-model truth.
+    RecordGoalReport {
+        report: GoalReportRecord,
+    },
+    /// GA2 (goal-orchestration GO9): the ONLY "complete this goal" request the
+    /// server accepts is this one, and it is REJECTED by construction. Goal
+    /// completion is reachable only through the GA5 evidence-gated auditor; this
+    /// command exists so the rejection is an explicit, tested contract rather than
+    /// a silent absence.
+    MarkGoalComplete {
+        goal_id: String,
+    },
+    /// List the project's goals with a concise status summary (GO4/GO5).
+    ListGoals,
+    /// View one goal in full (GO4): lifecycle, requirements, story, continuation
+    /// decisions, and observed delegated-provider state.
+    ViewGoal {
+        goal_id: String,
+    },
+    /// The agent story / report ledger for a goal (GO3/GO5), oldest first.
+    GoalStory {
+        goal_id: String,
+    },
+    /// The event timeline for a goal (GO5/GO10): the goal's own events plus the
+    /// events of its attempt run, in sequence order.
+    GoalTimeline {
+        goal_id: String,
+    },
+    /// The observed-evidence report rows for a goal (GO5).
+    GoalEvidence {
+        goal_id: String,
+    },
+    /// The validation-kind report rows for a goal (GO5).
+    GoalValidations {
+        goal_id: String,
+    },
+    /// The review-kind report rows for a goal (GO5).
+    GoalReviews {
+        goal_id: String,
+    },
+    /// The risk / blocker / contradiction surface for a goal (GO5): the goal's
+    /// current blocker, blocked/contradicted requirements, and raised-blocker
+    /// reports.
+    GoalRisks {
+        goal_id: String,
+    },
+    /// A historical execution report for a goal (GO10), rebuildable from events,
+    /// projections, and artifacts, rendered as `markdown` or `json`. Degrades
+    /// clearly when artifacts are missing or redacted.
+    GoalReport {
+        goal_id: String,
+        format: GoalReportFormat,
+    },
+}
+
+/// GA2 (goal-orchestration GO6): the structured goal specification a `SetGoal`
+/// carries. The structured fields are stored as JSON on the goal projection so a
+/// goal is durable, rebuildable state -- not transcript text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalSpec {
+    pub goal_id: String,
+    pub objective: String,
+    pub task_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub session_id: Option<String>,
+    pub parent_goal_id: Option<String>,
+    pub attempt_run_id: Option<String>,
+    /// The requirements this goal must satisfy (GO3). Each seeds a
+    /// requirement-ledger row at `unverified`.
+    pub requirements: Vec<GoalRequirementSpec>,
+    /// Structured success criteria (GO6) as JSON.
+    pub success_criteria_json: String,
+    /// Structured constraints (GO6) as JSON.
+    pub constraints_json: String,
+    /// Structured verification surface (GO6) as JSON.
+    pub verification_surface_json: String,
+    /// Structured budget (GO6) as JSON.
+    pub budget_json: String,
+    /// Structured stop conditions (GO6) as JSON.
+    pub stop_conditions_json: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalRequirementSpec {
+    pub requirement_id: String,
+    pub summary: String,
+}
+
+/// GA2 (goal-orchestration GO3): a per-requirement status transition record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequirementStatusRecord {
+    pub requirement_id: String,
+    pub goal_id: String,
+    pub summary: String,
+    /// `unverified` / `supported` / `validated` / `reviewed` / `blocked` /
+    /// `contradicted` (GO9 requirement states).
+    pub status: String,
+    /// `agent_reported` (a claim) or an observed source. A `validated`/`reviewed`
+    /// status backed only by `agent_reported` is rejected.
+    pub source: String,
+}
+
+/// GA2 (goal-orchestration GO4): a report / evidence / review / validation
+/// record against a goal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalReportRecord {
+    pub goal_report_id: String,
+    pub goal_id: String,
+    pub session_id: Option<String>,
+    pub requirement_id: Option<String>,
+    /// The reporting tool / observed-evidence kind (e.g. `capo.report_progress`,
+    /// `capo.record_validation`, `capo.raise_blocker`, `runtime_output`).
+    pub report_kind: String,
+    /// `agent_reported` (a claim) or an observed source (`runtime_output` /
+    /// `adapter_event`).
+    pub source: String,
+    /// Agent self-declared confidence (0-100) for an `agent_reported` report;
+    /// `None` for observed evidence.
+    pub confidence: Option<i64>,
+    pub summary: String,
+    /// The artifact holding the raw body, preserved as an INPUT.
+    pub body_artifact_id: Option<String>,
+    /// A reference to an observed `EvidenceRecorded` row this report cites.
+    pub evidence_id: Option<String>,
+}
+
+/// GA2 (goal-orchestration GO10): the rendering format of a historical report.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GoalReportFormat {
+    Markdown,
+    Json,
+}
+
+impl GoalReportFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Markdown => "markdown",
+            Self::Json => "json",
+        }
+    }
 }
 
 /// A single committed event as it crosses the server transport boundary (ST4).
@@ -499,6 +709,17 @@ impl ServerCommand {
                 // pure forward read and never appends an event or mutates a
                 // projection.
                 | ServerCommand::ReadThread { .. }
+                // GA2: the goal read surfaces are pure forward reads over the
+                // goal projections / event log and never append an event.
+                | ServerCommand::ListGoals
+                | ServerCommand::ViewGoal { .. }
+                | ServerCommand::GoalStory { .. }
+                | ServerCommand::GoalTimeline { .. }
+                | ServerCommand::GoalEvidence { .. }
+                | ServerCommand::GoalValidations { .. }
+                | ServerCommand::GoalReviews { .. }
+                | ServerCommand::GoalRisks { .. }
+                | ServerCommand::GoalReport { .. }
         )
     }
 }
@@ -539,6 +760,138 @@ pub enum ServerResponsePayload {
     /// A session's multi-turn conversation thread (ST5), projected from the
     /// event log for [`ServerCommand::ReadThread`].
     Thread(ServerThread),
+    /// GA2: the project's goals with a concise status summary (`ListGoals`).
+    Goals(Vec<GoalStatusSummary>),
+    /// GA2: one goal in full (`ViewGoal` / `SetGoal` / a lifecycle mutation).
+    GoalView(Box<GoalView>),
+    /// GA2: the report rows behind a story / evidence / validation / review /
+    /// risk read surface.
+    GoalReports(GoalReportListing),
+    /// GA2: a goal event timeline (`GoalTimeline`).
+    GoalTimeline(GoalTimelineView),
+    /// GA2: a rendered historical execution report (`GoalReport`).
+    GoalReport(GoalReportRendering),
+}
+
+/// GA2 (goal-orchestration GO4/GO5): the concise per-goal status the `goals`
+/// read surface renders -- objective, lifecycle status, requirement counts, and
+/// the current blocker. Raw structured metadata stays behind the full view.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalStatusSummary {
+    pub goal_id: String,
+    pub objective: String,
+    pub status: String,
+    pub parent_goal_id: Option<String>,
+    pub attempt_run_id: Option<String>,
+    pub requirement_count: usize,
+    /// How many requirements are in a satisfied-or-stronger state
+    /// (`supported` / `validated` / `reviewed`).
+    pub requirements_supported: usize,
+    pub blocked_requirement_count: usize,
+    pub contradicted_requirement_count: usize,
+    pub report_count: usize,
+    pub blocker_reason: String,
+    pub updated_sequence: i64,
+}
+
+/// GA2 (goal-orchestration GO4): one goal in full, assembled from the goal,
+/// requirement-ledger, story, continuation, and delegated-provider projections.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalView {
+    pub summary: GoalStatusSummary,
+    pub success_criteria_json: String,
+    pub constraints_json: String,
+    pub verification_surface_json: String,
+    pub budget_json: String,
+    pub stop_conditions_json: String,
+    pub task_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub session_id: Option<String>,
+    pub requirements: Vec<GoalRequirementView>,
+    pub reports: Vec<GoalReportView>,
+    pub continuations: Vec<GoalContinuationView>,
+    pub delegated_provider_goals: Vec<DelegatedProviderGoalView>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalRequirementView {
+    pub requirement_id: String,
+    pub summary: String,
+    pub status: String,
+    pub last_status_source: String,
+    /// Whether the last status was driven by observed evidence (true) or an agent
+    /// claim (false). The read model never shows a requirement validated by a
+    /// claim alone.
+    pub observed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalReportView {
+    pub goal_report_id: String,
+    pub requirement_id: Option<String>,
+    pub report_kind: String,
+    pub source: String,
+    /// Whether this row is observed evidence (vs an `agent_reported` claim).
+    pub observed: bool,
+    pub confidence: Option<i64>,
+    pub summary: String,
+    pub body_artifact_id: Option<String>,
+    pub evidence_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalContinuationView {
+    pub continuation_id: String,
+    pub decision: String,
+    pub reason: String,
+    pub attempt_run_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegatedProviderGoalView {
+    pub delegated_goal_id: String,
+    pub provider_kind: String,
+    pub provider_goal_ref: Option<String>,
+    pub provider_state: String,
+    pub source: String,
+}
+
+/// GA2: a filtered listing of a goal's report rows for one read surface (story /
+/// evidence / validation / review / risk). The `surface` field names which one
+/// so the renderer can title it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalReportListing {
+    pub goal_id: String,
+    pub surface: String,
+    pub blocker_reason: String,
+    pub reports: Vec<GoalReportView>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalTimelineView {
+    pub goal_id: String,
+    pub entries: Vec<GoalTimelineEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalTimelineEntry {
+    pub sequence: i64,
+    pub event_id: String,
+    pub kind: String,
+    pub actor: String,
+    pub redaction_state: String,
+}
+
+/// GA2 (goal-orchestration GO10): a rendered historical report. The body is the
+/// markdown or JSON text; `format` names which, and `degraded` flags that some
+/// referenced artifact was missing or redacted so the report rendered a clear
+/// placeholder rather than raw content.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalReportRendering {
+    pub goal_id: String,
+    pub format: String,
+    pub body: String,
+    pub degraded: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1000,5 +1353,46 @@ fn default_request_id(command: &ServerCommand) -> String {
             session_id,
             from_sequence,
         } => format!("server-thread-{}-{}", slug(session_id), from_sequence),
+        ServerCommand::SetGoal { spec } => format!("server-goal-set-{}", slug(&spec.goal_id)),
+        ServerCommand::PauseGoal { goal_id } => format!("server-goal-pause-{}", slug(goal_id)),
+        ServerCommand::ResumeGoal { goal_id } => format!("server-goal-resume-{}", slug(goal_id)),
+        ServerCommand::BlockGoal { goal_id, reason } => format!(
+            "server-goal-block-{}-{}",
+            slug(goal_id),
+            stable_hash(reason.as_bytes())
+        ),
+        ServerCommand::ClearGoal { goal_id, reason } => format!(
+            "server-goal-clear-{}-{}",
+            slug(goal_id),
+            stable_hash(reason.as_bytes())
+        ),
+        ServerCommand::SetRequirementStatus { record } => format!(
+            "server-goal-requirement-{}-{}",
+            slug(&record.requirement_id),
+            slug(&record.status)
+        ),
+        ServerCommand::RecordGoalReport { report } => {
+            format!("server-goal-report-{}", slug(&report.goal_report_id))
+        }
+        ServerCommand::MarkGoalComplete { goal_id } => {
+            format!("server-goal-mark-complete-{}", slug(goal_id))
+        }
+        ServerCommand::ListGoals => "server-goals-list".to_string(),
+        ServerCommand::ViewGoal { goal_id } => format!("server-goal-view-{}", slug(goal_id)),
+        ServerCommand::GoalStory { goal_id } => format!("server-goal-story-{}", slug(goal_id)),
+        ServerCommand::GoalTimeline { goal_id } => {
+            format!("server-goal-timeline-{}", slug(goal_id))
+        }
+        ServerCommand::GoalEvidence { goal_id } => {
+            format!("server-goal-evidence-{}", slug(goal_id))
+        }
+        ServerCommand::GoalValidations { goal_id } => {
+            format!("server-goal-validations-{}", slug(goal_id))
+        }
+        ServerCommand::GoalReviews { goal_id } => format!("server-goal-reviews-{}", slug(goal_id)),
+        ServerCommand::GoalRisks { goal_id } => format!("server-goal-risks-{}", slug(goal_id)),
+        ServerCommand::GoalReport { goal_id, format } => {
+            format!("server-goal-report-{}-{}", slug(goal_id), format.as_str())
+        }
     }
 }

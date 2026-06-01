@@ -18,6 +18,7 @@ mod controller_routing;
 mod dashboard;
 mod dispatch;
 mod event_tail;
+mod goal_commands;
 mod live_provider;
 mod safety_floor;
 mod server_core;
@@ -1330,6 +1331,96 @@ impl CapoServer {
                 // `Subscribe` tail over the same watermark.
                 let thread = self.read_thread(session_id, from_sequence)?;
                 self.response(request_id, origin, ServerResponsePayload::Thread(thread))
+            }
+            // GA2 (goal-orchestration GO4/GO6): the typed goal lifecycle mutations
+            // all flow through the server/controller boundary here.
+            ServerCommand::SetGoal { spec } => {
+                self.handle_goal_command_set(request_id, origin, spec)
+            }
+            ServerCommand::PauseGoal { goal_id } => self.handle_goal_lifecycle(
+                request_id,
+                origin,
+                goal_id,
+                capo_state::GoalProjection::PAUSED,
+                "",
+                EventKind::GoalPaused,
+                "goal.paused",
+            ),
+            ServerCommand::ResumeGoal { goal_id } => self.handle_goal_lifecycle(
+                request_id,
+                origin,
+                goal_id,
+                capo_state::GoalProjection::ACTIVE,
+                "",
+                EventKind::GoalResumed,
+                "goal.resumed",
+            ),
+            ServerCommand::BlockGoal { goal_id, reason } => self.handle_goal_lifecycle(
+                request_id,
+                origin,
+                goal_id,
+                capo_state::GoalProjection::BLOCKED,
+                &reason,
+                EventKind::GoalBlocked,
+                "goal.blocked",
+            ),
+            ServerCommand::ClearGoal { goal_id, reason } => self.handle_goal_lifecycle(
+                request_id,
+                origin,
+                goal_id,
+                capo_state::GoalProjection::CLEARED,
+                &reason,
+                EventKind::GoalCleared,
+                "goal.cleared",
+            ),
+            ServerCommand::SetRequirementStatus { record } => {
+                self.handle_set_requirement_status(request_id, origin, record)
+            }
+            ServerCommand::RecordGoalReport { report } => {
+                self.handle_record_goal_report(request_id, origin, report)
+            }
+            // GA2 (goal-orchestration GO9): a direct mark-complete is rejected by
+            // construction -- completion is the GA5 auditor's verdict.
+            ServerCommand::MarkGoalComplete { goal_id } => self.reject_mark_goal_complete(&goal_id),
+            ServerCommand::ListGoals => self.handle_list_goals(request_id, origin),
+            ServerCommand::ViewGoal { goal_id } => {
+                self.handle_view_goal(request_id, origin, goal_id)
+            }
+            ServerCommand::GoalStory { goal_id } => self.handle_goal_report_listing(
+                request_id,
+                origin,
+                goal_id,
+                goal_commands::GoalReportSurface::Story,
+            ),
+            ServerCommand::GoalEvidence { goal_id } => self.handle_goal_report_listing(
+                request_id,
+                origin,
+                goal_id,
+                goal_commands::GoalReportSurface::Evidence,
+            ),
+            ServerCommand::GoalValidations { goal_id } => self.handle_goal_report_listing(
+                request_id,
+                origin,
+                goal_id,
+                goal_commands::GoalReportSurface::Validations,
+            ),
+            ServerCommand::GoalReviews { goal_id } => self.handle_goal_report_listing(
+                request_id,
+                origin,
+                goal_id,
+                goal_commands::GoalReportSurface::Reviews,
+            ),
+            ServerCommand::GoalRisks { goal_id } => self.handle_goal_report_listing(
+                request_id,
+                origin,
+                goal_id,
+                goal_commands::GoalReportSurface::Risks,
+            ),
+            ServerCommand::GoalTimeline { goal_id } => {
+                self.handle_goal_timeline(request_id, origin, goal_id)
+            }
+            ServerCommand::GoalReport { goal_id, format } => {
+                self.handle_goal_report_rendering(request_id, origin, goal_id, format)
             }
         }
     }

@@ -503,6 +503,23 @@ fn command_methods() -> Vec<&'static str> {
         "recover",
         "subscribe",
         "read_thread",
+        "set_goal",
+        "pause_goal",
+        "resume_goal",
+        "block_goal",
+        "clear_goal",
+        "set_requirement_status",
+        "record_goal_report",
+        "mark_goal_complete",
+        "list_goals",
+        "view_goal",
+        "goal_story",
+        "goal_timeline",
+        "goal_evidence",
+        "goal_validations",
+        "goal_reviews",
+        "goal_risks",
+        "goal_report",
     ]
 }
 
@@ -524,6 +541,11 @@ fn payload_types() -> Vec<&'static str> {
         "recovery",
         "subscribed",
         "thread",
+        "goals",
+        "goal_view",
+        "goal_reports",
+        "goal_timeline",
+        "goal_report",
     ]
 }
 
@@ -545,6 +567,10 @@ fn error_kinds() -> Vec<&'static str> {
         "run_session_mismatch",
         "adapter_session_mismatch",
         "unsupported_chat_adapter",
+        "unknown_goal",
+        "goal_complete_not_a_lifecycle_command",
+        "illegal_goal_status_transition",
+        "unclassifiable_report_source",
         "remote",
         "cancelled",
         "interrupted",

@@ -146,7 +146,50 @@ Must not do:
 
 ## GA2 - Milestone A: Server Lifecycle/Read Commands And Operator Read Surfaces
 
-Status: pending.
+Status: in progress (server side done and gate-green; CLI operator_control goal
+read surfaces still pending). The typed `crates/capo-server` goal lifecycle
+mutations (`SetGoal`/`PauseGoal`/`ResumeGoal`/`BlockGoal`/`ClearGoal`/
+`SetRequirementStatus`/`RecordGoalReport`) and read commands (`ListGoals`/
+`ViewGoal`/`GoalStory`/`GoalTimeline`/`GoalEvidence`/`GoalValidations`/
+`GoalReviews`/`GoalRisks`/`GoalReport`) are wired end to end through the
+server/controller boundary: typed requests + responses (`types.rs`), the
+encode/decode round-trip and missing goal codec helpers (`transport/codec.rs`),
+the published JSON-RPC schema enums and regenerated `contract/jsonrpc-schema.json`
+snapshot, and the wire error mapping for the four GA2 `ServerError` kinds
+(`unknown_goal`, `goal_complete_not_a_lifecycle_command`,
+`illegal_goal_status_transition`, `unclassifiable_report_source`). Goal-complete
+is rejected by construction (the GA5 auditor is the only path); a `validated`/
+`reviewed` requirement on an agent claim alone is rejected; historical reports
+render as markdown and JSON without inlining raw artifact bodies. NOT yet done:
+the `crates/capo-cli` operator_control goal read surfaces (`goals`, `goal [GOAL]`,
+`story`, `timeline`, `evidence`, `validations`, `reviews`, `risks`) and the
+`cargo test -p capo-cli --test server_transport goal` control-through-server
+tests; those remain for a follow-up before GA2 closes.
+
+Evidence:
+
+- Root cause of the failed gate: the GA2 goal commands/payloads/error variants
+  were added to `types.rs` but the dependent code lagged -- `transport/codec.rs`
+  called 9 goal encode/decode helpers that did not exist, `transport/wire.rs` and
+  `transport/contract.rs` did not map/publish the 4 new error kinds, the
+  `tests/contract.rs` exhaustive matches did not cover the new command/payload/
+  error variants, and a borrow error (`cannot move out of goal because it is
+  borrowed`) sat in `goal_commands.rs::handle_goal_lifecycle`. Fixed all of these
+  with the smallest correct change and regenerated the checked-in JSON-RPC schema
+  snapshot via `CAPO_REGENERATE_WIRE_SNAPSHOTS=1`.
+- Added deterministic server-boundary tests in `crates/capo-server/src/tests/
+  goal.rs` (7 tests): lifecycle mutations drive the read model; direct
+  mark-complete is rejected; an unknown-goal lifecycle command is rejected; a
+  `validated`-on-`agent_reported` requirement is rejected while `supported`-on-
+  observed is accepted; an unclassifiable report source is rejected; story vs
+  evidence surfaces separate claims from observed evidence; markdown + JSON
+  historical reports render without leaking raw bodies.
+- `cargo fmt --check` -> exit 0.
+- `cargo clippy --all-targets --all-features -- -D warnings` -> exit 0.
+- `cargo test -p capo-server goal` -> 9 passed (7 new GA2 + 2 pre-existing).
+- `cargo test --workspace` -> exit 0, 0 failed across all crates (capo-server lib:
+  103 passed, 3 ignored).
+- `git diff --check` -> clean.
 
 Acceptance:
 
