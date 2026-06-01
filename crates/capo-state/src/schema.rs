@@ -627,6 +627,12 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
     add_missing_column(connection, "capability_grants", "created_at", "TEXT")?;
     add_missing_column(connection, "capability_grants", "expires_at", "TEXT")?;
     add_missing_column(connection, "capability_grants", "revoked_at", "TEXT")?;
+    // GA5 (GO9): the STRUCTURED validation/review outcome (e.g. `passed` / `weak` /
+    // `skipped`) from a `capo.record_validation` / `capo.record_review` report.
+    // Nullable so reports recorded before this landed back-fill as NULL, and so
+    // non-validation reports (which carry no outcome) stay NULL. The auditor keys
+    // its weak/skipped downgrade on this enum, NOT on free-text summary prose.
+    add_missing_column(connection, "goal_reports", "outcome", "TEXT")?;
     Ok(())
 }
 

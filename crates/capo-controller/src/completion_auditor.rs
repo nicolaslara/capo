@@ -367,13 +367,18 @@ impl FakeBoundaryController {
             },
         };
 
-        // Does the goal have ANY observed evidence at all (task-scoped)? A
-        // requirement-tagged observed report binds evidence to a specific
-        // requirement; an untagged observed evidence row backs the goal broadly.
-        let goal_has_observed_evidence = !evidence.is_empty()
+        // GO9 gate provenance: each requirement is judged on ITS OWN observed
+        // binding -- never on a goal-wide OR that lets one requirement's evidence
+        // vouch for an unrelated one. The only narrow exception is a single-
+        // requirement goal, where a task-scoped (untagged) observed evidence row
+        // can only belong to that one requirement, so there is no cross-requirement
+        // leak. We compute that exception explicitly rather than as an
+        // unconditional fallback.
+        let single_requirement = requirements.len() == 1;
+        let goal_has_task_scoped_observed_evidence = !evidence.is_empty()
             || reports
                 .iter()
-                .any(GoalReportProjection::is_observed_evidence);
+                .any(|report| report.is_observed_evidence() && report.requirement_id.is_none());
 
         let inputs = requirements
             .iter()
@@ -381,7 +386,7 @@ impl FakeBoundaryController {
                 let observed_evidence = requirement_has_observed_evidence(
                     requirement,
                     &reports,
-                    goal_has_observed_evidence,
+                    single_requirement && goal_has_task_scoped_observed_evidence,
                 );
                 RequirementInput {
                     requirement_id: requirement.requirement_id.clone(),
@@ -489,19 +494,39 @@ impl FakeBoundaryController {
 
 /// Whether a requirement is backed by CONCRETE OBSERVED EVIDENCE (GO9 gate).
 ///
-/// A requirement is observed-backed iff there is an observed-source goal-report row
-/// tagged to that requirement, OR an `EvidenceProjection` row recorded for the
-/// goal's task while this requirement is being audited. Because evidence rows are
-/// task-scoped (not requirement-scoped) in GA1, an untagged observed evidence row
-/// backs any requirement of the goal; a requirement-tagged observed report binds it
-/// precisely. An `agent_reported` claim NEVER counts here -- that is the whole point
-/// of the gate.
+/// The gate is PER-REQUIREMENT: it never lets one requirement's evidence vouch for
+/// an unrelated one. A requirement is observed-backed iff ANY of the following hold,
+/// each of which is bound to THIS requirement specifically:
+///
+/// 1. its own last status transition came from an OBSERVED source
+///    (`runtime_output` / `adapter_event`), classified by
+///    [`capo_tools::source_is_observed_evidence`] exactly as GA3 does
+///    (`continuation_context.rs`). This is the precise per-requirement provenance
+///    and the primary defense-in-depth signal: a `validated`/`reviewed` status whose
+///    own source is `agent_reported` is rejected here even if the GA2 boundary is
+///    bypassed or a projection is rebuilt from a malformed event; OR
+/// 2. there is an observed-source goal-report row TAGGED to this requirement; OR
+/// 3. `single_requirement_task_evidence` is set -- i.e. this is the goal's ONLY
+///    requirement AND the goal carries a task-scoped (untagged) observed evidence
+///    row. With a single requirement there is no other requirement an untagged row
+///    could belong to, so there is no cross-requirement leak.
+///
+/// An `agent_reported` claim NEVER counts here -- that is the whole point of the
+/// gate. There is deliberately NO goal-wide OR fallback for multi-requirement goals:
+/// a requirement whose only support is a claim stays unbacked even if a SIBLING
+/// requirement has real evidence.
 fn requirement_has_observed_evidence(
     requirement: &RequirementLedgerProjection,
     reports: &[GoalReportProjection],
-    goal_has_observed_evidence: bool,
+    single_requirement_task_evidence: bool,
 ) -> bool {
-    // A requirement-tagged observed report is the most precise binding.
+    // (1) The requirement's OWN last-status provenance is the precise signal: a
+    // satisfying status driven by an observed source is backed; a claim-sourced one
+    // is not (mirrors GA3 `source_is_observed_evidence(&requirement.last_status_source)`).
+    if capo_tools::source_is_observed_evidence(&requirement.last_status_source) {
+        return true;
+    }
+    // (2) A requirement-tagged observed report binds evidence to THIS requirement.
     let observed_report_for_requirement = reports.iter().any(|report| {
         report.is_observed_evidence()
             && report.requirement_id.as_ref() == Some(&requirement.requirement_id)
@@ -509,13 +534,10 @@ fn requirement_has_observed_evidence(
     if observed_report_for_requirement {
         return true;
     }
-    // Otherwise the requirement is backed iff the goal has ANY task-scoped observed
-    // evidence (an `EvidenceProjection` row or an untagged observed report). This is
-    // deliberately conservative: the auditor still requires the requirement to reach
-    // a satisfying ledger status, and GA2 already forbids a `validated`/`reviewed`
-    // ledger status from an `agent_reported` source, so the satisfying status itself
-    // cannot have come from a claim.
-    goal_has_observed_evidence
+    // (3) Single-requirement goal with a task-scoped observed row: the row can only
+    // belong to this requirement, so no cross-requirement leak. (Computed by the
+    // caller; never an unconditional goal-wide fallback.)
+    single_requirement_task_evidence
 }
 
 /// Whether a requirement carries an explicitly weak or skipped validation (GO9
