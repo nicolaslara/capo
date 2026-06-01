@@ -26,6 +26,11 @@ pub enum StateError {
     /// failure). Carried as a typed error so the chat surface never fabricates a
     /// fake summary in place of a real Codex result.
     CodexLiveChat(String),
+    /// GA7 (GO11): a goal report/observation carried an unclassifiable `source`
+    /// tag (neither observed evidence nor `agent_reported`). Rejected at the
+    /// controller seam so a malformed tag never lands in the goal read model the
+    /// GA5 auditor reads -- mirrors the server's `UnclassifiableReportSource`.
+    UnclassifiableReportSource(String),
 }
 
 impl From<std::io::Error> for StateError {
