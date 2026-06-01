@@ -688,7 +688,54 @@ Must not do:
 
 ## GA8 - Mocked End-To-End Continuation And Completion Paths
 
-Status: pending.
+Status: done. The mocked end-to-end suite
+(`crates/capo-controller/src/goal_autonomy_e2e.rs`, registered `mod
+goal_autonomy_e2e;` in `lib.rs`) COMPOSES the real turn loop
+(`FakeBoundaryController::run_turn` driving a scripted-mock batch -- no live
+provider), the GA4 safe-boundary scheduler
+(`evaluate_and_record_continuation`), and the GA5 evidence-gated auditor
+(`audit_and_record_goal_completion`) through the controller side of the
+server/controller boundary, with goal state seeded through the same projection
+records the GA4/GA5/GA6 controller tests use. It walks all seven branches GA8
+names and asserts the resulting EVENT SEQUENCE and PROJECTION STATE (recorded
+`goal.continuation_decision_recorded` / `goal.audit_decision_recorded`,
+durable `run.aborted` + aborted run projection on budget-limit, the recorded
+`(decision, reason)` continuation rows, and the latest audit verdict
+projection), never console text. The CONTINUE branch additionally exercises the
+`safety-gates` single-writer workspace lock (`acquire_workspace_write_lease`)
+and a real shadow-git checkpoint boundary (`create_checkpoint`) before the
+continued turn, and asserts the loop's terminal turn projected exactly one
+observed-evidence row (`adapter_replay:mock`). The COMPLETE-WITH-EVIDENCE branch
+generates a historical execution report controller-side from the persisted
+projections (goal, requirement ledger, observed evidence, audit verdict,
+continuation decisions; no inlined raw artifact bodies) and snapshots it against
+an exact golden string, then re-renders after `rebuild_projections` to prove the
+report rebuilds identically (GO10 rebuildable-from-events). No live provider is
+invoked (the deterministic-e2e Must-Not-Do); this task's Verification does not
+call for a Codex live smoke, so the live gates stayed unset.
+
+Evidence:
+
+- New module `crates/capo-controller/src/goal_autonomy_e2e.rs` (8 tests: the
+  seven GA8 branches -- `goal_autonomy_e2e_continue_at_a_safe_boundary`,
+  `_pause_when_input_is_queued`, `_block_on_a_raised_blocker`,
+  `_budget_limit_on_exhaustion`, `_no_progress_suppression`,
+  `_premature_completion_blocked`,
+  `_complete_with_evidence_and_historical_report_snapshot` -- plus a budget-helper
+  resolve check). Registered `mod goal_autonomy_e2e;` in
+  `crates/capo-controller/src/lib.rs`. No new runtime types, events, or
+  projections: the e2e reuses the GA1-GA5 surfaces and a test-local
+  historical-report renderer over the existing read queries.
+- `cargo test -p capo-controller goal_autonomy_e2e` -> 8 passed.
+- `cargo fmt --check` -> exit 0.
+- `cargo clippy --all-targets --all-features -- -D warnings` -> exit 0.
+- `cargo test --workspace` -> exit 0, 0 failed across all crates (capo-controller
+  lib: 175 passed, 2 ignored). (One CLI `server_transport` integration test
+  -- `bare_capo_starts_control_and_autostarts_server_when_needed` -- flaked once
+  under full-workspace parallelism from server-autostart port contention; it
+  passes in isolation and on a clean re-run of the full workspace, and is
+  unrelated to this controller-only change.)
+- `git diff --check` -> clean.
 
 Acceptance:
 

@@ -36,6 +36,7 @@ mod completion_auditor;
 mod continuation_context;
 mod continuation_scheduler;
 mod fake_session;
+mod goal_autonomy_e2e;
 mod grant_lifecycle;
 mod local_dispatch;
 mod parent_child;
