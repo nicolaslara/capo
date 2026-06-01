@@ -641,6 +641,180 @@ fn acp_live_transcript_events_flow_through_the_loop_ingestion_route() {
 }
 
 #[test]
+fn acp_live_turn_routes_permission_through_policy_and_ingests_events_via_loop_route() {
+    // DP1 review fixes 1 + 3, end-to-end through the SINGLE controller seam:
+    //
+    // 1. SAFETY: the wire client is NOT the policy authority. `drive_acp_live_turn`
+    //    installs the controller's `PermissionPolicy`-backed decider into the wire
+    //    client, so an inbound `session/request_permission` is decided by
+    //    `decide_adapter_permission` and PERSISTED (`permission.requested` ->
+    //    `permission.decided`). A read-only policy DENIES the write scope, so the
+    //    agent's offered `allow_once` is OVER-RULED -- the wire client writes back
+    //    `cancelled`, never the offered allow option.
+    //
+    // 3. INGESTION: the per-event batch flows through
+    //    `apply_normalized_adapter_events_with_turn`, landing the tool call as a
+    //    read-model row -- not collapsed into a `TurnOutput` summary.
+    use capo_adapters::{
+        AcpAdapter, AcpLiveAdapter, AcpPermissionOutcome, ScriptedAcpTransport,
+        ScriptedServerFrame, TurnRequest,
+    };
+
+    let root = temp_root();
+    // A read-only static policy: it DENIES `filesystem:write:workspace`.
+    let controller = FakeBoundaryController::open_with_permission_policy(
+        ProjectId::new("project-capo"),
+        &root,
+        PermissionPolicy::static_read_only_local(),
+    )
+    .expect("controller");
+    let registration = controller
+        .register_agent("acp-live-policy")
+        .expect("register acp agent");
+    let refs = controller
+        .send_task(&registration, "Drive a live ACP turn under a deny policy")
+        .expect("send task");
+
+    let wrappers =
+        capo_tools::RuntimeToolWrappers::new(capo_tools::RuntimeToolConfig::local_workspace(
+            std::path::PathBuf::from("/tmp/capo-acp-policy-ws"),
+            std::path::PathBuf::from("/tmp/capo-acp-policy-art"),
+        ));
+    let setup_plan = AcpAdapter::session_setup_plan(
+        &wrappers.list_tools(),
+        &PermissionPolicy::static_read_only_local(),
+        refs.session_id.clone(),
+    );
+    let adapter = AcpLiveAdapter::new(
+        "acp-agent",
+        vec!["--stdio".to_string()],
+        std::path::PathBuf::from("/tmp/capo-acp-policy-ws"),
+        std::path::PathBuf::from("/tmp/capo-acp-policy-art"),
+        setup_plan,
+    );
+
+    let transport = ScriptedAcpTransport::new()
+        .on_request(
+            "initialize",
+            vec![ScriptedServerFrame::Response(serde_json::json!({
+                "protocolVersion": 1
+            }))],
+        )
+        .on_request(
+            "session/new",
+            vec![ScriptedServerFrame::Response(serde_json::json!({
+                "sessionId": "acp-policy-session-1"
+            }))],
+        )
+        .on_request(
+            "session/prompt",
+            vec![
+                ScriptedServerFrame::Update(serde_json::json!({
+                    "sessionId": "acp-policy-session-1",
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tool-policy-1",
+                        "title": "write file",
+                        "status": "pending"
+                    }
+                })),
+                // The agent asks for permission to write; the policy denies it.
+                ScriptedServerFrame::RequestPermission(serde_json::json!({
+                    "sessionId": "acp-policy-session-1",
+                    "toolCall": { "toolCallId": "tool-policy-1", "kind": "edit" },
+                    "options": [
+                        { "optionId": "opt-allow", "name": "Allow", "kind": "allow_once" }
+                    ]
+                })),
+                ScriptedServerFrame::Update(serde_json::json!({
+                    "sessionId": "acp-policy-session-1",
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "tool-policy-1",
+                        "status": "completed",
+                        "content": { "type": "text", "text": "done" }
+                    }
+                })),
+                ScriptedServerFrame::Response(serde_json::json!({ "stopReason": "end_turn" })),
+            ],
+        );
+
+    let outcome = controller
+        .drive_acp_live_turn(
+            &refs,
+            &adapter,
+            transport,
+            &TurnRequest {
+                turn_id: TurnId::new("turn-acp-policy"),
+                agent_name: "acp-worker".to_string(),
+                goal: "write a file".to_string(),
+            },
+        )
+        .expect("drive acp live turn through the controller");
+
+    // SAFETY: the policy DENY over-ruled the agent's offered allow. The wire client
+    // wrote back `cancelled`, NOT the offered allow option.
+    assert_eq!(outcome.transcript.permission_round_trips.len(), 1);
+    let round_trip = &outcome.transcript.permission_round_trips[0];
+    assert_eq!(
+        round_trip.outcome,
+        AcpPermissionOutcome::Cancelled,
+        "a policy deny must over-rule the adapter-offered allow on the wire",
+    );
+    assert_eq!(round_trip.capo_decision, "deny");
+    assert!(round_trip.must_not_proceed);
+    assert!(
+        !round_trip.permission_decision_id.is_empty(),
+        "the controller persisted a real decision id (not the fail-closed default)",
+    );
+
+    // The lifecycle was PERSISTED through the controller seam.
+    let perm_events: Vec<_> = controller
+        .state()
+        .events_after(0, 10_000)
+        .expect("events")
+        .into_iter()
+        .filter(|event| {
+            event.session_id.as_ref() == Some(&refs.session_id)
+                && event.kind.starts_with("permission.")
+        })
+        .collect();
+    assert!(
+        perm_events.iter().any(|e| e.kind == "permission.requested"
+            && e.payload_json.contains("acp-live-perm-turn-acp-policy")),
+        "the ACP round-trip permission.requested persisted",
+    );
+    // The ACP round-trip's decided event (not the unrelated memory-packet decision
+    // from task setup): keyed by our `request_ref`.
+    let decided = perm_events
+        .iter()
+        .find(|e| {
+            e.kind == "permission.decided"
+                && e.payload_json.contains("acp-live-perm-turn-acp-policy")
+        })
+        .expect("ACP round-trip permission.decided persisted");
+    assert!(decided.payload_json.contains("\"decision\":\"reject\""));
+    assert!(
+        !decided.payload_json.contains("\"option_id\":\"opt-allow\""),
+        "the denied allow option must not be persisted as the chosen response",
+    );
+
+    // INGESTION: the per-event batch landed in the read models via the loop route.
+    assert!(outcome.ingest.appended_event_count > 0);
+    assert!(outcome.ingest.tool_event_count > 0);
+    let tools = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.status == "completed" && tool.tool_origin == "adapter_native:acp"),
+        "the ACP tool call must land as a completed adapter-native read-model row",
+    );
+}
+
+#[test]
 fn acp_live_adapter_dispatches_through_the_agent_adapter_handle() {
     // DP1: `AcpLiveAdapter` is reachable from the single orchestration seam --
     // `AgentAdapterHandle::acp(..)` -- and reports as a real provider, so the loop

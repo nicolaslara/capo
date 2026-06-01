@@ -26,8 +26,9 @@ use crate::acp_wire::{
     AcpTransport, AcpTurnTranscript, AcpWireClient, AcpWireError, PipedProcessTransport,
 };
 use crate::{
-    AcpAdapter, AcpSessionSetupPlan, AdapterSession, AdapterSessionRequest, AgentAdapter,
-    NormalizedAdapterEvent, TurnOutput, TurnRequest, scan_artifacts_for_sensitive_markers,
+    AcpAdapter, AcpPermissionDecider, AcpSessionSetupPlan, AdapterSession, AdapterSessionRequest,
+    AgentAdapter, FailClosedPermissionDecider, NormalizedAdapterEvent, TurnOutput, TurnRequest,
+    scan_artifacts_for_sensitive_markers,
 };
 
 /// The two opt-in env gates the live ACP path honors, mirroring the Codex live
@@ -129,11 +130,35 @@ impl AcpLiveAdapter {
         }
     }
 
+    /// Run ONE live ACP turn against a freshly spawned agent, routing any inbound
+    /// `session/request_permission` through `decider` (the controller's
+    /// `PermissionPolicy`-backed seam). See [`Self::run_turn`].
+    pub fn run_turn_with_decider<'d>(
+        &self,
+        request: &TurnRequest,
+        decider: Box<dyn AcpPermissionDecider + 'd>,
+    ) -> Result<AcpTurnTranscript, AcpLiveError> {
+        self.run_turn_inner(request, decider)
+    }
+
     /// Run ONE live ACP turn against a freshly spawned agent: launch through the
     /// runtime, attach the wire client, `initialize` -> `session/new` ->
     /// `session/prompt`, and tear the process down. Fail-closed-fast when the
     /// gate is off.
+    ///
+    /// SAFETY: without an injected controller decider this uses the fail-closed
+    /// default ([`FailClosedPermissionDecider`]) -- it cancels every permission
+    /// request rather than self-authorizing. The controller path uses
+    /// [`Self::run_turn_with_decider`] to route through `PermissionPolicy`.
     pub fn run_turn(&self, request: &TurnRequest) -> Result<AcpTurnTranscript, AcpLiveError> {
+        self.run_turn_inner(request, Box::new(FailClosedPermissionDecider))
+    }
+
+    fn run_turn_inner<'d>(
+        &self,
+        request: &TurnRequest,
+        decider: Box<dyn AcpPermissionDecider + 'd>,
+    ) -> Result<AcpTurnTranscript, AcpLiveError> {
         if !acp_live_gate_open() {
             let mut missing_env = Vec::new();
             if !env_flag(ACP_LIVE_PREFLIGHT_OPT_IN_ENV) {
@@ -180,7 +205,7 @@ impl AcpLiveAdapter {
         let stderr_path = process.stderr_path().to_path_buf();
 
         let transport = PipedProcessTransport::new(stdin, stdout);
-        let result = self.drive(transport, &request.goal);
+        let result = self.drive_with_decider(transport, &request.goal, decider);
 
         let shutdown = process.shutdown("acp live turn complete");
         debug_assert_eq!(shutdown.process.status, "exited");
@@ -206,7 +231,21 @@ impl AcpLiveAdapter {
         transport: T,
         prompt: &str,
     ) -> Result<AcpTurnTranscript, AcpLiveError> {
-        let mut client = AcpWireClient::attach(transport, self.setup_plan.clone());
+        self.drive_with_decider(transport, prompt, Box::new(FailClosedPermissionDecider))
+    }
+
+    /// Drive the full flow, routing inbound `session/request_permission` through
+    /// `decider` (the controller's `PermissionPolicy`-backed seam). The wire client
+    /// writes back ONLY the decider's outcome, so the wire client is never the
+    /// policy authority.
+    pub fn drive_with_decider<'d, T: AcpTransport>(
+        &self,
+        transport: T,
+        prompt: &str,
+        decider: Box<dyn AcpPermissionDecider + 'd>,
+    ) -> Result<AcpTurnTranscript, AcpLiveError> {
+        let mut client = AcpWireClient::attach(transport, self.setup_plan.clone())
+            .with_permission_decider(decider);
         client.initialize()?;
         let session_id = client.session_new(self.workspace_root.to_string_lossy().as_ref())?;
         let transcript = client.prompt(&session_id, prompt)?;

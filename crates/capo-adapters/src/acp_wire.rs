@@ -33,8 +33,9 @@ use capo_core::RunId;
 use serde_json::{Value, json};
 
 use crate::{
-    AcpAdapter, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionOutcome,
-    AcpSessionSetupPlan, NormalizedAdapterEvent, map_acp_options_trusted_local,
+    AcpAdapter, AcpPermissionDecider, AcpPermissionOption, AcpPermissionOptionKind,
+    AcpPermissionOutcome, AcpSessionSetupPlan, AdapterPermissionRequest, AdapterPermissionResponse,
+    FailClosedPermissionDecider, NormalizedAdapterEvent,
 };
 
 /// The default per-read deadline on the live wire pump.
@@ -205,19 +206,35 @@ pub struct AcpClientCallRecord {
 }
 
 /// The audited outcome of one live `session/request_permission` round-trip: what
-/// the agent offered, what Capo chose, and the option id returned on the wire.
+/// the agent offered, what Capo's POLICY decided, and the outcome returned on the
+/// wire.
+///
+/// SAFETY: `capo_decision` and `outcome` are the CONTROLLER's policy decision (not
+/// a wire-local mapping). The wire client routes the offered options through the
+/// injected [`AcpPermissionDecider`] and records the controller-returned response
+/// here, so the audit trail reflects the policy authority's decision -- including a
+/// policy DENY that over-ruled an adapter-offered allow.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcpPermissionRoundTrip {
     pub tool_call_id: Option<String>,
     pub offered_option_ids: Vec<String>,
+    /// The requested capability scope the wire client derived from the agent's
+    /// tool call and submitted to the policy authority.
+    pub requested_scope: String,
     pub capo_decision: String,
     pub outcome: AcpPermissionOutcome,
+    /// Whether the controller signalled the adapter MUST NOT proceed (any deny /
+    /// cancel). The wire client always honors this regardless of the wire outcome.
+    pub must_not_proceed: bool,
+    /// The Capo permission-decision id the controller persisted for this
+    /// round-trip (empty for the fail-closed default decider).
+    pub permission_decision_id: String,
 }
 
 /// The live ACP JSON-RPC 2.0 client. Generic over the [`AcpTransport`] so the
 /// identical protocol logic runs against a scripted in-memory server (tests) and
 /// a runtime-spawned process pipe (live).
-pub struct AcpWireClient<T: AcpTransport> {
+pub struct AcpWireClient<'d, T: AcpTransport> {
     transport: T,
     next_id: i64,
     /// The capability setup plan: which `fs/*` / `terminal/*` client calls Capo
@@ -232,9 +249,20 @@ pub struct AcpWireClient<T: AcpTransport> {
     /// The per-read deadline the pump enforces so a stalled agent cannot wedge the
     /// turn forever on the live transport.
     read_timeout: Duration,
+    /// The POLICY-AUTHORITY seam an inbound `session/request_permission` is routed
+    /// through. SAFETY: the wire client is NEVER the policy authority -- it builds
+    /// an [`AdapterPermissionRequest`] from the offered options and hands it to this
+    /// decider, writing back ONLY the controller-returned outcome. Defaults to
+    /// [`FailClosedPermissionDecider`] (cancel everything) so a client driven
+    /// without a controller seam cannot self-authorize.
+    ///
+    /// The pump runs synchronously on the calling thread, so the decider never
+    /// crosses a thread boundary (no `Send`/`Sync` bound). A borrowed-lifetime box
+    /// lets the controller install a decider that borrows the controller itself.
+    permission_decider: Box<dyn AcpPermissionDecider + 'd>,
 }
 
-impl<T: AcpTransport> AcpWireClient<T> {
+impl<'d, T: AcpTransport> AcpWireClient<'d, T> {
     /// Attach the client to a started transport with the given capability setup
     /// plan. The transport is created by launching the ACP process through
     /// `RuntimeRunner` (live) or by a scripted server (tests); the client is
@@ -249,7 +277,20 @@ impl<T: AcpTransport> AcpWireClient<T> {
             external_session_id: None,
             run_id,
             read_timeout: ACP_PUMP_READ_TIMEOUT,
+            permission_decider: Box::new(FailClosedPermissionDecider),
         }
+    }
+
+    /// Inject the POLICY-AUTHORITY seam an inbound `session/request_permission` is
+    /// routed through. SAFETY: without this, the client fails closed (cancels every
+    /// permission request). The controller installs its `decide_adapter_permission`
+    /// backed decider here so the wire client routes the agent's offered options
+    /// through `PermissionPolicy` and writes back ONLY the controller-returned
+    /// outcome (a policy DENY over-rules an adapter-offered allow).
+    #[must_use]
+    pub fn with_permission_decider(mut self, decider: Box<dyn AcpPermissionDecider + 'd>) -> Self {
+        self.permission_decider = decider;
+        self
     }
 
     /// Override the Capo run id stamped onto serviced client calls (defaults to a
@@ -597,9 +638,17 @@ impl<T: AcpTransport> AcpWireClient<T> {
             .send_line(&serde_json::to_string(&response).unwrap())
     }
 
-    /// Answer an inbound `session/request_permission` request on the wire: map
-    /// the offered options through the TrustedLocal table and reply with the
-    /// chosen `optionId` (or `cancelled`).
+    /// Answer an inbound `session/request_permission` request on the wire.
+    ///
+    /// SAFETY: the wire client is NOT the policy authority. It builds an
+    /// [`AdapterPermissionRequest`] from the agent's offered ACP `PermissionOption[]`
+    /// plus the capability scope it derived from the agent's tool call, routes it
+    /// through the injected [`AcpPermissionDecider`] (the controller's
+    /// `PermissionPolicy`-backed `decide_adapter_permission` seam at runtime, or the
+    /// fail-closed default in a bare protocol test), and writes back ONLY the
+    /// controller-returned [`AdapterPermissionResponse::outcome`]. A policy DENY that
+    /// over-ruled an adapter-offered allow is reflected verbatim, and
+    /// `must_not_proceed` is recorded so the audit trail carries the halt signal.
     fn answer_permission(
         &mut self,
         request: &Value,
@@ -618,18 +667,24 @@ impl<T: AcpTransport> AcpWireClient<T> {
         let options = parse_permission_options(params);
         let offered_option_ids = options.iter().map(|o| o.option_id.clone()).collect();
 
-        // DP1 scopes the live wire permission round-trip + option mapping to the
-        // TrustedLocal prototype profile. Apply the documented option-mapping table
-        // under TrustedLocal; under ANY OTHER profile the wire client is not the
-        // policy authority, so it fails CLOSED (cancels) rather than self-authorizing
-        // -- it never applies TrustedLocal allow semantics to a session whose policy
-        // never granted them. Full per-scope policy integration for non-trusted
-        // profiles lives in the controller seam, not here.
-        let mapping = match self.setup_plan.permission_profile {
-            crate::AcpPermissionProfile::TrustedLocal => map_acp_options_trusted_local(&options),
-            crate::AcpPermissionProfile::Other => crate::AcpOptionMapping::cancelled(),
-        };
-        let outcome_value = match &mapping.outcome {
+        // Derive the requested capability scope + tool name from the agent's tool
+        // call so the policy authority decides the ACTUAL scope, not a wire guess.
+        let (tool_name, requested_scope) = derive_scope(params);
+        let adapter_request = AdapterPermissionRequest::new(
+            tool_name,
+            requested_scope.clone(),
+            self.setup_plan.capability_profile_id.clone(),
+            options,
+        );
+
+        // Route through the controller policy seam. The wire client writes back
+        // ONLY the controller-returned outcome (never a wire-local mapping), so a
+        // policy DENY over-rules any adapter-offered allow.
+        let decided: AdapterPermissionResponse = self
+            .permission_decider
+            .decide_acp_permission(&adapter_request);
+
+        let outcome_value = match &decided.outcome {
             AcpPermissionOutcome::Selected { option_id } => {
                 json!({ "outcome": "selected", "optionId": option_id })
             }
@@ -648,8 +703,11 @@ impl<T: AcpTransport> AcpWireClient<T> {
             .push(AcpPermissionRoundTrip {
                 tool_call_id,
                 offered_option_ids,
-                capo_decision: mapping.capo_decision.to_string(),
-                outcome: mapping.outcome.clone(),
+                requested_scope,
+                capo_decision: decided.capo_decision.clone(),
+                outcome: decided.outcome.clone(),
+                must_not_proceed: decided.must_not_proceed,
+                permission_decision_id: decided.permission_decision_id.clone(),
             });
         Ok(())
     }
@@ -664,6 +722,40 @@ impl<T: AcpTransport> AcpWireClient<T> {
         let frame = json!({ "jsonrpc": "2.0", "method": method, "params": params });
         self.transport
             .send_line(&serde_json::to_string(&frame).unwrap())
+    }
+}
+
+/// Derive the requested capability `(tool_name, scope)` from an ACP
+/// `session/request_permission` `params` object so the policy authority decides
+/// the ACTUAL scope the agent is asking for.
+///
+/// ACP carries the requesting action under `toolCall` (with an optional `kind` --
+/// `read` / `edit` / `execute` -- and a `title`). We map the ACP tool kind onto a
+/// Capo capability scope (`{domain}:{action}:{resource}`) and the backing Capo
+/// wrapper tool name. An unknown/absent kind maps to the most-privileged write
+/// scope so the policy is asked the STRICTEST question (fail-safe: a missing kind
+/// is never treated as a cheap read).
+fn derive_scope(params: &Value) -> (String, String) {
+    let tool_call = params.get("toolCall");
+    let kind = tool_call
+        .and_then(|tc| tc.get("kind"))
+        .or_else(|| params.get("kind"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match kind {
+        "read" => (
+            "capo.file_read".to_string(),
+            "filesystem:read:workspace".to_string(),
+        ),
+        "execute" => (
+            "capo.shell_run".to_string(),
+            "process:exec:workspace".to_string(),
+        ),
+        // "edit"/"delete"/"move"/unknown all ask the strict write question.
+        _ => (
+            "capo.file_write".to_string(),
+            "filesystem:write:workspace".to_string(),
+        ),
     }
 }
 
@@ -942,8 +1034,57 @@ impl<W: Write> AcpTransport for PipedProcessTransport<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AcpAdapter, AdapterTimelineConfidence};
+    use crate::{AdapterTimelineConfidence, map_acp_options_trusted_local};
     use capo_core::SessionId;
+
+    /// A test stand-in for the controller's policy-authority seam.
+    ///
+    /// It models the controller contract the real `decide_adapter_permission`
+    /// implements: it runs the documented option mapping, but a `policy_allows =
+    /// false` configuration OVER-RULES an adapter-offered allow (a policy DENY
+    /// wins), returning `cancelled` + `must_not_proceed` -- exactly what the
+    /// controller does. This lets the deterministic wire tests prove the wire
+    /// client writes back ONLY the seam's decision, never a self-authorized one.
+    struct StubPolicyDecider {
+        policy_allows: bool,
+    }
+
+    impl AcpPermissionDecider for StubPolicyDecider {
+        fn decide_acp_permission(
+            &self,
+            request: &AdapterPermissionRequest,
+        ) -> AdapterPermissionResponse {
+            let mapping = map_acp_options_trusted_local(&request.options);
+            // A policy deny over-rules an adapter-offered allow.
+            if mapping.capo_decision == "allow" && !self.policy_allows {
+                return AdapterPermissionResponse {
+                    outcome: AcpPermissionOutcome::Cancelled,
+                    capo_decision: "deny".to_string(),
+                    capo_persistence: None,
+                    permission_decision_id: "decision-stub-deny".to_string(),
+                    capability_grant_id: None,
+                    adapter_error: false,
+                    must_not_proceed: true,
+                };
+            }
+            let must_not_proceed = mapping.capo_decision != "allow";
+            AdapterPermissionResponse {
+                outcome: mapping.outcome.clone(),
+                capo_decision: mapping.capo_decision.to_string(),
+                capo_persistence: mapping.capo_persistence.map(str::to_string),
+                permission_decision_id: "decision-stub".to_string(),
+                capability_grant_id: None,
+                adapter_error: false,
+                must_not_proceed,
+            }
+        }
+    }
+
+    fn allow_decider() -> Box<dyn AcpPermissionDecider + Send + Sync> {
+        Box::new(StubPolicyDecider {
+            policy_allows: true,
+        })
+    }
 
     fn setup_plan() -> AcpSessionSetupPlan {
         // A trusted-local capability plan advertises fs read + write + terminal,
@@ -1025,7 +1166,8 @@ mod tests {
                 ],
             );
 
-        let mut client = AcpWireClient::attach(transport, setup_plan());
+        let mut client =
+            AcpWireClient::attach(transport, setup_plan()).with_permission_decider(allow_decider());
         let version = client.initialize().expect("initialize");
         assert_eq!(version, 1);
         assert_eq!(client.negotiated_protocol_version(), Some(1));
@@ -1110,7 +1252,8 @@ mod tests {
             );
 
         {
-            let mut client = AcpWireClient::attach(&mut transport, setup_plan());
+            let mut client = AcpWireClient::attach(&mut transport, setup_plan())
+                .with_permission_decider(allow_decider());
             client.initialize().unwrap();
             let session_id = client.session_new("/tmp").unwrap();
             client.prompt(&session_id, "go").unwrap();
@@ -1209,6 +1352,14 @@ mod tests {
         plan: AcpSessionSetupPlan,
         prompt_frames: Vec<ScriptedServerFrame>,
     ) -> (ScriptedAcpTransport, AcpTurnTranscript) {
+        drive_prompt_with_decider(plan, prompt_frames, allow_decider())
+    }
+
+    fn drive_prompt_with_decider(
+        plan: AcpSessionSetupPlan,
+        prompt_frames: Vec<ScriptedServerFrame>,
+        decider: Box<dyn AcpPermissionDecider + Send + Sync>,
+    ) -> (ScriptedAcpTransport, AcpTurnTranscript) {
         let mut transport = ScriptedAcpTransport::new()
             .on_request(
                 "initialize",
@@ -1222,7 +1373,8 @@ mod tests {
             )
             .on_request("session/prompt", prompt_frames);
         let transcript = {
-            let mut client = AcpWireClient::attach(&mut transport, plan);
+            let mut client =
+                AcpWireClient::attach(&mut transport, plan).with_permission_decider(decider);
             client.initialize().unwrap();
             let session_id = client.session_new("/tmp").unwrap();
             client.prompt(&session_id, "go").unwrap()
@@ -1311,28 +1463,48 @@ mod tests {
         );
     }
 
-    /// Under a non-TrustedLocal profile the wire client is NOT the policy
-    /// authority: it fails CLOSED (cancels) even when the agent offers an allow
-    /// option, rather than self-authorizing on the wire.
+    /// SAFETY: with NO controller policy seam injected, the wire client uses the
+    /// default [`FailClosedPermissionDecider`] and CANCELS an offered allow rather
+    /// than self-authorizing on the wire -- the wire client is never the authority.
     #[test]
-    fn permission_non_trusted_local_profile_fails_closed() {
-        let (transport, transcript) = drive_prompt(
-            read_only_setup_plan(),
-            vec![
-                ScriptedServerFrame::RequestPermission(json!({
-                    "sessionId": "s1",
-                    "toolCall": { "toolCallId": "t-allow" },
-                    "options": [{ "optionId": "opt-allow", "name": "Allow", "kind": "allow_once" }]
-                })),
-                ScriptedServerFrame::Response(json!({ "stopReason": "end_turn" })),
-            ],
-        );
+    fn permission_without_decider_fails_closed_on_offered_allow() {
+        // No `.with_permission_decider(..)`: the default fail-closed decider is used.
+        let mut transport = ScriptedAcpTransport::new()
+            .on_request(
+                "initialize",
+                vec![ScriptedServerFrame::Response(
+                    json!({ "protocolVersion": 1 }),
+                )],
+            )
+            .on_request(
+                "session/new",
+                vec![ScriptedServerFrame::Response(json!({ "sessionId": "s1" }))],
+            )
+            .on_request(
+                "session/prompt",
+                vec![
+                    ScriptedServerFrame::RequestPermission(json!({
+                        "sessionId": "s1",
+                        "toolCall": { "toolCallId": "t-allow", "kind": "edit" },
+                        "options": [{ "optionId": "opt-allow", "name": "Allow", "kind": "allow_once" }]
+                    })),
+                    ScriptedServerFrame::Response(json!({ "stopReason": "end_turn" })),
+                ],
+            );
+        let transcript = {
+            let mut client = AcpWireClient::attach(&mut transport, setup_plan());
+            client.initialize().unwrap();
+            let session_id = client.session_new("/tmp").unwrap();
+            client.prompt(&session_id, "go").unwrap()
+        };
 
+        let round_trip = &transcript.permission_round_trips[0];
         assert_eq!(
-            transcript.permission_round_trips[0].outcome,
+            round_trip.outcome,
             AcpPermissionOutcome::Cancelled,
-            "a non-trusted-local session must not be granted an offered allow on the wire"
+            "a wire client with no policy seam must fail closed, never self-authorize"
         );
+        assert!(round_trip.must_not_proceed);
         let response = transport
             .recorded
             .iter()
@@ -1343,6 +1515,57 @@ mod tests {
                 .pointer("/result/outcome/outcome")
                 .and_then(Value::as_str),
             Some("cancelled")
+        );
+    }
+
+    /// SAFETY: a policy DENY over-rules an adapter-offered allow. The agent offers
+    /// `allow_once`, but the injected policy seam denies the scope, so the wire
+    /// client writes back `cancelled` (NOT the offered allow option) and records
+    /// `must_not_proceed` -- proving the wire client writes back ONLY the
+    /// controller-returned outcome, never the raw adapter offer.
+    #[test]
+    fn permission_policy_deny_overrides_adapter_offered_allow_on_the_wire() {
+        let (transport, transcript) = drive_prompt_with_decider(
+            setup_plan(),
+            vec![
+                ScriptedServerFrame::RequestPermission(json!({
+                    "sessionId": "s1",
+                    "toolCall": { "toolCallId": "t-allow", "kind": "edit" },
+                    "options": [{ "optionId": "opt-allow", "name": "Allow", "kind": "allow_once" }]
+                })),
+                ScriptedServerFrame::Response(json!({ "stopReason": "end_turn" })),
+            ],
+            Box::new(StubPolicyDecider {
+                policy_allows: false,
+            }),
+        );
+
+        let round_trip = &transcript.permission_round_trips[0];
+        assert_eq!(round_trip.capo_decision, "deny");
+        assert_eq!(
+            round_trip.outcome,
+            AcpPermissionOutcome::Cancelled,
+            "a policy deny must NOT return the offered allow option on the wire"
+        );
+        assert!(round_trip.must_not_proceed);
+        // The derived scope is the strict write scope (edit -> write).
+        assert_eq!(round_trip.requested_scope, "filesystem:write:workspace");
+
+        let response = transport
+            .recorded
+            .iter()
+            .find(|frame| frame.pointer("/result/outcome/outcome").is_some())
+            .expect("permission outcome on the wire");
+        assert_eq!(
+            response
+                .pointer("/result/outcome/outcome")
+                .and_then(Value::as_str),
+            Some("cancelled"),
+            "a policy-denied allow must serialize as cancelled, not selected{{opt-allow}}",
+        );
+        assert!(
+            response.pointer("/result/outcome/optionId").is_none(),
+            "the offered allow option id must never reach the wire on a policy deny",
         );
     }
 

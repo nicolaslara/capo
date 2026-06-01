@@ -50,9 +50,9 @@ pub use local_subscription::{
     LocalAdapterSmokeRunner, scan_artifacts_for_sensitive_markers,
 };
 pub use permission_request::{
-    AcpOptionMapping, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionOutcome,
-    AdapterPermissionCancelReason, AdapterPermissionRequest, AdapterPermissionResponse,
-    map_acp_options_trusted_local,
+    AcpOptionMapping, AcpPermissionDecider, AcpPermissionOption, AcpPermissionOptionKind,
+    AcpPermissionOutcome, AdapterPermissionCancelReason, AdapterPermissionRequest,
+    AdapterPermissionResponse, FailClosedPermissionDecider, map_acp_options_trusted_local,
 };
 pub use provider_parsers::{AcpAdapter, ClaudeCodeAdapter, CodexExecAdapter};
 pub use scripted_mock_agent::{ScriptedMockAgent, ScriptedMockEvent, ScriptedMockTurn};

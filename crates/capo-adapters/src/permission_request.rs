@@ -364,6 +364,69 @@ impl AdapterPermissionResponse {
     pub fn may_proceed(&self) -> bool {
         self.allowed() && !self.must_not_proceed
     }
+
+    /// The fail-closed response: a `cancelled` outcome that halts the adapter.
+    ///
+    /// Returned by the DEFAULT (no controller seam injected) decider so the wire
+    /// client never self-authorizes -- it cancels unless a real policy authority
+    /// decided the request.
+    pub fn fail_closed(reason: impl Into<String>) -> Self {
+        Self {
+            outcome: AcpPermissionOutcome::Cancelled,
+            capo_decision: "cancel".to_string(),
+            capo_persistence: None,
+            permission_decision_id: reason.into(),
+            capability_grant_id: None,
+            adapter_error: false,
+            must_not_proceed: true,
+        }
+    }
+}
+
+/// The policy-authority seam the live ACP wire client routes an inbound
+/// `session/request_permission` through, so the wire client is NEVER the policy
+/// authority itself.
+///
+/// SAFETY: the wire client builds an [`AdapterPermissionRequest`] from the
+/// agent's offered ACP `PermissionOption[]` plus the requested scope, hands it to
+/// the injected decider, and writes back ONLY the [`AdapterPermissionResponse`]
+/// the decider returns -- honoring `must_not_proceed` (a policy DENY over-rules an
+/// adapter-offered allow). The real implementation lives at the controller seam
+/// (`capo-controller`'s `decide_adapter_permission` /
+/// `run_adapter_permission_round_trip`), which runs `PermissionPolicy::decide` and
+/// persists the `permission.requested -> permission.decided ->
+/// capability.grant_created` lifecycle. The wire client cannot depend on the
+/// controller (layering), so the controller injects its decider through this
+/// trait.
+///
+/// When NO decider is injected, the wire client uses [`FailClosedPermissionDecider`]
+/// and cancels every request rather than self-authorizing.
+pub trait AcpPermissionDecider {
+    /// Decide one ACP permission round-trip. The returned response's `outcome` is
+    /// written back to the agent verbatim, and `must_not_proceed` is the
+    /// authoritative halt signal.
+    fn decide_acp_permission(
+        &self,
+        request: &AdapterPermissionRequest,
+    ) -> AdapterPermissionResponse;
+}
+
+/// The default decider used when the wire client is driven WITHOUT a controller
+/// policy seam (e.g. a bare protocol test, or a misconfiguration): it never
+/// authorizes anything. Every request is cancelled with `must_not_proceed`, so the
+/// wire client cannot self-authorize a tool call no policy ever granted.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FailClosedPermissionDecider;
+
+impl AcpPermissionDecider for FailClosedPermissionDecider {
+    fn decide_acp_permission(
+        &self,
+        _request: &AdapterPermissionRequest,
+    ) -> AdapterPermissionResponse {
+        AdapterPermissionResponse::fail_closed(
+            "no controller permission seam injected: wire client fails closed",
+        )
+    }
 }
 
 #[cfg(test)]

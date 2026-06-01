@@ -26,6 +26,10 @@ pub enum StateError {
     /// failure). Carried as a typed error so the chat surface never fabricates a
     /// fake summary in place of a real Codex result.
     CodexLiveChat(String),
+    /// DP1: a live ACP wire turn failed (gate-closed, spawn, transport, or
+    /// protocol error). Carried as a typed error so the controller never ingests a
+    /// fabricated transcript in place of a real ACP result.
+    AcpLiveDrive(String),
     /// GA7 (GO11): a goal report/observation carried an unclassifiable `source`
     /// tag (neither observed evidence nor `agent_reported`). Rejected at the
     /// controller seam so a malformed tag never lands in the goal read model the
