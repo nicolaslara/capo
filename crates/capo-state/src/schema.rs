@@ -521,6 +521,72 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             completed_sequence INTEGER,
             notes TEXT NOT NULL
         );
+        -- GA1 (goal-orchestration GO1/GO3): the goal-domain read models. These
+        -- are projected in-transaction like the existing projections and rebuild
+        -- identically from `projection_records`. None of them carry a `complete`
+        -- goal status: completion is the GA5 auditor's verdict, never a write.
+        CREATE TABLE IF NOT EXISTS goals (
+            goal_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            task_id TEXT,
+            agent_id TEXT,
+            session_id TEXT,
+            parent_goal_id TEXT,
+            attempt_run_id TEXT,
+            objective TEXT NOT NULL,
+            status TEXT NOT NULL,
+            success_criteria_json TEXT NOT NULL,
+            constraints_json TEXT NOT NULL,
+            verification_surface_json TEXT NOT NULL,
+            budget_json TEXT NOT NULL,
+            stop_conditions_json TEXT NOT NULL,
+            blocker_reason TEXT NOT NULL DEFAULT '',
+            updated_sequence INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS requirement_ledgers (
+            requirement_id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            status TEXT NOT NULL,
+            last_status_source TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS goal_reports (
+            goal_report_id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            session_id TEXT,
+            requirement_id TEXT,
+            report_kind TEXT NOT NULL,
+            source TEXT NOT NULL,
+            confidence INTEGER,
+            summary TEXT NOT NULL,
+            body_artifact_id TEXT,
+            evidence_id TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS goal_continuations (
+            continuation_id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            attempt_run_id TEXT,
+            decision TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            updated_sequence INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS delegated_provider_goals (
+            delegated_goal_id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            session_id TEXT,
+            provider_kind TEXT NOT NULL,
+            provider_goal_ref TEXT,
+            provider_state TEXT NOT NULL,
+            source TEXT NOT NULL,
+            body_artifact_id TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
         ",
     )?;
     add_missing_column(
@@ -602,6 +668,12 @@ pub(crate) fn clear_projection_tables(transaction: &Transaction<'_>) -> StateRes
         "source_bindings",
         "workpad_files",
         "workpad_tasks",
+        // GA1 goal-domain read models.
+        "goals",
+        "requirement_ledgers",
+        "goal_reports",
+        "goal_continuations",
+        "delegated_provider_goals",
         "projection_watermarks",
     ] {
         transaction.execute(&format!("DELETE FROM {table}"), [])?;

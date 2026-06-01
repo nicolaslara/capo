@@ -80,7 +80,28 @@ Must not do:
 
 ## GA1 - Milestone A: Goal/Requirement/Evidence Event Model And Projections
 
-Status: pending.
+Status: done. Goal lifecycle/requirement/continuation/delegated-provider events
+(`event.rs`) and the five `ProjectionRecord` variants + structs
+(`projections.rs`) are wired end to end: schema tables (`schema.rs`), the
+encode/decode round-trip (`codec_encode.rs`/`codec.rs`), the in-transaction
+projection apply (`apply.rs`), and typed read methods (`queries.rs`). Agent
+reports persist as `source=agent_reported` with confidence distinct from observed
+evidence (`runtime_output`/`adapter_event`); duplicate report submissions dedupe
+on idempotency key; a full rebuild reproduces the goal/requirement/report
+projections identically.
+
+Evidence:
+
+- `cargo fmt --check` -> clean (exit 0).
+- `cargo clippy --all-targets --all-features -- -D warnings` -> exit 0 (the prior
+  non-exhaustive-match failures in `apply.rs`/`codec_encode.rs` for the new
+  `ProjectionRecord` variants are resolved).
+- `cargo test -p capo-state goal` -> 2 passed
+  (`goal_projections_are_persisted_and_rebuild_identically`,
+  `duplicate_goal_report_submission_is_idempotent`).
+- `cargo test --workspace` -> exit 0, 0 failed across all crates (capo-state lib:
+  64 passed).
+- `git diff --check` -> clean.
 
 Acceptance:
 

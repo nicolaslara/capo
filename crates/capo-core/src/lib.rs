@@ -59,6 +59,11 @@ typed_id!(TurnId);
 typed_id!(ToolCallId);
 typed_id!(MemoryPacketId);
 typed_id!(EvidenceId);
+// GA1 (goal-orchestration GO1): the Capo-owned goal and requirement identities.
+// A `GoalAttempt` references the existing dispatch `RunId` rather than a second
+// run-completion identity, so these stay narrow to the goal/requirement model.
+typed_id!(GoalId);
+typed_id!(RequirementId);
 typed_id!(CommandId);
 typed_id!(CapabilityProfileId);
 typed_id!(ArtifactId);

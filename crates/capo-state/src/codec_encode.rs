@@ -600,5 +600,98 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             h: None,
             payload_json: "{}".to_string(),
         },
+        // GA1 (goal-orchestration GO1): the goal lifecycle read model. The
+        // structured GO6 fields (success criteria/constraints/verification/budget/
+        // stop conditions) and the current blocker exceed the positional slots, so
+        // they ride in the payload to survive a projection rebuild.
+        ProjectionRecord::Goal(goal) => ProjectionRecordRow {
+            kind: "goal",
+            record_id: goal.goal_id.to_string(),
+            a: Some(goal.project_id.to_string()),
+            b: Some(goal.status.clone()),
+            c: Some(goal.objective.clone()),
+            d: goal.parent_goal_id.as_ref().map(ToString::to_string),
+            e: goal.attempt_run_id.as_ref().map(ToString::to_string),
+            f: goal.task_id.as_ref().map(ToString::to_string),
+            g: goal.agent_id.as_ref().map(ToString::to_string),
+            h: goal.session_id.as_ref().map(ToString::to_string),
+            payload_json: json!({
+                "success_criteria_json": goal.success_criteria_json,
+                "constraints_json": goal.constraints_json,
+                "verification_surface_json": goal.verification_surface_json,
+                "budget_json": goal.budget_json,
+                "stop_conditions_json": goal.stop_conditions_json,
+                "blocker_reason": goal.blocker_reason,
+            })
+            .to_string(),
+        },
+        // GA1 (goal-orchestration GO3): the per-requirement status ledger.
+        ProjectionRecord::RequirementLedger(ledger) => ProjectionRecordRow {
+            kind: "requirement_ledger",
+            record_id: ledger.requirement_id.to_string(),
+            a: Some(ledger.goal_id.to_string()),
+            b: Some(ledger.project_id.to_string()),
+            c: Some(ledger.summary.clone()),
+            d: Some(ledger.status.clone()),
+            e: Some(ledger.last_status_source.clone()),
+            f: None,
+            g: None,
+            h: None,
+            payload_json: "{}".to_string(),
+        },
+        // GA1 (goal-orchestration GO3): the agent-report / story ledger. The
+        // load-bearing `source` tag (`agent_reported` vs observed) is preserved so
+        // a claim is never stored indistinguishably from observed evidence.
+        ProjectionRecord::GoalReport(report) => ProjectionRecordRow {
+            kind: "goal_report",
+            record_id: report.goal_report_id.clone(),
+            a: Some(report.goal_id.to_string()),
+            b: Some(report.project_id.to_string()),
+            c: Some(report.report_kind.clone()),
+            d: Some(report.source.clone()),
+            e: Some(report.summary.clone()),
+            f: report.session_id.as_ref().map(ToString::to_string),
+            g: report.requirement_id.as_ref().map(ToString::to_string),
+            h: report.confidence.map(|value| value.to_string()),
+            payload_json: json!({
+                "body_artifact_id": report.body_artifact_id,
+                "evidence_id": report.evidence_id.as_ref().map(ToString::to_string),
+            })
+            .to_string(),
+        },
+        // GA1 (goal-orchestration GO3/GO8): a recorded continuation decision.
+        ProjectionRecord::GoalContinuation(continuation) => ProjectionRecordRow {
+            kind: "goal_continuation",
+            record_id: continuation.continuation_id.clone(),
+            a: Some(continuation.goal_id.to_string()),
+            b: Some(continuation.project_id.to_string()),
+            c: Some(continuation.decision.clone()),
+            d: Some(continuation.reason.clone()),
+            e: continuation
+                .attempt_run_id
+                .as_ref()
+                .map(ToString::to_string),
+            f: None,
+            g: None,
+            h: None,
+            payload_json: "{}".to_string(),
+        },
+        // GA1 (goal-orchestration GO12): observed delegated-provider goal state.
+        ProjectionRecord::DelegatedProviderGoal(delegated) => ProjectionRecordRow {
+            kind: "delegated_provider_goal",
+            record_id: delegated.delegated_goal_id.clone(),
+            a: Some(delegated.goal_id.to_string()),
+            b: Some(delegated.project_id.to_string()),
+            c: Some(delegated.provider_kind.clone()),
+            d: Some(delegated.provider_state.clone()),
+            e: Some(delegated.source.clone()),
+            f: delegated.session_id.as_ref().map(ToString::to_string),
+            g: delegated.provider_goal_ref.clone(),
+            h: None,
+            payload_json: json!({
+                "body_artifact_id": delegated.body_artifact_id,
+            })
+            .to_string(),
+        },
     }
 }

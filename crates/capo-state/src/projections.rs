@@ -1,5 +1,6 @@
 use capo_core::{
-    AgentId, EvidenceId, MemoryPacketId, ProjectId, RunId, SessionId, TaskId, ToolCallId,
+    AgentId, EvidenceId, GoalId, MemoryPacketId, ProjectId, RequirementId, RunId, SessionId,
+    TaskId, ToolCallId,
 };
 
 use crate::RedactionState;
@@ -39,6 +40,12 @@ pub enum ProjectionRecord {
     WorkpadIndexReset(WorkpadIndexResetProjection),
     WorkpadFile(WorkpadFileProjection),
     WorkpadTask(WorkpadTaskProjection),
+    // GA1 (goal-orchestration GO1/GO3): the goal-domain read models.
+    Goal(GoalProjection),
+    RequirementLedger(RequirementLedgerProjection),
+    GoalReport(GoalReportProjection),
+    GoalContinuation(GoalContinuationProjection),
+    DelegatedProviderGoal(DelegatedProviderGoalProjection),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -892,5 +899,217 @@ pub struct WorkpadTaskProjection {
     pub observed_status: String,
     pub capo_execution_status: String,
     pub observed_unix: i64,
+    pub updated_sequence: i64,
+}
+
+/// GA1 (goal-orchestration GO1/GO3): the active-goal read model.
+///
+/// One row per Capo-owned goal. The lifecycle `status` is last-write-wins over
+/// the `goal.created`/`updated`/`paused`/`resumed`/`blocked`/`cleared` event
+/// stream, so the projection rebuilds identically from the log.
+///
+/// A goal links to its project, task, agent, session, and parent goal, and
+/// carries the structured success criteria, constraints, verification surface,
+/// budget, and stop conditions as JSON (GO6). It references its current dispatch
+/// `RunId` as the goal-attempt run identity rather than introducing a second
+/// run-completion notion: the dispatch execution-status projections
+/// (`AdapterDispatchExecutionProjection`) remain the single owner of run exit.
+///
+/// IMPORTANT: `status` is NEVER `complete` by an ordinary lifecycle write. A
+/// Capo goal-complete transition is reachable only through the GA5 auditor on
+/// observed evidence; the lifecycle events here cannot flip a goal to complete.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalProjection {
+    pub goal_id: GoalId,
+    pub project_id: ProjectId,
+    pub task_id: Option<TaskId>,
+    pub agent_id: Option<AgentId>,
+    pub session_id: Option<SessionId>,
+    /// The parent goal this goal is a subgoal of (GO11), when one exists.
+    pub parent_goal_id: Option<GoalId>,
+    /// The dispatch run identity for the current goal attempt (GO1 `GoalAttempt`).
+    /// `None` before a run is dispatched. This is a REFERENCE to the existing
+    /// dispatch run; the run's terminal status stays owned by the dispatch
+    /// execution-status projection.
+    pub attempt_run_id: Option<RunId>,
+    pub objective: String,
+    /// Lifecycle status: `active` / `paused` / `blocked` / `cleared`. Never
+    /// `complete` from a lifecycle write (the auditor owns completion).
+    pub status: String,
+    /// Structured success criteria (GO6), as JSON.
+    pub success_criteria_json: String,
+    /// Structured constraints (GO6), as JSON.
+    pub constraints_json: String,
+    /// Structured verification surface (GO6), as JSON.
+    pub verification_surface_json: String,
+    /// Structured budget (GO6) -- e.g. the `GoalBudget` resource ceiling, as JSON.
+    pub budget_json: String,
+    /// Structured stop conditions (GO6), as JSON.
+    pub stop_conditions_json: String,
+    /// The most recent blocker reason while `status = blocked`, else empty (GO3
+    /// current-blocker state).
+    pub blocker_reason: String,
+    pub updated_sequence: i64,
+}
+
+impl GoalProjection {
+    /// The lifecycle statuses a goal can carry. `complete` is intentionally
+    /// absent: completion is the auditor's verdict, not a lifecycle write.
+    pub const ACTIVE: &'static str = "active";
+    pub const PAUSED: &'static str = "paused";
+    pub const BLOCKED: &'static str = "blocked";
+    pub const CLEARED: &'static str = "cleared";
+
+    /// Whether this goal is currently active (eligible for continuation).
+    pub fn is_active(&self) -> bool {
+        self.status == Self::ACTIVE
+    }
+}
+
+/// GA1 (goal-orchestration GO3): the per-requirement status ledger.
+///
+/// One row per `(goal, requirement)`. The `status` is last-write-wins over the
+/// `goal.requirement_status_changed` stream and distinguishes the requirement
+/// states the auditor reasons over (GO9): `unverified`, `supported`,
+/// `validated`, `reviewed`, `blocked`, `contradicted`. GA1 only RECORDS the
+/// status transitions emitted for it; the GA5 auditor owns deciding which
+/// transition is warranted from observed evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequirementLedgerProjection {
+    pub requirement_id: RequirementId,
+    pub goal_id: GoalId,
+    pub project_id: ProjectId,
+    pub summary: String,
+    /// `unverified` / `supported` / `validated` / `reviewed` / `blocked` /
+    /// `contradicted` (GO9 requirement states).
+    pub status: String,
+    /// The source class that last drove this status, tagged exactly like the
+    /// `tools-aci` evidence sources: `agent_reported` for a claim, or an observed
+    /// source (`runtime_output` / `adapter_event`). A requirement is never
+    /// `validated`/`reviewed` by an `agent_reported` source alone (the auditor
+    /// enforces that); this field records provenance for the read model.
+    pub last_status_source: String,
+    pub updated_sequence: i64,
+}
+
+impl RequirementLedgerProjection {
+    pub const UNVERIFIED: &'static str = "unverified";
+    pub const SUPPORTED: &'static str = "supported";
+    pub const VALIDATED: &'static str = "validated";
+    pub const REVIEWED: &'static str = "reviewed";
+    pub const BLOCKED: &'static str = "blocked";
+    pub const CONTRADICTED: &'static str = "contradicted";
+}
+
+/// GA1 (goal-orchestration GO3): the per-goal agent-report / story ledger.
+///
+/// This is the queryable spine behind the agent-story, validation-ledger,
+/// confidence/risk-summary, and current-blocker read surfaces (GO3/GO5). Each
+/// row projects ONE recorded report against a goal -- a `goal.report_recorded`
+/// event sourced from a `tools-aci` `agent_reported` report (intent, progress,
+/// confidence, assumption, blocker, validation, completion claim) or an observed
+/// evidence/review reference.
+///
+/// The load-bearing field is `source`: it is tagged exactly like the
+/// `tools-aci` evidence sources (`agent_reported` vs `runtime_output` /
+/// `adapter_event`), so a claim is NEVER stored indistinguishably from observed
+/// evidence and completion is never reachable by agent assertion alone. The raw
+/// report body lives in an artifact, not as authoritative read-model truth; this
+/// row holds the structured summary plus references.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalReportProjection {
+    pub goal_report_id: String,
+    pub goal_id: GoalId,
+    pub project_id: ProjectId,
+    pub session_id: Option<SessionId>,
+    pub requirement_id: Option<RequirementId>,
+    /// The `tools-aci` reporting tool that produced this report (e.g.
+    /// `capo.report_progress`, `capo.record_validation`, `capo.raise_blocker`,
+    /// `capo.complete_requirement`), or an observed-evidence kind.
+    pub report_kind: String,
+    /// `agent_reported` for a claim, or an observed source
+    /// (`runtime_output` / `adapter_event`). See [`Self::is_observed_evidence`].
+    pub source: String,
+    /// The agent's self-declared confidence (0-100) for an `agent_reported`
+    /// report; `None` for observed evidence (which carries no agent confidence).
+    pub confidence: Option<i64>,
+    /// A short structured summary of the report for the story read model. The
+    /// full body is kept in `body_artifact_id`, not here.
+    pub summary: String,
+    /// The artifact holding the raw/full report body, preserved as an INPUT, not
+    /// authoritative read-model truth (`state-model.md`).
+    pub body_artifact_id: Option<String>,
+    /// A reference to the observed `EvidenceRecorded` row this report cites, when
+    /// the report points at observed evidence rather than restating it.
+    pub evidence_id: Option<EvidenceId>,
+    pub updated_sequence: i64,
+}
+
+impl GoalReportProjection {
+    /// Whether this report row is OBSERVED evidence rather than an agent claim.
+    /// Mirrors `capo_tools::source_is_observed_evidence` so the two surfaces
+    /// classify a source identically.
+    pub fn is_observed_evidence(&self) -> bool {
+        self.source == "runtime_output"
+            || self.source == "adapter_event"
+            || self.source.starts_with("adapter_event:")
+    }
+
+    /// Whether this report is an agent CLAIM (`agent_reported`). The auditor
+    /// treats a claim as a proposal only.
+    pub fn is_agent_reported(&self) -> bool {
+        self.source == "agent_reported"
+    }
+}
+
+/// GA1 (goal-orchestration GO3/GO8): a recorded continuation decision.
+///
+/// One row per `goal.continuation_decision_recorded` event. The scheduler that
+/// PRODUCES the decision lives in GA4; GA1 owns only the durable record so the
+/// "why did (or didn't) this goal continue?" answer is a derived read model. The
+/// decision is one of `continue` / `pause` / `block` / `budget-limit` /
+/// `no-progress-suppress`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalContinuationProjection {
+    pub continuation_id: String,
+    pub goal_id: GoalId,
+    pub project_id: ProjectId,
+    /// The dispatch run this continuation decision was evaluated against, when a
+    /// run exists. References the dispatch run identity, never a second one.
+    pub attempt_run_id: Option<RunId>,
+    /// `continue` / `pause` / `block` / `budget-limit` / `no-progress-suppress`.
+    pub decision: String,
+    /// A short machine reason code for the decision (e.g. `safe_boundary`,
+    /// `input_queued`, `budget_exhausted`, `no_material_progress`).
+    pub reason: String,
+    pub updated_sequence: i64,
+}
+
+/// GA1 (goal-orchestration GO12): observed delegated-provider goal state.
+///
+/// When Capo mirrors a goal into a provider-native goal mode (e.g. Codex
+/// `/goal`), the provider's reported goal state, command surface, and completion
+/// are recorded here as OBSERVED-NOT-AUTHORITATIVE evidence. `source` is always
+/// an agent-reported/observed tag, never an authoritative Capo completion: a
+/// provider-native completion is a claim the GA5 auditor weighs, it does not flip
+/// the Capo goal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegatedProviderGoalProjection {
+    pub delegated_goal_id: String,
+    pub goal_id: GoalId,
+    pub project_id: ProjectId,
+    pub session_id: Option<SessionId>,
+    /// The provider whose native goal mode this mirrors (e.g. `codex`).
+    pub provider_kind: String,
+    /// The provider-native goal handle/ref, when the provider exposes one.
+    pub provider_goal_ref: Option<String>,
+    /// The provider's observed goal state string (provider vocabulary, recorded
+    /// verbatim as observed input, not mapped onto Capo lifecycle states).
+    pub provider_state: String,
+    /// Always an `agent_reported`/observed tag -- provider-native completion is
+    /// evidence the auditor weighs, never authoritative Capo completion.
+    pub source: String,
+    /// The artifact preserving the raw provider goal output, kept as an INPUT.
+    pub body_artifact_id: Option<String>,
     pub updated_sequence: i64,
 }

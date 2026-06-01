@@ -1,5 +1,6 @@
 use capo_core::{
-    AgentId, EvidenceId, MemoryPacketId, ProjectId, RunId, SessionId, TaskId, ToolCallId,
+    AgentId, EvidenceId, GoalId, MemoryPacketId, ProjectId, RequirementId, RunId, SessionId,
+    TaskId, ToolCallId,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -9,12 +10,14 @@ use crate::{
     AdapterDispatchPromptMaterializationProjection, AdapterDispatchPromptSourceProjection,
     AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
     AgentProjection, CapabilityGrantProjection, CheckpointProjection,
-    ConnectivityExposureProjection, EventKind, EventRecord, EvidenceProjection, InFlightRun,
-    MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
-    PermissionApprovalProjection, ReviewFindingProjection, RunProjection, RunScoreProjection,
-    RuntimeTargetProjection, SessionProjection, SourceBindingProjection, SqliteStateStore,
-    StateError, StateResult, TaskOutcomeReportProjection, TaskProjection, ToolCallProjection,
-    ToolCallProvenance, ToolObservationProjection, WorkpadFileProjection, WorkpadTaskProjection,
+    ConnectivityExposureProjection, DelegatedProviderGoalProjection, EventKind, EventRecord,
+    EvidenceProjection, GoalContinuationProjection, GoalProjection, GoalReportProjection,
+    InFlightRun, MemoryPacketProjection, MemoryRecordProjection, MemorySourceProjection,
+    PermissionApprovalProjection, RequirementLedgerProjection, ReviewFindingProjection,
+    RunProjection, RunScoreProjection, RuntimeTargetProjection, SessionProjection,
+    SourceBindingProjection, SqliteStateStore, StateError, StateResult,
+    TaskOutcomeReportProjection, TaskProjection, ToolCallProjection, ToolCallProvenance,
+    ToolObservationProjection, WorkpadFileProjection, WorkpadTaskProjection,
     WorkspaceLeaseProjection, optional_id,
 };
 
@@ -1871,6 +1874,102 @@ impl SqliteStateStore {
             &events,
         ))
     }
+
+    /// GA1 (goal-orchestration GO1): read the goal lifecycle read model. The GA5
+    /// auditor and GA4 scheduler operate on this rebuilt state rather than a live
+    /// transcript, so this read must round-trip identically across a rebuild.
+    pub fn goal(&self, goal_id: &GoalId) -> StateResult<Option<GoalProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let goal = connection
+            .query_row(
+                "SELECT goal_id, project_id, task_id, agent_id, session_id, parent_goal_id,
+                        attempt_run_id, objective, status, success_criteria_json, constraints_json,
+                        verification_surface_json, budget_json, stop_conditions_json,
+                        blocker_reason, updated_sequence
+                 FROM goals
+                 WHERE goal_id = ?1",
+                params![goal_id.as_str()],
+                goal_from_row,
+            )
+            .optional()?;
+        Ok(goal)
+    }
+
+    /// GA1 (goal-orchestration GO3): the per-requirement status ledger for a goal.
+    pub fn requirement_ledgers_for_goal(
+        &self,
+        goal_id: &GoalId,
+    ) -> StateResult<Vec<RequirementLedgerProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT requirement_id, goal_id, project_id, summary, status, last_status_source,
+                    updated_sequence
+             FROM requirement_ledgers
+             WHERE goal_id = ?1
+             ORDER BY requirement_id ASC",
+        )?;
+        let rows = statement.query_map(params![goal_id.as_str()], requirement_ledger_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    /// GA1 (goal-orchestration GO3): the agent-report / story ledger for a goal,
+    /// oldest first, preserving the observed-vs-reported `source` tag.
+    pub fn goal_reports_for_goal(
+        &self,
+        goal_id: &GoalId,
+    ) -> StateResult<Vec<GoalReportProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT goal_report_id, goal_id, project_id, session_id, requirement_id, report_kind,
+                    source, confidence, summary, body_artifact_id, evidence_id, updated_sequence
+             FROM goal_reports
+             WHERE goal_id = ?1
+             ORDER BY updated_sequence ASC, goal_report_id ASC",
+        )?;
+        let rows = statement.query_map(params![goal_id.as_str()], goal_report_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    /// GA1 (goal-orchestration GO3/GO8): the recorded continuation decisions for a
+    /// goal, oldest first.
+    pub fn goal_continuations_for_goal(
+        &self,
+        goal_id: &GoalId,
+    ) -> StateResult<Vec<GoalContinuationProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT continuation_id, goal_id, project_id, attempt_run_id, decision, reason,
+                    updated_sequence
+             FROM goal_continuations
+             WHERE goal_id = ?1
+             ORDER BY updated_sequence ASC, continuation_id ASC",
+        )?;
+        let rows = statement.query_map(params![goal_id.as_str()], goal_continuation_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    /// GA1 (goal-orchestration GO12): the observed delegated-provider goal records
+    /// for a goal, oldest first. These are observed-not-authoritative evidence.
+    pub fn delegated_provider_goals_for_goal(
+        &self,
+        goal_id: &GoalId,
+    ) -> StateResult<Vec<DelegatedProviderGoalProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT delegated_goal_id, goal_id, project_id, session_id, provider_kind,
+                    provider_goal_ref, provider_state, source, body_artifact_id, updated_sequence
+             FROM delegated_provider_goals
+             WHERE goal_id = ?1
+             ORDER BY updated_sequence ASC, delegated_goal_id ASC",
+        )?;
+        let rows =
+            statement.query_map(params![goal_id.as_str()], delegated_provider_goal_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
 }
 
 /// Extract `(external_pid, runtime_process_ref)` from a `run.started` payload
@@ -1961,6 +2060,89 @@ fn source_binding_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceBi
         source_anchor: row.get(6)?,
         source_hash: row.get(7)?,
         binding_status: row.get(8)?,
+        updated_sequence: row.get(9)?,
+    })
+}
+
+fn goal_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GoalProjection> {
+    Ok(GoalProjection {
+        goal_id: GoalId::new(row.get::<_, String>(0)?),
+        project_id: ProjectId::new(row.get::<_, String>(1)?),
+        task_id: optional_id(row.get::<_, Option<String>>(2)?),
+        agent_id: optional_id(row.get::<_, Option<String>>(3)?),
+        session_id: optional_id(row.get::<_, Option<String>>(4)?),
+        parent_goal_id: optional_id(row.get::<_, Option<String>>(5)?),
+        attempt_run_id: optional_id(row.get::<_, Option<String>>(6)?),
+        objective: row.get(7)?,
+        status: row.get(8)?,
+        success_criteria_json: row.get(9)?,
+        constraints_json: row.get(10)?,
+        verification_surface_json: row.get(11)?,
+        budget_json: row.get(12)?,
+        stop_conditions_json: row.get(13)?,
+        blocker_reason: row.get(14)?,
+        updated_sequence: row.get(15)?,
+    })
+}
+
+fn requirement_ledger_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<RequirementLedgerProjection> {
+    Ok(RequirementLedgerProjection {
+        requirement_id: RequirementId::new(row.get::<_, String>(0)?),
+        goal_id: GoalId::new(row.get::<_, String>(1)?),
+        project_id: ProjectId::new(row.get::<_, String>(2)?),
+        summary: row.get(3)?,
+        status: row.get(4)?,
+        last_status_source: row.get(5)?,
+        updated_sequence: row.get(6)?,
+    })
+}
+
+fn goal_report_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GoalReportProjection> {
+    Ok(GoalReportProjection {
+        goal_report_id: row.get(0)?,
+        goal_id: GoalId::new(row.get::<_, String>(1)?),
+        project_id: ProjectId::new(row.get::<_, String>(2)?),
+        session_id: optional_id(row.get::<_, Option<String>>(3)?),
+        requirement_id: optional_id(row.get::<_, Option<String>>(4)?),
+        report_kind: row.get(5)?,
+        source: row.get(6)?,
+        confidence: row.get(7)?,
+        summary: row.get(8)?,
+        body_artifact_id: row.get(9)?,
+        evidence_id: optional_id(row.get::<_, Option<String>>(10)?),
+        updated_sequence: row.get(11)?,
+    })
+}
+
+fn goal_continuation_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<GoalContinuationProjection> {
+    Ok(GoalContinuationProjection {
+        continuation_id: row.get(0)?,
+        goal_id: GoalId::new(row.get::<_, String>(1)?),
+        project_id: ProjectId::new(row.get::<_, String>(2)?),
+        attempt_run_id: optional_id(row.get::<_, Option<String>>(3)?),
+        decision: row.get(4)?,
+        reason: row.get(5)?,
+        updated_sequence: row.get(6)?,
+    })
+}
+
+fn delegated_provider_goal_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<DelegatedProviderGoalProjection> {
+    Ok(DelegatedProviderGoalProjection {
+        delegated_goal_id: row.get(0)?,
+        goal_id: GoalId::new(row.get::<_, String>(1)?),
+        project_id: ProjectId::new(row.get::<_, String>(2)?),
+        session_id: optional_id(row.get::<_, Option<String>>(3)?),
+        provider_kind: row.get(4)?,
+        provider_goal_ref: row.get(5)?,
+        provider_state: row.get(6)?,
+        source: row.get(7)?,
+        body_artifact_id: row.get(8)?,
         updated_sequence: row.get(9)?,
     })
 }

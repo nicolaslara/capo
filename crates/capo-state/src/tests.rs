@@ -173,6 +173,407 @@ fn source_binding_projection_is_persisted_and_rebuilt() {
     );
 }
 
+// GA1 (goal-orchestration GO1/GO3): the goal-domain projections must project
+// in-transaction like every other projection and rebuild byte-identically from
+// the persisted projection records. These tests prove the full encode -> row ->
+// decode -> apply round-trip for the goal lifecycle, requirement ledger, agent
+// report ledger, continuation decision, and observed delegated-provider state,
+// plus that a duplicate report submission is deduped by its idempotency key.
+#[test]
+fn goal_projections_are_persisted_and_rebuild_identically() {
+    let store = temp_store("goal-projections-rebuild");
+    let project_id = ProjectId::new("project-capo");
+    let task_id = TaskId::new("task-goal");
+    let agent_id = AgentId::new("agent-goal");
+    let session_id = SessionId::new("session-goal");
+    let run_id = RunId::new("run-goal-attempt");
+    let goal_id = GoalId::new("goal-ship-feature");
+    let requirement_id = RequirementId::new("req-tests-pass");
+    let evidence_id = EvidenceId::new("evidence-check-output");
+
+    let goal = GoalProjection {
+        goal_id: goal_id.clone(),
+        project_id: project_id.clone(),
+        task_id: Some(task_id.clone()),
+        agent_id: Some(agent_id.clone()),
+        session_id: Some(session_id.clone()),
+        parent_goal_id: None,
+        attempt_run_id: Some(run_id.clone()),
+        objective: "Ship the goal-domain projections".to_string(),
+        status: GoalProjection::ACTIVE.to_string(),
+        success_criteria_json: "{\"criteria\":[\"tests pass\"]}".to_string(),
+        constraints_json: "{\"no_network\":true}".to_string(),
+        verification_surface_json: "{\"surface\":\"cargo test\"}".to_string(),
+        budget_json: "{\"max_runs\":3}".to_string(),
+        stop_conditions_json: "{\"on\":\"budget\"}".to_string(),
+        blocker_reason: String::new(),
+        updated_sequence: 0,
+    };
+    store
+        .append_event(
+            NewEvent {
+                event_id: "event-goal-created".to_string(),
+                kind: EventKind::GoalCreated,
+                actor: "controller".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: Some(task_id.clone()),
+                agent_id: Some(agent_id.clone()),
+                session_id: Some(session_id.clone()),
+                run_id: Some(run_id.clone()),
+                turn_id: None,
+                item_id: Some(goal_id.to_string()),
+                payload_json: "{\"kind\":\"goal.created\"}".to_string(),
+                idempotency_key: Some("goal.created:goal-ship-feature".to_string()),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Goal(goal.clone())],
+        )
+        .expect("append goal created");
+
+    let requirement = RequirementLedgerProjection {
+        requirement_id: requirement_id.clone(),
+        goal_id: goal_id.clone(),
+        project_id: project_id.clone(),
+        summary: "All tests pass".to_string(),
+        status: RequirementLedgerProjection::SUPPORTED.to_string(),
+        last_status_source: "runtime_output".to_string(),
+        updated_sequence: 0,
+    };
+    store
+        .append_event(
+            NewEvent {
+                event_id: "event-requirement-status".to_string(),
+                kind: EventKind::RequirementStatusChanged,
+                actor: "auditor".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(session_id.clone()),
+                run_id: None,
+                turn_id: None,
+                item_id: Some(requirement_id.to_string()),
+                payload_json: "{\"kind\":\"goal.requirement_status_changed\"}".to_string(),
+                idempotency_key: Some(
+                    "goal.requirement_status_changed:req-tests-pass:supported".to_string(),
+                ),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::RequirementLedger(requirement.clone())],
+        )
+        .expect("append requirement status");
+
+    // An agent-reported completion CLAIM: stored as source=agent_reported with
+    // confidence, never as observed evidence (GA1 acceptance / knowledge.md).
+    let claim_report = GoalReportProjection {
+        goal_report_id: "report-claim-complete".to_string(),
+        goal_id: goal_id.clone(),
+        project_id: project_id.clone(),
+        session_id: Some(session_id.clone()),
+        requirement_id: Some(requirement_id.clone()),
+        report_kind: "capo.complete_requirement".to_string(),
+        source: "agent_reported".to_string(),
+        confidence: Some(80),
+        summary: "Agent claims the requirement is done".to_string(),
+        body_artifact_id: Some("artifact-claim-body".to_string()),
+        evidence_id: None,
+        updated_sequence: 0,
+    };
+    store
+        .append_event(
+            NewEvent {
+                event_id: "event-report-claim".to_string(),
+                kind: EventKind::GoalReportRecorded,
+                actor: "agent-goal".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: Some(agent_id.clone()),
+                session_id: Some(session_id.clone()),
+                run_id: Some(run_id.clone()),
+                turn_id: None,
+                item_id: Some("report-claim-complete".to_string()),
+                payload_json: "{\"kind\":\"goal.report_recorded\"}".to_string(),
+                idempotency_key: Some("goal.report_recorded:report-claim-complete".to_string()),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::GoalReport(claim_report.clone())],
+        )
+        .expect("append claim report");
+
+    // An OBSERVED evidence report: source=runtime_output, no confidence, cites the
+    // reused EvidenceRecorded row rather than restating it.
+    let observed_report = GoalReportProjection {
+        goal_report_id: "report-observed-check".to_string(),
+        goal_id: goal_id.clone(),
+        project_id: project_id.clone(),
+        session_id: Some(session_id.clone()),
+        requirement_id: Some(requirement_id.clone()),
+        report_kind: "runtime_output".to_string(),
+        source: "runtime_output".to_string(),
+        confidence: None,
+        summary: "Observed check output".to_string(),
+        body_artifact_id: None,
+        evidence_id: Some(evidence_id.clone()),
+        updated_sequence: 0,
+    };
+    store
+        .append_event(
+            NewEvent {
+                event_id: "event-report-observed".to_string(),
+                kind: EventKind::GoalReportRecorded,
+                actor: "runtime".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(session_id.clone()),
+                run_id: Some(run_id.clone()),
+                turn_id: None,
+                item_id: Some("report-observed-check".to_string()),
+                payload_json: "{\"kind\":\"goal.report_recorded\"}".to_string(),
+                idempotency_key: Some("goal.report_recorded:report-observed-check".to_string()),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::GoalReport(observed_report.clone())],
+        )
+        .expect("append observed report");
+
+    let continuation = GoalContinuationProjection {
+        continuation_id: "continuation-1".to_string(),
+        goal_id: goal_id.clone(),
+        project_id: project_id.clone(),
+        attempt_run_id: Some(run_id.clone()),
+        decision: "pause".to_string(),
+        reason: "input_queued".to_string(),
+        updated_sequence: 0,
+    };
+    store
+        .append_event(
+            NewEvent {
+                event_id: "event-continuation".to_string(),
+                kind: EventKind::ContinuationDecisionRecorded,
+                actor: "scheduler".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(session_id.clone()),
+                run_id: Some(run_id.clone()),
+                turn_id: None,
+                item_id: Some("continuation-1".to_string()),
+                payload_json: "{\"kind\":\"goal.continuation_decision_recorded\"}".to_string(),
+                idempotency_key: Some(
+                    "goal.continuation_decision_recorded:continuation-1".to_string(),
+                ),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::GoalContinuation(continuation.clone())],
+        )
+        .expect("append continuation decision");
+
+    let delegated = DelegatedProviderGoalProjection {
+        delegated_goal_id: "delegated-codex-1".to_string(),
+        goal_id: goal_id.clone(),
+        project_id: project_id.clone(),
+        session_id: Some(session_id.clone()),
+        provider_kind: "codex".to_string(),
+        provider_goal_ref: Some("codex-goal-abc".to_string()),
+        provider_state: "in_progress".to_string(),
+        source: "agent_reported".to_string(),
+        body_artifact_id: Some("artifact-codex-goal".to_string()),
+        updated_sequence: 0,
+    };
+    store
+        .append_event(
+            NewEvent {
+                event_id: "event-delegated".to_string(),
+                kind: EventKind::DelegatedProviderGoalObserved,
+                actor: "adapter".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(session_id.clone()),
+                run_id: Some(run_id.clone()),
+                turn_id: None,
+                item_id: Some("delegated-codex-1".to_string()),
+                payload_json: "{\"kind\":\"goal.delegated_provider_observed\"}".to_string(),
+                idempotency_key: Some(
+                    "goal.delegated_provider_observed:delegated-codex-1".to_string(),
+                ),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::DelegatedProviderGoal(delegated.clone())],
+        )
+        .expect("append delegated provider goal");
+
+    // Read the live projections back (the sequence-stamped read model).
+    let read_goal = store.goal(&goal_id).unwrap().expect("goal");
+    assert!(read_goal.is_active());
+    assert_eq!(read_goal.objective, goal.objective);
+    assert_eq!(read_goal.attempt_run_id.as_ref(), Some(&run_id));
+    assert_eq!(read_goal.budget_json, goal.budget_json);
+
+    let read_requirements = store.requirement_ledgers_for_goal(&goal_id).unwrap();
+    assert_eq!(read_requirements.len(), 1);
+    assert_eq!(read_requirements[0].status, "supported");
+    assert_eq!(read_requirements[0].last_status_source, "runtime_output");
+
+    let read_reports = store.goal_reports_for_goal(&goal_id).unwrap();
+    assert_eq!(read_reports.len(), 2);
+    let claim = read_reports
+        .iter()
+        .find(|report| report.goal_report_id == "report-claim-complete")
+        .expect("claim report");
+    assert!(claim.is_agent_reported());
+    assert!(!claim.is_observed_evidence());
+    assert_eq!(claim.confidence, Some(80));
+    let observed = read_reports
+        .iter()
+        .find(|report| report.goal_report_id == "report-observed-check")
+        .expect("observed report");
+    assert!(observed.is_observed_evidence());
+    assert!(!observed.is_agent_reported());
+    assert_eq!(observed.confidence, None);
+    assert_eq!(observed.evidence_id.as_ref(), Some(&evidence_id));
+
+    let read_continuations = store.goal_continuations_for_goal(&goal_id).unwrap();
+    assert_eq!(read_continuations.len(), 1);
+    assert_eq!(read_continuations[0].decision, "pause");
+    assert_eq!(read_continuations[0].reason, "input_queued");
+
+    let read_delegated = store.delegated_provider_goals_for_goal(&goal_id).unwrap();
+    assert_eq!(read_delegated.len(), 1);
+    assert_eq!(read_delegated[0].provider_kind, "codex");
+    assert_eq!(read_delegated[0].provider_state, "in_progress");
+
+    // The load-bearing property: every goal projection rebuilds IDENTICALLY from
+    // the persisted projection records (full encode/decode/apply round-trip).
+    let goal_before = read_goal.clone();
+    let requirements_before = read_requirements.clone();
+    let reports_before = read_reports.clone();
+    let continuations_before = read_continuations.clone();
+    let delegated_before = read_delegated.clone();
+
+    store.rebuild_projections().expect("rebuild projections");
+
+    assert_eq!(store.goal(&goal_id).unwrap(), Some(goal_before));
+    assert_eq!(
+        store.requirement_ledgers_for_goal(&goal_id).unwrap(),
+        requirements_before
+    );
+    assert_eq!(
+        store.goal_reports_for_goal(&goal_id).unwrap(),
+        reports_before
+    );
+    assert_eq!(
+        store.goal_continuations_for_goal(&goal_id).unwrap(),
+        continuations_before
+    );
+    assert_eq!(
+        store.delegated_provider_goals_for_goal(&goal_id).unwrap(),
+        delegated_before
+    );
+}
+
+#[test]
+fn duplicate_goal_report_submission_is_idempotent() {
+    let store = temp_store("goal-report-idempotent");
+    let project_id = ProjectId::new("project-capo");
+    let session_id = SessionId::new("session-goal-idem");
+    let goal_id = GoalId::new("goal-idem");
+
+    // Seed the goal so the report references a real goal.
+    store
+        .append_event(
+            NewEvent {
+                event_id: "event-goal-idem".to_string(),
+                kind: EventKind::GoalCreated,
+                actor: "controller".to_string(),
+                project_id: Some(project_id.clone()),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(session_id.clone()),
+                run_id: None,
+                turn_id: None,
+                item_id: Some(goal_id.to_string()),
+                payload_json: "{\"kind\":\"goal.created\"}".to_string(),
+                idempotency_key: Some("goal.created:goal-idem".to_string()),
+                redaction_state: RedactionState::Safe,
+            },
+            &[ProjectionRecord::Goal(GoalProjection {
+                goal_id: goal_id.clone(),
+                project_id: project_id.clone(),
+                task_id: None,
+                agent_id: None,
+                session_id: Some(session_id.clone()),
+                parent_goal_id: None,
+                attempt_run_id: None,
+                objective: "Idempotency".to_string(),
+                status: GoalProjection::ACTIVE.to_string(),
+                success_criteria_json: "{}".to_string(),
+                constraints_json: "{}".to_string(),
+                verification_surface_json: "{}".to_string(),
+                budget_json: "{}".to_string(),
+                stop_conditions_json: "{}".to_string(),
+                blocker_reason: String::new(),
+                updated_sequence: 0,
+            })],
+        )
+        .expect("append goal");
+
+    let report = GoalReportProjection {
+        goal_report_id: "report-dup".to_string(),
+        goal_id: goal_id.clone(),
+        project_id: project_id.clone(),
+        session_id: Some(session_id.clone()),
+        requirement_id: None,
+        report_kind: "capo.report_progress".to_string(),
+        source: "agent_reported".to_string(),
+        confidence: Some(55),
+        summary: "Progress report".to_string(),
+        body_artifact_id: None,
+        evidence_id: None,
+        updated_sequence: 0,
+    };
+    let report_event = |event_id: &str| NewEvent {
+        event_id: event_id.to_string(),
+        kind: EventKind::GoalReportRecorded,
+        actor: "agent".to_string(),
+        project_id: Some(project_id.clone()),
+        task_id: None,
+        agent_id: None,
+        session_id: Some(session_id.clone()),
+        run_id: None,
+        turn_id: None,
+        item_id: Some("report-dup".to_string()),
+        payload_json: "{\"kind\":\"goal.report_recorded\"}".to_string(),
+        // Same idempotency key for both submissions: a replayed/duplicated report
+        // must dedupe rather than double-project.
+        idempotency_key: Some("goal.report_recorded:report-dup".to_string()),
+        redaction_state: RedactionState::Safe,
+    };
+
+    let first = store
+        .append_event(
+            report_event("event-report-first"),
+            &[ProjectionRecord::GoalReport(report.clone())],
+        )
+        .expect("append first report");
+    let second = store
+        .append_event(
+            report_event("event-report-duplicate"),
+            &[ProjectionRecord::GoalReport(report.clone())],
+        )
+        .expect("append duplicate report");
+
+    // The duplicate returns the original sequence and does not append a new event.
+    assert_eq!(first, second);
+    let reports = store.goal_reports_for_goal(&goal_id).unwrap();
+    assert_eq!(reports.len(), 1, "duplicate report must not double-project");
+    assert_eq!(reports[0].summary, "Progress report");
+
+    // A rebuild from the deduped log keeps exactly one report row.
+    store.rebuild_projections().expect("rebuild projections");
+    assert_eq!(store.goal_reports_for_goal(&goal_id).unwrap(), reports);
+}
+
 #[test]
 fn tool_observations_are_persisted_and_rebuilt() {
     let store = temp_store("tool-observations");

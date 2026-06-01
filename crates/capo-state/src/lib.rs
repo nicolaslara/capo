@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use capo_core::{
-    AgentId, BoundaryBinding, BoundaryKind, EvidenceId, MemoryPacketId, ProjectId, RunId,
-    SessionId, TaskId, ToolCallId,
+    AgentId, BoundaryBinding, BoundaryKind, EvidenceId, GoalId, MemoryPacketId, ProjectId,
+    RequirementId, RunId, SessionId, TaskId, ToolCallId,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -993,8 +993,10 @@ macro_rules! impl_from_string_id {
 impl_from_string_id!(
     AgentId,
     EvidenceId,
+    GoalId,
     MemoryPacketId,
     ProjectId,
+    RequirementId,
     RunId,
     SessionId,
     TaskId,

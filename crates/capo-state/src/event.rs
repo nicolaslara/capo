@@ -62,6 +62,21 @@ pub enum EventKind {
     RunAborted,
     RunOrphaned,
     RunRecovered,
+    // GA1 (goal-orchestration GO1/GO3): the append-only goal lifecycle,
+    // requirement-status, continuation-decision, and delegated-provider-goal
+    // events. These CITE the `goal-orchestration` schema and do NOT redefine
+    // evidence/review -- those reuse `EvidenceRecorded`/`ReviewFindingRecorded`
+    // and the `tools-aci` `agent_reported` report events.
+    GoalCreated,
+    GoalUpdated,
+    GoalPaused,
+    GoalResumed,
+    GoalBlocked,
+    GoalCleared,
+    RequirementStatusChanged,
+    GoalReportRecorded,
+    ContinuationDecisionRecorded,
+    DelegatedProviderGoalObserved,
 }
 
 /// The terminal outcome a projected turn-ending event carries, in the
@@ -144,6 +159,16 @@ impl EventKind {
             Self::RunAborted => "run.aborted",
             Self::RunOrphaned => "run.orphaned",
             Self::RunRecovered => "run.recovered",
+            Self::GoalCreated => "goal.created",
+            Self::GoalUpdated => "goal.updated",
+            Self::GoalPaused => "goal.paused",
+            Self::GoalResumed => "goal.resumed",
+            Self::GoalBlocked => "goal.blocked",
+            Self::GoalCleared => "goal.cleared",
+            Self::RequirementStatusChanged => "goal.requirement_status_changed",
+            Self::GoalReportRecorded => "goal.report_recorded",
+            Self::ContinuationDecisionRecorded => "goal.continuation_decision_recorded",
+            Self::DelegatedProviderGoalObserved => "goal.delegated_provider_observed",
         }
     }
 
@@ -216,6 +241,16 @@ impl EventKind {
             EventKind::RunAborted,
             EventKind::RunOrphaned,
             EventKind::RunRecovered,
+            EventKind::GoalCreated,
+            EventKind::GoalUpdated,
+            EventKind::GoalPaused,
+            EventKind::GoalResumed,
+            EventKind::GoalBlocked,
+            EventKind::GoalCleared,
+            EventKind::RequirementStatusChanged,
+            EventKind::GoalReportRecorded,
+            EventKind::ContinuationDecisionRecorded,
+            EventKind::DelegatedProviderGoalObserved,
         ];
         ALL.iter()
             .copied()
