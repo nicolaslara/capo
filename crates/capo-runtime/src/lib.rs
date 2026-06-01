@@ -17,9 +17,14 @@ use capo_core::{BoundaryBinding, BoundaryKind, RunId};
 use std::os::unix::process::CommandExt;
 
 mod async_runner;
+mod sandbox;
 
 pub use async_runner::{
     AsyncLocalProcessRunner, AsyncRunningProcess, StreamSource, StreamingOutcome,
+};
+pub use sandbox::{
+    OsSandbox, SandboxEnforcement, SandboxPlan, SandboxProfile, SandboxRefusal, SandboxRun,
+    SandboxTier,
 };
 
 /// First runtime variants from the prototype plan.
@@ -2142,7 +2147,7 @@ fn capped_output(bytes: Vec<u8>, limit_bytes: usize) -> RuntimeResult<Vec<u8>> {
     }
 }
 
-fn normalize_path(path: &Path) -> RuntimeResult<PathBuf> {
+pub(crate) fn normalize_path(path: &Path) -> RuntimeResult<PathBuf> {
     if path.exists() {
         Ok(path.canonicalize()?)
     } else {

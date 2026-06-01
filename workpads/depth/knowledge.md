@@ -192,8 +192,13 @@ smokes stay behind explicit opt-in env gates mirroring `CAPO_SERVER_RUN_CODEX_LI
 - Does the live ACP adapter reuse the existing CodexExec/ClaudeCode connectors or
   wrap a generic JSON-RPC ACP client? (Leaning: a generic ACP client, since ACP is
   an interoperability boundary distinct from the subscription connectors.)
-- Is the first sandbox tier macOS seatbelt (dev box) or linux landlock+bwrap (CI),
-  and which gates first?
+- DP-OQ2 RESOLVED (DP7, 2026-06-01): macOS seatbelt gates FIRST on the dev box
+  (the host is darwin, `sandbox-exec` is present, and seatbelt enforcement is
+  proven by OS-enforced refusal-mode tests). linux landlock+bwrap is the CI
+  enforcement tier (`bwrap` launcher + `--unshare-net`), planned and policy-shaped
+  but enforced only where `cfg!(target_os = "linux")` holds. On any other platform
+  the tier reports `SandboxEnforcement::Unenforced` and Capo does NOT claim
+  sandboxing.
 - How aggressively should FTS5 retrieval rank/snippet before vector search is
   justified, and what dogfood signal would prove FTS insufficient?
 - When a worktree-per-goal is bound, what is the merge-back/review point before a

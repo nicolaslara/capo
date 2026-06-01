@@ -519,7 +519,7 @@ Verification:
 
 ## DP7 - First OS Sandbox Tier (Seatbelt / Landlock+Bwrap) Behind The Runtime Boundary
 
-Status: pending.
+Status: done (2026-06-01).
 
 Prerequisite: `safety-gates` (checkpoint/recovery + enforced `PermissionPolicy`).
 
@@ -560,6 +560,53 @@ Must not do:
 
 - Do not claim sandboxing on a platform where Capo cannot enforce it; record the
   platform limitation instead.
+
+Evidence (DP7 landed 2026-06-01):
+
+- New `crates/capo-runtime/src/sandbox.rs`: a first OS sandbox tier as a SWAPPABLE
+  option behind the `RuntimeRunner` boundary (`OsSandbox` + `SandboxTier::{None,
+  MacosSeatbelt, LinuxLandlockBwrap}`), enforcing filesystem/network confinement
+  through actual OS mechanisms rather than the provider CLI's `--sandbox` flag.
+  macOS seatbelt is launched via `/usr/bin/sandbox-exec -f <generated .sbpl>`
+  (`(deny default)` + `(allow file-read*)` + `(allow file-write* (subpath ...))`
+  per confined root + `(deny network*)`/`(allow network*)` per profile), modeled
+  after the codex `sandboxing` seatbelt base/network policy. The linux path
+  rewrites the request to launch through `bwrap` (read-only `/` bind, read-write
+  bind per confined root, `--unshare-net` when egress is forbidden), modeled after
+  the codex `linux-sandbox`/`bwrap` crates.
+- `SandboxTier::is_enforced_here()` gates the claim: seatbelt enforces only on
+  `cfg!(target_os = "macos")`, landlock+bwrap only on linux. On a non-supporting
+  platform the plan reports `SandboxEnforcement::Unenforced` and emits a
+  `sandbox.unenforced` event -- Capo does NOT claim sandboxing where the OS cannot
+  enforce it (the DP7 "Must not do").
+- The sandbox decision is wired to the `safety-gates` capability scopes through
+  `SandboxProfile` (confined `writable_roots` = `filesystem:write:workspace`,
+  `allow_network_egress` = the `network:connect:*` critical scope). `OsSandbox::plan`
+  refuses an un-granted critical scope BEFORE the sandbox launches: a run that
+  requires egress under a network-forbidding profile, or a cwd outside the confined
+  writable roots, yields `SandboxEnforcement::Refused` + a `sandbox.launch_refused`
+  event with NO planned process (an event, not a silent failure).
+- Composes with the `real-turn-loop` path confinement: `OsSandbox::run` rewrites
+  the request to launch under the OS launcher and runs it through the SAME
+  `LocalProcessRunner`, reusing env-scrub, `ensure_cwd_allowed`, redaction, and
+  artifact capture; a successful confined run still produces the runner's normal
+  artifact/exit-status surface (an ADDITIONAL enforcement layer, not a replacement).
+- Deterministic REFUSAL-mode tests (platform-gated to macOS so they run on the
+  supported OS only): `seatbelt_refuses_out_of_root_write_at_the_os_layer` (a shell
+  write to a path OUTSIDE the confined root fails with non-zero exit and the file
+  is absent -- refused by the seatbelt sandbox itself, not just Capo's path-prefix
+  check), `seatbelt_refuses_network_egress_at_the_os_layer` (an `nc` connect is
+  blocked at the OS layer with the pre-launch gate intentionally bypassed),
+  `seatbelt_allows_in_root_write` (the confinement is additional, not blanket
+  denial), `seatbelt_policy_denies_network_and_confines_writes` (policy shape).
+  Platform-independent: pre-launch refusals (egress-forbidden, write-outside-root)
+  and the enforcement-claim/host-default gates.
+- DP-OQ2 resolved in `knowledge.md`: macOS seatbelt gates first on the dev box;
+  linux landlock+bwrap is the CI tier.
+- Gate (run from `/Users/nicolas/devel/capo-wt/depth`): `cargo fmt --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, and
+  `cargo test --workspace` all pass. Live sandboxed-run smoke remains deferred to
+  DP11.
 
 ## DP8 - Git Worktree Isolation Per Session/Goal
 
