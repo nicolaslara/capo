@@ -16,6 +16,7 @@ This repository is still early. The current implementation is a Rust scaffold/pr
 - `--planner capo` exists as a tracked Capo operator-agent mode. It creates or reuses a `capo-operator` Codex-backed session, asks Codex to map free-form operator input into a constrained action JSON shape, validates the action, executes only known server-backed actions, and audits those choices through Capo state. `CAPO_CONTROL_PLANNER_PROVIDER=codex` is the current/default provider; future providers such as local Gemma can implement the same boundary.
 - Control can start and continue Codex-backed sessions only behind explicit live-provider gates. Normal repeatable tests use fake/scripted agents or mocked Codex output, and Claude live execution is still blocked.
 - Result rendering now keeps structured Markdown output readable in the terminal. Durable live-provider raw-output retention remains conservative and artifact-backed.
+- Dashboard webclient first slice is complete under `web/dashboard/`: a dependency-free browser dashboard with fixture-backed query data, mocked server-command API, and screenshot-reviewed browser smoke.
 - `capo project memory ...` is the preferred markdown-backed project-memory surface.
 - `capo workpad ...` still exists only as compatibility for older local scripts and repo migration.
 
@@ -26,6 +27,7 @@ See:
 - [`WORKING.md`](./WORKING.md) for the agent workflow
 - [`workpads/WORKPADS.md`](./workpads/WORKPADS.md) for workpad load lists
 - [`workpads/operator-control/tasks.md`](./workpads/operator-control/tasks.md) for current control-loop evidence
+- [`workpads/dashboard-webclient/tasks.md`](./workpads/dashboard-webclient/tasks.md) for browser dashboard evidence and screenshot paths
 - [`workpads/scaffold/completion-audit.md`](./workpads/scaffold/completion-audit.md) for the completed scaffold alignment audit
 
 ## Try The CLI
@@ -87,6 +89,25 @@ reviews
 details
 dashboard
 quit
+```
+
+### Try The Browser Dashboard
+
+The first browser dashboard slice uses fixture data and a mocked
+server-command API. It is useful for reviewing the operator UI and visual QA;
+live Capo-server HTTP integration is future work.
+
+```sh
+node web/dashboard/scripts/dev-server.mjs
+```
+
+Open `http://127.0.0.1:4173`.
+
+Verification commands:
+
+```sh
+node web/dashboard/scripts/verify.mjs
+node web/dashboard/scripts/browser-smoke.mjs
 ```
 
 The same control loop can be scripted:
