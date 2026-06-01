@@ -716,7 +716,26 @@ Verification:
 
 ## DP11 - Live Opt-In ACP + Sandbox Smoke (Secrets Stripped) Paired With Deterministic Assertions And E2E Gate
 
-Status: pending.
+Status: landed.
+
+Evidence: `crates/capo-controller/src/dp11_live_smoke.rs` adds the depth E2E gate
+(always-on deterministic ACP turn through `drive_acp_live_turn`, memory
+eligibility filtering, and the platform-independent sandbox refusal shape) plus
+the two gated live smokes, each paired with the SAME shape assertion:
+- `live_acp_smoke` (`#[ignore]` + `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1`
+  `CAPO_SERVER_RUN_ACP_LIVE=1`) spawns a REAL ACP-compatible agent through the
+  runtime and drives one real `initialize -> session/new -> session/prompt ->
+  session/update -> session/request_permission -> cancel` flow through the
+  controller's `PermissionPolicy` seam, scanning the agent stderr for secrets and
+  asserting the identical `AcpTurnShape` the always-on
+  `depth_e2e_gate_acp_turn_matches_paired_shape` pins.
+- `live_sandbox_smoke` (`#[ignore]` + `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1`
+  `CAPO_SERVER_RUN_SANDBOX_LIVE=1`) runs a REAL OS-sandboxed process proving the
+  OS layer refuses an out-of-root write, with secrets-stripped artifacts; paired
+  with the always-on `depth_e2e_gate_sandbox_refuses_egress_and_out_of_root_write`
+  refusal shape. Skips cleanly when the tier is unenforceable on the platform.
+`AcpLiveAdapter::spawn_live_session` / `LiveAcpSession` (capo-adapters) provide
+the runtime-owned live transport so ACP stays strictly an adapter.
 
 Prerequisite: DP1-DP9 landed with their deterministic suites green.
 

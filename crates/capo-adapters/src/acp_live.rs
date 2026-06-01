@@ -17,10 +17,10 @@
 //! itself as an ACP agent backend.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use capo_core::{BoundaryBinding, BoundaryKind, RunId, SessionId, TurnId};
-use capo_runtime::LocalProcessRunner;
+use capo_runtime::{LocalProcessRunner, PipedRunningProcess};
 
 use crate::acp_wire::{
     AcpTransport, AcpTurnTranscript, AcpWireClient, AcpWireError, PipedProcessTransport,
@@ -222,6 +222,64 @@ impl AcpLiveAdapter {
         result
     }
 
+    /// DP11: spawn a REAL ACP agent through the runtime and hand back a
+    /// [`LiveAcpSession`] whose [`AcpTransport`] a caller (e.g. the controller's
+    /// `drive_acp_live_turn`) can drive directly -- so the live wire round-trip
+    /// runs inside the controller's `PermissionPolicy` seam rather than the
+    /// adapter's fail-closed default, while ACP stays strictly an adapter.
+    ///
+    /// Fail-closed-fast: returns [`AcpLiveError::GateClosed`] unless BOTH live
+    /// opt-in env gates are set. The runtime owns the spawned process group; the
+    /// returned session borrows the pipe handles and MUST be finalized with
+    /// [`LiveAcpSession::finalize`] to tear the process down and scan the agent's
+    /// stderr artifact for credential markers before retention.
+    pub fn spawn_live_session(&self, turn: &TurnId) -> Result<LiveAcpSession, AcpLiveError> {
+        if !acp_live_gate_open() {
+            let mut missing_env = Vec::new();
+            if !env_flag(ACP_LIVE_PREFLIGHT_OPT_IN_ENV) {
+                missing_env.push(ACP_LIVE_PREFLIGHT_OPT_IN_ENV);
+            }
+            if !env_flag(ACP_LIVE_RUN_OPT_IN_ENV) {
+                missing_env.push(ACP_LIVE_RUN_OPT_IN_ENV);
+            }
+            return Err(AcpLiveError::GateClosed {
+                agent_name: self.program.clone(),
+                missing_env,
+            });
+        }
+
+        let launch_plan = AcpAdapter::local_launch_plan(
+            self.program.clone(),
+            self.argv.clone(),
+            self.workspace_root.clone(),
+            self.artifact_root.clone(),
+        );
+        launch_plan
+            .assert_subscription_safe()
+            .map_err(AcpLiveError::Spawn)?;
+        fs::create_dir_all(&launch_plan.workspace_root)
+            .map_err(|error| AcpLiveError::Spawn(format!("workspace: {error}")))?;
+        fs::create_dir_all(&launch_plan.artifact_root)
+            .map_err(|error| AcpLiveError::Spawn(format!("artifacts: {error}")))?;
+
+        let runner = LocalProcessRunner::new(launch_plan.runtime_config());
+        let run_id = RunId::new(format!("acp-live-{}", turn.as_str()));
+        let mut process = runner
+            .spawn_piped_process(launch_plan.runtime_request_for_turn(run_id, turn.as_str()))
+            .map_err(|error| AcpLiveError::Spawn(format!("{error:?}")))?;
+        let stdin = process
+            .take_stdin()
+            .ok_or_else(|| AcpLiveError::Spawn("missing stdin pipe".to_string()))?;
+        let stdout = process
+            .take_stdout()
+            .ok_or_else(|| AcpLiveError::Spawn("missing stdout pipe".to_string()))?;
+        let transport = PipedProcessTransport::new(stdin, stdout);
+        Ok(LiveAcpSession {
+            process,
+            transport: Some(transport),
+        })
+    }
+
     /// Drive the full `initialize` -> `session/new` -> `session/prompt` flow over
     /// an attached transport. Shared by the live spawn path and the deterministic
     /// scripted-transport tests, so the live adapter exercises the IDENTICAL wire
@@ -250,6 +308,45 @@ impl AcpLiveAdapter {
         let session_id = client.session_new(self.workspace_root.to_string_lossy().as_ref())?;
         let transcript = client.prompt(&session_id, prompt)?;
         Ok(transcript)
+    }
+}
+
+/// DP11: a live ACP agent spawned through the runtime (the runtime owns the
+/// process group). The caller takes its [`AcpTransport`] to drive one live turn
+/// (e.g. through the controller seam) and then [`finalize`](Self::finalize)s it,
+/// which tears the process down and scans the agent's stderr artifact for
+/// credential markers, dropping it (and failing) if it leaked one.
+pub struct LiveAcpSession {
+    process: PipedRunningProcess,
+    transport: Option<PipedProcessTransport<std::process::ChildStdin>>,
+}
+
+impl LiveAcpSession {
+    /// Take the live wire transport exactly once so a caller can drive the turn.
+    pub fn take_transport(&mut self) -> Option<PipedProcessTransport<std::process::ChildStdin>> {
+        self.transport.take()
+    }
+
+    /// The agent's captured stderr artifact path (for evidence after the scan).
+    pub fn stderr_path(&self) -> &Path {
+        self.process.stderr_path()
+    }
+
+    /// Tear the spawned agent down and enforce the secrets-stripped contract on
+    /// its stderr artifact: if the agent's stderr leaked a credential marker, the
+    /// artifact is dropped and this fails closed.
+    pub fn finalize(mut self, reason: &str) -> Result<(), AcpLiveError> {
+        // Drop the transport first so the agent sees EOF on stdin and can exit.
+        self.transport = None;
+        let stderr_path = self.process.stderr_path().to_path_buf();
+        let _ = self.process.shutdown(reason);
+        if scan_artifacts_for_sensitive_markers([&stderr_path]).is_err() {
+            let _ = fs::remove_file(&stderr_path);
+            return Err(AcpLiveError::Output(
+                "acp agent stderr failed the sensitive-marker scan".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
