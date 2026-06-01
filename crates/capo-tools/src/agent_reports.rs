@@ -43,29 +43,15 @@ pub const CAPO_REPORTING_TOOLS: &[&str] = &[
     "capo.complete_subtask",
 ];
 
-/// The source tag for an agent-submitted report: a CLAIM, not observed proof.
-///
-/// This is the load-bearing classification: a report tagged `agent_reported` is
-/// structurally distinct from observed tool evidence, so completion is never
-/// reachable by agent assertion alone.
-pub const EVIDENCE_SOURCE_AGENT_REPORTED: &str = "agent_reported";
-
-/// The source tag for evidence OBSERVED from runtime process output (the typed
-/// wrapper/test results), distinct from an agent report.
-pub const EVIDENCE_SOURCE_RUNTIME_OUTPUT: &str = "runtime_output";
-
-/// The source tag for evidence OBSERVED from a provider/adapter tool event,
-/// distinct from an agent report.
-pub const EVIDENCE_SOURCE_ADAPTER_EVENT: &str = "adapter_event";
-
-/// Whether a `source` tag denotes OBSERVED evidence (runtime output or an
-/// adapter event) rather than an agent-submitted claim. Adapter-event sources
-/// may be sub-tagged (`adapter_event:<adapter>`), so this matches the prefix.
-pub fn source_is_observed_evidence(source: &str) -> bool {
-    source == EVIDENCE_SOURCE_RUNTIME_OUTPUT
-        || source == EVIDENCE_SOURCE_ADAPTER_EVENT
-        || source.starts_with(&format!("{EVIDENCE_SOURCE_ADAPTER_EVENT}:"))
-}
+// The observed-vs-claim classification is the single load-bearing safety
+// invariant of the goal loop, so it has ONE owner in `capo-core`. This crate
+// re-exports it (and the source-tag constants) rather than keeping its own copy,
+// so `capo-tools` and `capo-state` cannot drift on what counts as observed
+// evidence.
+pub use capo_core::{
+    EVIDENCE_SOURCE_ADAPTER_EVENT, EVIDENCE_SOURCE_AGENT_REPORTED, EVIDENCE_SOURCE_RUNTIME_OUTPUT,
+    source_is_observed_evidence,
+};
 
 /// The Capo-owned registry for the `GO2` agent-reporting / evidence tools.
 ///

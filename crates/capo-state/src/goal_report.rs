@@ -26,17 +26,12 @@ use crate::projections::{
     GoalContinuationProjection, GoalProjection, GoalReportProjection, RequirementLedgerProjection,
 };
 
-/// Whether a `source` tag denotes OBSERVED evidence (runtime output or an adapter
-/// event) rather than an agent-submitted claim. Adapter-event sources may be
-/// sub-tagged (`adapter_event:<adapter>`), so this matches the prefix.
-///
-/// This is the capo-state-side mirror of `capo_tools::source_is_observed_evidence`;
-/// the doc comment on [`GoalReportProjection::is_observed_evidence`] notes the two
-/// must classify a source identically, and the projection helpers below delegate
-/// here so there is one classifier inside this crate.
-pub fn source_is_observed_evidence(source: &str) -> bool {
-    source == "runtime_output" || source == "adapter_event" || source.starts_with("adapter_event:")
-}
+// The observed-vs-claim classification has ONE owner in `capo-core`
+// (`capo_core::source_is_observed_evidence`). This crate re-exports it (so
+// `capo_state::source_is_observed_evidence` and the projection helpers below keep
+// resolving to it) rather than keeping a literal-string mirror that could drift
+// from the `capo-tools` / auditor classifier.
+pub use capo_core::source_is_observed_evidence;
 
 /// Everything the GO10 report renders, gathered from the persisted projections
 /// plus the goal's event timeline. Held by reference: the caller owns the rows it

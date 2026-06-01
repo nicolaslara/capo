@@ -1002,9 +1002,10 @@ impl RequirementLedgerProjection {
     pub const CONTRADICTED: &'static str = "contradicted";
 
     /// Whether the LAST status was driven by OBSERVED evidence (vs an agent
-    /// claim). Mirrors `capo_tools::source_is_observed_evidence` via the single
-    /// in-crate classifier so the read model never shows a requirement validated
-    /// by a claim alone.
+    /// claim). Delegates to the single `capo_core::source_is_observed_evidence`
+    /// classifier (re-exported as `crate::source_is_observed_evidence`) the
+    /// auditor and the `capo-tools` surface also use, so the read model never
+    /// shows a requirement validated by a claim alone.
     pub fn is_observed_evidence(&self) -> bool {
         crate::source_is_observed_evidence(&self.last_status_source)
     }
@@ -1056,8 +1057,9 @@ pub struct GoalReportProjection {
 
 impl GoalReportProjection {
     /// Whether this report row is OBSERVED evidence rather than an agent claim.
-    /// Mirrors `capo_tools::source_is_observed_evidence` so the two surfaces
-    /// classify a source identically.
+    /// Delegates to the single `capo_core::source_is_observed_evidence`
+    /// classifier (re-exported as `crate::source_is_observed_evidence`) so every
+    /// surface classifies a source identically.
     pub fn is_observed_evidence(&self) -> bool {
         crate::source_is_observed_evidence(&self.source)
     }
