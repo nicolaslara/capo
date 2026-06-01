@@ -202,6 +202,16 @@ mod tests {
         // Attempt 1: the goal is created bound to session 1, with one requirement
         // and one OBSERVED evidence row tagged to the goal's task (the stable
         // cross-attempt key).
+        //
+        // The requirement's own `last_status_source` is a CLAIM (`agent_reported`),
+        // NOT an observed source, so the auditor's per-requirement provenance check
+        // (completion_auditor.rs path 1, `source_is_observed_evidence`) does NOT
+        // short-circuit to complete. The ONLY thing that can back this requirement is
+        // the task-scoped observed `EvidenceProjection` row seeded below (the single-
+        // requirement path 3). This makes the rebuilt OBSERVED evidence -- not a
+        // surviving status string -- load-bearing for the COMPLETE verdict: drop the
+        // evidence row, or read it session-scoped (so the session rebind loses it),
+        // and the requirement falls to `claim_only` and the goal audits INCOMPLETE.
         seed(
             "seed-goal",
             EventKind::GoalCreated,
@@ -213,7 +223,7 @@ mod tests {
                     project_id: ProjectId::new(PROJECT),
                     summary: "All tests pass".to_string(),
                     status: RequirementLedgerProjection::VALIDATED.to_string(),
-                    last_status_source: "runtime_output".to_string(),
+                    last_status_source: capo_tools::EVIDENCE_SOURCE_AGENT_REPORTED.to_string(),
                     updated_sequence: 0,
                 }),
             ],
@@ -305,8 +315,11 @@ mod tests {
         );
 
         // 3) The AUDITOR operates on the rebuilt state without any transcript: the
-        //    single requirement is `validated` AND backed by observed evidence, so
-        //    the goal audits COMPLETE purely from persisted projections.
+        //    single requirement is `validated` but its OWN status source is a claim,
+        //    so it audits COMPLETE only because it is backed by the rebuilt task-
+        //    scoped OBSERVED evidence row (recovered across the session rebind). The
+        //    verdict therefore rests on rebuilt observed evidence, not a surviving
+        //    status string -- drop the evidence row and this assertion fails.
         let verdict = restarted
             .audit_goal_completion(&goal_id)
             .expect("audit after restart");
