@@ -1,38 +1,49 @@
 //! GA8: mocked end-to-end continuation and completion paths.
 //!
-//! This module is the deterministic, no-live-provider end-to-end suite that
-//! COMPOSES the pieces the earlier GA tasks built -- the real turn loop
-//! ([`crate::turn_loop`] / [`FakeBoundaryController::run_turn`]), the GA4 safe-
-//! boundary continuation scheduler
-//! ([`FakeBoundaryController::evaluate_and_record_continuation`]), and the GA5
-//! evidence-gated completion auditor
-//! ([`FakeBoundaryController::audit_and_record_goal_completion`]) -- through the
-//! controller side of the server/controller boundary, exactly as a server would
-//! drive them. There is NO live provider here (the deterministic e2e Must-Not-Do);
-//! agents are scripted mocks and goal state is seeded through the same projection
-//! records the GA4/GA5/GA6 controller tests use.
+//! This module is the deterministic, no-live-provider suite over the pieces the
+//! earlier GA tasks built -- the real turn loop ([`crate::turn_loop`] /
+//! [`FakeBoundaryController::run_turn`]), the GA4 safe-boundary continuation
+//! scheduler ([`FakeBoundaryController::evaluate_and_record_continuation`]), and
+//! the GA5 evidence-gated completion auditor
+//! ([`FakeBoundaryController::audit_and_record_goal_completion`]). It drives the
+//! CONTROLLER side directly -- the same controller methods a server dispatches to
+//! over the server/controller boundary -- rather than instantiating `capo-server`
+//! and crossing the wire boundary itself (the wire boundary is covered by the
+//! `capo-server` goal tests). There is NO live provider here (the deterministic
+//! e2e Must-Not-Do); agents are scripted mocks and goal state is seeded through
+//! the same projection records the GA4/GA5/GA6 controller tests use.
 //!
-//! It walks each scheduler/auditor branch GA8 names and, for every branch, asserts
-//! the resulting EVENT SEQUENCE and PROJECTION STATE -- never console text (the GA8
-//! Must-Not-Do). The seven branches:
+//! The suite has two layers, both asserting the EVENT SEQUENCE and PROJECTION
+//! STATE -- never console text (the GA8 Must-Not-Do):
 //!
-//! 1. continue at a safe boundary (also exercises the `safety-gates` workspace lock
-//!    and a real checkpoint boundary in the continue path);
-//! 2. pause when user input is queued (a boundary is unsafe);
-//! 3. block on a raised blocker;
-//! 4. budget-limit on budget exhaustion (durable `run.aborted`);
-//! 5. no-progress suppression after a no-material-progress continuation;
-//! 6. premature-completion-blocked (only an agent claim exists);
-//! 7. complete-with-evidence (concrete observed evidence + validation present),
-//!    then generate a historical report and snapshot it.
+//! - One DRIVEN end-to-end lifecycle
+//!   ([`goal_autonomy_e2e_driven_lifecycle_continue_suppress_audit_complete`]):
+//!   a single goal walked through one orchestration path -- continue at a safe
+//!   boundary (real loop + workspace lock + checkpoint) -> observe no material
+//!   progress -> no-progress-suppress -> audit blocks a claim-only completion ->
+//!   record observed evidence -> audit completes -> render the historical report --
+//!   so the loop, scheduler, and auditor genuinely compose in sequence on one goal.
+//! - Per-branch focused checks that each isolate ONE scheduler/auditor branch on a
+//!   freshly seeded goal, so a regression points at the exact branch:
+//!   1. continue at a safe boundary (also exercises the `safety-gates` workspace
+//!      lock and a real checkpoint boundary in the continue path);
+//!   2. pause when user input is queued (a boundary is unsafe);
+//!   3. block on a raised blocker;
+//!   4. budget-limit on budget exhaustion (durable `run.aborted`);
+//!   5. no-progress suppression after a no-material-progress continuation;
+//!   6. premature-completion-blocked (only an agent claim exists);
+//!   7. complete-with-evidence (concrete observed evidence + validation present),
+//!      then generate a historical report and snapshot it.
 //!
-//! The historical report is rendered controller-side from the persisted goal
-//! projections so it is rebuildable from events + projections (GO10) and is
-//! asserted against an exact golden string -- the GA8 "snapshot it" requirement.
+//! The historical report is rendered through the SHARED GO10 renderer
+//! ([`capo_state::render_goal_report_markdown`]) -- the SAME renderer the operator
+//! surface (`capo_server`) ships -- from the persisted goal projections, so it is
+//! rebuildable from events + projections (GO10), is asserted against an exact
+//! golden string (the GA8 "snapshot it" requirement), and cannot drift from the
+//! shipped report.
 
 #![cfg(test)]
 
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -43,8 +54,9 @@ use capo_core::{
 };
 use capo_state::{
     AgentProjection, EventKind, EvidenceProjection, GoalAuditDecisionProjection, GoalProjection,
-    GoalReportProjection, NewEvent, ProjectionRecord, RequirementLedgerProjection, RunProjection,
-    SessionProjection, TaskProjection,
+    GoalReportInputs, GoalReportProjection, NewEvent, ProjectionRecord, RenderedGoalReport,
+    RequirementLedgerProjection, RunProjection, SessionProjection, TaskProjection,
+    render_goal_report_markdown,
 };
 
 use crate::{
@@ -628,27 +640,44 @@ fn goal_autonomy_e2e_complete_with_evidence_and_historical_report_snapshot() {
     assert_eq!(latest.requirements_complete, 1);
     assert!(has_event_kind(&controller, "goal.audit_decision_recorded"));
 
-    // Generate the historical report from persisted projections and snapshot it.
+    // Generate the historical report and snapshot it. CRITICAL: this renders
+    // through the SAME shared GO10 renderer the operator surface ships
+    // (`capo_state::render_goal_report_markdown`, reached over the
+    // server/controller boundary by `capo_server`'s `handle_goal_report_rendering`),
+    // NOT a test-local re-implementation -- so the format the e2e pins is exactly
+    // the format the operator sees, and the two cannot drift.
     let report = render_historical_report(&controller, &GoalId::new(GOAL));
     let expected = "\
-# Goal Report: goal-ga8
-Objective: Land the GA8 end-to-end
-Status: active
-Verdict: complete (all_requirements_met) 1/1 requirements complete
+# Goal report: goal-ga8
+
+- Objective: Land the GA8 end-to-end
+- Status: active
+- Requirements: 1 (1 supported, 0 blocked, 0 contradicted)
+- Verdict: complete (all_requirements_met) — 1/1 requirements complete
 
 ## Requirements
-- req-1: validated [source=runtime_output]
 
-## Observed Evidence
-- evidence-check-1 (kind=test, confidence=95)
+- [validated] requirement req-1 (req-1) — source: runtime_output (observed)
 
-## Continuation Decisions
-(none)
+## Story
+
+_No reports recorded._
+
+## Observed evidence
+
+- evidence-check-1 (kind: test, confidence: 95)
+
+## Timeline
+
+_No events recorded._
 ";
     assert_eq!(
-        report, expected,
+        report.body, expected,
         "the historical report rebuilds from projections to an exact snapshot"
     );
+    // No events were supplied to the renderer, so it correctly degrades the
+    // (empty) timeline section rather than rendering raw content.
+    assert!(report.degraded, "an empty timeline degrades the report");
 
     // The report is REBUILDABLE: re-render after a projection rebuild yields the
     // identical snapshot (GO10 "rebuildable from events, projections, artifacts").
@@ -657,96 +686,59 @@ Verdict: complete (all_requirements_met) 1/1 requirements complete
         .rebuild_projections()
         .expect("rebuild projections");
     let rebuilt = render_historical_report(&controller, &GoalId::new(GOAL));
-    assert_eq!(rebuilt, expected, "the report rebuilds identically");
+    assert_eq!(
+        rebuilt.body, expected,
+        "the report rebuilds identically through the shared renderer"
+    );
 }
 
-// ===================== Controller-side historical report =====================
+// ===================== Shared historical-report rendering =====================
 
-/// GA8 (GO10): render a deterministic historical execution report for a goal from
-/// the PERSISTED projections (goal, requirement ledger, observed evidence, audit
-/// verdict, continuation decisions). It is rebuildable from events + projections --
-/// re-render after `rebuild_projections` yields the same bytes -- and carries only
-/// projected read-model facts, never inlined raw artifact bodies. This is the
-/// controller-side report the deterministic e2e snapshots; the GA2 server renderer
-/// is the operator-facing surface, but the controller crate does not depend on the
-/// server, so the e2e renders from the same projections directly.
-fn render_historical_report(controller: &FakeBoundaryController, goal_id: &GoalId) -> String {
+/// GA8 (GO10): render the historical execution report for a goal through the
+/// SHARED [`capo_state::render_goal_report_markdown`] -- the SINGLE GO10 renderer
+/// the operator surface (`capo_server`) also ships. The controller crate cannot
+/// depend on `capo-server`, but both depend on `capo-state`, so the renderer lives
+/// there and the e2e snapshots the SAME bytes the operator sees; the two renderers
+/// can no longer diverge because there is only one.
+///
+/// We supply an EMPTY timeline so the snapshot is deterministic (the per-event
+/// sequence/actor ordering is asserted by branch 1 and the server tests, not here);
+/// every report INPUT is read from the persisted projections, so the report is
+/// rebuildable from events + projections.
+fn render_historical_report(
+    controller: &FakeBoundaryController,
+    goal_id: &GoalId,
+) -> RenderedGoalReport {
     let state = controller.state();
     let goal = state.goal(goal_id).expect("goal").expect("goal present");
-
-    let mut out = String::new();
-    let _ = writeln!(out, "# Goal Report: {}", goal.goal_id.as_str());
-    let _ = writeln!(out, "Objective: {}", goal.objective);
-    let _ = writeln!(out, "Status: {}", goal.status);
-
-    match state
-        .latest_goal_audit_decision(goal_id)
-        .expect("latest audit")
-    {
-        Some(audit) => {
-            let _ = writeln!(
-                out,
-                "Verdict: {} ({}) {}/{} requirements complete",
-                audit.verdict, audit.reason, audit.requirements_complete, audit.requirements_total
-            );
-        }
-        None => {
-            let _ = writeln!(out, "Verdict: (not yet audited)");
-        }
-    }
-
     let requirements = state
         .requirement_ledgers_for_goal(goal_id)
         .expect("requirements");
-    let _ = writeln!(out, "\n## Requirements");
-    if requirements.is_empty() {
-        let _ = writeln!(out, "(none)");
-    } else {
-        for requirement in &requirements {
-            let _ = writeln!(
-                out,
-                "- {}: {} [source={}]",
-                requirement.requirement_id.as_str(),
-                requirement.status,
-                requirement.last_status_source
-            );
-        }
-    }
-
-    // Observed evidence by the goal's stable task key (cross-attempt), never inlined
-    // raw bodies -- only the projected id/kind/confidence.
+    let reports = state.goal_reports_for_goal(goal_id).expect("reports");
+    let continuations = state
+        .goal_continuations_for_goal(goal_id)
+        .expect("continuations");
+    let delegated_provider_goals = state
+        .delegated_provider_goals_for_goal(goal_id)
+        .expect("delegated provider goals");
     let evidence: Vec<EvidenceProjection> = match goal.task_id.as_ref() {
         Some(task_id) => state.evidence_for_task(task_id).expect("task evidence"),
         None => Vec::new(),
     };
-    let _ = writeln!(out, "\n## Observed Evidence");
-    if evidence.is_empty() {
-        let _ = writeln!(out, "(none)");
-    } else {
-        for row in &evidence {
-            let _ = writeln!(
-                out,
-                "- {} (kind={}, confidence={})",
-                row.evidence_id.as_str(),
-                row.kind,
-                row.confidence
-            );
-        }
-    }
-
-    let continuations = state
-        .goal_continuations_for_goal(goal_id)
-        .expect("continuations");
-    let _ = writeln!(out, "\n## Continuation Decisions");
-    if continuations.is_empty() {
-        let _ = writeln!(out, "(none)");
-    } else {
-        for row in &continuations {
-            let _ = writeln!(out, "- {} ({})", row.decision, row.reason);
-        }
-    }
-
-    out
+    let audit = state
+        .latest_goal_audit_decision(goal_id)
+        .expect("latest audit");
+    let inputs = GoalReportInputs {
+        goal: &goal,
+        requirements: &requirements,
+        reports: &reports,
+        continuations: &continuations,
+        delegated_provider_goals: &delegated_provider_goals,
+        evidence: &evidence,
+        audit: audit.as_ref(),
+        timeline: &[],
+    };
+    render_goal_report_markdown(&inputs)
 }
 
 // A small compile-time sanity check that the budget helper imports resolve.

@@ -21,6 +21,7 @@ mod codec_adapter;
 mod codec_encode;
 mod error;
 mod event;
+mod goal_report;
 mod projections;
 mod queries;
 mod schema;
@@ -31,6 +32,10 @@ pub use error::{StateError, StateResult};
 pub use event::{
     ArtifactRecord, EventKind, EventRecord, NewEvent, ProjectedTurnOutcome, RecoveryAttempt,
     RedactionState,
+};
+pub use goal_report::{
+    GoalReportInputs, RenderedGoalReport, render_goal_report_json, render_goal_report_markdown,
+    source_is_observed_evidence,
 };
 pub use projections::*;
 pub use thread::{SessionThread, ThreadItem, ThreadItemKind, ThreadTurn, ThreadTurnStatus};

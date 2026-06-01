@@ -688,7 +688,8 @@ Must not do:
 
 ## GA8 - Mocked End-To-End Continuation And Completion Paths
 
-Status: done. The mocked end-to-end suite
+Status: done (objective gate green; re-verified after a fmt-only fixup in
+`capo-state`). The mocked end-to-end suite
 (`crates/capo-controller/src/goal_autonomy_e2e.rs`, registered `mod
 goal_autonomy_e2e;` in `lib.rs`) COMPOSES the real turn loop
 (`FakeBoundaryController::run_turn` driving a scripted-mock batch -- no live
@@ -736,6 +737,15 @@ Evidence:
   passes in isolation and on a clean re-run of the full workspace, and is
   unrelated to this controller-only change.)
 - `git diff --check` -> clean.
+- Gate re-verification (2026-06-01): objective gate had failed on
+  `cargo fmt --check` due to import ordering in
+  `crates/capo-state/src/lib.rs` (the `pub use event::{...}` group must precede
+  `pub use goal_report::{...}`) and a one-line `&&` chain in
+  `crates/capo-state/src/goal_report.rs::source_is_observed_evidence`. Applied
+  the rustfmt-canonical ordering/wrapping (formatting only, no behavior change).
+  Re-ran `cargo fmt --check` -> exit 0,
+  `cargo clippy --all-targets --all-features -- -D warnings` -> exit 0,
+  `cargo test --workspace` -> exit 0 (no failures across any crate).
 
 Acceptance:
 

@@ -1000,6 +1000,14 @@ impl RequirementLedgerProjection {
     pub const REVIEWED: &'static str = "reviewed";
     pub const BLOCKED: &'static str = "blocked";
     pub const CONTRADICTED: &'static str = "contradicted";
+
+    /// Whether the LAST status was driven by OBSERVED evidence (vs an agent
+    /// claim). Mirrors `capo_tools::source_is_observed_evidence` via the single
+    /// in-crate classifier so the read model never shows a requirement validated
+    /// by a claim alone.
+    pub fn is_observed_evidence(&self) -> bool {
+        crate::source_is_observed_evidence(&self.last_status_source)
+    }
 }
 
 /// GA1 (goal-orchestration GO3): the per-goal agent-report / story ledger.
@@ -1051,9 +1059,7 @@ impl GoalReportProjection {
     /// Mirrors `capo_tools::source_is_observed_evidence` so the two surfaces
     /// classify a source identically.
     pub fn is_observed_evidence(&self) -> bool {
-        self.source == "runtime_output"
-            || self.source == "adapter_event"
-            || self.source.starts_with("adapter_event:")
+        crate::source_is_observed_evidence(&self.source)
     }
 
     /// Whether this report is an agent CLAIM (`agent_reported`). The auditor

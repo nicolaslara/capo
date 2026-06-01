@@ -366,11 +366,59 @@ impl CapoServer {
         goal_id: String,
         format: GoalReportFormat,
     ) -> ServerResult<ServerResponse> {
-        let view = self.assemble_goal_view(&goal_id)?;
-        let timeline = self.goal_timeline_entries(&self.require_goal(&goal_id)?)?;
-        let rendering = match format {
-            GoalReportFormat::Markdown => render_report_markdown(&view, &timeline),
-            GoalReportFormat::Json => render_report_json(&view, &timeline),
+        let goal = self.require_goal(&goal_id)?;
+        let id = GoalId::new(goal_id.clone());
+        // Gather the persisted projections + timeline and render through the SHARED
+        // GO10 renderer in `capo-state` -- the SAME code the deterministic goal
+        // e2e snapshots, so the operator surface and the e2e cannot drift into two
+        // contradictory definitions of "the historical report".
+        let requirements = self
+            .state()
+            .requirement_ledgers_for_goal(&id)
+            .map_err(ServerError::State)?;
+        let reports = self
+            .state()
+            .goal_reports_for_goal(&id)
+            .map_err(ServerError::State)?;
+        let continuations = self
+            .state()
+            .goal_continuations_for_goal(&id)
+            .map_err(ServerError::State)?;
+        let delegated_provider_goals = self
+            .state()
+            .delegated_provider_goals_for_goal(&id)
+            .map_err(ServerError::State)?;
+        let evidence = match goal.task_id.as_ref() {
+            Some(task_id) => self
+                .state()
+                .evidence_for_task(task_id)
+                .map_err(ServerError::State)?,
+            None => Vec::new(),
+        };
+        let audit = self
+            .state()
+            .latest_goal_audit_decision(&id)
+            .map_err(ServerError::State)?;
+        let timeline = self.goal_timeline_entries(&goal)?;
+        let inputs = capo_state::GoalReportInputs {
+            goal: &goal,
+            requirements: &requirements,
+            reports: &reports,
+            continuations: &continuations,
+            delegated_provider_goals: &delegated_provider_goals,
+            evidence: &evidence,
+            audit: audit.as_ref(),
+            timeline: &timeline,
+        };
+        let rendered = match format {
+            GoalReportFormat::Markdown => capo_state::render_goal_report_markdown(&inputs),
+            GoalReportFormat::Json => capo_state::render_goal_report_json(&inputs),
+        };
+        let rendering = GoalReportRendering {
+            goal_id,
+            format: format.as_str().to_string(),
+            body: rendered.body,
+            degraded: rendered.degraded,
         };
         self.response(
             request_id,
@@ -791,195 +839,5 @@ impl GoalReportSurface {
                 kind.contains("blocker") || kind.contains("risk") || kind.contains("contradict")
             }
         }
-    }
-}
-
-/// GA2 (goal-orchestration GO10): render the historical execution report as
-/// markdown. Rebuildable from the goal view + timeline; degrades clearly when a
-/// referenced artifact is absent (it is named as a missing reference, never
-/// rendered as raw content -- raw provider transcripts never appear here).
-fn render_report_markdown(view: &GoalView, timeline: &[EventRecord]) -> GoalReportRendering {
-    let summary = &view.summary;
-    let mut degraded = false;
-    let mut body = String::new();
-    body.push_str(&format!("# Goal report: {}\n\n", summary.goal_id));
-    body.push_str(&format!("- Objective: {}\n", summary.objective));
-    body.push_str(&format!("- Status: {}\n", summary.status));
-    if let Some(parent) = &summary.parent_goal_id {
-        body.push_str(&format!("- Parent goal: {parent}\n"));
-    }
-    body.push_str(&format!(
-        "- Requirements: {} ({} supported, {} blocked, {} contradicted)\n",
-        summary.requirement_count,
-        summary.requirements_supported,
-        summary.blocked_requirement_count,
-        summary.contradicted_requirement_count,
-    ));
-    if !summary.blocker_reason.is_empty() {
-        body.push_str(&format!("- Current blocker: {}\n", summary.blocker_reason));
-    }
-    body.push_str("\n## Requirements\n\n");
-    if view.requirements.is_empty() {
-        body.push_str("_No requirements recorded._\n");
-    }
-    for requirement in &view.requirements {
-        body.push_str(&format!(
-            "- [{}] {} ({}) — source: {} ({})\n",
-            requirement.status,
-            requirement.summary,
-            requirement.requirement_id,
-            requirement.last_status_source,
-            if requirement.observed {
-                "observed"
-            } else {
-                "reported"
-            },
-        ));
-    }
-    body.push_str("\n## Story\n\n");
-    if view.reports.is_empty() {
-        body.push_str("_No reports recorded._\n");
-    }
-    for report in &view.reports {
-        let provenance = if report.observed {
-            "observed".to_string()
-        } else {
-            format!(
-                "reported (confidence {})",
-                report
-                    .confidence
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "n/a".to_string())
-            )
-        };
-        body.push_str(&format!(
-            "- {} [{}] {} — {}\n",
-            report.report_kind, report.source, report.summary, provenance,
-        ));
-        if let Some(artifact) = &report.body_artifact_id {
-            // GO10 degradation: the raw body lives in an artifact, referenced by
-            // id, never inlined. We name it; we never render its raw content.
-            body.push_str(&format!("    - body artifact: {artifact}\n"));
-        }
-    }
-    if !view.continuations.is_empty() {
-        body.push_str("\n## Continuation decisions\n\n");
-        for continuation in &view.continuations {
-            body.push_str(&format!(
-                "- {} — {}\n",
-                continuation.decision, continuation.reason
-            ));
-        }
-    }
-    if !view.delegated_provider_goals.is_empty() {
-        body.push_str("\n## Delegated provider goals (observed, not authoritative)\n\n");
-        for delegated in &view.delegated_provider_goals {
-            body.push_str(&format!(
-                "- {}: {} [{}]\n",
-                delegated.provider_kind, delegated.provider_state, delegated.source
-            ));
-        }
-    }
-    body.push_str("\n## Timeline\n\n");
-    if timeline.is_empty() {
-        body.push_str("_No events recorded._\n");
-        degraded = true;
-    }
-    for record in timeline {
-        let state = record.redaction_state.as_str();
-        if state != "safe" {
-            // GO10 degradation: a redacted event is shown as a redacted reference,
-            // not its raw payload.
-            degraded = true;
-            body.push_str(&format!(
-                "- [{}] {} (actor {}) — [redacted:{}]\n",
-                record.sequence, record.kind, record.actor, state
-            ));
-        } else {
-            body.push_str(&format!(
-                "- [{}] {} (actor {})\n",
-                record.sequence, record.kind, record.actor
-            ));
-        }
-    }
-    GoalReportRendering {
-        goal_id: summary.goal_id.clone(),
-        format: GoalReportFormat::Markdown.as_str().to_string(),
-        body,
-        degraded,
-    }
-}
-
-/// GA2 (goal-orchestration GO10): render the historical report as JSON. Same
-/// derived data as the markdown render; raw artifact bodies are referenced by id,
-/// never inlined, and redacted events surface their redaction state.
-fn render_report_json(view: &GoalView, timeline: &[EventRecord]) -> GoalReportRendering {
-    let summary = &view.summary;
-    let mut degraded = timeline.is_empty();
-    let timeline_json: Vec<serde_json::Value> = timeline
-        .iter()
-        .map(|record| {
-            let state = record.redaction_state.as_str();
-            if state != "safe" {
-                degraded = true;
-            }
-            serde_json::json!({
-                "sequence": record.sequence,
-                "event_id": record.event_id,
-                "kind": record.kind,
-                "actor": record.actor,
-                "redaction_state": state,
-            })
-        })
-        .collect();
-    let value = serde_json::json!({
-        "goal_id": summary.goal_id,
-        "objective": summary.objective,
-        "status": summary.status,
-        "parent_goal_id": summary.parent_goal_id,
-        "attempt_run_id": summary.attempt_run_id,
-        "blocker_reason": summary.blocker_reason,
-        "success_criteria_json": view.success_criteria_json,
-        "constraints_json": view.constraints_json,
-        "verification_surface_json": view.verification_surface_json,
-        "budget_json": view.budget_json,
-        "stop_conditions_json": view.stop_conditions_json,
-        "requirements": view.requirements.iter().map(|requirement| serde_json::json!({
-            "requirement_id": requirement.requirement_id,
-            "summary": requirement.summary,
-            "status": requirement.status,
-            "last_status_source": requirement.last_status_source,
-            "observed": requirement.observed,
-        })).collect::<Vec<_>>(),
-        "reports": view.reports.iter().map(|report| serde_json::json!({
-            "goal_report_id": report.goal_report_id,
-            "requirement_id": report.requirement_id,
-            "report_kind": report.report_kind,
-            "source": report.source,
-            "observed": report.observed,
-            "confidence": report.confidence,
-            "summary": report.summary,
-            "body_artifact_id": report.body_artifact_id,
-            "evidence_id": report.evidence_id,
-        })).collect::<Vec<_>>(),
-        "continuations": view.continuations.iter().map(|continuation| serde_json::json!({
-            "continuation_id": continuation.continuation_id,
-            "decision": continuation.decision,
-            "reason": continuation.reason,
-        })).collect::<Vec<_>>(),
-        "delegated_provider_goals": view.delegated_provider_goals.iter().map(|delegated| serde_json::json!({
-            "delegated_goal_id": delegated.delegated_goal_id,
-            "provider_kind": delegated.provider_kind,
-            "provider_state": delegated.provider_state,
-            "source": delegated.source,
-        })).collect::<Vec<_>>(),
-        "timeline": timeline_json,
-        "degraded": degraded,
-    });
-    GoalReportRendering {
-        goal_id: summary.goal_id.clone(),
-        format: GoalReportFormat::Json.as_str().to_string(),
-        body: serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
-        degraded,
     }
 }
