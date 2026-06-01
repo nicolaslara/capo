@@ -945,6 +945,37 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    /// GA3 (GO7): evidence for a task, spanning EVERY attempt session bound to that
+    /// task. Goal continuations rebind a goal to a fresh attempt session, so a
+    /// session-scoped read drops prior-attempt observed evidence; the task id is the
+    /// stable cross-attempt key. Newest-last (`updated_sequence ASC`) like the
+    /// session-scoped read so callers can `reverse()` for newest-first.
+    pub fn evidence_for_task(&self, task_id: &TaskId) -> StateResult<Vec<EvidenceProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT evidence_id, project_id, task_id, session_id, run_id, kind, artifact_id,
+                    confidence, updated_sequence
+             FROM evidence
+             WHERE task_id = ?1
+             ORDER BY updated_sequence ASC, evidence_id ASC",
+        )?;
+        let rows = statement.query_map(params![task_id.as_str()], |row| {
+            Ok(EvidenceProjection {
+                evidence_id: EvidenceId::new(row.get::<_, String>(0)?),
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                task_id: optional_id(row.get::<_, Option<String>>(2)?),
+                session_id: optional_id(row.get::<_, Option<String>>(3)?),
+                run_id: optional_id(row.get::<_, Option<String>>(4)?),
+                kind: row.get(5)?,
+                artifact_id: row.get(6)?,
+                confidence: row.get(7)?,
+                updated_sequence: row.get(8)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
     pub fn project_evidence(&self, project_id: &ProjectId) -> StateResult<Vec<EvidenceProjection>> {
         let connection = Connection::open(&self.db_path)?;
         let mut statement = connection.prepare(
@@ -1023,6 +1054,39 @@ impl SqliteStateStore {
              ORDER BY updated_sequence ASC, memory_packet_id ASC",
         )?;
         let rows = statement.query_map(params![session_id.as_str()], |row| {
+            Ok(MemoryPacketProjection {
+                memory_packet_id: MemoryPacketId::new(row.get::<_, String>(0)?),
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                task_id: optional_id(row.get::<_, Option<String>>(2)?),
+                agent_id: optional_id(row.get::<_, Option<String>>(3)?),
+                session_id: optional_id(row.get::<_, Option<String>>(4)?),
+                run_id: optional_id(row.get::<_, Option<String>>(5)?),
+                turn_id: row.get(6)?,
+                packet_artifact_id: row.get(7)?,
+                purpose: row.get(8)?,
+                updated_sequence: row.get(9)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    /// GA3 (GO7): memory packets for a task, spanning every attempt session bound to
+    /// that task (see [`Self::evidence_for_task`] for why the task id, not the
+    /// current session id, is the cross-attempt key).
+    pub fn memory_packets_for_task(
+        &self,
+        task_id: &TaskId,
+    ) -> StateResult<Vec<MemoryPacketProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT memory_packet_id, project_id, task_id, agent_id, session_id, run_id,
+                    turn_id, packet_artifact_id, purpose, updated_sequence
+             FROM memory_packet_refs
+             WHERE task_id = ?1
+             ORDER BY updated_sequence ASC, memory_packet_id ASC",
+        )?;
+        let rows = statement.query_map(params![task_id.as_str()], |row| {
             Ok(MemoryPacketProjection {
                 memory_packet_id: MemoryPacketId::new(row.get::<_, String>(0)?),
                 project_id: ProjectId::new(row.get::<_, String>(1)?),
@@ -1321,6 +1385,45 @@ impl SqliteStateStore {
              ORDER BY updated_sequence ASC, review_finding_id ASC",
         )?;
         let rows = statement.query_map(params![session_id.as_str()], |row| {
+            Ok(ReviewFindingProjection {
+                review_finding_id: row.get(0)?,
+                project_id: ProjectId::new(row.get::<_, String>(1)?),
+                task_id: TaskId::new(row.get::<_, String>(2)?),
+                session_id: SessionId::new(row.get::<_, String>(3)?),
+                run_id: optional_id(row.get::<_, Option<String>>(4)?),
+                tool_call_id: optional_id(row.get::<_, Option<String>>(5)?),
+                workpad_task_id: row.get(6)?,
+                reviewer: row.get(7)?,
+                finding_kind: row.get(8)?,
+                severity: row.get(9)?,
+                summary: row.get(10)?,
+                status: row.get(11)?,
+                evidence_artifact_id: row.get(12)?,
+                follow_up: row.get(13)?,
+                updated_sequence: row.get(14)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
+    }
+
+    /// GA3 (GO7): review findings for a task, spanning every attempt session bound
+    /// to that task (see [`Self::evidence_for_task`] for why the task id, not the
+    /// current session id, is the cross-attempt key).
+    pub fn review_findings_for_task(
+        &self,
+        task_id: &TaskId,
+    ) -> StateResult<Vec<ReviewFindingProjection>> {
+        let connection = Connection::open(&self.db_path)?;
+        let mut statement = connection.prepare(
+            "SELECT review_finding_id, project_id, task_id, session_id, run_id, tool_call_id,
+                    workpad_task_id, reviewer, finding_kind, severity, summary, status,
+                    evidence_artifact_id, follow_up, updated_sequence
+             FROM review_findings
+             WHERE task_id = ?1
+             ORDER BY updated_sequence ASC, review_finding_id ASC",
+        )?;
+        let rows = statement.query_map(params![task_id.as_str()], |row| {
             Ok(ReviewFindingProjection {
                 review_finding_id: row.get(0)?,
                 project_id: ProjectId::new(row.get::<_, String>(1)?),

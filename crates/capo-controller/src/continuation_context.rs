@@ -7,9 +7,15 @@
 //! NOT an authoritative read model and is never persisted as one. Nothing in this
 //! module appends an event or projects a record -- it only READS the GA1/GA2 goal
 //! projections (objective, requirements, reports, evidence, blockers,
-//! validation/review state, continuation decisions) plus the session's memory
-//! packets and review findings, and folds them into one bounded, explainable
-//! packet.
+//! validation/review state, continuation decisions) plus the goal's memory packets
+//! and review findings, and folds them into one bounded, explainable packet.
+//!
+//! Cross-attempt survival (GO7): observed evidence, review findings, and memory
+//! packets are read by the goal's TASK id, not its currently-bound session id. A
+//! continuation rebinds the goal to a fresh attempt session (`goals.session_id` is
+//! mutable), so a session-scoped read would silently drop every prior-attempt
+//! observation -- the task id is the stable key that spans all attempt sessions. A
+//! task-less goal falls back to its bound session.
 //!
 //! The load-bearing GO7 property -- survives restart / compaction / transcript
 //! loss: the active objective and the audit contract are reconstructed STRICTLY
@@ -317,29 +323,55 @@ impl FakeBoundaryController {
             fragments.push(self.report_fragment(report, limits.max_summary_chars)?);
         }
 
-        // Observed evidence for the goal's session (when one is bound): newest
-        // first, bounded. Evidence is always observed.
-        if let Some(session_id) = goal.session_id.as_ref() {
-            let mut evidence = self.state.evidence_for_session(session_id)?;
-            evidence.reverse();
-            for row in evidence.iter().take(limits.max_evidence) {
-                fragments.push(self.evidence_fragment(row, limits.max_summary_chars)?);
-            }
+        // Observed evidence, review findings, and memory packets: newest first,
+        // bounded. These MUST survive across attempts (GO7): a continuation rebinds
+        // the goal to a fresh attempt session (`goals.session_id` is mutable), so a
+        // read scoped to the current `goal.session_id` would silently drop every
+        // prior-attempt observation -- defeating the whole reason GA3 distinguishes
+        // observed evidence from claims. The goal's TASK is the stable cross-attempt
+        // key (evidence/reviews/memory all carry `task_id`), so we scope by task
+        // when the goal has one and fall back to the current session only for a
+        // task-less goal.
+        let evidence = match goal.task_id.as_ref() {
+            Some(task_id) => self.state.evidence_for_task(task_id)?,
+            None => match goal.session_id.as_ref() {
+                Some(session_id) => self.state.evidence_for_session(session_id)?,
+                None => Vec::new(),
+            },
+        };
+        let reviews = match goal.task_id.as_ref() {
+            Some(task_id) => self.state.review_findings_for_task(task_id)?,
+            None => match goal.session_id.as_ref() {
+                Some(session_id) => self.state.review_findings_for_session(session_id)?,
+                None => Vec::new(),
+            },
+        };
+        let memory_packets = match goal.task_id.as_ref() {
+            Some(task_id) => self.state.memory_packets_for_task(task_id)?,
+            None => match goal.session_id.as_ref() {
+                Some(session_id) => self.state.memory_packets_for_session(session_id)?,
+                None => Vec::new(),
+            },
+        };
 
-            // Review findings for the session: newest first, bounded.
-            let mut reviews = self.state.review_findings_for_session(session_id)?;
-            reviews.reverse();
-            for review in reviews.iter().take(limits.max_reviews) {
-                fragments.push(review_fragment(review, limits.max_summary_chars));
-            }
+        // Evidence is always observed.
+        let mut evidence = evidence;
+        evidence.reverse();
+        for row in evidence.iter().take(limits.max_evidence) {
+            fragments.push(self.evidence_fragment(row, limits.max_summary_chars)?);
+        }
 
-            // Memory packets for the session: newest first, bounded. We reference
-            // the packet artifact; we do not inline packet contents.
-            let mut packets = self.state.memory_packets_for_session(session_id)?;
-            packets.reverse();
-            for packet in packets.iter().take(limits.max_memory_packets) {
-                fragments.push(memory_packet_fragment(packet, limits.max_summary_chars));
-            }
+        let mut reviews = reviews;
+        reviews.reverse();
+        for review in reviews.iter().take(limits.max_reviews) {
+            fragments.push(self.review_fragment(review, limits.max_summary_chars)?);
+        }
+
+        // Memory packets reference the packet artifact; we do not inline contents.
+        let mut memory_packets = memory_packets;
+        memory_packets.reverse();
+        for packet in memory_packets.iter().take(limits.max_memory_packets) {
+            fragments.push(self.memory_packet_fragment(packet, limits.max_summary_chars)?);
         }
 
         // Continuation decisions: newest first, bounded.
@@ -354,7 +386,7 @@ impl FakeBoundaryController {
 
         // Delegated-provider goal observations (observed, not authoritative).
         for delegated in self.state.delegated_provider_goals_for_goal(goal_id)? {
-            fragments.push(delegated_fragment(&delegated, limits.max_summary_chars));
+            fragments.push(self.delegated_fragment(&delegated, limits.max_summary_chars)?);
         }
 
         // The goal's task, when present, is its workpad/source anchor: a REFERENCE
@@ -452,6 +484,90 @@ impl FakeBoundaryController {
             None => Ok((None, true)),
         }
     }
+
+    /// GA3 (GO7): a review finding. Its `evidence_artifact_id` body is named with
+    /// the artifact's content hash + redaction state via [`Self::artifact_provenance`]
+    /// (a method so it can reach the artifact store), so a redacted/missing review
+    /// body degrades to a redacted reference rather than silently claiming `safe`.
+    fn review_fragment(
+        &self,
+        review: &ReviewFindingProjection,
+        max_summary_chars: usize,
+    ) -> StateResult<ContinuationContextFragment> {
+        let (body_content_hash, redacted) =
+            self.artifact_provenance(&review.evidence_artifact_id)?;
+        let summary = clamp_summary(
+            &format!(
+                "review {} [{}/{}]: {}",
+                review.reviewer, review.finding_kind, review.severity, review.summary
+            ),
+            max_summary_chars,
+        );
+        Ok(fragment(
+            ContinuationSourceKind::ReviewFinding,
+            review.review_finding_id.clone(),
+            summary,
+            None,
+            review.evidence_artifact_id.clone(),
+            body_content_hash,
+            redacted,
+        ))
+    }
+
+    /// GA3 (GO7): a memory-packet reference. Its `packet_artifact_id` body is named
+    /// with the artifact's content hash + redaction state (see
+    /// [`Self::artifact_provenance`]); we reference the packet, never inline it.
+    fn memory_packet_fragment(
+        &self,
+        packet: &MemoryPacketProjection,
+        max_summary_chars: usize,
+    ) -> StateResult<ContinuationContextFragment> {
+        let (body_content_hash, redacted) = self.artifact_provenance(&packet.packet_artifact_id)?;
+        let summary = clamp_summary(
+            &format!("memory packet: {}", packet.purpose),
+            max_summary_chars,
+        );
+        Ok(fragment(
+            ContinuationSourceKind::MemoryPacket,
+            packet.memory_packet_id.as_str().to_string(),
+            summary,
+            None,
+            packet.packet_artifact_id.clone(),
+            body_content_hash,
+            redacted,
+        ))
+    }
+
+    /// GA3 (GO7): a delegated-provider goal observation (observed-not-authoritative
+    /// evidence the auditor weighs). Its `body_artifact_id` body is named with the
+    /// artifact's content hash + redaction state (see [`Self::artifact_provenance`]).
+    fn delegated_fragment(
+        &self,
+        delegated: &DelegatedProviderGoalProjection,
+        max_summary_chars: usize,
+    ) -> StateResult<ContinuationContextFragment> {
+        let (body_content_hash, redacted) =
+            self.artifact_provenance(&delegated.body_artifact_id)?;
+        let summary = clamp_summary(
+            &format!(
+                "delegated {} state={} [{}]",
+                delegated.provider_kind, delegated.provider_state, delegated.source
+            ),
+            max_summary_chars,
+        );
+        // A provider-native completion is observed-not-authoritative evidence the
+        // auditor weighs; it is never an authoritative completion, so it is tagged
+        // observed but kept distinct as its own source kind.
+        Ok(fragment(
+            ContinuationSourceKind::DelegatedProviderGoal,
+            delegated.delegated_goal_id.clone(),
+            summary,
+            Some(true),
+            delegated.body_artifact_id.clone(),
+            body_content_hash,
+            redacted,
+        ))
+    }
 }
 
 fn build_audit_contract(
@@ -522,47 +638,6 @@ fn requirement_fragment(
     )
 }
 
-fn review_fragment(
-    review: &ReviewFindingProjection,
-    max_summary_chars: usize,
-) -> ContinuationContextFragment {
-    let summary = clamp_summary(
-        &format!(
-            "review {} [{}/{}]: {}",
-            review.reviewer, review.finding_kind, review.severity, review.summary
-        ),
-        max_summary_chars,
-    );
-    fragment(
-        ContinuationSourceKind::ReviewFinding,
-        review.review_finding_id.clone(),
-        summary,
-        None,
-        review.evidence_artifact_id.clone(),
-        None,
-        false,
-    )
-}
-
-fn memory_packet_fragment(
-    packet: &MemoryPacketProjection,
-    max_summary_chars: usize,
-) -> ContinuationContextFragment {
-    let summary = clamp_summary(
-        &format!("memory packet: {}", packet.purpose),
-        max_summary_chars,
-    );
-    fragment(
-        ContinuationSourceKind::MemoryPacket,
-        packet.memory_packet_id.as_str().to_string(),
-        summary,
-        None,
-        packet.packet_artifact_id.clone(),
-        None,
-        false,
-    )
-}
-
 fn continuation_fragment(
     continuation: &GoalContinuationProjection,
     max_summary_chars: usize,
@@ -580,31 +655,6 @@ fn continuation_fragment(
         summary,
         None,
         None,
-        None,
-        false,
-    )
-}
-
-fn delegated_fragment(
-    delegated: &DelegatedProviderGoalProjection,
-    max_summary_chars: usize,
-) -> ContinuationContextFragment {
-    let summary = clamp_summary(
-        &format!(
-            "delegated {} state={} [{}]",
-            delegated.provider_kind, delegated.provider_state, delegated.source
-        ),
-        max_summary_chars,
-    );
-    // A provider-native completion is observed-not-authoritative evidence the
-    // auditor weighs; it is never an authoritative completion, so it is tagged
-    // observed but kept distinct as its own source kind.
-    fragment(
-        ContinuationSourceKind::DelegatedProviderGoal,
-        delegated.delegated_goal_id.clone(),
-        summary,
-        Some(true),
-        delegated.body_artifact_id.clone(),
         None,
         false,
     )
@@ -960,14 +1010,18 @@ mod tests {
         let (controller, _root) = open();
         seed_baseline_goal(&controller);
 
-        // Seed MORE reports than the limit allows, each with a long body.
+        // Seed MORE reports than the limit allows. Each carries a DISTINCT, ordered
+        // body (a long unique prefix so we also prove bodies are not dumped) so the
+        // test can prove the surviving fragments are the NEWEST N in newest-first
+        // order -- not just that exactly N survive. Reports are seeded report-0
+        // first .. report-19 last, so report-19 is the newest.
         let long = "x".repeat(5_000);
         for i in 0..20 {
             seed(
                 &controller,
                 &format!("seed-report-{i}"),
                 &[ProjectionRecord::GoalReport(GoalReportProjection {
-                    goal_report_id: format!("report-{i}"),
+                    goal_report_id: format!("report-{i:02}"),
                     goal_id: GoalId::new(GOAL),
                     project_id: ProjectId::new(PROJECT),
                     session_id: Some(SessionId::new(SESSION)),
@@ -975,7 +1029,7 @@ mod tests {
                     report_kind: "capo.report_progress".to_string(),
                     source: "agent_reported".to_string(),
                     confidence: Some(50),
-                    summary: long.clone(),
+                    summary: format!("report body {i} {long}"),
                     body_artifact_id: None,
                     evidence_id: None,
                     updated_sequence: 0,
@@ -1000,6 +1054,19 @@ mod tests {
             report_fragments.len(),
             3,
             "report fragments are bounded by max_reports"
+        );
+        // The surviving fragments are exactly the NEWEST three, newest first. This
+        // fails if the `.reverse()` in assembly is dropped (oldest-3 kept) or if an
+        // arbitrary 3 are selected, so the recency guarantee is PROVEN, not asserted
+        // by construction.
+        let surviving_refs: Vec<&str> = report_fragments
+            .iter()
+            .map(|f| f.source_ref.as_str())
+            .collect();
+        assert_eq!(
+            surviving_refs,
+            vec!["report-19", "report-18", "report-17"],
+            "the newest three reports survive, newest first"
         );
         for fragment in report_fragments {
             assert!(
@@ -1148,6 +1215,109 @@ mod tests {
     fn continuation_objective_and_audit_contract_survive_server_restart_and_rebuild() {
         let (controller, state_root) = open();
         seed_baseline_goal(&controller);
+
+        // Seed SOURCED fragments before capturing `before`, so the post-rebuild
+        // `before == after` equality actually exercises fragment selection,
+        // newest-N ordering, and the `artifact_by_id` provenance path across a
+        // restart -- not just the transcript-independent audit contract.
+        controller
+            .state
+            .record_artifact(ArtifactRecord {
+                artifact_id: "restart-artifact-safe".to_string(),
+                project_id: Some(ProjectId::new(PROJECT)),
+                session_id: Some(SessionId::new(SESSION)),
+                run_id: Some(RunId::new("run-ga3")),
+                kind: "report_body".to_string(),
+                uri: "file:///tmp/restart-safe.txt".to_string(),
+                content_hash: "sha256:safe-restart".to_string(),
+                size_bytes: 64,
+                redaction_state: RedactionState::Safe,
+            })
+            .expect("record safe artifact");
+        controller
+            .state
+            .record_artifact(ArtifactRecord {
+                artifact_id: "restart-artifact-redacted".to_string(),
+                project_id: Some(ProjectId::new(PROJECT)),
+                session_id: Some(SessionId::new(SESSION)),
+                run_id: Some(RunId::new("run-ga3")),
+                kind: "report_body".to_string(),
+                uri: "file:///tmp/restart-redacted.txt".to_string(),
+                content_hash: "sha256:redacted-restart".to_string(),
+                size_bytes: 64,
+                redaction_state: RedactionState::Redacted,
+            })
+            .expect("record redacted artifact");
+        // Two reports: one referencing a safe body, one a redacted body.
+        seed(
+            &controller,
+            "seed-restart-report-safe",
+            &[ProjectionRecord::GoalReport(GoalReportProjection {
+                goal_report_id: "restart-report-safe".to_string(),
+                goal_id: GoalId::new(GOAL),
+                project_id: ProjectId::new(PROJECT),
+                session_id: Some(SessionId::new(SESSION)),
+                requirement_id: None,
+                report_kind: "capo.test_run".to_string(),
+                source: "runtime_output".to_string(),
+                confidence: None,
+                summary: "restart safe report".to_string(),
+                body_artifact_id: Some("restart-artifact-safe".to_string()),
+                evidence_id: None,
+                updated_sequence: 0,
+            })],
+        );
+        seed(
+            &controller,
+            "seed-restart-report-redacted",
+            &[ProjectionRecord::GoalReport(GoalReportProjection {
+                goal_report_id: "restart-report-redacted".to_string(),
+                goal_id: GoalId::new(GOAL),
+                project_id: ProjectId::new(PROJECT),
+                session_id: Some(SessionId::new(SESSION)),
+                requirement_id: None,
+                report_kind: "capo.report_progress".to_string(),
+                source: "agent_reported".to_string(),
+                confidence: Some(40),
+                summary: "restart redacted report".to_string(),
+                body_artifact_id: Some("restart-artifact-redacted".to_string()),
+                evidence_id: None,
+                updated_sequence: 0,
+            })],
+        );
+        // Observed evidence and a memory packet (task-scoped, cross-attempt).
+        seed(
+            &controller,
+            "seed-restart-evidence",
+            &[ProjectionRecord::Evidence(EvidenceProjection {
+                evidence_id: EvidenceId::new("restart-evidence-1"),
+                project_id: ProjectId::new(PROJECT),
+                task_id: Some(TaskId::new("task-ga3")),
+                session_id: Some(SessionId::new(SESSION)),
+                run_id: Some(RunId::new("run-ga3")),
+                kind: "test".to_string(),
+                artifact_id: Some("restart-artifact-safe".to_string()),
+                confidence: 100,
+                updated_sequence: 0,
+            })],
+        );
+        seed(
+            &controller,
+            "seed-restart-memory",
+            &[ProjectionRecord::MemoryPacketRef(MemoryPacketProjection {
+                memory_packet_id: MemoryPacketId::new("restart-packet-1"),
+                project_id: ProjectId::new(PROJECT),
+                task_id: Some(TaskId::new("task-ga3")),
+                agent_id: Some(AgentId::new("agent-ga3")),
+                session_id: Some(SessionId::new(SESSION)),
+                run_id: Some(RunId::new("run-ga3")),
+                turn_id: None,
+                packet_artifact_id: Some("restart-artifact-redacted".to_string()),
+                purpose: "carry context across restart".to_string(),
+                updated_sequence: 0,
+            })],
+        );
+
         // A blocker so the contract carries current-blocker state too.
         seed(
             &controller,
@@ -1162,6 +1332,39 @@ mod tests {
         let before = controller
             .continuation_context_packet(&GoalId::new(GOAL))
             .expect("packet before restart");
+
+        // The seeded sourced fragments are present before restart, so the equality
+        // below is load-bearing for fragment assembly (not just the contract).
+        let safe_before = before
+            .fragments
+            .iter()
+            .find(|f| f.source_ref == "restart-report-safe")
+            .expect("safe report fragment present before restart");
+        assert_eq!(
+            safe_before.body_content_hash.as_deref(),
+            Some("sha256:safe-restart")
+        );
+        assert!(!safe_before.redacted);
+        let redacted_before = before
+            .fragments
+            .iter()
+            .find(|f| f.source_ref == "restart-report-redacted")
+            .expect("redacted report fragment present before restart");
+        assert!(redacted_before.redacted);
+        assert!(
+            before
+                .fragments
+                .iter()
+                .any(|f| f.source_ref == "restart-evidence-1"),
+            "observed evidence present before restart"
+        );
+        assert!(
+            before
+                .fragments
+                .iter()
+                .any(|f| f.source_ref == "restart-packet-1"),
+            "memory packet present before restart"
+        );
 
         // Simulate a server restart: drop the controller, RE-OPEN over the same
         // state root, and REBUILD all projections from the event log. The objective
@@ -1202,5 +1405,210 @@ mod tests {
                 .render_prompt()
                 .contains("Objective: Ship the GA3 continuation packet")
         );
+    }
+
+    #[test]
+    fn observed_evidence_reviews_and_memory_survive_a_goal_rebind_to_a_new_attempt_session() {
+        let (controller, _root) = open();
+        // Attempt 1: the goal is bound to SESSION, and a first attempt records
+        // observed evidence, a review finding, and a memory packet against that
+        // session (but always under the stable task id).
+        seed_baseline_goal(&controller);
+        seed(
+            &controller,
+            "seed-attempt1-evidence",
+            &[ProjectionRecord::Evidence(EvidenceProjection {
+                evidence_id: EvidenceId::new("attempt1-evidence"),
+                project_id: ProjectId::new(PROJECT),
+                task_id: Some(TaskId::new("task-ga3")),
+                session_id: Some(SessionId::new(SESSION)),
+                run_id: Some(RunId::new("run-ga3")),
+                kind: "test".to_string(),
+                artifact_id: None,
+                confidence: 100,
+                updated_sequence: 0,
+            })],
+        );
+        seed(
+            &controller,
+            "seed-attempt1-review",
+            &[ProjectionRecord::ReviewFinding(ReviewFindingProjection {
+                review_finding_id: "attempt1-review".to_string(),
+                project_id: ProjectId::new(PROJECT),
+                task_id: TaskId::new("task-ga3"),
+                session_id: SessionId::new(SESSION),
+                run_id: Some(RunId::new("run-ga3")),
+                tool_call_id: None,
+                workpad_task_id: None,
+                reviewer: "reviewer-ga3".to_string(),
+                finding_kind: "correctness".to_string(),
+                severity: "low".to_string(),
+                summary: "attempt 1 review".to_string(),
+                status: "open".to_string(),
+                evidence_artifact_id: None,
+                follow_up: None,
+                updated_sequence: 0,
+            })],
+        );
+        seed(
+            &controller,
+            "seed-attempt1-memory",
+            &[ProjectionRecord::MemoryPacketRef(MemoryPacketProjection {
+                memory_packet_id: MemoryPacketId::new("attempt1-packet"),
+                project_id: ProjectId::new(PROJECT),
+                task_id: Some(TaskId::new("task-ga3")),
+                agent_id: Some(AgentId::new("agent-ga3")),
+                session_id: Some(SessionId::new(SESSION)),
+                run_id: Some(RunId::new("run-ga3")),
+                turn_id: None,
+                packet_artifact_id: None,
+                purpose: "attempt 1 context".to_string(),
+                updated_sequence: 0,
+            })],
+        );
+
+        // A continuation rebinds the SAME goal to a fresh attempt session. This is
+        // exactly the `ON CONFLICT(goal_id) DO UPDATE SET session_id = ...` path.
+        const SESSION_2: &str = "session-ga3-attempt-2";
+        seed(
+            &controller,
+            "seed-rebind",
+            &[ProjectionRecord::Goal(GoalProjection {
+                session_id: Some(SessionId::new(SESSION_2)),
+                attempt_run_id: Some(RunId::new("run-ga3-attempt-2")),
+                ..goal_projection(GoalProjection::ACTIVE)
+            })],
+        );
+
+        let packet = controller
+            .continuation_context_packet(&GoalId::new(GOAL))
+            .expect("packet after rebind");
+
+        // The prior attempt's observed evidence / review / memory MUST still be in
+        // the packet even though the goal is now bound to a different session. A
+        // session-scoped read (the bug) would drop all three.
+        assert!(
+            packet
+                .fragments
+                .iter()
+                .any(|f| f.source_ref == "attempt1-evidence"),
+            "prior-attempt observed evidence survives a goal rebind"
+        );
+        assert!(
+            packet
+                .fragments
+                .iter()
+                .any(|f| f.source_ref == "attempt1-review"),
+            "prior-attempt review finding survives a goal rebind"
+        );
+        assert!(
+            packet
+                .fragments
+                .iter()
+                .any(|f| f.source_ref == "attempt1-packet"),
+            "prior-attempt memory packet survives a goal rebind"
+        );
+    }
+
+    #[test]
+    fn memory_review_and_delegated_bodies_carry_artifact_hash_and_redaction() {
+        let (controller, _root) = open();
+        seed_baseline_goal(&controller);
+
+        // A redacted artifact referenced by a memory packet, a review finding, and a
+        // delegated-provider observation. Each must degrade to a redacted reference
+        // with the artifact's content hash -- not silently report redacted=false /
+        // body_content_hash=None.
+        controller
+            .state
+            .record_artifact(ArtifactRecord {
+                artifact_id: "shared-redacted".to_string(),
+                project_id: Some(ProjectId::new(PROJECT)),
+                session_id: Some(SessionId::new(SESSION)),
+                run_id: Some(RunId::new("run-ga3")),
+                kind: "body".to_string(),
+                uri: "file:///tmp/shared-redacted.txt".to_string(),
+                content_hash: "sha256:shared".to_string(),
+                size_bytes: 10,
+                redaction_state: RedactionState::Redacted,
+            })
+            .expect("record redacted artifact");
+
+        seed(
+            &controller,
+            "seed-memory-redacted",
+            &[ProjectionRecord::MemoryPacketRef(MemoryPacketProjection {
+                memory_packet_id: MemoryPacketId::new("packet-redacted"),
+                project_id: ProjectId::new(PROJECT),
+                task_id: Some(TaskId::new("task-ga3")),
+                agent_id: Some(AgentId::new("agent-ga3")),
+                session_id: Some(SessionId::new(SESSION)),
+                run_id: Some(RunId::new("run-ga3")),
+                turn_id: None,
+                packet_artifact_id: Some("shared-redacted".to_string()),
+                purpose: "carries a sensitive packet body".to_string(),
+                updated_sequence: 0,
+            })],
+        );
+        seed(
+            &controller,
+            "seed-review-redacted",
+            &[ProjectionRecord::ReviewFinding(ReviewFindingProjection {
+                review_finding_id: "review-redacted".to_string(),
+                project_id: ProjectId::new(PROJECT),
+                task_id: TaskId::new("task-ga3"),
+                session_id: SessionId::new(SESSION),
+                run_id: Some(RunId::new("run-ga3")),
+                tool_call_id: None,
+                workpad_task_id: None,
+                reviewer: "reviewer-ga3".to_string(),
+                finding_kind: "correctness".to_string(),
+                severity: "high".to_string(),
+                summary: "review with sensitive evidence".to_string(),
+                status: "open".to_string(),
+                evidence_artifact_id: Some("shared-redacted".to_string()),
+                follow_up: None,
+                updated_sequence: 0,
+            })],
+        );
+        seed(
+            &controller,
+            "seed-delegated-redacted",
+            &[ProjectionRecord::DelegatedProviderGoal(
+                DelegatedProviderGoalProjection {
+                    delegated_goal_id: "delegated-redacted".to_string(),
+                    goal_id: GoalId::new(GOAL),
+                    project_id: ProjectId::new(PROJECT),
+                    session_id: Some(SessionId::new(SESSION)),
+                    provider_kind: "codex".to_string(),
+                    provider_goal_ref: None,
+                    provider_state: "completed".to_string(),
+                    source: "adapter_event".to_string(),
+                    body_artifact_id: Some("shared-redacted".to_string()),
+                    updated_sequence: 0,
+                },
+            )],
+        );
+
+        let packet = controller
+            .continuation_context_packet(&GoalId::new(GOAL))
+            .expect("packet");
+
+        for source_ref in ["packet-redacted", "review-redacted", "delegated-redacted"] {
+            let frag = packet
+                .fragments
+                .iter()
+                .find(|f| f.source_ref == source_ref)
+                .unwrap_or_else(|| panic!("{source_ref} fragment"));
+            assert!(
+                frag.redacted,
+                "{source_ref}: a non-safe artifact body is a redacted reference"
+            );
+            assert_eq!(
+                frag.body_content_hash.as_deref(),
+                Some("sha256:shared"),
+                "{source_ref}: the referenced artifact's content hash is carried"
+            );
+        }
     }
 }
