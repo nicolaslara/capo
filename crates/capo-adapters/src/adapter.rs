@@ -1,6 +1,7 @@
 use capo_core::{BoundaryBinding, BoundaryKind, SessionId, TurnId};
 
 use crate::acp_live::AcpLiveAdapter;
+use crate::claude_live::ClaudeCodeLiveAdapter;
 use crate::codex_live::{CodexLiveAdapter, CodexLiveChatError};
 use crate::{
     AdapterPermissionRequest, AdapterPermissionResponse, NormalizedAdapterEvent, ScriptedMockAgent,
@@ -127,6 +128,13 @@ pub enum AgentAdapterHandle {
     /// to the Codex adapter; it never replaces the fake adapter as a global
     /// default for unbound/mock agents.
     Codex(CodexLiveAdapter),
+    /// DP4: a real live Claude Code adapter handle (the SECOND real provider),
+    /// bound ONLY for agents explicitly routed to the Claude workspace-write
+    /// adapter. Like the Codex handle it is a real provider binding
+    /// (`is_real()`), never a default for unbound/mock agents; the live write
+    /// spawn stays fail-closed behind the Claude live opt-in gate
+    /// (`CAPO_SERVER_RUN_CLAUDE_LIVE` + the shared live-provider preflight).
+    Claude(ClaudeCodeLiveAdapter),
     /// DP1: a real live ACP JSON-RPC adapter handle, bound ONLY for agents
     /// explicitly routed to the ACP wire client. Like the Codex handle it is a
     /// real provider binding (`is_real()`), never a default for unbound/mock
@@ -153,6 +161,13 @@ impl AgentAdapterHandle {
         Self::Codex(adapter)
     }
 
+    /// Bind a real live Claude adapter handle (DP4). The live write spawn is
+    /// fail-closed behind the Claude live opt-in gate; with the gate off
+    /// `try_send_turn` returns an immediate typed error rather than spawning.
+    pub fn claude(adapter: ClaudeCodeLiveAdapter) -> Self {
+        Self::Claude(adapter)
+    }
+
     /// Bind a real live ACP adapter handle (DP1). The live spawn is fail-closed
     /// behind the ACP live opt-in gate; with the gate off `send_turn` reports a
     /// blocked turn rather than spawning a process.
@@ -164,7 +179,7 @@ impl AgentAdapterHandle {
     /// deterministic test handles; the Codex and ACP handles are real provider
     /// bindings.
     pub fn is_real(&self) -> bool {
-        matches!(self, Self::Codex(_) | Self::Acp(_))
+        matches!(self, Self::Codex(_) | Self::Claude(_) | Self::Acp(_))
     }
 
     fn as_adapter(&self) -> &dyn AgentAdapter {
@@ -172,6 +187,7 @@ impl AgentAdapterHandle {
             Self::Fake(adapter) => adapter,
             Self::ScriptedMock(agent) => agent,
             Self::Codex(adapter) => adapter,
+            Self::Claude(adapter) => adapter,
             Self::Acp(adapter) => adapter.as_ref(),
         }
     }

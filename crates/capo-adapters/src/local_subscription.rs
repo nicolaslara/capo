@@ -328,6 +328,60 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// DP4: the Claude workspace-write profile (the second real provider).
+    ///
+    /// Unlike [`Self::local_launch_plan`] (the no-tools `--permission-mode plan`
+    /// profile that touches nothing), this profile lifts Claude out of plan mode
+    /// into a workspace-write run confined to `workspace_root`:
+    /// `claude -p --output-format stream-json --verbose` per the observed
+    /// `protocol-provider.md` surface, with the edit/write/run tools enabled but
+    /// MCP and slash commands still disabled so the run stays confined to the
+    /// workspace. It stays subscription-safe (same scrubbed env allowlist and
+    /// redaction rules); the caller is responsible for confining `workspace_root`
+    /// and capturing the pre-write checkpoint before this plan is executed
+    /// (mirroring the RTL6 floor the Codex workspace-write plan relies on). The
+    /// unrelated `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` connector env is
+    /// never in the allowlist, so the runtime's `env_clear()` spawn scrubs it.
+    pub fn local_workspace_write_launch_plan(
+        workspace_root: PathBuf,
+        artifact_root: PathBuf,
+        prompt: impl Into<String>,
+    ) -> LocalAdapterLaunchPlan {
+        LocalAdapterLaunchPlan {
+            adapter_kind: NormalizedAdapterKind::ClaudeCode,
+            provider_kind: "claude_subscription".to_string(),
+            credential_scope: "user_local_subscription".to_string(),
+            program: "claude".to_string(),
+            argv: vec![
+                "-p".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--verbose".to_string(),
+                // Workspace-write: accept edits within the confined workspace
+                // (the caller confines `workspace_root` + checkpoints first), but
+                // keep MCP + slash commands disabled so the run can only touch the
+                // confined workspace and never an external connector.
+                "--permission-mode".to_string(),
+                "acceptEdits".to_string(),
+                "--no-session-persistence".to_string(),
+                "--disable-slash-commands".to_string(),
+                "--mcp-config".to_string(),
+                "/dev/null".to_string(),
+                "--strict-mcp-config".to_string(),
+                "--add-dir".to_string(),
+                workspace_root.to_string_lossy().to_string(),
+                prompt.into(),
+            ],
+            workspace_root,
+            artifact_root,
+            env_allowlist: local_subscription_cli_env_allowlist(),
+            redaction_rules: local_adapter_redaction_rules(),
+            output_limit_bytes: 1024 * 1024,
+            stdout_format: "stream-json".to_string(),
+            stderr_policy: "logs_redacted".to_string(),
+        }
+    }
+
     pub fn local_smoke_plan(
         workspace_root: PathBuf,
         artifact_root: PathBuf,

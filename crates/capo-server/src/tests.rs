@@ -14,6 +14,7 @@ use crate::{
     ServerResponse, ServerResponsePayload, send_tcp, serve_tcp,
 };
 
+mod claude_chat;
 mod codex_chat;
 mod codex_workspace_write;
 mod contract;

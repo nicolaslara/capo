@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use capo_adapters::{AgentAdapterHandle, CodexLiveAdapter};
+use capo_adapters::{AgentAdapterHandle, ClaudeCodeLiveAdapter, CodexLiveAdapter};
 use capo_controller::{FakeBoundaryController, LocalAdapterDispatchRunStart};
 use capo_core::{AgentId, CommandIntent, CommandTarget, ProjectId, RunId, SessionId, TaskId};
 use capo_state::{
@@ -82,31 +82,55 @@ pub struct CapoServer {
 /// connections of the same server process) behind a [`Mutex`]. The Codex chat
 /// turn itself is fail-closed-fast: even a bound agent's turn returns an immediate
 /// typed error (no spawn) when [`capo_adapters::codex_live_chat_gate_open`] is off.
+/// The real-provider chat binding the per-agent route should use.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RealChatBinding {
+    Codex,
+    Claude,
+}
+
 #[derive(Clone, Debug)]
 struct CodexChatBindings {
+    /// Codex-bound agent names (AI2).
     bound_agents: Arc<Mutex<HashSet<String>>>,
-    workspace_root: PathBuf,
-    artifact_root: PathBuf,
+    /// DP4: Claude-bound agent names (the second real provider).
+    claude_bound_agents: Arc<Mutex<HashSet<String>>>,
+    codex_workspace_root: PathBuf,
+    codex_artifact_root: PathBuf,
+    claude_workspace_root: PathBuf,
+    claude_artifact_root: PathBuf,
     /// Absolute path to a codex binary (ops `CAPO_CODEX_BIN`; tests a stub). Only
     /// honored when absolute -- the runtime spawns with `env_clear()`.
     program_override: Option<String>,
+    /// Absolute path to a claude binary (ops `CAPO_CLAUDE_BIN`; tests a stub).
+    /// Only honored when absolute -- the runtime spawns with `env_clear()`.
+    claude_program_override: Option<String>,
 }
 
 impl CodexChatBindings {
-    /// Derive the Codex chat config from the server `state_root`: the one-shot
-    /// runs confined to `<state_root>/codex-chat/workspace` and writes artifacts
-    /// under `<state_root>/codex-chat/artifacts`. An absolute `CAPO_CODEX_BIN`
-    /// pins the codex program; a relative value is ignored (env_clear spawn).
+    /// Derive the chat config from the server `state_root`: the Codex one-shot
+    /// runs confined to `<state_root>/codex-chat/{workspace,artifacts}`; the
+    /// Claude workspace-write one-shot under `<state_root>/claude-chat/...`. An
+    /// absolute `CAPO_CODEX_BIN` / `CAPO_CLAUDE_BIN` pins the respective program;
+    /// a relative value is ignored (env_clear spawn).
     fn from_state_root(state_root: &Path) -> Self {
-        let base = state_root.join("codex-chat");
+        let codex_base = state_root.join("codex-chat");
+        let claude_base = state_root.join("claude-chat");
         let program_override = std::env::var("CAPO_CODEX_BIN")
+            .ok()
+            .filter(|path| Path::new(path).is_absolute());
+        let claude_program_override = std::env::var("CAPO_CLAUDE_BIN")
             .ok()
             .filter(|path| Path::new(path).is_absolute());
         Self {
             bound_agents: Arc::new(Mutex::new(HashSet::new())),
-            workspace_root: base.join("workspace"),
-            artifact_root: base.join("artifacts"),
+            claude_bound_agents: Arc::new(Mutex::new(HashSet::new())),
+            codex_workspace_root: codex_base.join("workspace"),
+            codex_artifact_root: codex_base.join("artifacts"),
+            claude_workspace_root: claude_base.join("workspace"),
+            claude_artifact_root: claude_base.join("artifacts"),
             program_override,
+            claude_program_override,
         }
     }
 
@@ -118,23 +142,60 @@ impl CodexChatBindings {
             .insert(agent_name.to_string());
     }
 
-    /// Whether `agent_name` is bound to the Codex chat adapter.
-    fn is_bound(&self, agent_name: &str) -> bool {
-        self.bound_agents
+    /// DP4: record that `agent_name` is bound to the Claude chat adapter.
+    fn bind_claude(&self, agent_name: &str) {
+        self.claude_bound_agents
+            .lock()
+            .expect("claude chat binding lock")
+            .insert(agent_name.to_string());
+    }
+
+    /// The real-provider chat binding for `agent_name`, if any.
+    fn binding_for(&self, agent_name: &str) -> Option<RealChatBinding> {
+        if self
+            .bound_agents
             .lock()
             .expect("codex chat binding lock")
             .contains(agent_name)
+        {
+            return Some(RealChatBinding::Codex);
+        }
+        if self
+            .claude_bound_agents
+            .lock()
+            .expect("claude chat binding lock")
+            .contains(agent_name)
+        {
+            return Some(RealChatBinding::Claude);
+        }
+        None
     }
 
     /// Build the per-agent Codex chat handle. The handle drives the real one-shot
     /// only when the live-provider gate is open; otherwise it fails closed-fast.
     fn codex_handle(&self) -> AgentAdapterHandle {
-        let mut adapter =
-            CodexLiveAdapter::new(self.workspace_root.clone(), self.artifact_root.clone());
+        let mut adapter = CodexLiveAdapter::new(
+            self.codex_workspace_root.clone(),
+            self.codex_artifact_root.clone(),
+        );
         if let Some(program) = self.program_override.as_deref() {
             adapter = adapter.with_codex_program_override(program);
         }
         AgentAdapterHandle::codex(adapter)
+    }
+
+    /// DP4: build the per-agent Claude chat handle. The handle drives the real
+    /// workspace-write one-shot only when the Claude live gate is open; otherwise
+    /// it fails closed-fast.
+    fn claude_handle(&self) -> AgentAdapterHandle {
+        let mut adapter = ClaudeCodeLiveAdapter::new(
+            self.claude_workspace_root.clone(),
+            self.claude_artifact_root.clone(),
+        );
+        if let Some(program) = self.claude_program_override.as_deref() {
+            adapter = adapter.with_claude_program_override(program);
+        }
+        AgentAdapterHandle::claude(adapter)
     }
 }
 
@@ -228,14 +289,23 @@ impl CapoServer {
     /// other (fake/default) agent routes through the ordinary
     /// [`Self::command_controller`], so Codex is never a global chat default.
     fn chat_controller(&self, agent_name: &str) -> ControllerRoute<'_> {
-        if self.codex_chat.is_bound(agent_name) {
-            ControllerRoute::new_codex_bound(
+        match self.codex_chat.binding_for(agent_name) {
+            Some(RealChatBinding::Codex) => ControllerRoute::new_codex_bound(
                 self.controller_selection,
                 &self.controller,
                 self.codex_chat.codex_handle(),
-            )
-        } else {
-            self.command_controller()
+            ),
+            // DP4: a Claude-bound agent routes through the SAME binding-respecting
+            // chat route (generic over the per-agent `AgentAdapterHandle`), so its
+            // chat turn drives the real Claude workspace-write handle while every
+            // other agent keeps the shared adapter; fail-closed-fast when the gate
+            // is off, identical to Codex.
+            Some(RealChatBinding::Claude) => ControllerRoute::new_codex_bound(
+                self.controller_selection,
+                &self.controller,
+                self.codex_chat.claude_handle(),
+            ),
+            None => self.command_controller(),
         }
     }
 
@@ -244,13 +314,15 @@ impl CapoServer {
         let origin = request.origin.clone();
         match request.command {
             ServerCommand::RegisterAgent { name, adapter } => {
-                // AI2: resolve the agent's chat adapter binding. `fake` (default)
-                // keeps the deterministic adapter; `codex` binds the real Codex
-                // chat handle for THIS agent only (fail-closed-fast on chat).
-                // Anything else is rejected before the agent is created.
-                let codex_bound = match adapter.as_str() {
-                    "fake" => false,
-                    "codex" => true,
+                // AI2/DP4: resolve the agent's chat adapter binding. `fake`
+                // (default) keeps the deterministic adapter; `codex` binds the
+                // real Codex chat handle and `claude` binds the real Claude
+                // workspace-write handle for THIS agent only (fail-closed-fast on
+                // chat). Anything else is rejected before the agent is created.
+                let chat_binding = match adapter.as_str() {
+                    "fake" => None,
+                    "codex" => Some(RealChatBinding::Codex),
+                    "claude" => Some(RealChatBinding::Claude),
                     other => {
                         return Err(ServerError::UnsupportedChatAdapter {
                             adapter: other.to_string(),
@@ -271,8 +343,14 @@ impl CapoServer {
                     .command_controller()
                     .register_agent_command(&command)
                     .map_err(ServerError::State)?;
-                if codex_bound {
-                    self.codex_chat.bind(&registration.agent_name);
+                match chat_binding {
+                    Some(RealChatBinding::Codex) => {
+                        self.codex_chat.bind(&registration.agent_name);
+                    }
+                    Some(RealChatBinding::Claude) => {
+                        self.codex_chat.bind_claude(&registration.agent_name);
+                    }
+                    None => {}
                 }
                 self.record_server_request_handled(&command, &origin, "register_agent", None, None)
                     .map_err(ServerError::State)?;

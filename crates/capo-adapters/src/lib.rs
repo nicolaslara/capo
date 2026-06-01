@@ -9,6 +9,7 @@ mod acp_live;
 mod acp_replay;
 mod acp_wire;
 mod adapter;
+mod claude_live;
 mod codex_live;
 mod event;
 mod local_subscription;
@@ -35,6 +36,9 @@ pub use adapter::{
     AdapterSession, AdapterSessionRequest, AgentAdapter, AgentAdapterHandle, FakeAdapter,
     FakeProviderConnector, FakeProviderInfo, PermissionDeliveryAck, ProviderConnector, TurnOutput,
     TurnRequest,
+};
+pub use claude_live::{
+    CLAUDE_LIVE_RUN_OPT_IN_ENV, ClaudeCodeLiveAdapter, claude_live_chat_gate_open,
 };
 pub use codex_live::{
     CODEX_LIVE_PREFLIGHT_OPT_IN_ENV, CODEX_LIVE_RUN_OPT_IN_ENV, CodexLiveAdapter,
