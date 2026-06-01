@@ -44,6 +44,16 @@ pub enum EventKind {
     MemoryPacketBuilt,
     MemoryRecordIngested,
     MemoryRecordInvalidated,
+    // DP6 (memory-architecture.md): the extraction/index/staleness MemoryJob
+    // lifecycle. `job_requested`/`job_completed` bracket an `extract_facts` /
+    // `index_fts` / `invalidate` / `rebuild` job; `record_superseded` and
+    // `record_promoted` are the staleness/review transitions a job emits. A
+    // generated record can never supersede a reviewed workpad decision without an
+    // explicit `record_promoted`.
+    MemoryJobRequested,
+    MemoryJobCompleted,
+    MemoryRecordSuperseded,
+    MemoryRecordPromoted,
     TaskOutcomeReportGenerated,
     ReviewFindingRecorded,
     EvidenceRecorded,
@@ -166,6 +176,10 @@ impl EventKind {
             Self::MemoryPacketBuilt => "memory.packet_built",
             Self::MemoryRecordIngested => "memory.record_ingested",
             Self::MemoryRecordInvalidated => "memory.record_invalidated",
+            Self::MemoryJobRequested => "memory.job_requested",
+            Self::MemoryJobCompleted => "memory.job_completed",
+            Self::MemoryRecordSuperseded => "memory.record_superseded",
+            Self::MemoryRecordPromoted => "memory.record_promoted",
             Self::TaskOutcomeReportGenerated => "task.outcome_report_generated",
             Self::ReviewFindingRecorded => "review.finding_recorded",
             Self::EvidenceRecorded => "evidence.recorded",
@@ -257,6 +271,10 @@ impl EventKind {
             EventKind::MemoryPacketBuilt,
             EventKind::MemoryRecordIngested,
             EventKind::MemoryRecordInvalidated,
+            EventKind::MemoryJobRequested,
+            EventKind::MemoryJobCompleted,
+            EventKind::MemoryRecordSuperseded,
+            EventKind::MemoryRecordPromoted,
             EventKind::TaskOutcomeReportGenerated,
             EventKind::ReviewFindingRecorded,
             EventKind::EvidenceRecorded,

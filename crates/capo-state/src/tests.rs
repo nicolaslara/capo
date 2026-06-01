@@ -3609,6 +3609,24 @@ fn recovery_completion_requires_started_attempt() {
 }
 
 #[test]
+fn dp6_memory_job_event_kinds_round_trip() {
+    // DP6: the extraction/index/staleness MemoryJob event kinds have stable wire
+    // strings and round-trip through `as_str`/`from_wire`.
+    for (kind, wire) in [
+        (EventKind::MemoryJobRequested, "memory.job_requested"),
+        (EventKind::MemoryJobCompleted, "memory.job_completed"),
+        (
+            EventKind::MemoryRecordSuperseded,
+            "memory.record_superseded",
+        ),
+        (EventKind::MemoryRecordPromoted, "memory.record_promoted"),
+    ] {
+        assert_eq!(kind.as_str(), wire);
+        assert_eq!(EventKind::from_wire(wire), Some(kind));
+    }
+}
+
+#[test]
 fn sg3_capability_grant_revoked_and_expired_event_kinds_round_trip() {
     // SG3: the new grant-lifecycle event kinds have stable wire strings and
     // round-trip through `as_str`/`from_wire`.

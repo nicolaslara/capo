@@ -5,8 +5,14 @@
 
 use capo_core::{BoundaryBinding, BoundaryKind, MemoryPacketId, SessionId};
 
+mod jobs;
 mod retrieval;
 
+pub use jobs::{
+    ExtractedRecord, IndexedRecordFingerprint, MarkdownSourceRange, MemoryJobEngine, MemoryJobKind,
+    MemoryJobOutcome, RejectedSource, SourceRejection, StalenessTransition, classify_source,
+    content_hash, may_supersede_reviewed, promote_generated_record, split_markdown_sections,
+};
 pub use retrieval::{
     FtsError, MarkdownMemoryBackend, MarkdownSource, MemoryBudget, MemoryHit, MemoryQuery,
     MemorySearchResult, SqliteFtsMemoryBackend,

@@ -41,6 +41,7 @@ mod fake_session;
 mod goal_autonomy_e2e;
 mod grant_lifecycle;
 mod local_dispatch;
+mod memory_index_ingest;
 mod parent_child;
 mod permission_round_trip;
 mod real_controller;
@@ -72,6 +73,7 @@ pub use grant_lifecycle::{
     GrantReadBackDecision, GrantReadBackSource, GrantRevocation, GrantRevocationScope,
 };
 pub use local_dispatch::LocalAdapterDispatchRunStart;
+pub use memory_index_ingest::MemoryJobIngestReport;
 pub use parent_child::{
     ChildCompletionClaim, ParentMergeDecision, ParentMergeGate, ParentMergeInputs,
     ParentMergeOutcome, ParentSubgoalStoryEntry, ProviderGoalCapability, ProviderGoalSupport,
