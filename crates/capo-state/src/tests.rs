@@ -556,22 +556,186 @@ fn duplicate_goal_report_submission_is_idempotent() {
             &[ProjectionRecord::GoalReport(report.clone())],
         )
         .expect("append first report");
+    // The duplicate carries a DIFFERENT summary/confidence under the SAME
+    // idempotency key. Genuine event-layer dedup must drop the second event
+    // outright (first write wins); a benign upsert that re-projected would
+    // instead overwrite the row with these new values (last-write-wins). The
+    // differing payload is what distinguishes the two.
+    let duplicate_report = GoalReportProjection {
+        confidence: Some(99),
+        summary: "Overwritten progress report".to_string(),
+        ..report.clone()
+    };
     let second = store
         .append_event(
             report_event("event-report-duplicate"),
-            &[ProjectionRecord::GoalReport(report.clone())],
+            &[ProjectionRecord::GoalReport(duplicate_report)],
         )
         .expect("append duplicate report");
 
-    // The duplicate returns the original sequence and does not append a new event.
+    // The duplicate returns the original sequence and does not append a new
+    // event: goal-created + the first report = exactly 2 events, the duplicate
+    // must not increment.
     assert_eq!(first, second);
+    assert_eq!(
+        store.event_count().unwrap(),
+        2,
+        "duplicate report must not append a new event"
+    );
     let reports = store.goal_reports_for_goal(&goal_id).unwrap();
     assert_eq!(reports.len(), 1, "duplicate report must not double-project");
+    // The FIRST write wins (dedup), so the original summary/confidence persist
+    // rather than the duplicate's overwriting values.
     assert_eq!(reports[0].summary, "Progress report");
+    assert_eq!(reports[0].confidence, Some(55));
 
-    // A rebuild from the deduped log keeps exactly one report row.
+    // A rebuild from the deduped log keeps exactly one report row with the
+    // first write's values.
     store.rebuild_projections().expect("rebuild projections");
     assert_eq!(store.goal_reports_for_goal(&goal_id).unwrap(), reports);
+}
+
+// GA1: the goal lifecycle transitions (blocked/resumed/cleared) and the
+// `blocker_reason` current-blocker field must project last-write-wins and
+// rebuild byte-identically. The happy-path test above only ever projects an
+// ACTIVE goal with an empty blocker_reason, so this exercises the
+// non-`active` statuses, the `is_active() == false` path, and the
+// blocker_reason column that a lifecycle write carries.
+#[test]
+fn goal_lifecycle_transitions_project_and_rebuild_identically() {
+    let store = temp_store("goal-lifecycle-transitions");
+    let project_id = ProjectId::new("project-capo");
+    let session_id = SessionId::new("session-goal-lifecycle");
+    let goal_id = GoalId::new("goal-lifecycle");
+
+    // A small helper that projects the goal at a given lifecycle status with a
+    // given blocker_reason, under a status-scoped idempotency key.
+    let append_status = |event_id: &str, kind: EventKind, status: &str, blocker_reason: &str| {
+        store
+            .append_event(
+                NewEvent {
+                    event_id: event_id.to_string(),
+                    kind,
+                    actor: "controller".to_string(),
+                    project_id: Some(project_id.clone()),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: Some(session_id.clone()),
+                    run_id: None,
+                    turn_id: None,
+                    item_id: Some(goal_id.to_string()),
+                    payload_json: format!(
+                        "{{\"kind\":\"{}\",\"blocker_reason\":{}}}",
+                        kind.as_str(),
+                        serde_json::to_string(blocker_reason).unwrap()
+                    ),
+                    idempotency_key: Some(format!("{}:goal-lifecycle", kind.as_str())),
+                    redaction_state: RedactionState::Safe,
+                },
+                &[ProjectionRecord::Goal(GoalProjection {
+                    goal_id: goal_id.clone(),
+                    project_id: project_id.clone(),
+                    task_id: None,
+                    agent_id: None,
+                    session_id: Some(session_id.clone()),
+                    parent_goal_id: None,
+                    attempt_run_id: None,
+                    objective: "Lifecycle goal".to_string(),
+                    status: status.to_string(),
+                    success_criteria_json: "{}".to_string(),
+                    constraints_json: "{}".to_string(),
+                    verification_surface_json: "{}".to_string(),
+                    budget_json: "{}".to_string(),
+                    stop_conditions_json: "{}".to_string(),
+                    blocker_reason: blocker_reason.to_string(),
+                    updated_sequence: 0,
+                })],
+            )
+            .expect("append lifecycle transition")
+    };
+
+    append_status(
+        "event-goal-created",
+        EventKind::GoalCreated,
+        GoalProjection::ACTIVE,
+        "",
+    );
+    // Blocked carries a non-empty blocker_reason (the GO3 current-blocker state).
+    append_status(
+        "event-goal-blocked",
+        EventKind::GoalBlocked,
+        GoalProjection::BLOCKED,
+        "waiting on operator approval",
+    );
+
+    // After the block, the live read model reflects last-write-wins status and
+    // the persisted blocker_reason, and the goal is no longer active.
+    let blocked = store.goal(&goal_id).unwrap().expect("blocked goal");
+    assert_eq!(blocked.status, GoalProjection::BLOCKED);
+    assert!(!blocked.is_active());
+    assert_eq!(blocked.blocker_reason, "waiting on operator approval");
+
+    // Resuming clears the blocker_reason and restores active.
+    append_status(
+        "event-goal-resumed",
+        EventKind::GoalResumed,
+        GoalProjection::ACTIVE,
+        "",
+    );
+    let resumed = store.goal(&goal_id).unwrap().expect("resumed goal");
+    assert_eq!(resumed.status, GoalProjection::ACTIVE);
+    assert!(resumed.is_active());
+    assert_eq!(resumed.blocker_reason, "");
+
+    // Clearing is terminal and is not active.
+    append_status(
+        "event-goal-cleared",
+        EventKind::GoalCleared,
+        GoalProjection::CLEARED,
+        "",
+    );
+    let cleared = store.goal(&goal_id).unwrap().expect("cleared goal");
+    assert_eq!(cleared.status, GoalProjection::CLEARED);
+    assert!(!cleared.is_active());
+
+    // The load-bearing property: the goal rebuilds IDENTICALLY from the durable
+    // projection records, including the (now-empty) blocker_reason that rode the
+    // lifecycle payloads.
+    let cleared_before = cleared.clone();
+    store.rebuild_projections().expect("rebuild projections");
+    assert_eq!(store.goal(&goal_id).unwrap(), Some(cleared_before));
+}
+
+// GA1: pin the new goal-lifecycle EventKind wire strings so a typo in any of
+// them is caught, mirroring the SG3 grant-lifecycle round-trip test. The
+// persisted `EventRecord.kind` string is the durable contract, so `as_str` and
+// `from_wire` must round-trip for every goal-lifecycle kind.
+#[test]
+fn ga1_goal_lifecycle_event_kinds_round_trip() {
+    for (kind, wire) in [
+        (EventKind::GoalCreated, "goal.created"),
+        (EventKind::GoalUpdated, "goal.updated"),
+        (EventKind::GoalPaused, "goal.paused"),
+        (EventKind::GoalResumed, "goal.resumed"),
+        (EventKind::GoalBlocked, "goal.blocked"),
+        (EventKind::GoalCleared, "goal.cleared"),
+        (
+            EventKind::RequirementStatusChanged,
+            "goal.requirement_status_changed",
+        ),
+        (EventKind::GoalReportRecorded, "goal.report_recorded"),
+        (
+            EventKind::ContinuationDecisionRecorded,
+            "goal.continuation_decision_recorded",
+        ),
+        (
+            EventKind::DelegatedProviderGoalObserved,
+            "goal.delegated_provider_observed",
+        ),
+    ] {
+        assert_eq!(kind.as_str(), wire);
+        assert_eq!(EventKind::from_wire(wire), Some(kind));
+    }
 }
 
 #[test]
