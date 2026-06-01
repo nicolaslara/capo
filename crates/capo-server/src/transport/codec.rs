@@ -406,7 +406,131 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             "goal_id": goal_id,
             "format": format.as_str(),
         }),
+        ServerCommand::ContinueGoal {
+            goal_id,
+            continuation_id,
+            conditions,
+            turn,
+        } => json!({
+            "type": "continue_goal",
+            "goal_id": goal_id,
+            "continuation_id": continuation_id,
+            "conditions": encode_continue_goal_conditions(conditions),
+            "turn": encode_continue_goal_turn(turn),
+        }),
     }
+}
+
+fn encode_continue_goal_conditions(c: &crate::ContinueGoalConditions) -> Value {
+    json!({
+        "enabled": c.enabled,
+        "runtime_idle": c.runtime_idle,
+        "session_idle": c.session_idle,
+        "user_input_queued": c.user_input_queued,
+        "permission_pending": c.permission_pending,
+        "capability_profile_valid": c.capability_profile_valid,
+        "next_step_writes_source": c.next_step_writes_source,
+        "checkpoint_boundary_available": c.checkpoint_boundary_available,
+        "verification_runner_available": c.verification_runner_available,
+        "last_continuation_made_no_progress": c.last_continuation_made_no_progress,
+        "strategy_changed_since_suppression": c.strategy_changed_since_suppression,
+        "budget_max_turns": c.budget_max_turns,
+        "budget_timeout_seconds": c.budget_timeout_seconds,
+        "budget_max_token_cost": c.budget_max_token_cost,
+        "budget_turns_taken": c.budget_turns_taken,
+        "budget_token_cost": c.budget_token_cost,
+    })
+}
+
+fn encode_continue_goal_turn(t: &crate::ContinueGoalTurn) -> Value {
+    json!({
+        "agent_name": t.agent_name,
+        "adapter": t.adapter,
+        "goal": t.goal,
+        "workspace": t.workspace,
+        "artifacts": t.artifacts,
+        "session_id": t.session_id,
+        "run_id": t.run_id,
+        "turn_id": t.turn_id,
+        "capability_profile": t.capability_profile,
+        "runtime_scope": t.runtime_scope,
+        "credential_scan_policy": t.credential_scan_policy,
+        "raw_prompt_policy": t.raw_prompt_policy,
+        "raw_output_policy": t.raw_output_policy,
+        "tool_wrapper_policy": t.tool_wrapper_policy,
+        "live_provider_opt_in": t.live_provider_opt_in,
+        "live_execution_opt_in": t.live_execution_opt_in,
+        "mock_runtime_opt_in": t.mock_runtime_opt_in,
+        "mock_provider_output_name": t.mock_provider_output_name,
+        "mock_provider_output_jsonl": t.mock_provider_output_jsonl,
+        "timeout_seconds": t.timeout_seconds,
+        "max_turns": t.max_turns,
+        "max_token_cost": t.max_token_cost,
+        "turns_taken_before": t.turns_taken_before,
+        "token_cost_before": t.token_cost_before,
+        "turn_token_cost": t.turn_token_cost,
+        "unattended": t.unattended,
+    })
+}
+
+fn decode_continue_goal_conditions(
+    value: &Value,
+) -> TransportResult<crate::ContinueGoalConditions> {
+    Ok(crate::ContinueGoalConditions {
+        enabled: required_bool(value, "enabled")?,
+        runtime_idle: required_bool(value, "runtime_idle")?,
+        session_idle: required_bool(value, "session_idle")?,
+        user_input_queued: required_bool(value, "user_input_queued")?,
+        permission_pending: required_bool(value, "permission_pending")?,
+        capability_profile_valid: required_bool(value, "capability_profile_valid")?,
+        next_step_writes_source: required_bool(value, "next_step_writes_source")?,
+        checkpoint_boundary_available: required_bool(value, "checkpoint_boundary_available")?,
+        verification_runner_available: required_bool(value, "verification_runner_available")?,
+        last_continuation_made_no_progress: required_bool(
+            value,
+            "last_continuation_made_no_progress",
+        )?,
+        strategy_changed_since_suppression: required_bool(
+            value,
+            "strategy_changed_since_suppression",
+        )?,
+        budget_max_turns: required_usize(value, "budget_max_turns")? as u32,
+        budget_timeout_seconds: required_usize(value, "budget_timeout_seconds")? as u64,
+        budget_max_token_cost: required_usize(value, "budget_max_token_cost")? as u64,
+        budget_turns_taken: required_usize(value, "budget_turns_taken")? as u32,
+        budget_token_cost: required_usize(value, "budget_token_cost")? as u64,
+    })
+}
+
+fn decode_continue_goal_turn(value: &Value) -> TransportResult<crate::ContinueGoalTurn> {
+    Ok(crate::ContinueGoalTurn {
+        agent_name: required_string(value, "agent_name")?,
+        adapter: required_string(value, "adapter")?,
+        goal: required_string(value, "goal")?,
+        workspace: required_string(value, "workspace")?,
+        artifacts: required_string(value, "artifacts")?,
+        session_id: required_string(value, "session_id")?,
+        run_id: required_string(value, "run_id")?,
+        turn_id: required_string(value, "turn_id")?,
+        capability_profile: required_string(value, "capability_profile")?,
+        runtime_scope: required_string(value, "runtime_scope")?,
+        credential_scan_policy: required_string(value, "credential_scan_policy")?,
+        raw_prompt_policy: required_string(value, "raw_prompt_policy")?,
+        raw_output_policy: required_string(value, "raw_output_policy")?,
+        tool_wrapper_policy: required_string(value, "tool_wrapper_policy")?,
+        live_provider_opt_in: required_bool(value, "live_provider_opt_in")?,
+        live_execution_opt_in: required_bool(value, "live_execution_opt_in")?,
+        mock_runtime_opt_in: required_bool(value, "mock_runtime_opt_in")?,
+        mock_provider_output_name: optional_string(value, "mock_provider_output_name")?,
+        mock_provider_output_jsonl: optional_string(value, "mock_provider_output_jsonl")?,
+        timeout_seconds: required_usize(value, "timeout_seconds")? as u64,
+        max_turns: required_usize(value, "max_turns")? as u32,
+        max_token_cost: required_usize(value, "max_token_cost")? as u64,
+        turns_taken_before: required_usize(value, "turns_taken_before")? as u32,
+        token_cost_before: required_usize(value, "token_cost_before")? as u64,
+        turn_token_cost: required_usize(value, "turn_token_cost")? as u64,
+        unattended: optional_bool(value, "unattended")?.unwrap_or(true),
+    })
 }
 
 pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
@@ -613,6 +737,12 @@ pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
             goal_id: required_string(value, "goal_id")?,
             format: decode_goal_report_format(&required_string(value, "format")?)?,
         }),
+        "continue_goal" => Ok(ServerCommand::ContinueGoal {
+            goal_id: required_string(value, "goal_id")?,
+            continuation_id: required_string(value, "continuation_id")?,
+            conditions: decode_continue_goal_conditions(required_value(value, "conditions")?)?,
+            turn: Box::new(decode_continue_goal_turn(required_value(value, "turn")?)?),
+        }),
         other => Err(TransportError::Protocol(format!(
             "unknown command type: {other}"
         ))),
@@ -720,17 +850,21 @@ pub(super) fn encode_payload(payload: &ServerResponsePayload) -> Value {
             value["type"] = json!("dispatch_run");
             value
         }
-        ServerResponsePayload::DispatchTurn(turn) => json!({
-            "type": "dispatch_turn",
-            "run": encode_dispatch_run(&turn.run),
-            "finished": {
-                "turn_id": turn.finished.turn_id,
-                "stop_reason": turn.finished.stop_reason,
-                "observed_terminal_event": turn.finished.observed_terminal_event,
-                "summary_refs": turn.finished.summary_refs,
-                "observed_tool_refs": turn.finished.observed_tool_refs,
-            },
-            "ceiling_breach_code": turn.ceiling_breach_code,
+        ServerResponsePayload::DispatchTurn(turn) => {
+            let mut obj = encode_dispatch_turn_body(turn);
+            obj.insert("type".to_string(), json!("dispatch_turn"));
+            Value::Object(obj)
+        }
+        ServerResponsePayload::ContinuationEvaluated(summary) => json!({
+            "type": "continuation_evaluated",
+            "goal_id": summary.goal_id,
+            "continuation_id": summary.continuation_id,
+            "decision": summary.decision,
+            "reason": summary.reason,
+            "dispatched": summary
+                .dispatched
+                .as_ref()
+                .map(|turn| Value::Object(encode_dispatch_turn_body(turn))),
         }),
         ServerResponsePayload::Recovery(recovery) => json!({
             "type": "recovery",
@@ -789,6 +923,47 @@ pub(super) fn encode_payload(payload: &ServerResponsePayload) -> Value {
             "degraded": rendering.degraded,
         }),
     }
+}
+
+/// AI1/AI5: encode a [`DispatchTurnSummary`] body (no `type` tag). Shared by the
+/// standalone `dispatch_turn` payload and the embedded `dispatched` turn of the
+/// AI5 `continuation_evaluated` payload so both emit one identical turn shape.
+fn encode_dispatch_turn_body(turn: &DispatchTurnSummary) -> serde_json::Map<String, Value> {
+    let mut map = serde_json::Map::new();
+    map.insert("run".to_string(), encode_dispatch_run(&turn.run));
+    map.insert(
+        "finished".to_string(),
+        json!({
+            "turn_id": turn.finished.turn_id,
+            "stop_reason": turn.finished.stop_reason,
+            "observed_terminal_event": turn.finished.observed_terminal_event,
+            "summary_refs": turn.finished.summary_refs,
+            "observed_tool_refs": turn.finished.observed_tool_refs,
+        }),
+    );
+    map.insert(
+        "ceiling_breach_code".to_string(),
+        json!(turn.ceiling_breach_code),
+    );
+    map
+}
+
+/// AI1/AI5: decode a [`DispatchTurnSummary`] from its wire object (the inverse of
+/// [`encode_dispatch_turn_body`]). Shared by the `dispatch_turn` payload and the
+/// `dispatched` field of `continuation_evaluated`.
+fn decode_dispatch_turn_summary(value: &Value) -> TransportResult<DispatchTurnSummary> {
+    let finished = required_value(value, "finished")?;
+    Ok(DispatchTurnSummary {
+        run: decode_dispatch_run(required_value(value, "run")?)?,
+        finished: TurnFinishedSummary {
+            turn_id: required_string(finished, "turn_id")?,
+            stop_reason: required_string(finished, "stop_reason")?,
+            observed_terminal_event: required_bool(finished, "observed_terminal_event")?,
+            summary_refs: required_string_array(finished, "summary_refs")?,
+            observed_tool_refs: required_string_array(finished, "observed_tool_refs")?,
+        },
+        ceiling_breach_code: optional_string(value, "ceiling_breach_code")?,
+    })
 }
 
 /// AI1: encode a [`DispatchRunSummary`] to its wire object. Shared by the
@@ -1036,20 +1211,21 @@ pub(super) fn decode_payload(value: &Value) -> TransportResult<ServerResponsePay
         "dispatch_run" => Ok(ServerResponsePayload::DispatchRun(decode_dispatch_run(
             value,
         )?)),
-        "dispatch_turn" => Ok(ServerResponsePayload::DispatchTurn(DispatchTurnSummary {
-            run: decode_dispatch_run(required_value(value, "run")?)?,
-            finished: {
-                let finished = required_value(value, "finished")?;
-                TurnFinishedSummary {
-                    turn_id: required_string(finished, "turn_id")?,
-                    stop_reason: required_string(finished, "stop_reason")?,
-                    observed_terminal_event: required_bool(finished, "observed_terminal_event")?,
-                    summary_refs: required_string_array(finished, "summary_refs")?,
-                    observed_tool_refs: required_string_array(finished, "observed_tool_refs")?,
-                }
+        "dispatch_turn" => Ok(ServerResponsePayload::DispatchTurn(
+            decode_dispatch_turn_summary(value)?,
+        )),
+        "continuation_evaluated" => Ok(ServerResponsePayload::ContinuationEvaluated(
+            crate::ContinuationEvaluatedSummary {
+                goal_id: required_string(value, "goal_id")?,
+                continuation_id: required_string(value, "continuation_id")?,
+                decision: required_string(value, "decision")?,
+                reason: required_string(value, "reason")?,
+                dispatched: match value.get("dispatched") {
+                    Some(Value::Null) | None => None,
+                    Some(turn) => Some(decode_dispatch_turn_summary(turn)?),
+                },
             },
-            ceiling_breach_code: optional_string(value, "ceiling_breach_code")?,
-        })),
+        )),
         "recovery" => Ok(ServerResponsePayload::Recovery(RecoverySummary {
             recovery_attempt_id: required_string(value, "recovery_attempt_id")?,
             recovered_run_count: required_usize(value, "recovered_run_count")?,

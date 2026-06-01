@@ -1300,3 +1300,372 @@ fn live_turn_wall_clock_timeout_kills_the_process_group_and_aborts_the_run() {
     assert_eq!(agent.status, "available");
     assert!(agent.current_session_id.is_none());
 }
+
+// ----- AI5: closing the autonomy loop (ContinueGoal) ----------------------
+
+/// AI5: the live safe-boundary conditions for a `ContinueGoal`, maximally
+/// permissive so a single flipped field exercises one branch. `enabled` is the
+/// opt-in (off by default) gate; the budget is unbounded.
+fn continue_conditions(enabled: bool) -> crate::ContinueGoalConditions {
+    crate::ContinueGoalConditions {
+        enabled,
+        runtime_idle: true,
+        session_idle: true,
+        user_input_queued: false,
+        permission_pending: false,
+        capability_profile_valid: true,
+        next_step_writes_source: false,
+        checkpoint_boundary_available: true,
+        verification_runner_available: true,
+        last_continuation_made_no_progress: false,
+        strategy_changed_since_suppression: false,
+        budget_max_turns: 0,
+        budget_timeout_seconds: 0,
+        budget_max_token_cost: 0,
+        budget_turns_taken: 0,
+        budget_token_cost: 0,
+    }
+}
+
+/// AI5: the dispatch-turn spec a continued turn drives. A deterministic
+/// mock-runtime codex turn (no real provider binary, fail-closed live gate) on
+/// the given session/run -- exactly the AI1 production turn shape.
+fn continue_turn(goal: &str, session: &str, run: &str, turn: &str) -> crate::ContinueGoalTurn {
+    crate::ContinueGoalTurn {
+        agent_name: "codex-local".to_string(),
+        adapter: "codex".to_string(),
+        goal: goal.to_string(),
+        workspace: "/tmp/capo-workspace".to_string(),
+        artifacts: "/tmp/capo-artifacts".to_string(),
+        session_id: session.to_string(),
+        run_id: run.to_string(),
+        turn_id: turn.to_string(),
+        capability_profile: "trusted-local".to_string(),
+        runtime_scope: "local_process_loopback".to_string(),
+        credential_scan_policy: "metadata_only_no_secret_read".to_string(),
+        raw_prompt_policy: "not_rendered".to_string(),
+        raw_output_policy: "artifacts_scanned_redacted".to_string(),
+        tool_wrapper_policy: "capo_wrapped_required".to_string(),
+        live_provider_opt_in: true,
+        live_execution_opt_in: false,
+        mock_runtime_opt_in: true,
+        mock_provider_output_name: Some("codex-exec.jsonl".to_string()),
+        mock_provider_output_jsonl: Some(CODEX_FIXTURE.to_string()),
+        timeout_seconds: 30,
+        max_turns: 4,
+        max_token_cost: 1_000,
+        turns_taken_before: 0,
+        token_cost_before: 0,
+        turn_token_cost: 0,
+        unattended: true,
+    }
+}
+
+#[test]
+fn continue_goal_enabled_at_safe_boundary_drives_exactly_one_production_turn() {
+    // AI5: the autonomy loop is CLOSED on the production path. With continuation
+    // enabled and every safe-boundary precondition met, the GA4 scheduler decides
+    // `continue` and `ContinueGoal` drives EXACTLY ONE follow-on turn through the
+    // SINGLE production orchestration path (`run_dispatch_turn`, the same path AI1's
+    // `RunDispatchTurn` uses) -- never a parallel driver. The continued turn's
+    // dispatch event sequence is identical to an operator `RunDispatchTurn`.
+    let goal = "Close the autonomy loop through the production path";
+    let root = temp_root();
+    let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
+    register_and_start(&server, "codex-local", goal, "session-cont", "run-cont");
+
+    // An active goal bound to the started session/run.
+    handle(
+        &server,
+        ServerCommand::SetGoal {
+            spec: crate::GoalSpec {
+                goal_id: "goal-cont".to_string(),
+                objective: goal.to_string(),
+                task_id: None,
+                agent_id: None,
+                session_id: Some("session-cont".to_string()),
+                parent_goal_id: None,
+                attempt_run_id: Some("run-cont".to_string()),
+                requirements: vec![],
+                success_criteria_json: "{}".to_string(),
+                constraints_json: "{}".to_string(),
+                verification_surface_json: "{}".to_string(),
+                budget_json: "{}".to_string(),
+                stop_conditions_json: "{}".to_string(),
+            },
+        },
+    );
+
+    let response = handle(
+        &server,
+        ServerCommand::ContinueGoal {
+            goal_id: "goal-cont".to_string(),
+            continuation_id: "cont-1".to_string(),
+            conditions: continue_conditions(true),
+            turn: Box::new(continue_turn(goal, "session-cont", "run-cont", "turn-cont")),
+        },
+    );
+    let ServerResponsePayload::ContinuationEvaluated(summary) = response.payload else {
+        panic!("ContinueGoal must return a ContinuationEvaluated payload");
+    };
+    assert_eq!(summary.decision, "continue");
+    assert_eq!(summary.reason, "safe_boundary");
+    // Exactly ONE turn was driven, through the production path (the loop's
+    // `TurnFinished` annotation keyed to the turn the continuation drove).
+    let dispatched = summary
+        .dispatched
+        .expect("a continue decision drives exactly one production turn");
+    assert_eq!(dispatched.finished.turn_id, "turn-cont");
+    assert!(dispatched.finished.observed_terminal_event);
+    assert!(dispatched.ceiling_breach_code.is_none());
+    assert_eq!(
+        dispatched.run.status,
+        "mocked_live_provider_output_ingested"
+    );
+
+    // The continued turn drove the SAME live dispatch substrate an operator
+    // `RunDispatchTurn` does -- one path, one event shape.
+    let kinds = dispatch_event_kinds(&root, "session-cont");
+    for required in [
+        "adapter.dispatch_planned",
+        "adapter.dispatch_gate_checked",
+        "run.exited",
+    ] {
+        assert!(
+            kinds.iter().any(|kind| kind == required),
+            "continued production turn missing dispatch event {required}"
+        );
+    }
+
+    // The decision was durably recorded as a continuation read model.
+    let view = handle(
+        &server,
+        ServerCommand::ViewGoal {
+            goal_id: "goal-cont".to_string(),
+        },
+    );
+    let ServerResponsePayload::GoalView(view) = view.payload else {
+        panic!("expected goal view");
+    };
+    assert_eq!(view.continuations.len(), 1);
+    assert_eq!(view.continuations[0].decision, "continue");
+}
+
+#[test]
+fn continue_goal_disabled_records_pause_and_drives_no_turn() {
+    // AI5: opt-in / off by default. With continuation DISABLED the scheduler
+    // short-circuits to `pause` (reason `not_enabled`) and NO turn is driven --
+    // the off-by-default autonomy invariant holds at the production boundary.
+    let goal = "Stay paused while continuation is disabled";
+    let root = temp_root();
+    let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
+    register_and_start(&server, "codex-local", goal, "session-off", "run-off");
+    handle(
+        &server,
+        ServerCommand::SetGoal {
+            spec: crate::GoalSpec {
+                goal_id: "goal-off".to_string(),
+                objective: goal.to_string(),
+                task_id: None,
+                agent_id: None,
+                session_id: Some("session-off".to_string()),
+                parent_goal_id: None,
+                attempt_run_id: Some("run-off".to_string()),
+                requirements: vec![],
+                success_criteria_json: "{}".to_string(),
+                constraints_json: "{}".to_string(),
+                verification_surface_json: "{}".to_string(),
+                budget_json: "{}".to_string(),
+                stop_conditions_json: "{}".to_string(),
+            },
+        },
+    );
+
+    let response = handle(
+        &server,
+        ServerCommand::ContinueGoal {
+            goal_id: "goal-off".to_string(),
+            continuation_id: "cont-off".to_string(),
+            conditions: continue_conditions(false),
+            turn: Box::new(continue_turn(goal, "session-off", "run-off", "turn-off")),
+        },
+    );
+    let ServerResponsePayload::ContinuationEvaluated(summary) = response.payload else {
+        panic!("expected ContinuationEvaluated payload");
+    };
+    assert_eq!(summary.decision, "pause");
+    assert_eq!(summary.reason, "not_enabled");
+    assert!(
+        summary.dispatched.is_none(),
+        "a disabled continuation must drive NO turn"
+    );
+    // No dispatch substrate ran on the session (only the start-session events).
+    let kinds = dispatch_event_kinds(&root, "session-off");
+    assert!(
+        !kinds.iter().any(|kind| kind == "run.exited"),
+        "a disabled continuation must not drive a turn"
+    );
+}
+
+#[test]
+fn continue_goal_non_continuing_decisions_drive_no_turn() {
+    // AI5: every NON-continuing decision records only and drives no turn:
+    //  - Pause (a safe-boundary precondition unmet: input queued)
+    //  - Block (a blocked goal)
+    //  - NoProgressSuppress (a prior no-material-progress continuation)
+    //  - BudgetLimit (an exhausted goal budget) -- which ALSO aborts the run.
+    let goal = "Non-continuing decisions drive no turn";
+    let root = temp_root();
+    let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
+    handle(
+        &server,
+        ServerCommand::RegisterAgent {
+            name: "codex-local".to_string(),
+            adapter: "fake".to_string(),
+        },
+    );
+    let started = handle(
+        &server,
+        ServerCommand::StartSession {
+            agent_name: "codex-local".to_string(),
+            goal: goal.to_string(),
+            adapter: "codex".to_string(),
+            session_id: Some("session-nc".to_string()),
+            run_id: Some("run-nc".to_string()),
+        },
+    );
+    let ServerResponsePayload::SessionStarted(refs) = started.payload else {
+        panic!("expected session started");
+    };
+    // Bind each goal to the REAL started session/run/task/agent so the
+    // budget-limit abort path has a live run to terminate (RTL7).
+    let (task_id, agent_id) = (refs.task_id.to_string(), refs.agent_id.to_string());
+
+    let set_goal = |goal_id: &str| ServerCommand::SetGoal {
+        spec: crate::GoalSpec {
+            goal_id: goal_id.to_string(),
+            objective: goal.to_string(),
+            task_id: Some(task_id.clone()),
+            agent_id: Some(agent_id.clone()),
+            session_id: Some("session-nc".to_string()),
+            parent_goal_id: None,
+            attempt_run_id: Some("run-nc".to_string()),
+            requirements: vec![],
+            success_criteria_json: "{}".to_string(),
+            constraints_json: "{}".to_string(),
+            verification_surface_json: "{}".to_string(),
+            budget_json: "{}".to_string(),
+            stop_conditions_json: "{}".to_string(),
+        },
+    };
+
+    // Pause: input queued at an otherwise-safe boundary.
+    handle(&server, set_goal("goal-pause"));
+    let pause = continue_eval(
+        &server,
+        "goal-pause",
+        "cont-pause",
+        crate::ContinueGoalConditions {
+            user_input_queued: true,
+            ..continue_conditions(true)
+        },
+        "turn-pause",
+    );
+    assert_eq!(pause.decision, "pause");
+    assert_eq!(pause.reason, "input_queued");
+    assert!(pause.dispatched.is_none());
+
+    // Block: a blocked goal never continues.
+    handle(&server, set_goal("goal-block"));
+    handle(
+        &server,
+        ServerCommand::BlockGoal {
+            goal_id: "goal-block".to_string(),
+            reason: "operator hold".to_string(),
+        },
+    );
+    let block = continue_eval(
+        &server,
+        "goal-block",
+        "cont-block",
+        continue_conditions(true),
+        "turn-block",
+    );
+    assert_eq!(block.decision, "block");
+    assert!(block.dispatched.is_none());
+
+    // NoProgressSuppress: a prior no-material-progress continuation suppresses.
+    handle(&server, set_goal("goal-spin"));
+    let spin = continue_eval(
+        &server,
+        "goal-spin",
+        "cont-spin",
+        crate::ContinueGoalConditions {
+            last_continuation_made_no_progress: true,
+            ..continue_conditions(true)
+        },
+        "turn-spin",
+    );
+    assert_eq!(spin.decision, "no-progress-suppress");
+    assert!(spin.dispatched.is_none());
+
+    // BudgetLimit: an exhausted goal budget is terminal, drives no turn, and
+    // durably aborts the goal's attempt run.
+    handle(&server, set_goal("goal-budget"));
+    let budget = continue_eval(
+        &server,
+        "goal-budget",
+        "cont-budget",
+        crate::ContinueGoalConditions {
+            budget_max_turns: 1,
+            budget_timeout_seconds: 60,
+            budget_max_token_cost: 1_000,
+            budget_turns_taken: 2,
+            ..continue_conditions(true)
+        },
+        "turn-budget",
+    );
+    assert_eq!(budget.decision, "budget-limit");
+    assert!(budget.dispatched.is_none());
+
+    // No dispatch substrate ran on the session for ANY of the four decisions.
+    let kinds = dispatch_event_kinds(&root, "session-nc");
+    assert!(
+        !kinds.iter().any(|kind| kind == "run.exited"),
+        "no non-continuing decision may drive a turn"
+    );
+    // The budget-limit decision durably aborted the goal's attempt run (RTL7).
+    let state = SqliteStateStore::open(&root).expect("state");
+    assert_eq!(
+        state
+            .run(&capo_core::RunId::new("run-nc"))
+            .expect("run")
+            .expect("present")
+            .status,
+        "aborted",
+        "a budget-limit continuation aborts the goal's attempt run"
+    );
+}
+
+/// Issue a `ContinueGoal` and return its `ContinuationEvaluated` summary.
+fn continue_eval(
+    server: &CapoServer,
+    goal_id: &str,
+    continuation_id: &str,
+    conditions: crate::ContinueGoalConditions,
+    turn_id: &str,
+) -> crate::ContinuationEvaluatedSummary {
+    let response = handle(
+        server,
+        ServerCommand::ContinueGoal {
+            goal_id: goal_id.to_string(),
+            continuation_id: continuation_id.to_string(),
+            conditions,
+            turn: Box::new(continue_turn("noop", "session-nc", "run-nc", turn_id)),
+        },
+    );
+    match response.payload {
+        ServerResponsePayload::ContinuationEvaluated(summary) => summary,
+        other => panic!("expected ContinuationEvaluated, got {other:?}"),
+    }
+}

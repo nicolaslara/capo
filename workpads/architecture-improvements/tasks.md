@@ -422,7 +422,32 @@ off, with fake agents unchanged).
 
 ## AI5 - Close the autonomy loop: a `Continue` continuation decision must drive the next turn through the single production path
 
-Status: open. Priority: medium. Source: goal-autonomy boundary review (2026-06-01).
+Status: done. Priority: medium. Source: goal-autonomy boundary review (2026-06-01).
+
+Resolution (2026-06-01): added `ServerCommand::ContinueGoal { goal_id,
+continuation_id, conditions, turn }` (`crates/capo-server/src/types.rs`) handled by
+`CapoServer::handle_continue_goal` (`crates/capo-server/src/goal_commands.rs`). The
+handler folds the live conditions + goal budget into GA4 `ContinuationConditions`,
+evaluates AND durably records the decision through the single
+`FakeBoundaryController::evaluate_and_record_continuation` path (event +
+`GoalContinuationProjection`, and the RTL7 `run.aborted` on `budget-limit`), then --
+ONLY on a `Continue` decision (reachable only with `conditions.enabled = true` and
+every safe-boundary precondition met) -- issues EXACTLY ONE follow-on turn via
+`drive_continued_turn`, a thin builder over AI1's `run_dispatch_turn` (the SINGLE
+production path, never a parallel driver). The outcome is returned as
+`ServerResponsePayload::ContinuationEvaluated`, whose `dispatched:
+Option<DispatchTurnSummary>` is `Some` iff exactly one turn was driven. Opt-in / off
+by default holds at the boundary: `enabled = false` short-circuits the scheduler to
+`pause` and no turn is dispatched. Deterministic tests in
+`crates/capo-server/src/tests/turn_orchestration.rs`:
+`continue_goal_enabled_at_safe_boundary_drives_exactly_one_production_turn` (enabled
++ safe boundary -> one continued turn + `TurnFinished`, asserting the SAME
+`dispatch_planned`/`dispatch_gate_checked`/`run.exited` substrate as an operator
+turn), `continue_goal_disabled_records_pause_and_drives_no_turn` (disabled -> pause,
+no dispatch), and `continue_goal_non_continuing_decisions_drive_no_turn`
+(Pause/Block/NoProgressSuppress -> no dispatch; BudgetLimit -> no dispatch AND a
+durable `run.aborted`). Wire contract (`jsonrpc-schema.json` + codec + exhaustive
+contract match) extended and regenerated.
 
 Problem:
 

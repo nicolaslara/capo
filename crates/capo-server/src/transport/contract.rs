@@ -520,6 +520,7 @@ fn command_methods() -> Vec<&'static str> {
         "goal_reviews",
         "goal_risks",
         "goal_report",
+        "continue_goal",
     ]
 }
 
@@ -546,6 +547,7 @@ fn payload_types() -> Vec<&'static str> {
         "goal_reports",
         "goal_timeline",
         "goal_report",
+        "continuation_evaluated",
     ]
 }
 

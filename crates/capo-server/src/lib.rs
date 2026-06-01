@@ -1500,6 +1500,19 @@ impl CapoServer {
             ServerCommand::GoalReport { goal_id, format } => {
                 self.handle_goal_report_rendering(request_id, origin, goal_id, format)
             }
+            ServerCommand::ContinueGoal {
+                goal_id,
+                continuation_id,
+                conditions,
+                turn,
+            } => self.handle_continue_goal(
+                request_id,
+                origin,
+                goal_id,
+                continuation_id,
+                conditions,
+                *turn,
+            ),
         }
     }
 

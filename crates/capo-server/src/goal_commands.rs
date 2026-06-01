@@ -17,7 +17,7 @@
 
 use capo_core::{
     AgentId, CommandIntent, CommandTarget, EvidenceId, GoalId, RequirementId, RunId, SessionId,
-    TaskId,
+    TaskId, TurnId,
 };
 use capo_state::{
     DelegatedProviderGoalProjection, EventKind, EventRecord, GoalContinuationProjection,
@@ -132,6 +132,191 @@ impl CapoServer {
             &records,
         )?;
         self.goal_view_response(request_id, origin, &spec.goal_id)
+    }
+
+    /// AI5 (architecture-improvements): close the autonomy loop. Evaluate the GA4
+    /// continuation scheduler for the goal, durably record the decision, and -- ONLY
+    /// on a `Continue` decision (which the scheduler reaches only when continuation
+    /// is explicitly enabled and every safe-boundary precondition holds) -- drive
+    /// exactly ONE follow-on turn through the SINGLE production orchestration path
+    /// ([`crate::CapoServer::run_dispatch_turn`], the same path AI1's
+    /// `RunDispatchTurn` uses). Every non-continuing decision records only and
+    /// drives no turn; a `BudgetLimit` additionally aborts the goal's attempt run
+    /// durably (the recording path's RTL7 `run.aborted`).
+    ///
+    /// The off-by-default invariant is preserved at this boundary: with
+    /// `conditions.enabled = false` the scheduler short-circuits to `pause` and no
+    /// turn is ever dispatched.
+    pub(crate) fn handle_continue_goal(
+        &self,
+        request_id: String,
+        origin: ServerClientOrigin,
+        goal_id: String,
+        continuation_id: String,
+        conditions: crate::ContinueGoalConditions,
+        turn: crate::ContinueGoalTurn,
+    ) -> ServerResult<ServerResponse> {
+        use capo_controller::{
+            ContinuationConditions, ContinuationDecision, GoalBudget, RunResourceCeiling,
+            RunResourceUsage,
+        };
+
+        // The goal must exist; the scheduler reads its lifecycle status (active/
+        // blocked) from the persisted projection.
+        let goal = self.require_goal(&goal_id)?;
+
+        let budget = GoalBudget {
+            ceiling: RunResourceCeiling::for_live_provider(
+                conditions.budget_max_turns,
+                std::time::Duration::from_secs(conditions.budget_timeout_seconds),
+                conditions.budget_max_token_cost,
+            ),
+            usage: RunResourceUsage {
+                turns_taken: conditions.budget_turns_taken,
+                wall_clock_elapsed: std::time::Duration::ZERO,
+                token_cost: conditions.budget_token_cost,
+            },
+        };
+        let scheduler_conditions = ContinuationConditions {
+            enabled: conditions.enabled,
+            runtime_idle: conditions.runtime_idle,
+            session_idle: conditions.session_idle,
+            user_input_queued: conditions.user_input_queued,
+            permission_pending: conditions.permission_pending,
+            capability_profile_valid: conditions.capability_profile_valid,
+            next_step_writes_source: conditions.next_step_writes_source,
+            checkpoint_boundary_available: conditions.checkpoint_boundary_available,
+            verification_runner_available: conditions.verification_runner_available,
+            last_continuation_made_no_progress: conditions.last_continuation_made_no_progress,
+            strategy_changed_since_suppression: conditions.strategy_changed_since_suppression,
+            budget,
+        };
+
+        // The abort refs pair a terminal `budget-limit` decision with the RTL7
+        // `run.aborted` event. Built from the goal's bound attempt run + session;
+        // `abort_run_for_ceiling` resolves the rest from persisted state, so the
+        // runtime/external refs are not load-bearing for the abort itself.
+        let abort_refs = match (
+            goal.attempt_run_id.clone(),
+            goal.session_id.clone(),
+            goal.task_id.clone(),
+            goal.agent_id.clone(),
+        ) {
+            (Some(run_id), Some(session_id), Some(task_id), Some(agent_id)) => Some((
+                capo_controller::FakeRunRefs {
+                    task_id,
+                    agent_id,
+                    session_id,
+                    run_id,
+                    runtime_process_ref: String::new(),
+                    external_session_ref: String::new(),
+                },
+                TurnId::new(turn.turn_id.clone()),
+            )),
+            _ => None,
+        };
+
+        // Evaluate AND durably record the decision (event + GoalContinuationProjection),
+        // aborting the attempt run on a budget breach -- the single GA4 recording path.
+        let outcome = self
+            .controller
+            .evaluate_and_record_continuation(
+                &GoalId::new(goal_id.clone()),
+                &continuation_id,
+                &scheduler_conditions,
+                None,
+                abort_refs.as_ref().map(|(refs, turn_id)| (refs, turn_id)),
+            )
+            .map_err(ServerError::State)?;
+
+        // ONLY a `Continue` decision drives the next turn, and it re-enters the
+        // SINGLE production path -- never a parallel driver. Every other decision
+        // records only. Because the scheduler returns `Continue` only when
+        // `enabled` is set, the off-by-default invariant holds here by construction.
+        let dispatched = if outcome.decision == ContinuationDecision::Continue {
+            Some(self.drive_continued_turn(turn)?)
+        } else {
+            None
+        };
+
+        self.response(
+            request_id,
+            origin,
+            ServerResponsePayload::ContinuationEvaluated(crate::ContinuationEvaluatedSummary {
+                goal_id,
+                continuation_id,
+                decision: outcome.decision.as_str().to_string(),
+                reason: outcome.reason.to_string(),
+                dispatched,
+            }),
+        )
+    }
+
+    /// AI5: drive ONE continued turn through the SINGLE production orchestration
+    /// path. This is a thin builder over [`crate::CapoServer::run_dispatch_turn`]
+    /// (AI1) -- the exact same loop an operator turn enters -- so a continued turn
+    /// is indistinguishable from an operator turn in its event sequence +
+    /// `TurnFinished`. It is reached ONLY from a recorded `Continue` decision.
+    fn drive_continued_turn(
+        &self,
+        turn: crate::ContinueGoalTurn,
+    ) -> ServerResult<crate::DispatchTurnSummary> {
+        use crate::{DispatchTurnMode, DispatchTurnRequest, LiveProviderTurn, TurnFinishedSummary};
+
+        // A live turn must run inside a wall-clock-bounded ceiling (the loop rejects
+        // an unbounded one); a zero timeout cannot satisfy that.
+        if turn.timeout_seconds == 0 {
+            return Err(ServerError::AdapterFixture(
+                "ContinueGoal requires a non-zero wall-clock timeout for the continued turn (the \
+                 live turn runs inside a wall-clock-bounded resource ceiling)"
+                    .to_string(),
+            ));
+        }
+        let ceiling = capo_controller::RunResourceCeiling::for_live_provider(
+            turn.max_turns,
+            std::time::Duration::from_secs(turn.timeout_seconds),
+            turn.max_token_cost,
+        );
+        let usage_before = capo_controller::RunResourceUsage {
+            turns_taken: turn.turns_taken_before,
+            wall_clock_elapsed: std::time::Duration::ZERO,
+            token_cost: turn.token_cost_before,
+        };
+        let outcome = self.run_dispatch_turn(DispatchTurnRequest {
+            agent_name: turn.agent_name,
+            adapter: turn.adapter,
+            goal: turn.goal,
+            workspace: turn.workspace,
+            artifacts: turn.artifacts,
+            session_id: turn.session_id,
+            run_id: turn.run_id,
+            turn_id: turn.turn_id,
+            mode: DispatchTurnMode::LiveProvider(Box::new(LiveProviderTurn {
+                capability_profile: turn.capability_profile,
+                runtime_scope: turn.runtime_scope,
+                credential_scan_policy: turn.credential_scan_policy,
+                raw_prompt_policy: turn.raw_prompt_policy,
+                raw_output_policy: turn.raw_output_policy,
+                tool_wrapper_policy: turn.tool_wrapper_policy,
+                live_provider_opt_in: turn.live_provider_opt_in,
+                live_execution_opt_in: turn.live_execution_opt_in,
+                mock_runtime_opt_in: turn.mock_runtime_opt_in,
+                mock_provider_output_name: turn.mock_provider_output_name,
+                mock_provider_output_jsonl: turn.mock_provider_output_jsonl,
+                ceiling,
+                usage_before,
+                turn_token_cost: turn.turn_token_cost,
+                codex_program_override: None,
+                unattended: turn.unattended,
+            })),
+        })?;
+        Ok(crate::DispatchTurnSummary {
+            run: outcome.run,
+            finished: TurnFinishedSummary::from_finished(&outcome.finished),
+            ceiling_breach_code: outcome
+                .ceiling_breach
+                .map(|breach| breach.code().to_string()),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -407,6 +407,101 @@ pub enum ServerCommand {
         goal_id: String,
         format: GoalReportFormat,
     },
+    /// AI5 (architecture-improvements): close the autonomy loop. Evaluate the GA4
+    /// continuation scheduler for an active goal and, ONLY on a `Continue` decision
+    /// AND ONLY when continuation is explicitly enabled, drive exactly ONE follow-on
+    /// turn through the SINGLE production orchestration path
+    /// ([`crate::CapoServer::run_dispatch_turn`], the same path AI1's
+    /// [`ServerCommand::RunDispatchTurn`] uses) -- never a parallel turn driver.
+    ///
+    /// The command evaluates AND durably records the decision through the GA4
+    /// [`capo_controller::FakeBoundaryController::evaluate_and_record_continuation`]
+    /// (event + `GoalContinuationProjection`), then branches:
+    ///
+    /// - `Continue` (only reachable with `conditions.enabled = true` and every
+    ///   safe-boundary precondition met): issue ONE `run_dispatch_turn` for the
+    ///   goal's attempt run, returning the SAME `DispatchTurn` outcome (run +
+    ///   `TurnFinished`) an operator turn produces.
+    /// - `Pause` / `Block` / `NoProgressSuppress`: record only; NO turn is driven.
+    /// - `BudgetLimit`: record AND durably abort the goal's attempt run via the RTL7
+    ///   `run.aborted` path; NO turn is driven.
+    ///
+    /// Opt-in / off by default: with `conditions.enabled = false` the scheduler
+    /// short-circuits to `pause` and this command NEVER dispatches a turn, so the
+    /// off-by-default autonomy invariant holds at the production boundary.
+    ContinueGoal {
+        goal_id: String,
+        /// A stable id for this continuation evaluation; recording is idempotent on
+        /// `(goal, continuation_id)`.
+        continuation_id: String,
+        /// The live safe-boundary conditions + explicit enablement the GA4
+        /// scheduler decides over. `enabled = false` keeps the loop closed.
+        conditions: ContinueGoalConditions,
+        /// The dispatch-turn inputs for the follow-on turn driven on a `Continue`.
+        /// Reused verbatim by the production `run_dispatch_turn` path so a continued
+        /// turn is indistinguishable from an operator turn.
+        turn: Box<ContinueGoalTurn>,
+    },
+}
+
+/// AI5: the live safe-boundary conditions + explicit enablement a
+/// [`ServerCommand::ContinueGoal`] folds into the GA4
+/// [`capo_controller::ContinuationConditions`]. Mirrors that struct as flat scalars
+/// so the wire stays simple; `enabled` is the opt-in (off by default) gate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContinueGoalConditions {
+    pub enabled: bool,
+    pub runtime_idle: bool,
+    pub session_idle: bool,
+    pub user_input_queued: bool,
+    pub permission_pending: bool,
+    pub capability_profile_valid: bool,
+    pub next_step_writes_source: bool,
+    pub checkpoint_boundary_available: bool,
+    pub verification_runner_available: bool,
+    pub last_continuation_made_no_progress: bool,
+    pub strategy_changed_since_suppression: bool,
+    /// Goal-level budget ceiling (turns / wall-clock seconds / token-cost) and the
+    /// usage accrued across the continuation series. Composes the RTL7 run ceiling.
+    pub budget_max_turns: u32,
+    pub budget_timeout_seconds: u64,
+    pub budget_max_token_cost: u64,
+    pub budget_turns_taken: u32,
+    pub budget_token_cost: u64,
+}
+
+/// AI5: the dispatch-turn inputs for the follow-on turn a `ContinueGoal` drives on
+/// a `Continue` decision. These are exactly the [`ServerCommand::RunDispatchTurn`]
+/// inputs (minus the `goal_id`/`continuation_id`, which the command carries) so the
+/// continued turn re-enters the AI1 single production path unchanged.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContinueGoalTurn {
+    pub agent_name: String,
+    pub adapter: String,
+    pub goal: String,
+    pub workspace: String,
+    pub artifacts: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub turn_id: String,
+    pub capability_profile: String,
+    pub runtime_scope: String,
+    pub credential_scan_policy: String,
+    pub raw_prompt_policy: String,
+    pub raw_output_policy: String,
+    pub tool_wrapper_policy: String,
+    pub live_provider_opt_in: bool,
+    pub live_execution_opt_in: bool,
+    pub mock_runtime_opt_in: bool,
+    pub mock_provider_output_name: Option<String>,
+    pub mock_provider_output_jsonl: Option<String>,
+    pub timeout_seconds: u64,
+    pub max_turns: u32,
+    pub max_token_cost: u64,
+    pub turns_taken_before: u32,
+    pub token_cost_before: u64,
+    pub turn_token_cost: u64,
+    pub unattended: bool,
 }
 
 /// GA2 (goal-orchestration GO6): the structured goal specification a `SetGoal`
@@ -771,6 +866,28 @@ pub enum ServerResponsePayload {
     GoalTimeline(GoalTimelineView),
     /// GA2: a rendered historical execution report (`GoalReport`).
     GoalReport(GoalReportRendering),
+    /// AI5: the outcome of a [`ServerCommand::ContinueGoal`]: the recorded GA4
+    /// decision/reason PLUS, ONLY when the decision continued and continuation was
+    /// enabled, the `DispatchTurn` summary of the ONE follow-on turn driven through
+    /// the production path. `dispatched` is `Some` iff exactly one turn was driven.
+    ContinuationEvaluated(ContinuationEvaluatedSummary),
+}
+
+/// AI5: the wire outcome of [`ServerCommand::ContinueGoal`]. The decision/reason is
+/// the recorded GA4 verdict; `dispatched` carries the driven turn's
+/// [`DispatchTurnSummary`] and is `Some` exactly when the decision was `continue`
+/// (which is only reachable when continuation was enabled) -- so a caller can prove
+/// "continue drove one turn, every other decision drove none" from the payload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContinuationEvaluatedSummary {
+    pub goal_id: String,
+    pub continuation_id: String,
+    /// `continue` / `pause` / `block` / `budget-limit` / `no-progress-suppress`.
+    pub decision: String,
+    pub reason: String,
+    /// The follow-on turn driven through the single production path on a `continue`
+    /// decision; `None` for every non-continuing decision (no turn was driven).
+    pub dispatched: Option<DispatchTurnSummary>,
 }
 
 /// GA2 (goal-orchestration GO4/GO5): the concise per-goal status the `goals`
@@ -1394,5 +1511,14 @@ fn default_request_id(command: &ServerCommand) -> String {
         ServerCommand::GoalReport { goal_id, format } => {
             format!("server-goal-report-{}-{}", slug(goal_id), format.as_str())
         }
+        ServerCommand::ContinueGoal {
+            goal_id,
+            continuation_id,
+            ..
+        } => format!(
+            "server-goal-continue-{}-{}",
+            slug(goal_id),
+            slug(continuation_id)
+        ),
     }
 }
