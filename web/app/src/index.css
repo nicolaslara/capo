@@ -1,0 +1,179 @@
+@import 'tailwindcss';
+
+/* Class-based dark mode: <html class="dark"> */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ============================================================
+   Capo Operator Console — design tokens
+   Terminal-native aesthetic, refined for craft, in light + dark.
+   Dark palette is the winning `terminal-native` direction;
+   light is a matched IDE-light palette (AA-contrast semantics).
+   ============================================================ */
+
+:root {
+  color-scheme: light;
+
+  /* Surfaces — light (cool neutral paper stack) */
+  --surface-0: #eef1f5;   /* app backdrop */
+  --surface-1: #ffffff;   /* primary panel */
+  --surface-2: #f7f9fb;   /* raised / header */
+  --surface-3: #f1f4f8;   /* rows / inputs */
+  --surface-hover: #eef2f7;
+  --surface-active: #e7eef7;
+
+  --line: #dfe3ea;
+  --line-strong: #cbd2dc;
+  --line-soft: #e9edf2;
+
+  --fg: #131720;          /* primary text */
+  --fg-1: #3c4654;        /* secondary */
+  --fg-2: #5f6b7a;        /* tertiary / labels */
+  --fg-3: #8b96a5;        /* faint / placeholder */
+
+  /* Semantic — AA on light surfaces */
+  --green: #1a7f37;
+  --amber: #9a6700;
+  --red: #cf222e;
+  --cyan: #0e7490;
+  --violet: #7c3aed;
+
+  --green-bg: rgba(26,127,55,0.10);
+  --amber-bg: rgba(154,103,0,0.12);
+  --red-bg: rgba(207,34,46,0.09);
+  --cyan-bg: rgba(14,116,144,0.10);
+  --violet-bg: rgba(124,58,237,0.10);
+
+  --green-ln: rgba(26,127,55,0.30);
+  --amber-ln: rgba(154,103,0,0.32);
+  --red-ln: rgba(207,34,46,0.30);
+  --cyan-ln: rgba(14,116,144,0.30);
+  --violet-ln: rgba(124,58,237,0.30);
+
+  --shadow-sm: 0 1px 2px rgba(16,24,40,0.06);
+  --shadow: 0 1px 2px rgba(16,24,40,0.06), 0 8px 24px rgba(16,24,40,0.08);
+  --glow: transparent;
+}
+
+.dark {
+  color-scheme: dark;
+
+  /* Surfaces — near-black IDE editor stack */
+  --surface-0: #07090e;
+  --surface-1: #0b0e14;
+  --surface-2: #0f131b;
+  --surface-3: #141a24;
+  --surface-hover: #1a212d;
+  --surface-active: #18202c;
+
+  --line: #1d242f;
+  --line-strong: #2a333f;
+  --line-soft: #161c25;
+
+  --fg: #e6edf3;
+  --fg-1: #aeb9c5;
+  --fg-2: #7b8794;
+  --fg-3: #55606d;
+
+  --green: #3fb950;
+  --amber: #d29922;
+  --red: #f85149;
+  --cyan: #39c5cf;
+  --violet: #a371f7;
+
+  --green-bg: rgba(63,185,80,0.13);
+  --amber-bg: rgba(210,153,34,0.14);
+  --red-bg: rgba(248,81,73,0.13);
+  --cyan-bg: rgba(57,197,207,0.13);
+  --violet-bg: rgba(163,113,247,0.14);
+
+  --green-ln: rgba(63,185,80,0.34);
+  --amber-ln: rgba(210,153,34,0.36);
+  --red-ln: rgba(248,81,73,0.36);
+  --cyan-ln: rgba(57,197,207,0.34);
+  --violet-ln: rgba(163,113,247,0.36);
+
+  --shadow-sm: 0 1px 0 rgba(0,0,0,0.4);
+  --shadow: 0 1px 0 rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.36);
+  --glow: radial-gradient(1100px 520px at 82% -12%, rgba(57,197,207,0.05), transparent 60%);
+}
+
+@theme inline {
+  --color-surface-0: var(--surface-0);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-surface-hover: var(--surface-hover);
+  --color-surface-active: var(--surface-active);
+
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-line-soft: var(--line-soft);
+
+  --color-fg: var(--fg);
+  --color-fg-1: var(--fg-1);
+  --color-fg-2: var(--fg-2);
+  --color-fg-3: var(--fg-3);
+
+  --color-green: var(--green);
+  --color-amber: var(--amber);
+  --color-red: var(--red);
+  --color-cyan: var(--cyan);
+  --color-violet: var(--violet);
+
+  --color-green-bg: var(--green-bg);
+  --color-amber-bg: var(--amber-bg);
+  --color-red-bg: var(--red-bg);
+  --color-cyan-bg: var(--cyan-bg);
+  --color-violet-bg: var(--violet-bg);
+
+  --color-green-ln: var(--green-ln);
+  --color-amber-ln: var(--amber-ln);
+  --color-red-ln: var(--red-ln);
+  --color-cyan-ln: var(--cyan-ln);
+  --color-violet-ln: var(--violet-ln);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'SFMono-Regular', 'JetBrains Mono', 'Cascadia Code', Menlo, Consolas, monospace;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 9px;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background-color: var(--surface-0);
+  background-image: var(--glow);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Tabular, slashed-zero figures for everything scan-heavy. */
+.mono { font-family: var(--font-mono); font-feature-settings: 'tnum' 1, 'zero' 1, 'cv01' 1; }
+.tnum { font-feature-settings: 'tnum' 1, 'zero' 1; }
+
+::selection { background: var(--violet-bg); }
+
+/* Quiet, themed scrollbars */
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; border: 2px solid transparent; background-clip: content-box; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
+
+/* Running pulse used by status indicators */
+@keyframes capo-pulse {
+  0% { box-shadow: 0 0 0 0 var(--cyan-bg); }
+  70% { box-shadow: 0 0 0 6px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}

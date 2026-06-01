@@ -2,6 +2,7 @@
 workpads/references/repos/
 workpads/**/references/repos/
 .firecrawl/
+.playwright-mcp/
 
 # Local runtime state
 .capo/

@@ -1,0 +1,1337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Capo — Operator Dashboard</title>
+<style>
+  /* ============================================================
+     CAPO — Operator Dashboard
+     Direction: "Calm editorial neutral" (slate-editorial)
+     Warm-neutral stone surfaces, muted teal accent, soft contrast.
+     ============================================================ */
+
+  :root {
+    /* --- Color: warm-neutral stone scale --- */
+    --stone-0:  #ffffff;
+    --stone-25: #fbfaf8;   /* app background, warmest */
+    --stone-50: #f6f4f0;   /* recessed surfaces */
+    --stone-75: #f1eee9;   /* hover / subtle fills */
+    --stone-100:#ece8e1;   /* panel insets */
+    --stone-150:#e2ddd4;   /* hairline borders (light) */
+    --stone-200:#d6d0c5;   /* stronger borders */
+    --stone-300:#c2bbac;
+    --stone-400:#a39b8b;   /* muted text / icons */
+    --stone-500:#857d6e;   /* secondary text */
+    --stone-600:#6b6456;   /* tertiary headings */
+    --stone-700:#514b40;   /* body strong */
+    --stone-800:#3a352d;   /* primary text */
+    --stone-900:#272219;   /* ink / headings */
+
+    /* --- Primary accent: muted teal/green --- */
+    --teal-50:  #e9f2ef;
+    --teal-100: #d3e6e0;
+    --teal-200: #aed3c8;
+    --teal-500: #3d8475;   /* primary */
+    --teal-600: #336f63;   /* primary hover */
+    --teal-700: #28564d;   /* primary text on light */
+
+    /* --- Status roles (muted, editorial) --- */
+    /* running = in progress (blue-teal) */
+    --run-fg:   #2f6c86;
+    --run-bg:   #e4eef3;
+    --run-bd:   #c5dce6;
+    --run-dot:  #3c87a6;
+    /* finished / ok / good (green) */
+    --ok-fg:    #3a6b48;
+    --ok-bg:    #e7f0e7;
+    --ok-bd:    #c9e0cb;
+    --ok-dot:   #4f8a5f;
+    /* warning / attention (amber) — timed out, blocked, caution */
+    --warn-fg:  #8a5a1e;
+    --warn-bg:  #f6ecda;
+    --warn-bd:  #e7d3ac;
+    --warn-dot: #c0832c;
+    /* danger / blocked-hard (clay red) */
+    --dang-fg:  #97402f;
+    --dang-bg:  #f6e3dd;
+    --dang-bd:  #e8c3b8;
+    --dang-dot: #c0563f;
+    /* neutral / idle */
+    --neu-fg:   var(--stone-600);
+    --neu-bg:   var(--stone-75);
+    --neu-bd:   var(--stone-150);
+    --neu-dot:  var(--stone-400);
+
+    /* --- Type --- */
+    --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+
+    --t-11: 11px;
+    --t-12: 12px;
+    --t-13: 13px;
+    --t-14: 14px;
+    --t-15: 15px;
+    --t-18: 18px;
+    --t-22: 22px;
+    --t-28: 28px;
+
+    /* --- Spacing scale (4px base) --- */
+    --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
+    --s-5: 20px; --s-6: 24px; --s-7: 32px; --s-8: 40px;
+
+    /* --- Radius --- */
+    --r-sm: 6px;
+    --r-md: 9px;
+    --r-lg: 12px;
+    --r-pill: 999px;
+
+    /* --- Elevation (very soft, warm) --- */
+    --shadow-xs: 0 1px 2px rgba(39,34,25,0.04);
+    --shadow-sm: 0 1px 2px rgba(39,34,25,0.05), 0 1px 1px rgba(39,34,25,0.04);
+    --shadow-md: 0 4px 16px rgba(39,34,25,0.07), 0 1px 3px rgba(39,34,25,0.05);
+
+    --border: 1px solid var(--stone-150);
+    --border-strong: 1px solid var(--stone-200);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+
+  body {
+    font-family: var(--font-sans);
+    background: var(--stone-25);
+    color: var(--stone-800);
+    font-size: var(--t-14);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    letter-spacing: 0.1px;
+  }
+
+  ::selection { background: var(--teal-100); }
+
+  /* ----------------------------------------------------------------
+     App shell
+     ---------------------------------------------------------------- */
+  .app {
+    max-width: 1440px;
+    margin: 0 auto;
+    min-height: 100vh;
+    background: var(--stone-25);
+  }
+
+  /* ---- Top bar ---- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: var(--s-5);
+    padding: 0 var(--s-7);
+    height: 56px;
+    border-bottom: var(--border);
+    background: var(--stone-25);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: var(--s-3);
+    padding-right: var(--s-5);
+    border-right: var(--border);
+  }
+  .mark {
+    width: 28px; height: 28px;
+    border-radius: 8px;
+    background: var(--teal-500);
+    display: grid; place-items: center;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.18), var(--shadow-xs);
+    flex: none;
+  }
+  .mark svg { display: block; }
+  .brand-name {
+    font-size: var(--t-15);
+    font-weight: 650;
+    color: var(--stone-900);
+    letter-spacing: -0.2px;
+  }
+  .view-label {
+    font-size: var(--t-13);
+    color: var(--stone-500);
+    font-weight: 500;
+  }
+  .topbar-spacer { flex: 1; }
+
+  .server-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-2);
+    padding: 5px 10px 5px 8px;
+    border: var(--border);
+    background: var(--stone-50);
+    border-radius: var(--r-pill);
+    font-size: var(--t-12);
+    color: var(--stone-600);
+  }
+  .server-badge .srv-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--ok-dot);
+    box-shadow: 0 0 0 3px var(--ok-bg);
+  }
+  .server-badge b { color: var(--stone-700); font-weight: 600; }
+  .mode-chip {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--teal-700);
+    background: var(--teal-50);
+    border: 1px solid var(--teal-100);
+    padding: 2px 6px;
+    border-radius: var(--r-sm);
+    margin-left: 2px;
+  }
+
+  /* ---- Tabs ---- */
+  .tabs {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .tab {
+    font-size: var(--t-13);
+    font-weight: 500;
+    color: var(--stone-500);
+    padding: 6px 12px;
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    text-decoration: none;
+    transition: background .12s, color .12s;
+  }
+  .tab:hover { background: var(--stone-75); color: var(--stone-800); }
+  .tab.active {
+    color: var(--stone-900);
+    background: var(--stone-75);
+    font-weight: 600;
+    box-shadow: inset 0 0 0 1px var(--stone-150);
+  }
+
+  .toolbtns { display: flex; align-items: center; gap: var(--s-2); }
+  .btn {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: var(--font-sans);
+    font-size: var(--t-13);
+    font-weight: 550;
+    border-radius: var(--r-sm);
+    border: var(--border-strong);
+    background: var(--stone-0);
+    color: var(--stone-700);
+    padding: 6px 11px;
+    cursor: pointer;
+    box-shadow: var(--shadow-xs);
+    transition: background .12s, border-color .12s, color .12s;
+  }
+  .btn:hover { background: var(--stone-50); border-color: var(--stone-300); color: var(--stone-900); }
+  .btn svg { color: var(--stone-500); }
+  .btn.ghost { border-color: transparent; background: transparent; box-shadow: none; color: var(--stone-600); }
+  .btn.ghost:hover { background: var(--stone-75); }
+
+  /* ----------------------------------------------------------------
+     Layout
+     ---------------------------------------------------------------- */
+  .main {
+    padding: var(--s-6) var(--s-7) var(--s-8);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-6);
+  }
+
+  /* ---- Status strip ---- */
+  .status-strip {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: var(--s-3);
+  }
+  .metric {
+    background: var(--stone-0);
+    border: var(--border);
+    border-radius: var(--r-lg);
+    padding: var(--s-4) var(--s-5) var(--s-4);
+    box-shadow: var(--shadow-xs);
+    position: relative;
+    overflow: hidden;
+  }
+  .metric .m-top {
+    display: flex; align-items: center; gap: 7px;
+    margin-bottom: 10px;
+  }
+  .metric .m-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--neu-dot); flex: none; }
+  .metric .m-label {
+    font-size: var(--t-12);
+    color: var(--stone-500);
+    font-weight: 550;
+    letter-spacing: 0.2px;
+  }
+  .metric .m-value {
+    font-size: var(--t-28);
+    font-weight: 660;
+    color: var(--stone-900);
+    line-height: 1;
+    letter-spacing: -0.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .metric .m-sub {
+    font-size: var(--t-11);
+    color: var(--stone-400);
+    margin-top: 6px;
+  }
+  /* metric accent variants */
+  .metric.is-warning {
+    background: var(--warn-bg);
+    border-color: var(--warn-bd);
+  }
+  .metric.is-warning .m-dot { background: var(--warn-dot); box-shadow: 0 0 0 3px rgba(192,131,44,0.16); }
+  .metric.is-warning .m-label { color: var(--warn-fg); }
+  .metric.is-warning .m-value { color: var(--warn-fg); }
+  .metric.is-warning .m-sub {
+    color: var(--warn-fg);
+    display: inline-flex; align-items: center; gap: 4px; font-weight: 600;
+  }
+  .metric.is-active .m-dot { background: var(--run-dot); box-shadow: 0 0 0 3px var(--run-bg); }
+  .metric.is-good .m-dot { background: var(--ok-dot); box-shadow: 0 0 0 3px var(--ok-bg); }
+
+  /* ---- Two-column work area ---- */
+  .work {
+    display: grid;
+    grid-template-columns: minmax(0, 1.55fr) minmax(360px, 0.95fr);
+    gap: var(--s-6);
+    align-items: start;
+  }
+  .col { display: flex; flex-direction: column; gap: var(--s-6); }
+
+  /* ---- Panel primitive ---- */
+  .panel {
+    background: var(--stone-0);
+    border: var(--border);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+  }
+  .panel-head {
+    display: flex; align-items: center; gap: var(--s-3);
+    padding: var(--s-4) var(--s-5);
+    border-bottom: var(--border);
+  }
+  .panel-head h2 {
+    margin: 0;
+    font-size: var(--t-14);
+    font-weight: 640;
+    color: var(--stone-900);
+    letter-spacing: -0.1px;
+  }
+  .panel-head .ph-meta {
+    font-size: var(--t-12);
+    color: var(--stone-400);
+    margin-left: 2px;
+  }
+  .panel-head .ph-spacer { flex: 1; }
+  .count-chip {
+    font-size: var(--t-11);
+    font-weight: 600;
+    color: var(--stone-600);
+    background: var(--stone-75);
+    border: var(--border);
+    border-radius: var(--r-pill);
+    padding: 1px 8px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ----------------------------------------------------------------
+     Agent table
+     ---------------------------------------------------------------- */
+  .agent-table { width: 100%; border-collapse: collapse; }
+  .agent-table thead th {
+    text-align: left;
+    font-size: var(--t-11);
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--stone-400);
+    padding: 9px var(--s-5);
+    border-bottom: var(--border);
+    background: var(--stone-25);
+    white-space: nowrap;
+  }
+  .agent-table thead th.num { text-align: right; }
+  .agent-table tbody tr {
+    border-bottom: var(--border);
+    cursor: pointer;
+    transition: background .1s;
+  }
+  .agent-table tbody tr:last-child { border-bottom: none; }
+  .agent-table tbody tr:hover { background: var(--stone-25); }
+  .agent-table tbody tr.selected {
+    background: var(--teal-50);
+    box-shadow: inset 3px 0 0 var(--teal-500);
+  }
+  .agent-table tbody tr.selected:hover { background: var(--teal-50); }
+  .agent-table td { padding: 12px var(--s-5); vertical-align: middle; }
+
+  .agent-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .agent-name {
+    font-family: var(--font-mono);
+    font-size: var(--t-13);
+    font-weight: 600;
+    color: var(--stone-900);
+    letter-spacing: -0.2px;
+  }
+  .agent-result {
+    font-size: var(--t-12);
+    color: var(--stone-500);
+    max-width: 360px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .adapter-tag {
+    font-family: var(--font-mono);
+    font-size: var(--t-11);
+    color: var(--stone-600);
+    background: var(--stone-50);
+    border: var(--border);
+    padding: 2px 7px;
+    border-radius: var(--r-sm);
+    white-space: nowrap;
+  }
+
+  /* ---- Status pill ---- */
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: var(--t-12);
+    font-weight: 600;
+    padding: 3px 9px 3px 8px;
+    border-radius: var(--r-pill);
+    border: 1px solid transparent;
+    white-space: nowrap;
+    line-height: 1.4;
+  }
+  .pill .pdot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .pill .picon { display: block; flex: none; }
+
+  .pill.running  { color: var(--run-fg);  background: var(--run-bg);  border-color: var(--run-bd); }
+  .pill.running .pdot { background: var(--run-dot); }
+  .pill.finished { color: var(--ok-fg);   background: var(--ok-bg);   border-color: var(--ok-bd); }
+  .pill.timedout { color: var(--warn-fg); background: var(--warn-bg); border-color: var(--warn-bd); }
+  .pill.blocked  { color: var(--dang-fg); background: var(--dang-bg); border-color: var(--dang-bd); }
+  .pill.neutral  { color: var(--neu-fg);  background: var(--neu-bg);  border-color: var(--neu-bd); }
+
+  /* running dot pulse */
+  .pill.running .pdot { position: relative; }
+  .pill.running .pdot::after {
+    content: ""; position: absolute; inset: -3px; border-radius: 50%;
+    border: 1px solid var(--run-dot); opacity: .5;
+  }
+
+  /* mini count badges */
+  .counts { display: inline-flex; gap: 6px; justify-content: flex-end; }
+  .cbadge {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: var(--t-12);
+    font-variant-numeric: tabular-nums;
+    color: var(--stone-600);
+    font-weight: 550;
+  }
+  .cbadge svg { color: var(--stone-400); }
+  .cbadge.zero { color: var(--stone-300); }
+  .cbadge.zero svg { color: var(--stone-200); }
+
+  .conf {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: var(--t-12); color: var(--stone-600); font-weight: 550;
+  }
+  .conf-bars { display: inline-flex; gap: 2px; align-items: flex-end; height: 12px; }
+  .conf-bars i {
+    width: 3px; border-radius: 1px; background: var(--stone-200); display: block;
+  }
+  .conf-bars i:nth-child(1) { height: 5px; }
+  .conf-bars i:nth-child(2) { height: 8px; }
+  .conf-bars i:nth-child(3) { height: 11px; }
+  .conf.high .conf-bars i { background: var(--ok-dot); }
+  .conf.medium .conf-bars i:nth-child(1),
+  .conf.medium .conf-bars i:nth-child(2) { background: var(--warn-dot); }
+  .conf.low .conf-bars i:nth-child(1) { background: var(--dang-dot); }
+
+  /* ----------------------------------------------------------------
+     Session detail
+     ---------------------------------------------------------------- */
+  .session-head {
+    padding: var(--s-5);
+    border-bottom: var(--border);
+    background: var(--stone-25);
+  }
+  .session-top { display: flex; align-items: flex-start; gap: var(--s-3); }
+  .session-name {
+    font-family: var(--font-mono);
+    font-size: var(--t-18);
+    font-weight: 640;
+    color: var(--stone-900);
+    letter-spacing: -0.4px;
+  }
+  .session-sub {
+    font-size: var(--t-12);
+    color: var(--stone-500);
+    margin-top: 3px;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .session-sub .dot-sep { width: 3px; height: 3px; border-radius: 50%; background: var(--stone-300); }
+
+  .session-body { padding: var(--s-5); display: flex; flex-direction: column; gap: var(--s-5); }
+
+  .result-block {
+    background: var(--stone-50);
+    border: var(--border);
+    border-left: 3px solid var(--teal-500);
+    border-radius: var(--r-md);
+    padding: var(--s-4);
+  }
+  .field-label {
+    font-size: var(--t-11);
+    font-weight: 650;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--stone-400);
+    margin-bottom: 5px;
+  }
+  .result-text {
+    font-size: var(--t-14);
+    color: var(--stone-800);
+    line-height: 1.5;
+  }
+
+  .meta-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--s-4) var(--s-5);
+  }
+  .meta-grid .meta-item.full { grid-column: 1 / -1; }
+  .meta-value { font-size: var(--t-13); color: var(--stone-800); }
+  .goal-value { color: var(--stone-700); line-height: 1.45; }
+
+  /* mini lanes inside session */
+  .mini-lanes { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--s-3); }
+  .mini-lane {
+    border: var(--border);
+    border-radius: var(--r-md);
+    padding: var(--s-3) var(--s-4);
+    background: var(--stone-25);
+  }
+  .mini-lane .ml-label { font-size: var(--t-11); color: var(--stone-500); font-weight: 600; letter-spacing: 0.3px; }
+  .mini-lane .ml-value {
+    font-size: var(--t-22); font-weight: 640; color: var(--stone-900);
+    margin-top: 4px; line-height: 1; font-variant-numeric: tabular-nums;
+  }
+  .mini-lane .ml-tag { font-size: var(--t-11); margin-top: 4px; }
+
+  .evidence-list { display: flex; flex-direction: column; gap: 6px; }
+  .evidence-pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: var(--font-mono);
+    font-size: var(--t-12);
+    color: var(--stone-700);
+    background: var(--stone-50);
+    border: var(--border);
+    border-radius: var(--r-sm);
+    padding: 5px 9px;
+    width: fit-content;
+  }
+  .evidence-pill .ev-kind {
+    font-family: var(--font-sans);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--stone-400);
+    border-left: var(--border);
+    padding-left: 7px;
+    margin-left: 1px;
+  }
+
+  /* blocker note (none here -> success state) */
+  .blocker-note {
+    display: flex; align-items: center; gap: 8px;
+    font-size: var(--t-12);
+    color: var(--ok-fg);
+    background: var(--ok-bg);
+    border: 1px solid var(--ok-bd);
+    border-radius: var(--r-md);
+    padding: 9px var(--s-4);
+  }
+
+  /* ----------------------------------------------------------------
+     Command panel
+     ---------------------------------------------------------------- */
+  .cmd-body { padding: var(--s-5); display: flex; flex-direction: column; gap: var(--s-4); }
+  .steer-label { display: flex; align-items: baseline; gap: 8px; }
+  .steer-label .target {
+    font-family: var(--font-mono);
+    font-size: var(--t-12);
+    color: var(--teal-700);
+    background: var(--teal-50);
+    border: 1px solid var(--teal-100);
+    padding: 1px 7px; border-radius: var(--r-sm);
+  }
+  textarea.steer {
+    width: 100%;
+    resize: none;
+    font-family: var(--font-sans);
+    font-size: var(--t-13);
+    color: var(--stone-800);
+    background: var(--stone-25);
+    border: var(--border-strong);
+    border-radius: var(--r-md);
+    padding: var(--s-3) var(--s-4);
+    min-height: 76px;
+    line-height: 1.5;
+    box-shadow: inset 0 1px 2px rgba(39,34,25,0.03);
+  }
+  textarea.steer::placeholder { color: var(--stone-400); }
+  textarea.steer:focus {
+    outline: none;
+    border-color: var(--teal-500);
+    box-shadow: 0 0 0 3px var(--teal-50);
+  }
+
+  .cmd-actions { display: flex; align-items: center; gap: var(--s-2); }
+  .btn-send {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: var(--t-13); font-weight: 600;
+    color: #fff; background: var(--teal-500);
+    border: 1px solid var(--teal-600);
+    border-radius: var(--r-sm);
+    padding: 7px 16px; cursor: pointer;
+    box-shadow: var(--shadow-xs), inset 0 1px 0 rgba(255,255,255,0.12);
+    transition: background .12s;
+  }
+  .btn-send:hover { background: var(--teal-600); }
+  .cmd-actions .spacer { flex: 1; }
+
+  .btn-danger {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: var(--t-13); font-weight: 600;
+    color: var(--dang-fg);
+    background: var(--dang-bg);
+    border: 1px solid var(--dang-bd);
+    border-radius: var(--r-sm);
+    padding: 7px 13px; cursor: pointer;
+    transition: background .12s, border-color .12s;
+  }
+  .btn-danger:hover { background: #f1d3cb; border-color: #dcae9f; }
+  .btn-danger.stop {
+    color: #fff; background: var(--dang-dot); border-color: var(--dang-fg);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.12);
+  }
+  .btn-danger.stop:hover { background: var(--dang-fg); }
+  .btn-danger svg { flex: none; }
+
+  .cmd-log {
+    display: flex; align-items: center; gap: 8px;
+    font-family: var(--font-mono);
+    font-size: var(--t-12);
+    color: var(--stone-500);
+    border-top: var(--border);
+    padding-top: var(--s-3);
+    margin-top: 2px;
+  }
+  .cmd-log .log-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok-dot); flex: none; }
+  .cmd-log b { color: var(--stone-700); font-weight: 600; }
+  .cmd-log .ts { margin-left: auto; color: var(--stone-400); }
+
+  /* ----------------------------------------------------------------
+     Timeline
+     ---------------------------------------------------------------- */
+  .timeline { padding: var(--s-4) var(--s-5) var(--s-5); }
+  .tl-item {
+    display: grid;
+    grid-template-columns: 46px 22px 1fr;
+    gap: var(--s-2);
+    padding: var(--s-3) 0;
+    position: relative;
+  }
+  .tl-item:not(:last-child) { border-bottom: var(--border); }
+  .tl-time {
+    font-family: var(--font-mono);
+    font-size: var(--t-12);
+    color: var(--stone-400);
+    font-variant-numeric: tabular-nums;
+    padding-top: 1px;
+  }
+  .tl-rail { display: flex; justify-content: center; padding-top: 3px; }
+  .tl-icon {
+    width: 20px; height: 20px; border-radius: 6px;
+    display: grid; place-items: center; flex: none;
+    border: 1px solid transparent;
+  }
+  .tl-icon.planner   { background: var(--run-bg);  border-color: var(--run-bd);  color: var(--run-fg); }
+  .tl-icon.validation{ background: var(--ok-bg);   border-color: var(--ok-bd);   color: var(--ok-fg); }
+  .tl-icon.blocker   { background: var(--warn-bg); border-color: var(--warn-bd); color: var(--warn-fg); }
+  .tl-content { min-width: 0; }
+  .tl-line1 { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .tl-agent { font-family: var(--font-mono); font-size: var(--t-12); font-weight: 600; color: var(--stone-800); }
+  .tl-kind {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 650;
+    padding: 1px 6px; border-radius: var(--r-sm);
+  }
+  .tl-kind.planner    { color: var(--run-fg);  background: var(--run-bg); }
+  .tl-kind.validation { color: var(--ok-fg);   background: var(--ok-bg); }
+  .tl-kind.blocker    { color: var(--warn-fg); background: var(--warn-bg); }
+  .tl-text { font-size: var(--t-13); color: var(--stone-600); margin-top: 3px; line-height: 1.45; }
+
+  /* ----------------------------------------------------------------
+     Lanes (Evidence / Reviews / Validation)
+     ---------------------------------------------------------------- */
+  .lanes { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--s-6); }
+  .lane-rows { padding: var(--s-2) 0; }
+  .lane-row {
+    display: flex; align-items: center; gap: var(--s-3);
+    padding: 10px var(--s-5);
+    border-bottom: var(--border);
+  }
+  .lane-row:last-child { border-bottom: none; }
+  .lane-row .lr-main { min-width: 0; flex: 1; }
+  .lr-id {
+    font-family: var(--font-mono);
+    font-size: var(--t-12);
+    font-weight: 600;
+    color: var(--stone-800);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .lr-meta {
+    font-size: var(--t-11);
+    color: var(--stone-400);
+    margin-top: 2px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .lr-meta .target { font-family: var(--font-mono); color: var(--stone-500); }
+  .kind-tag {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px;
+    color: var(--stone-500); font-weight: 600;
+  }
+
+  /* status mini-pill (lanes) */
+  .spill {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: var(--t-11); font-weight: 600;
+    padding: 2px 8px; border-radius: var(--r-pill);
+    border: 1px solid transparent; white-space: nowrap; flex: none;
+  }
+  .spill .sdot { width: 5px; height: 5px; border-radius: 50%; }
+  .spill.good   { color: var(--ok-fg);   background: var(--ok-bg);   border-color: var(--ok-bd); }
+  .spill.good .sdot { background: var(--ok-dot); }
+  .spill.caution{ color: var(--warn-fg); background: var(--warn-bg); border-color: var(--warn-bd); }
+  .spill.caution .sdot { background: var(--warn-dot); }
+  .spill.attn   { color: var(--dang-fg); background: var(--dang-bg); border-color: var(--dang-bd); }
+  .spill.attn .sdot { background: var(--dang-dot); }
+
+  /* ---- Goals strip footer (compact) ---- */
+  .goal-card { padding: var(--s-5); }
+  .goal-title-row { display: flex; align-items: center; gap: var(--s-3); margin-bottom: var(--s-3); }
+  .goal-title { font-size: var(--t-15); font-weight: 640; color: var(--stone-900); }
+  .goal-id { font-family: var(--font-mono); font-size: var(--t-11); color: var(--stone-400); }
+  .goal-cols { display: grid; grid-template-columns: 1.3fr 1fr 0.8fr; gap: var(--s-6); }
+  .req-list { display: flex; flex-direction: column; gap: 6px; }
+  .req-item { display: flex; align-items: center; gap: 8px; font-size: var(--t-13); color: var(--stone-700); }
+  .req-check {
+    width: 16px; height: 16px; border-radius: 5px; flex: none;
+    display: grid; place-items: center;
+    background: var(--ok-bg); border: 1px solid var(--ok-bd); color: var(--ok-fg);
+  }
+  .req-item.pending .req-check { background: var(--warn-bg); border-color: var(--warn-bd); color: var(--warn-fg); }
+  .blocker-row {
+    display: flex; align-items: flex-start; gap: 8px;
+    font-size: var(--t-13); color: var(--warn-fg);
+    background: var(--warn-bg); border: 1px solid var(--warn-bd);
+    border-radius: var(--r-md); padding: 9px var(--s-3);
+  }
+
+  /* utility */
+  .muted { color: var(--stone-400); }
+  .mono { font-family: var(--font-mono); }
+  .nowrap { white-space: nowrap; }
+
+  /* ----------------------------------------------------------------
+     Responsive — 390px mobile
+     ---------------------------------------------------------------- */
+  @media (max-width: 960px) {
+    .topbar { flex-wrap: wrap; height: auto; padding: 10px var(--s-4); gap: var(--s-3); }
+    .topbar .tabs { order: 5; width: 100%; border-top: var(--border); padding-top: 8px; }
+    .topbar-spacer { display: none; }
+    .main { padding: var(--s-4); gap: var(--s-4); }
+    .status-strip { grid-template-columns: repeat(2, 1fr); gap: var(--s-2); }
+    .work { grid-template-columns: 1fr; gap: var(--s-4); }
+    .lanes { grid-template-columns: 1fr; gap: var(--s-4); }
+    .mini-lanes { grid-template-columns: 1fr; }
+    .meta-grid { grid-template-columns: 1fr; }
+    .goal-cols { grid-template-columns: 1fr; gap: var(--s-4); }
+    .agent-table thead { display: none; }
+    .agent-table tbody tr { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; padding: 10px var(--s-4); }
+    .agent-table td { padding: 2px 0; }
+    .agent-table td.col-adapter, .agent-table td.col-conf { display: none; }
+    .agent-result { max-width: none; white-space: normal; }
+    .cmd-actions { flex-wrap: wrap; }
+    .cmd-actions .spacer { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ========================= TOP BAR ========================= -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M11.5 4.6a4 4 0 1 0 0 6.8" stroke="#fff" stroke-width="1.7" stroke-linecap="round"/>
+          <circle cx="8" cy="8" r="1.6" fill="#fff"/>
+        </svg>
+      </span>
+      <span class="brand-name">Capo</span>
+      <span class="view-label">Operator Dashboard</span>
+    </div>
+
+    <nav class="tabs" aria-label="Primary">
+      <a class="tab active" href="#" aria-current="page">Overview</a>
+      <a class="tab" href="#">Goals</a>
+      <a class="tab" href="#">Settings</a>
+    </nav>
+
+    <span class="topbar-spacer"></span>
+
+    <span class="server-badge" title="Connected to mock server-command API">
+      <span class="srv-dot" aria-hidden="true"></span>
+      <b>mock server-command API</b>
+      <span class="mode-chip">fixture</span>
+    </span>
+
+    <div class="toolbtns">
+      <button class="btn" type="button">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5V5h-2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Refresh
+      </button>
+      <button class="btn ghost" type="button">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.2" stroke="currentColor" stroke-width="1.5"/><path d="M8 7.2v3.4M8 5.2v.05" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        Details
+      </button>
+    </div>
+  </header>
+
+  <main class="main">
+
+    <!-- ========================= STATUS STRIP ========================= -->
+    <section class="status-strip" aria-label="Run summary">
+      <div class="metric">
+        <div class="m-top"><span class="m-dot"></span><span class="m-label">Agents</span></div>
+        <div class="m-value">5</div>
+        <div class="m-sub">across this project</div>
+      </div>
+      <div class="metric is-active">
+        <div class="m-top"><span class="m-dot"></span><span class="m-label">Active</span></div>
+        <div class="m-value">3</div>
+        <div class="m-sub">running or finishing</div>
+      </div>
+      <div class="metric is-warning">
+        <div class="m-top"><span class="m-dot"></span><span class="m-label">Blocked</span></div>
+        <div class="m-value">1</div>
+        <div class="m-sub">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1.5 15 14H1L8 1.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M8 6.2v3.2M8 11.2v.05" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          needs attention
+        </div>
+      </div>
+      <div class="metric is-good">
+        <div class="m-top"><span class="m-dot"></span><span class="m-label">Evidence</span></div>
+        <div class="m-value">6</div>
+        <div class="m-sub">artifacts captured</div>
+      </div>
+      <div class="metric">
+        <div class="m-top"><span class="m-dot"></span><span class="m-label">Reviews</span></div>
+        <div class="m-value">2</div>
+        <div class="m-sub">1 accepted · 1 follow-up</div>
+      </div>
+      <div class="metric is-good">
+        <div class="m-top"><span class="m-dot"></span><span class="m-label">Validations</span></div>
+        <div class="m-value">3</div>
+        <div class="m-sub">2 passed · 1 pending</div>
+      </div>
+    </section>
+
+    <!-- ========================= WORK AREA ========================= -->
+    <div class="work">
+
+      <!-- LEFT COLUMN -->
+      <div class="col">
+
+        <!-- Agent table -->
+        <section class="panel" aria-label="Agents">
+          <div class="panel-head">
+            <h2>Agents</h2>
+            <span class="ph-meta">live run state</span>
+            <span class="ph-spacer"></span>
+            <span class="count-chip">5 total</span>
+          </div>
+          <table class="agent-table">
+            <thead>
+              <tr>
+                <th>Agent &amp; latest result</th>
+                <th>Status</th>
+                <th class="col-adapter">Adapter</th>
+                <th class="col-conf">Confidence</th>
+                <th class="num">Ev · Rv · Vl</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- capo-operator (selected) -->
+              <tr class="selected">
+                <td>
+                  <div class="agent-id">
+                    <span class="agent-name">capo-operator</span>
+                    <span class="agent-result">Selected results_evidence for an all-agent evidence request.</span>
+                  </div>
+                </td>
+                <td>
+                  <span class="pill finished">
+                    <svg class="picon" width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M3.2 8.4 6.4 11.5 12.8 4.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    finished
+                  </span>
+                </td>
+                <td class="col-adapter"><span class="adapter-tag">codex_exec</span></td>
+                <td class="col-conf">
+                  <span class="conf medium"><span class="conf-bars"><i></i><i></i><i></i></span>medium</span>
+                </td>
+                <td class="num">
+                  <span class="counts">
+                    <span class="cbadge" title="1 evidence"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4 2.5h5l3 3V13.5H4z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9 2.5v3h3" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>1</span>
+                    <span class="cbadge zero" title="0 reviews"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2.5 4.5h11v6h-7l-3 2.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>0</span>
+                    <span class="cbadge" title="1 validation"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 1.7 13 3.6v3.9c0 3-2.1 5.2-5 6.7-2.9-1.5-5-3.7-5-6.7V3.6z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>1</span>
+                  </span>
+                </td>
+              </tr>
+              <!-- codex-local timed out -->
+              <tr>
+                <td>
+                  <div class="agent-id">
+                    <span class="agent-name">codex-local</span>
+                    <span class="agent-result">Timed out after recording two tool calls and a memory packet.</span>
+                  </div>
+                </td>
+                <td>
+                  <span class="pill timedout">
+                    <svg class="picon" width="11" height="11" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8.5" r="5.6" stroke="currentColor" stroke-width="1.4"/><path d="M8 5.4v3.2l2 1.4M5.5 1.8h5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                    timed out
+                  </span>
+                </td>
+                <td class="col-adapter"><span class="adapter-tag">codex_exec</span></td>
+                <td class="col-conf">
+                  <span class="conf low"><span class="conf-bars"><i></i><i></i><i></i></span>low</span>
+                </td>
+                <td class="num">
+                  <span class="counts">
+                    <span class="cbadge" title="2 evidence"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4 2.5h5l3 3V13.5H4z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9 2.5v3h3" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>2</span>
+                    <span class="cbadge" title="1 review"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2.5 4.5h11v6h-7l-3 2.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>1</span>
+                    <span class="cbadge zero" title="0 validations"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 1.7 13 3.6v3.9c0 3-2.1 5.2-5 6.7-2.9-1.5-5-3.7-5-6.7V3.6z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>0</span>
+                  </span>
+                </td>
+              </tr>
+              <!-- codex-one running -->
+              <tr>
+                <td>
+                  <div class="agent-id">
+                    <span class="agent-name">codex-one</span>
+                    <span class="agent-result">Working on webclient design and browser verification.</span>
+                  </div>
+                </td>
+                <td>
+                  <span class="pill running">
+                    <span class="pdot" aria-hidden="true"></span>
+                    running
+                  </span>
+                </td>
+                <td class="col-adapter"><span class="adapter-tag">codex_exec</span></td>
+                <td class="col-conf">
+                  <span class="conf medium"><span class="conf-bars"><i></i><i></i><i></i></span>medium</span>
+                </td>
+                <td class="num">
+                  <span class="counts">
+                    <span class="cbadge" title="1 evidence"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4 2.5h5l3 3V13.5H4z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9 2.5v3h3" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>1</span>
+                    <span class="cbadge zero" title="0 reviews"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2.5 4.5h11v6h-7l-3 2.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>0</span>
+                    <span class="cbadge" title="1 validation"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 1.7 13 3.6v3.9c0 3-2.1 5.2-5 6.7-2.9-1.5-5-3.7-5-6.7V3.6z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>1</span>
+                  </span>
+                </td>
+              </tr>
+              <!-- codex-proof finished -->
+              <tr>
+                <td>
+                  <div class="agent-id">
+                    <span class="agent-name">codex-proof</span>
+                    <span class="agent-result">Finished Codex-backed proof through the server boundary.</span>
+                  </div>
+                </td>
+                <td>
+                  <span class="pill finished">
+                    <svg class="picon" width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M3.2 8.4 6.4 11.5 12.8 4.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    finished
+                  </span>
+                </td>
+                <td class="col-adapter"><span class="adapter-tag">codex_exec</span></td>
+                <td class="col-conf">
+                  <span class="conf high"><span class="conf-bars"><i></i><i></i><i></i></span>high</span>
+                </td>
+                <td class="num">
+                  <span class="counts">
+                    <span class="cbadge" title="2 evidence"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4 2.5h5l3 3V13.5H4z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9 2.5v3h3" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>2</span>
+                    <span class="cbadge" title="1 review"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2.5 4.5h11v6h-7l-3 2.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>1</span>
+                    <span class="cbadge" title="1 validation"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 1.7 13 3.6v3.9c0 3-2.1 5.2-5 6.7-2.9-1.5-5-3.7-5-6.7V3.6z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>1</span>
+                  </span>
+                </td>
+              </tr>
+              <!-- demo running (fake adapter) -->
+              <tr>
+                <td>
+                  <div class="agent-id">
+                    <span class="agent-name">demo</span>
+                    <span class="agent-result">Fake adapter processed the latest steering goal.</span>
+                  </div>
+                </td>
+                <td>
+                  <span class="pill running">
+                    <span class="pdot" aria-hidden="true"></span>
+                    running
+                  </span>
+                </td>
+                <td class="col-adapter"><span class="adapter-tag">fake</span></td>
+                <td class="col-conf">
+                  <span class="conf medium"><span class="conf-bars"><i></i><i></i><i></i></span>medium</span>
+                </td>
+                <td class="num">
+                  <span class="counts">
+                    <span class="cbadge" title="1 evidence"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4 2.5h5l3 3V13.5H4z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9 2.5v3h3" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>1</span>
+                    <span class="cbadge zero" title="0 reviews"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2.5 4.5h11v6h-7l-3 2.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>0</span>
+                    <span class="cbadge zero" title="0 validations"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 1.7 13 3.6v3.9c0 3-2.1 5.2-5 6.7-2.9-1.5-5-3.7-5-6.7V3.6z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>0</span>
+                  </span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <!-- Lanes: Evidence / Reviews / Validation -->
+        <section class="lanes" aria-label="Evidence, reviews and validations">
+          <!-- Evidence -->
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Evidence</h2>
+              <span class="ph-spacer"></span>
+              <span class="count-chip">6</span>
+            </div>
+            <div class="lane-rows">
+              <div class="lane-row">
+                <div class="lr-main">
+                  <div class="lr-id">planner-action-results-evidence</div>
+                  <div class="lr-meta"><span class="kind-tag">test</span><span class="dot-sep"></span><span class="target">capo-operator</span></div>
+                </div>
+                <span class="spill good"><span class="sdot"></span>validated</span>
+              </div>
+              <div class="lane-row">
+                <div class="lr-main">
+                  <div class="lr-id">codex-live-smoke</div>
+                  <div class="lr-meta"><span class="kind-tag">manual</span><span class="dot-sep"></span><span class="target">codex-proof</span></div>
+                </div>
+                <span class="spill good"><span class="sdot"></span>validated</span>
+              </div>
+              <div class="lane-row">
+                <div class="lr-main">
+                  <div class="lr-id">timeout-log</div>
+                  <div class="lr-meta"><span class="kind-tag">artifact</span><span class="dot-sep"></span><span class="target">codex-local</span></div>
+                </div>
+                <span class="spill caution"><span class="sdot"></span>partial</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Reviews -->
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Reviews</h2>
+              <span class="ph-spacer"></span>
+              <span class="count-chip">2</span>
+            </div>
+            <div class="lane-rows">
+              <div class="lane-row">
+                <div class="lr-main">
+                  <div class="lr-id">review-codex-local-timeout</div>
+                  <div class="lr-meta">target <span class="target">codex-local</span></div>
+                </div>
+                <span class="spill caution"><span class="sdot"></span>needs follow-up</span>
+              </div>
+              <div class="lane-row">
+                <div class="lr-main">
+                  <div class="lr-id">review-codex-proof</div>
+                  <div class="lr-meta">target <span class="target">codex-proof</span></div>
+                </div>
+                <span class="spill good"><span class="sdot"></span>accepted</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Validation -->
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Validation</h2>
+              <span class="ph-spacer"></span>
+              <span class="count-chip">3</span>
+            </div>
+            <div class="lane-rows">
+              <div class="lane-row">
+                <div class="lr-main">
+                  <div class="lr-id">browser-smoke</div>
+                  <div class="lr-meta">target <span class="target">dashboard-webclient</span></div>
+                </div>
+                <span class="spill caution"><span class="sdot"></span>pending</span>
+              </div>
+              <div class="lane-row">
+                <div class="lr-main">
+                  <div class="lr-id">codex-proof-smoke</div>
+                  <div class="lr-meta">target <span class="target">codex-proof</span></div>
+                </div>
+                <span class="spill good"><span class="sdot"></span>passed</span>
+              </div>
+              <div class="lane-row">
+                <div class="lr-main">
+                  <div class="lr-id">planner-results-evidence</div>
+                  <div class="lr-meta">target <span class="target">capo-operator</span></div>
+                </div>
+                <span class="spill good"><span class="sdot"></span>passed</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Goal card -->
+        <section class="panel" aria-label="Active goal">
+          <div class="panel-head">
+            <h2>Active Goal</h2>
+            <span class="ph-spacer"></span>
+            <span class="pill running" style="font-size:11px;"><span class="pdot"></span>active</span>
+          </div>
+          <div class="goal-card">
+            <div class="goal-title-row">
+              <span class="goal-title">Complete dashboard webclient workpad</span>
+              <span class="goal-id">goal-dashboard-webclient</span>
+            </div>
+            <div class="goal-cols">
+              <div>
+                <div class="field-label">Requirements</div>
+                <div class="req-list">
+                  <div class="req-item">
+                    <span class="req-check"><svg width="9" height="9" viewBox="0 0 16 16" fill="none"><path d="M3 8.4 6.4 11.5 13 4.6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                    design accepted
+                  </div>
+                  <div class="req-item pending">
+                    <span class="req-check"><svg width="9" height="9" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="3" fill="currentColor"/></svg></span>
+                    browser screenshots
+                  </div>
+                  <div class="req-item pending">
+                    <span class="req-check"><svg width="9" height="9" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="3" fill="currentColor"/></svg></span>
+                    interactive smoke
+                  </div>
+                </div>
+              </div>
+              <div>
+                <div class="field-label">Blockers</div>
+                <div class="blocker-row">
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style="flex:none;margin-top:1px"><path d="M8 1.5 15 14H1L8 1.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.2v3.2M8 11.2v.05" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                  live HTTP server integration is future work
+                </div>
+              </div>
+              <div>
+                <div class="field-label">Validation</div>
+                <div class="meta-value mono" style="color:var(--stone-700)">fixture browser smoke</div>
+                <div class="lr-meta" style="margin-top:8px">tracked via <span class="target">browser-smoke</span></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      <!-- RIGHT COLUMN -->
+      <div class="col">
+
+        <!-- Session detail -->
+        <section class="panel" aria-label="Session detail">
+          <div class="session-head">
+            <div class="session-top">
+              <div style="flex:1; min-width:0">
+                <div class="session-name">capo-operator</div>
+                <div class="session-sub">
+                  <span class="adapter-tag">codex_exec</span>
+                  <span class="dot-sep"></span>
+                  <span class="conf medium"><span class="conf-bars"><i></i><i></i><i></i></span>medium confidence</span>
+                </div>
+              </div>
+              <span class="pill finished">
+                <svg class="picon" width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M3.2 8.4 6.4 11.5 12.8 4.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                finished
+              </span>
+            </div>
+          </div>
+
+          <div class="session-body">
+            <div class="result-block">
+              <div class="field-label">Latest result</div>
+              <div class="result-text">Selected results_evidence for an all-agent evidence request.</div>
+            </div>
+
+            <div class="meta-grid">
+              <div class="meta-item full">
+                <div class="field-label">Goal</div>
+                <div class="meta-value goal-value">Map operator input into validated server-backed actions</div>
+              </div>
+            </div>
+
+            <div class="mini-lanes">
+              <div class="mini-lane">
+                <div class="ml-label">Evidence</div>
+                <div class="ml-value">1</div>
+                <div class="ml-tag"><span class="spill good"><span class="sdot"></span>validated</span></div>
+              </div>
+              <div class="mini-lane">
+                <div class="ml-label">Reviews</div>
+                <div class="ml-value">0</div>
+                <div class="ml-tag muted" style="font-size:11px">none pending</div>
+              </div>
+              <div class="mini-lane">
+                <div class="ml-label">Validations</div>
+                <div class="ml-value">1</div>
+                <div class="ml-tag"><span class="spill good"><span class="sdot"></span>passed</span></div>
+              </div>
+            </div>
+
+            <div>
+              <div class="field-label">Evidence</div>
+              <div class="evidence-list">
+                <span class="evidence-pill">
+                  <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M4 2.5h5l3 3V13.5H4z" stroke="var(--ok-fg)" stroke-width="1.3" stroke-linejoin="round"/><path d="M9 2.5v3h3" stroke="var(--ok-fg)" stroke-width="1.3" stroke-linejoin="round"/></svg>
+                  planner-action-results-evidence
+                  <span class="ev-kind">test</span>
+                </span>
+              </div>
+            </div>
+
+            <div>
+              <div class="field-label">Blocker</div>
+              <div class="blocker-note">
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M3 8.4 6.4 11.5 13 4.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                No blocker — agent finished cleanly.
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Command panel -->
+        <section class="panel" aria-label="Command panel">
+          <div class="panel-head">
+            <h2>Command</h2>
+            <span class="ph-meta">steer the selected agent</span>
+          </div>
+          <div class="cmd-body">
+            <div class="steer-label">
+              <span class="field-label" style="margin:0">Steer</span>
+              <span class="target">capo-operator</span>
+            </div>
+            <textarea class="steer" placeholder="Describe the next action for this agent — e.g. &quot;re-run results_evidence scoped to codex-proof and attach the smoke log.&quot;"></textarea>
+            <div class="cmd-actions">
+              <button class="btn-send" type="button">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 8h10M8 4l4 4-4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                Send
+              </button>
+              <span class="spacer"></span>
+              <button class="btn-danger" type="button" title="Pause this agent's run">
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="4" y="3" width="3" height="10" rx="1" fill="currentColor"/><rect x="9" y="3" width="3" height="10" rx="1" fill="currentColor"/></svg>
+                Interrupt
+              </button>
+              <button class="btn-danger stop" type="button" title="Stop this agent — destructive">
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor"/></svg>
+                Stop
+              </button>
+            </div>
+            <div class="cmd-log">
+              <span class="log-dot" aria-hidden="true"></span>
+              <span><b>planner</b> → results_evidence dispatched</span>
+              <span class="ts">12:00 · ok</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Recent activity -->
+        <section class="panel" aria-label="Recent activity">
+          <div class="panel-head">
+            <h2>Recent Activity</h2>
+            <span class="ph-spacer"></span>
+            <span class="count-chip">3</span>
+          </div>
+          <div class="timeline">
+            <div class="tl-item">
+              <div class="tl-time">12:00</div>
+              <div class="tl-rail">
+                <span class="tl-icon planner" title="planner event">
+                  <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M2.5 13.5 7 9l2.5 2.5 4-5.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="7" cy="9" r="1" fill="currentColor"/></svg>
+                </span>
+              </div>
+              <div class="tl-content">
+                <div class="tl-line1">
+                  <span class="tl-agent">capo-operator</span>
+                  <span class="tl-kind planner">planner</span>
+                </div>
+                <div class="tl-text">Mapped an all-agent response/evidence request to results_evidence.</div>
+              </div>
+            </div>
+
+            <div class="tl-item">
+              <div class="tl-time">11:42</div>
+              <div class="tl-rail">
+                <span class="tl-icon validation" title="validation event">
+                  <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M3.2 8.4 6.4 11.5 12.8 4.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </span>
+              </div>
+              <div class="tl-content">
+                <div class="tl-line1">
+                  <span class="tl-agent">codex-proof</span>
+                  <span class="tl-kind validation">validation</span>
+                </div>
+                <div class="tl-text">Codex proof completed through server dispatch.</div>
+              </div>
+            </div>
+
+            <div class="tl-item">
+              <div class="tl-time">11:15</div>
+              <div class="tl-rail">
+                <span class="tl-icon blocker" title="blocker event">
+                  <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M8 1.5 15 14H1L8 1.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M8 6.2v3.2M8 11.2v.05" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                </span>
+              </div>
+              <div class="tl-content">
+                <div class="tl-line1">
+                  <span class="tl-agent">codex-local</span>
+                  <span class="tl-kind blocker">blocker</span>
+                </div>
+                <div class="tl-text">Timed out while collecting workspace internals.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>
