@@ -466,13 +466,17 @@ impl FakeBoundaryController {
     /// durable [`CapabilityGrantProjection`], keyed to the turn.
     ///
     /// Called by the decide step immediately after the `permission.decided`
-    /// event, for any decision with non-observational persistence (allow OR a
-    /// `reject_always`-style deny grant). The persisted grant row carries the full
+    /// event, but ONLY for a decision that [`decision_creates_grant`] selects:
+    /// an `allow` with non-observational persistence, OR a DURABLE
+    /// (`reject_always`) deny whose persistence is `until_revoked` / `until_time`.
+    /// A transient `reject_once` deny (`once` / `until_turn_end`) is recorded on
+    /// `permission.decided` only and reaches this writer NOT at all -- it must not
+    /// materialize a standing deny grant. The persisted grant row carries the full
     /// decision record (`effect`/`decision_source`/`persistence`/`explanation`)
     /// so the durable grant store has a queryable, read-backable row -- this is
-    /// the grant SG3 reads back to authorize a later request, and the deny grant
-    /// that blocks one. The event payload uses `serde_json` so every interpolated
-    /// field is escaped for the full JSON grammar.
+    /// the grant SG3 reads back to authorize a later request, and the durable deny
+    /// grant that blocks one. The event payload uses `serde_json` so every
+    /// interpolated field is escaped for the full JSON grammar.
     fn append_capability_grant_created(
         &self,
         scope: &ToolDispatchScope,
