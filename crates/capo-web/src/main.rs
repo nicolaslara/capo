@@ -7,11 +7,22 @@
 //! request handler too (ST8).
 //!
 //!   GET  /api/dashboard      -> full read model (agents, dispatch, lanes, activity)
-//!   POST /api/commands        -> steer / interrupt / stop
-//!   GET  /api/events?from=N   -> Server-Sent Events EVENT TAIL: incremental,
+//!   POST /api/commands        -> steer / send-task / interrupt / stop. The reply
+//!                                carries the targeted `session_id` so the client
+//!                                can read its thread and tail its live reply.
+//!   GET  /api/thread?session=S&from=N
+//!                             -> the session's projected multi-turn conversation
+//!                                thread (ST5), incrementally from sequence N. The
+//!                                client renders this once, then extends it from
+//!                                the live event tail resuming at `next_sequence`.
+//!   GET  /api/events?from=N&session=S
+//!                             -> Server-Sent Events EVENT TAIL: incremental,
 //!                                broadcast-backed `ServerEvent` frames (ST4/ST8),
 //!                                each frame the published wire contract
-//!                                (`event:`/`data:` JSON-RPC notification).
+//!                                (`event:`/`data:` JSON-RPC notification). The
+//!                                streaming agent reply arrives here -- a
+//!                                `SteerAgent`/`SendTask` turn commits summary /
+//!                                tool / terminal events that fan out live.
 //! and serves the built front-end (web/app/dist) for everything else.
 
 use std::collections::HashMap;
@@ -31,8 +42,8 @@ use capo_core::ProjectId;
 use capo_query::{ProjectDashboardQuery, project_dashboard};
 use capo_server::{
     AgentSummary, CapoServer, EventNotification, ServerClientOrigin, ServerCommand,
-    ServerDashboardSnapshot, ServerEvent, ServerInputOrigin, ServerRequest, ServerResponsePayload,
-    SessionSummary, TailRecvError, contract::sse_frame,
+    ServerDashboardSnapshot, ServerEvent, ServerInputOrigin, ServerRequest, ServerResponse,
+    ServerResponsePayload, ServerThread, SessionSummary, TailRecvError, contract::sse_frame,
 };
 use capo_state::SqliteStateStore;
 use futures::StreamExt;
@@ -95,6 +106,7 @@ async fn main() {
     let app = Router::new()
         .route("/api/dashboard", get(dashboard))
         .route("/api/commands", post(commands))
+        .route("/api/thread", get(thread))
         .route("/api/events", get(events))
         .fallback_service(static_service)
         .layer(CorsLayer::permissive())
@@ -272,20 +284,40 @@ struct CommandBody {
     reason: String,
     #[serde(default)]
     goal: String,
+    /// The deterministic chat scenario for a `send_task` turn (defaults to
+    /// `default`). Lets a client pick a fixture-backed reply path for offline dev.
+    #[serde(default)]
+    scenario: String,
 }
 
 async fn commands(
     State(cfg): State<Arc<Config>>,
     Json(body): Json<CommandBody>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    // `goal`/`message` are interchangeable inputs for the turn's prompt; prefer
+    // the explicit `message` the chat composer sends.
+    let prompt = if body.message.is_empty() {
+        body.goal
+    } else {
+        body.message
+    };
     let command = match body.kind.as_str() {
+        // First message to an idle agent: open a fresh session/run whose agent
+        // reply streams back over the event tail (not a fixture placeholder).
+        // `scenario` defaults to the agent's deterministic chat scenario.
+        "send_task" => ServerCommand::SendTask {
+            agent_name: body.agent,
+            goal: prompt,
+            scenario: if body.scenario.is_empty() {
+                "default".to_string()
+            } else {
+                body.scenario
+            },
+        },
+        // Follow-up message to an agent that already has an active session.
         "steer_agent" => ServerCommand::SteerAgent {
             agent_name: body.agent,
-            goal: if body.message.is_empty() {
-                body.goal
-            } else {
-                body.message
-            },
+            goal: prompt,
         },
         "interrupt_agent" => ServerCommand::InterruptAgent {
             agent_name: body.agent,
@@ -310,10 +342,8 @@ async fn commands(
             ));
         }
     };
-    let state_root = cfg.state_root.clone();
-    tokio::task::spawn_blocking(move || {
-        let server = CapoServer::open(ProjectId::new(PROJECT_ID), &state_root)
-            .map_err(|e| format!("open: {e:?}"))?;
+    let server = cfg.server.clone();
+    let response = tokio::task::spawn_blocking(move || {
         server
             .handle(api_request(command))
             .map_err(|e| format!("handle: {e:?}"))
@@ -321,7 +351,92 @@ async fn commands(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(json!({ "ok": true })))
+
+    // Surface the targeted session so the client can read its thread and tail the
+    // streaming agent reply at `/api/thread` + `/api/events?session=...`.
+    Ok(Json(json!({
+        "ok": true,
+        "sessionId": response_session_id(&response),
+    })))
+}
+
+/// Pull the session the command acted on out of the typed response payload, so
+/// the client can subscribe to exactly the session whose reply will stream.
+fn response_session_id(response: &ServerResponse) -> Option<String> {
+    match &response.payload {
+        ServerResponsePayload::TaskSent(run) | ServerResponsePayload::SessionStarted(run) => {
+            Some(run.session_id.to_string())
+        }
+        ServerResponsePayload::AgentRegistered(agent)
+        | ServerResponsePayload::AgentStatus(agent) => {
+            agent.current_session_id.as_ref().map(|s| s.to_string())
+        }
+        _ => None,
+    }
+}
+
+#[derive(Deserialize)]
+struct ThreadQuery {
+    /// The session whose multi-turn thread to project (ST5).
+    session: String,
+    /// Resume watermark: project only turns/items strictly after this sequence.
+    /// `0` (the default) reads the full thread.
+    #[serde(default)]
+    from: i64,
+}
+
+/// GET /api/thread -- the session's projected multi-turn conversation thread (ST5).
+///
+/// Read-only forward projection over the durable event log, composing gap-free
+/// with the `/api/events` tail: render this once, then resume the tail from the
+/// returned `nextSequence`.
+async fn thread(
+    State(cfg): State<Arc<Config>>,
+    Query(q): Query<ThreadQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let server = cfg.server.clone();
+    let value = tokio::task::spawn_blocking(move || {
+        let response = server
+            .handle(api_request(ServerCommand::ReadThread {
+                session_id: q.session,
+                from_sequence: q.from,
+            }))
+            .map_err(|e| format!("handle: {e:?}"))?;
+        match response.payload {
+            ServerResponsePayload::Thread(thread) => Ok(map_thread(&thread)),
+            other => Err(format!("unexpected payload: {other:?}")),
+        }
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(value))
+}
+
+/// Map a projected [`ServerThread`] onto the JSON the web client renders. The
+/// shape mirrors the ST5 thread read model (turns of ordered items) so the chat
+/// surface renders the conversation without authoring turn ordering itself.
+fn map_thread(thread: &ServerThread) -> Value {
+    json!({
+        "sessionId": thread.session_id,
+        "fromSequence": thread.from_sequence,
+        "nextSequence": thread.next_sequence,
+        "turns": thread.turns.iter().map(|turn| json!({
+            "turnId": turn.turn_id,
+            "status": turn.status,
+            "firstSequence": turn.first_sequence,
+            "lastSequence": turn.last_sequence,
+            "items": turn.items.iter().map(|item| json!({
+                "sequence": item.sequence,
+                "eventId": item.event_id,
+                "kind": item.kind,
+                "eventKind": item.event_kind,
+                "itemRef": item.item_ref,
+                "text": item.text,
+                "redactionState": item.redaction_state,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -889,5 +1004,96 @@ mod tests {
         // thread returns on its own.
         drop(rx);
         let _ = handle.join();
+    }
+
+    /// `/api/thread` projects a session's real multi-turn thread (ST5) through
+    /// the server boundary and maps it onto the client JSON shape: ordered turns,
+    /// each carrying its items and the resume watermark the live tail extends.
+    /// Driven by a deterministic adapter-fixture replay (no clock, no provider).
+    #[test]
+    fn thread_endpoint_maps_a_real_projected_thread() {
+        let root = temp_root();
+        let server = open_server(&root);
+
+        register(&server, "codex-local");
+        let session_id = "session-codex-local-1";
+        server
+            .handle(api_request(ServerCommand::StartSession {
+                agent_name: "codex-local".to_string(),
+                goal: "Read a real thread through capo-web".to_string(),
+                adapter: "codex".to_string(),
+                session_id: Some(session_id.to_string()),
+                run_id: Some("run-codex-local-1".to_string()),
+            }))
+            .expect("start session");
+        server
+            .handle(api_request(ServerCommand::ReplayAdapterFixture {
+                adapter: "codex".to_string(),
+                session_id: session_id.to_string(),
+                run_id: "run-codex-local-1".to_string(),
+                turn_id: "turn-codex-local-1".to_string(),
+                fixture_name: "crates/capo-adapters/fixtures/codex-exec.jsonl".to_string(),
+                fixture_jsonl: include_str!(
+                    "../../capo-adapters/fixtures/codex-exec.jsonl"
+                )
+                .to_string(),
+            }))
+            .expect("replay codex fixture");
+
+        let response = server
+            .handle(api_request(ServerCommand::ReadThread {
+                session_id: session_id.to_string(),
+                from_sequence: 0,
+            }))
+            .expect("read thread");
+        let ServerResponsePayload::Thread(server_thread) = response.payload else {
+            panic!("expected a thread payload");
+        };
+        let mapped = map_thread(&server_thread);
+
+        assert_eq!(mapped["sessionId"], session_id);
+        assert_eq!(mapped["fromSequence"], 0);
+        let turns = mapped["turns"].as_array().expect("turns array");
+        let turn = turns
+            .iter()
+            .find(|turn| turn["turnId"] == "turn-codex-local-1")
+            .expect("the replayed turn is projected onto the client shape");
+        assert_eq!(turn["status"], "completed");
+        let items = turn["items"].as_array().expect("items array");
+        assert!(!items.is_empty(), "the turn projects its items");
+        assert!(items.iter().any(|item| item["kind"] == "tool"));
+        assert!(items.iter().any(|item| item["kind"] == "output"));
+        // The watermark the live `/api/events` tail resumes from composes with the
+        // last item, so the chat surface extends the thread without a gap.
+        let next = mapped["nextSequence"].as_i64().expect("nextSequence");
+        let last = turn["lastSequence"].as_i64().expect("lastSequence");
+        assert!(next >= last);
+    }
+
+    /// A `send_task` reply surfaces the targeted `session_id`, so the client
+    /// subscribes to exactly the session whose streaming agent reply will arrive
+    /// on the event tail -- rather than guessing or re-polling the whole dashboard.
+    #[test]
+    fn command_response_surfaces_the_targeted_session() {
+        let root = temp_root();
+        let server = open_server(&root);
+        register(&server, "alpha");
+
+        let response = server
+            .handle(api_request(ServerCommand::SendTask {
+                agent_name: "alpha".to_string(),
+                goal: "say hello".to_string(),
+                scenario: "default".to_string(),
+            }))
+            .expect("send task");
+        let ServerResponsePayload::TaskSent(ref run) = response.payload else {
+            panic!("expected a task-sent payload");
+        };
+        let expected = run.session_id.to_string();
+        assert_eq!(
+            response_session_id(&response),
+            Some(expected),
+            "the command reply must carry the session whose reply streams back"
+        );
     }
 }
