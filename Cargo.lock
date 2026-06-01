@@ -223,10 +223,12 @@ dependencies = [
  "capo-server",
  "capo-state",
  "futures",
+ "http-body-util",
  "serde",
  "serde_json",
  "tokio",
  "tokio-stream",
+ "tower",
  "tower-http",
 ]
 

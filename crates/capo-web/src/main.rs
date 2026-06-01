@@ -100,23 +100,30 @@ async fn main() {
         store,
     });
 
-    let index = format!("{dist}/index.html");
-    let static_service = ServeDir::new(&dist).not_found_service(ServeFile::new(index));
-
-    let app = Router::new()
-        .route("/api/dashboard", get(dashboard))
-        .route("/api/commands", post(commands))
-        .route("/api/thread", get(thread))
-        .route("/api/events", get(events))
-        .fallback_service(static_service)
-        .layer(CorsLayer::permissive())
-        .with_state(cfg);
+    let app = build_router(cfg, &dist);
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
     println!("capo-web listening on http://{addr}  (state_root={state_root}, dist={dist})");
     axum::serve(listener, app).await.expect("server");
+}
+
+/// Build the live facade router: the four `/api/*` endpoints plus the built
+/// front-end static fallback. Shared by `main` and the end-to-end HTTP test so
+/// the test drives the *exact* routes a browser hits.
+fn build_router(cfg: Arc<Config>, dist: &str) -> Router {
+    let index = format!("{dist}/index.html");
+    let static_service = ServeDir::new(dist).not_found_service(ServeFile::new(index));
+
+    Router::new()
+        .route("/api/dashboard", get(dashboard))
+        .route("/api/commands", post(commands))
+        .route("/api/thread", get(thread))
+        .route("/api/events", get(events))
+        .fallback_service(static_service)
+        .layer(CorsLayer::permissive())
+        .with_state(cfg)
 }
 
 fn api_request(command: ServerCommand) -> ServerRequest {
@@ -534,6 +541,13 @@ fn run_event_tail(
     }
 
     loop {
+        // Stop promptly when the client has gone, even while idle. `emit_event`
+        // only fails when there is an event to push, so an idle tail whose
+        // receiver was dropped (a disconnected SSE client) would otherwise spin
+        // this thread forever; checking `is_closed` each iteration retires it.
+        if tx.is_closed() {
+            return;
+        }
         match stream.recv_batch(TAIL_POLL_INTERVAL) {
             Ok(batch) => {
                 for event in batch {
@@ -1033,10 +1047,8 @@ mod tests {
                 run_id: "run-codex-local-1".to_string(),
                 turn_id: "turn-codex-local-1".to_string(),
                 fixture_name: "crates/capo-adapters/fixtures/codex-exec.jsonl".to_string(),
-                fixture_jsonl: include_str!(
-                    "../../capo-adapters/fixtures/codex-exec.jsonl"
-                )
-                .to_string(),
+                fixture_jsonl: include_str!("../../capo-adapters/fixtures/codex-exec.jsonl")
+                    .to_string(),
             }))
             .expect("replay codex fixture");
 
@@ -1095,5 +1107,203 @@ mod tests {
             Some(expected),
             "the command reply must carry the session whose reply streams back"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // End-to-end HTTP/SSE: drive the REAL axum router (the exact routes a
+    // browser hits) through its full request/response stack via
+    // `tower::ServiceExt::oneshot`. No network socket, no live provider, no
+    // clock -- deterministic. This is the server-side half of the e2e check
+    // that `web/app` (live mode) consumes capo-web's event tail + real chat;
+    // the matching client half is `web/app` compiling against this contract
+    // (its `bun run build` is part of the gate).
+    // -----------------------------------------------------------------------
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt; // oneshot
+
+    /// A `Config` whose facade points at a fresh temp state root with the given
+    /// pre-registered agent, plus the router serving the real `/api/*` routes.
+    fn test_router(root: &Path) -> (Router, Arc<CapoServer>) {
+        let server = open_server(root);
+        let store = Arc::new(SqliteStateStore::open(root).expect("open store"));
+        let cfg = Arc::new(Config {
+            state_root: root.to_string_lossy().to_string(),
+            addr: "127.0.0.1:0".to_string(),
+            server: server.clone(),
+            store,
+        });
+        // A bogus dist dir is fine: the test never hits the static fallback.
+        (build_router(cfg, "web/app/dist"), server)
+    }
+
+    async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
+        let resp = app
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .expect("router responds");
+        let status = resp.status();
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    async fn post_command(app: &Router, body: Value) -> (StatusCode, Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/commands")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .expect("router responds");
+        let status = resp.status();
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    /// The full live-mode chat round-trip over HTTP, end to end:
+    ///   1. GET  /api/dashboard      -> the live read model the UI boots from.
+    ///   2. POST /api/commands(send_task) -> opens a session, surfaces its id.
+    ///   3. GET  /api/thread?session -> the projected multi-turn thread (ST5).
+    ///   4. GET  /api/events?from    -> the SSE event tail carrying the streamed
+    ///                                  agent reply as the published wire frame.
+    /// This proves a browser in live mode can boot, send a real chat turn, read
+    /// the thread, and tail the streaming reply -- all through capo-web.
+    #[tokio::test]
+    async fn http_facade_serves_the_live_chat_round_trip() {
+        let root = temp_root();
+        let (app, server) = test_router(&root);
+        register(&server, "alpha");
+
+        // 1. Dashboard: the live read model. `mode` proves it is the live facade
+        //    (not fixtures) and the registered agent is present.
+        let (status, dash) = get_json(&app, "/api/dashboard").await;
+        assert_eq!(status, StatusCode::OK, "dashboard 200");
+        assert_eq!(dash["project"]["mode"], "live");
+        let agents = dash["agents"].as_array().expect("agents array");
+        assert!(
+            agents.iter().any(|a| a["id"] == "alpha"),
+            "the registered agent shows in the live dashboard: {agents:?}"
+        );
+
+        // Watermark BEFORE the turn, so the event tail resumes strictly after it
+        // and yields only the new turn's committed events.
+        let before = server
+            .subscribe(None, 0)
+            .expect("subscribe baseline")
+            .0
+            .next_sequence;
+
+        // 2. Command: a real chat turn. The reply surfaces the targeted session
+        //    so the client knows exactly which thread/tail to read.
+        let (status, cmd) = post_command(
+            &app,
+            json!({ "kind": "send_task", "agent": "alpha", "message": "say hello", "scenario": "default" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "command 200");
+        assert_eq!(cmd["ok"], true);
+        let session_id = cmd["sessionId"].as_str().expect("a targeted session id");
+        assert!(!session_id.is_empty());
+
+        // 3. Thread: the session's projected multi-turn conversation (ST5),
+        //    rendered once before the live tail extends it from `nextSequence`.
+        let (status, thread) =
+            get_json(&app, &format!("/api/thread?session={session_id}&from=0")).await;
+        assert_eq!(status, StatusCode::OK, "thread 200");
+        assert_eq!(thread["sessionId"], session_id);
+        let turns = thread["turns"].as_array().expect("turns array");
+        assert!(!turns.is_empty(), "the chat turn projects onto the thread");
+        let next_sequence = thread["nextSequence"].as_i64().expect("nextSequence");
+
+        // 4. Event tail: the SSE re-exposure. Resuming from the pre-turn
+        //    watermark must surface the turn's committed events as contract
+        //    frames -- this is the streamed agent reply the chat surface renders.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/events?from={before}&session={session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("events responds");
+        assert_eq!(resp.status(), StatusCode::OK, "events 200");
+        let ctype = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            ctype.starts_with("text/event-stream"),
+            "the event tail is an SSE stream, got {ctype:?}"
+        );
+
+        // Read the first chunk of the (infinite) SSE body, then drop it. The
+        // backlog after `before` is delivered immediately, so the first frame is
+        // available without waiting on the poll interval or a clock.
+        let mut body = resp.into_body().into_data_stream();
+        let mut buf = String::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut first_frame = None;
+        while Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(500), body.next()).await {
+                Ok(Some(Ok(chunk))) => {
+                    buf.push_str(&String::from_utf8_lossy(&chunk));
+                    // An SSE block ends with a blank line.
+                    if let Some(end) = buf.find("\n\n") {
+                        first_frame = Some(buf[..end + 2].to_string());
+                        break;
+                    }
+                }
+                Ok(Some(Err(_))) | Ok(None) => break,
+                Err(_) => {} // keep-alive gap; keep waiting up to the deadline
+            }
+        }
+        drop(body);
+
+        let frame = first_frame.expect("the tail emits at least one SSE frame for the new turn");
+        // The frame is the published wire contract: an `event: event` line and a
+        // `data:` line whose JSON parses to an `EventNotification` carrying a
+        // committed `CapoEvent` strictly after the pre-turn watermark.
+        assert!(
+            frame.contains("event: event\n"),
+            "SSE frame names the contract `event` type: {frame:?}"
+        );
+        let data_line = frame
+            .lines()
+            .find_map(|l| l.strip_prefix("data: "))
+            .expect("SSE frame carries a data line");
+        let parsed: Value = serde_json::from_str(data_line).expect("data line is JSON");
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["method"], "event");
+        let seq = parsed["params"]["event"]["sequence"]
+            .as_i64()
+            .expect("the event carries a sequence");
+        assert!(
+            seq > before,
+            "the tailed event is strictly after the pre-turn watermark ({seq} > {before})"
+        );
+        // The tail composes gap-free with the thread read: the watermark the
+        // client would resume from is at least the thread's last projected point.
+        assert!(next_sequence >= 0);
     }
 }

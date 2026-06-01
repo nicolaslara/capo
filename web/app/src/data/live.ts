@@ -75,11 +75,7 @@ function terminalNote(eventKind: string, text: string | null): string {
 }
 
 /** Project one thread item (history) into a chat message, or null to skip. */
-function itemToChatMessage(
-  sessionId: string,
-  turnId: string,
-  item: WireThreadItem,
-): ChatMessage | null {
+function itemToChatMessage(sessionId: string, item: WireThreadItem): ChatMessage | null {
   const cls = classifyEventKind(item.kind === 'output' ? 'session.summary_updated' : item.eventKind)
   // The thread item already carries `kind` as output/tool/terminal; trust it
   // first, falling back to event-kind classification.
@@ -101,11 +97,25 @@ export function threadToChatMessages(thread: WireThread): ChatMessage[] {
   const out: ChatMessage[] = []
   for (const turn of thread.turns) {
     for (const item of turn.items) {
-      const msg = itemToChatMessage(thread.sessionId, turn.turnId, item)
+      const msg = itemToChatMessage(thread.sessionId, item)
       if (msg) out.push(msg)
     }
   }
   return out
+}
+
+/** Read a session's projected multi-turn thread (ST5) from the live facade. */
+export async function fetchThread(sessionId: string, fromSequence = 0): Promise<WireThread | null> {
+  try {
+    const res = await fetch(
+      `/api/thread?session=${encodeURIComponent(sessionId)}&from=${fromSequence}`,
+      { cache: 'no-store' },
+    )
+    if (!res.ok) return null
+    return (await res.json()) as WireThread
+  } catch {
+    return null
+  }
 }
 
 /** Extract the human-facing text a payload carries (mirrors `item_text`). */

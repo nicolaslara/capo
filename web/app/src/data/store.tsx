@@ -1,6 +1,14 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { ConsoleData, ChatMessage } from './types'
 import { fixtureData } from './fixtures'
+import {
+  SSE_EVENT_NAME,
+  eventToChatMessage,
+  fetchThread,
+  parseEventFrame,
+  threadToChatMessages,
+  type CapoEvent,
+} from './live'
 
 export interface CommandLogEntry {
   id: string
@@ -54,28 +62,94 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [data, setData] = useState<ConsoleData>(() => structuredClone(fixtureData))
   const [commandLog, setCommandLog] = useState<CommandLogEntry[]>([])
   const liveRef = useRef(false)
+  // Mirror of the current data so the SSE handler (a stable closure) can resolve
+  // an incoming event's session/agent against the live agent table. Synced in an
+  // effect (never during render).
+  const dataRef = useRef(data)
+  useEffect(() => { dataRef.current = data }, [data])
+  // Event ids already projected into chat, so a re-delivered tail frame (or a
+  // thread item we hydrated) is never appended twice.
+  const seenEventIds = useRef<Set<string>>(new Set())
+
+  // Resolve the chat key (the agent table's `id`, which is the agent name) for a
+  // committed event, matching first on its session id then its `agent-<name>` id.
+  const chatKeyForEvent = (event: CapoEvent): string | null => {
+    const agents = dataRef.current.agents
+    if (event.session_id) {
+      const bySession = agents.find((a) => a.sessionId === event.session_id)
+      if (bySession) return bySession.id
+    }
+    if (event.agent_id) {
+      const name = event.agent_id.replace(/^agent-/, '')
+      const byName = agents.find((a) => a.id === name || a.name === name)
+      if (byName) return byName.id
+      return name
+    }
+    return null
+  }
+
+  // Append already-keyed chat messages, skipping any whose id was already seen.
+  const appendChatDeduped = (agentId: string, msgs: ChatMessage[]) => {
+    const fresh = msgs.filter((m) => !seenEventIds.current.has(m.id))
+    if (fresh.length === 0) return
+    for (const m of fresh) seenEventIds.current.add(m.id)
+    setData((d) => ({ ...d, chats: { ...d.chats, [agentId]: [...(d.chats[agentId] ?? []), ...fresh] } }))
+  }
 
   // Auto-detect the live facade: if GET /api/dashboard answers, switch to live
-  // data + subscribe to the SSE stream. Otherwise stay on fixtures.
+  // read-model data, keep it fresh with a light re-poll, and consume the
+  // INCREMENTAL event tail (ST4/ST8) -- each `event: event` SSE frame is a
+  // committed CapoEvent that we project into the targeted agent's chat. This is
+  // not a full-dashboard re-poll: the streaming agent reply arrives here.
   useEffect(() => {
     let es: EventSource | null = null
+    let poll: ReturnType<typeof setInterval> | null = null
     let cancelled = false
-    fetch('/api/dashboard', { cache: 'no-store' })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('no facade'))))
-      .then((j) => {
+
+    // The dashboard read model owns agents / lanes / summary, NOT the chat
+    // conversation (chats are built client-side from the event tail + thread).
+    // `keepChats` preserves the accumulated `chats` across re-polls so a poll
+    // never wipes the streamed reply; the initial live load drops the fixture
+    // chats by starting fresh.
+    const refreshDashboard = (keepChats: boolean) =>
+      fetch('/api/dashboard', { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error('no facade'))))
+        .then((j) => {
+          if (cancelled) return
+          setData((prev) => {
+            const next = normalize(j)
+            return keepChats ? { ...next, chats: prev.chats } : next
+          })
+        })
+
+    refreshDashboard(false)
+      .then(() => {
         if (cancelled) return
         liveRef.current = true
-        setData(normalize(j))
+        // Re-poll the projected read model (agents/lanes/dispatch) on a slow
+        // timer; the chat/conversation surface is driven by the event tail, not
+        // this poll.
+        poll = setInterval(() => { void refreshDashboard(true).catch(() => {}) }, 4000)
+
+        // Resume the tail from "now" (the server's default): only events
+        // committed after we subscribed stream in, so we are not flooded with
+        // backlog. Per-session history is hydrated on demand via /api/thread.
         es = new EventSource('/api/events')
-        es.onmessage = (ev) => {
-          try {
-            const parsed = JSON.parse(ev.data)
-            if (!parsed.error) setData(normalize(parsed))
-          } catch { /* ignore malformed frame */ }
-        }
+        es.addEventListener(SSE_EVENT_NAME, (ev: MessageEvent) => {
+          const event = parseEventFrame(ev.data)
+          if (!event) return
+          const key = chatKeyForEvent(event)
+          if (!key) return
+          const msg = eventToChatMessage(event)
+          if (msg) appendChatDeduped(key, [msg])
+        })
       })
       .catch(() => { /* fixture mode */ })
-    return () => { cancelled = true; es?.close() }
+    return () => {
+      cancelled = true
+      es?.close()
+      if (poll) clearInterval(poll)
+    }
   }, [])
 
   const logCmd = (text: string, tone?: 'default' | 'danger') =>
@@ -85,18 +159,32 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     kind: string,
     agent: string,
     extra: Record<string, string>,
-  ): Promise<{ ok: boolean; error?: string }> => {
+  ): Promise<{ ok: boolean; error?: string; sessionId?: string | null }> => {
     try {
       const res = await fetch('/api/commands', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ kind, agent, ...extra }),
       })
-      if (res.ok) return { ok: true }
+      if (res.ok) {
+        // The reply carries the targeted session so we can read its thread and
+        // tail its streaming reply (see capo-web /api/commands).
+        const body = (await res.json().catch(() => ({}))) as { sessionId?: string | null }
+        return { ok: true, sessionId: body.sessionId ?? null }
+      }
       return { ok: false, error: humanizeErr(await res.text()) }
     } catch (e) {
       return { ok: false, error: `could not reach server: ${String(e)}` }
     }
+  }
+
+  // Hydrate an agent's chat history from the session's projected thread (ST5):
+  // read it once, project to chat messages, and dedupe against the live tail so
+  // history + streamed reply never double up.
+  const hydrateThread = async (agentId: string, sessionId: string) => {
+    const thread = await fetchThread(sessionId)
+    if (!thread) return
+    appendChatDeduped(agentId, threadToChatMessages(thread))
   }
 
   const appendChat = (agentId: string, msgs: ChatMessage[]) =>
@@ -121,7 +209,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (liveRef.current) {
       void postCommand('steer_agent', agentId, { message }).then((r) => {
         if (r.ok) {
-          appendChat(agentId, [sysMsg('Steering goal sent through the server boundary · the agent reply updates live.')])
+          appendChat(agentId, [sysMsg('Steering goal sent through the server boundary · the agent reply streams in live.')])
+          // The streamed reply arrives on the event tail; also read the session
+          // thread once so any already-committed turn items render immediately.
+          if (r.sessionId) void hydrateThread(agentId, r.sessionId)
         } else {
           appendChat(agentId, [sysMsg(`⨯ ${r.error}`)])
           logCmd(`steer_agent failed: ${r.error}`, 'danger')
