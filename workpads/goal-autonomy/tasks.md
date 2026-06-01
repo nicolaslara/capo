@@ -780,11 +780,13 @@ Must not do:
 
 ## GA9 - Restart/Replay, E2E Gate, And Goal-Orchestration Close-Out
 
-Status: done. The end-to-end restart/replay gate is proven, the objective gate is
-green across all crates, the realized `goal-orchestration` tasks are marked
-design-realized with pointers to the implementing `GA<N>` (in
-`goal-orchestration/tasks.md`), and the GA0 milestone-gating open question is
-resolved with evidence (both milestones share THIS close-out gate -- see below).
+Status: done (objective gate green; re-verified after a fmt/clippy fixup in the
+GA9 e2e -- see the gate-fixup Evidence note below). The end-to-end restart/replay
+gate is proven, the objective gate is green across all crates, the realized
+`goal-orchestration` tasks are marked design-realized with pointers to the
+implementing `GA<N>` (in `goal-orchestration/tasks.md`), and the GA0
+milestone-gating open question is resolved with evidence (both milestones share
+THIS close-out gate -- see below).
 The distinct GA9 deliverable over GA6/GA8 is a single end-to-end test that drives
 the full orchestration lifecycle (a recorded continuation decision -> a claim-only
 audit-incomplete -> an observed-evidence audit-complete) on one controller, then
@@ -911,3 +913,33 @@ Must not do:
 
 - Do not close the workpad on self-attestation; close on deterministic e2e plus
   restart/replay evidence.
+
+Evidence (gate fixup, 2026-06-01): the objective gate had failed on `cargo fmt`
+(the `goal_timeline_entries` signature in
+`crates/capo-controller/src/goal_autonomy_e2e.rs` needed splitting across lines)
+and on `cargo clippy` (two `dead_code` errors: `goal_timeline_entries` and
+`clear_read_models` were defined and documented but never called -- they were only
+referenced in doc comments). Root cause: the GA9 restart/replay test had not yet
+wired in the two load-bearing helpers its own doc comments describe. Fixed with the
+smallest correct change -- wired both helpers into
+`goal_autonomy_e2e_full_state_survives_server_restart_and_rebuild`: it now (1)
+rebuilds the pre-restart `## Timeline` from the durable event log via
+`goal_timeline_entries` and pins it through `render_historical_report_with_timeline`
+(asserting the timeline is non-empty), (2) calls `clear_read_models(restarted.state())`
+after the cold reopen and before `rebuild_projections()`, so the post-restart goal /
+continuation / audit / report assertions pass ONLY via the replay path (not stale
+on-disk rows), and (3) re-rebuilds and asserts the post-restart timeline + report
+match byte-for-byte. `cargo fmt` then made the formatting canonical (no behavior
+change). Commands run from the worktree root:
+
+- `cargo fmt --check` -> exit 0 (clean).
+- `cargo clippy --all-targets --all-features -- -D warnings` -> exit 0 (the two
+  `dead_code` errors are resolved; no warnings).
+- `cargo test -p capo-controller goal_autonomy_e2e` -> 9 passed
+  (8 GA8 branches + the GA9 restart/replay test).
+- `cargo test --workspace` -> exit 0, 0 failed across all crates (capo-controller
+  lib: 176 passed, 2 ignored; capo-server lib: 108 passed, 3 ignored; capo-state
+  lib: 63 passed; capo-cli lib: 64 passed).
+- Objective gate `cargo fmt --check && cargo clippy --all-targets --all-features --
+  -D warnings && cargo test --workspace` -> exit 0. Live Codex/Claude smokes stayed
+  unset (GA9 Verification does not call for one).

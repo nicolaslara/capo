@@ -62,6 +62,7 @@ dependencies = [
  "capo-runtime",
  "capo-state",
  "capo-tools",
+ "rusqlite",
  "serde_json",
 ]
 

@@ -22,3 +22,9 @@ serde_json = "1.0.150"
 
 [dev-dependencies]
 serde_json = "1.0.150"
+# GA9 restart/replay test only: open the on-disk store directly to CLEAR the
+# read-model (projection) tables before a reopen, so the post-restart assertions
+# can only pass via `rebuild_projections()` replaying the durable log -- i.e. the
+# restart-survival property is genuinely load-bearing, not satisfied by stale
+# projection rows that a cold open would have served regardless.
+rusqlite = { version = "0.39.0", features = ["bundled"] }

@@ -53,10 +53,10 @@ use capo_core::{
     AgentId, EvidenceId, GoalId, ProjectId, RequirementId, RunId, SessionId, TaskId, TurnId,
 };
 use capo_state::{
-    AgentProjection, EventKind, EvidenceProjection, GoalAuditDecisionProjection, GoalProjection,
-    GoalReportInputs, GoalReportProjection, NewEvent, ProjectionRecord, RenderedGoalReport,
-    RequirementLedgerProjection, RunProjection, SessionProjection, TaskProjection,
-    render_goal_report_markdown,
+    AgentProjection, EventKind, EventRecord, EvidenceProjection, GoalAuditDecisionProjection,
+    GoalProjection, GoalReportInputs, GoalReportProjection, NewEvent, ProjectionRecord,
+    RenderedGoalReport, RequirementLedgerProjection, RunProjection, SessionProjection,
+    TaskProjection, render_goal_report_markdown,
 };
 
 use crate::{
@@ -701,13 +701,28 @@ _No events recorded._
 /// there and the e2e snapshots the SAME bytes the operator sees; the two renderers
 /// can no longer diverge because there is only one.
 ///
-/// We supply an EMPTY timeline so the snapshot is deterministic (the per-event
-/// sequence/actor ordering is asserted by branch 1 and the server tests, not here);
-/// every report INPUT is read from the persisted projections, so the report is
-/// rebuildable from events + projections.
+/// Branch 7's golden snapshot supplies an EMPTY timeline so the snapshot string is
+/// deterministic; the GA9 restart test instead supplies a REAL, non-empty timeline
+/// via [`render_historical_report_with_timeline`] so the event-log-derived `##
+/// Timeline` section is actually exercised across the restart. Either way, every
+/// report INPUT is read from the persisted projections / durable event log, so the
+/// report is rebuildable from events + projections.
 fn render_historical_report(
     controller: &FakeBoundaryController,
     goal_id: &GoalId,
+) -> RenderedGoalReport {
+    render_historical_report_with_timeline(controller, goal_id, &[])
+}
+
+/// As [`render_historical_report`], but with an explicit `timeline` so a caller can
+/// pin the `## Timeline` section. The GA9 restart test passes the timeline rebuilt
+/// from the durable event log via [`goal_timeline_entries`] (the SAME item-scoped
+/// gather `capo_server`'s `goal_timeline_entries` performs), so the section the e2e
+/// pins is the section the operator actually sees in the shipped report.
+fn render_historical_report_with_timeline(
+    controller: &FakeBoundaryController,
+    goal_id: &GoalId,
+    timeline: &[EventRecord],
 ) -> RenderedGoalReport {
     let state = controller.state();
     let goal = state.goal(goal_id).expect("goal").expect("goal present");
@@ -736,16 +751,65 @@ fn render_historical_report(
         delegated_provider_goals: &delegated_provider_goals,
         evidence: &evidence,
         audit: audit.as_ref(),
-        timeline: &[],
+        timeline,
     };
     render_goal_report_markdown(&inputs)
 }
 
+/// Rebuild the goal's event timeline from the durable log, mirroring `capo_server`'s
+/// `goal_timeline_entries` (the controller crate cannot depend on `capo-server`, but
+/// both reach the SAME `capo_state` event-log reads, so the result is byte-identical
+/// to what the operator-facing report renders): run-scoped evidence events plus every
+/// event keyed by the goal / its requirements / reports / continuations as `item_id`,
+/// deduped by `sequence` and ordered by `sequence`. This is the section of the report
+/// derived from the raw `events` log rather than the projections, so it is the part
+/// most dependent on a faithful replay across a restart.
+fn goal_timeline_entries(
+    controller: &FakeBoundaryController,
+    goal_id: &GoalId,
+) -> Vec<EventRecord> {
+    let state = controller.state();
+    let goal = state.goal(goal_id).expect("goal").expect("goal present");
+    let mut records: Vec<EventRecord> = Vec::new();
+    if let Some(run_id) = goal.attempt_run_id.as_ref() {
+        records = state
+            .evidence_events_for_run(run_id)
+            .expect("evidence events for run");
+    }
+    let mut item_ids: Vec<String> = vec![goal_id.to_string()];
+    for ledger in state
+        .requirement_ledgers_for_goal(goal_id)
+        .expect("requirements")
+    {
+        item_ids.push(ledger.requirement_id.to_string());
+    }
+    for report in state.goal_reports_for_goal(goal_id).expect("reports") {
+        item_ids.push(report.goal_report_id);
+    }
+    for continuation in state
+        .goal_continuations_for_goal(goal_id)
+        .expect("continuations")
+    {
+        item_ids.push(continuation.continuation_id);
+    }
+    for record in state.events_for_items(&item_ids).expect("events for items") {
+        if !records.iter().any(|seen| seen.sequence == record.sequence) {
+            records.push(record);
+        }
+    }
+    records.sort_by_key(|record| record.sequence);
+    records
+}
+
 /// GA9 (goal-orchestration GO13 + GO14 close-out): reopen the controller over the
-/// SAME on-disk state root with a fresh scripted-mock adapter -- a genuine server
-/// restart, NOT a `rebuild_projections()` on the live handle. The reopened
-/// controller shares no in-memory state with the original: every read model it
-/// serves is reconstructed from the durable event log on disk.
+/// SAME on-disk state root with a fresh scripted-mock adapter. This drops every
+/// in-memory handle the original held and opens a new [`capo_state::SqliteStateStore`]
+/// (its `open()` never clears the projection tables, so a cold open serves whatever
+/// rows are on disk). On its own the reopen proves only that the on-disk read models
+/// survive a process boundary; the GA9 test makes the replay path load-bearing by
+/// CLEARING those read models with [`clear_read_models`] between reopen and rebuild,
+/// so the post-restart assertions can pass ONLY because `rebuild_projections()`
+/// replayed the durable `projection_records` log.
 fn reopen(state_root: &Path) -> FakeBoundaryController {
     FakeBoundaryController::open_with_adapter(
         ProjectId::new(PROJECT),
@@ -753,6 +817,31 @@ fn reopen(state_root: &Path) -> FakeBoundaryController {
         AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new(SESSION)),
     )
     .expect("reopen controller over the same state root")
+}
+
+/// GA9: CORRUPT the on-disk read models by deleting every row from the goal-domain
+/// projection tables (and the watermark), reaching the store's db file directly. The
+/// durable `events` and `projection_records` logs are left intact, so a subsequent
+/// `rebuild_projections()` must replay them to repopulate the read models. This is
+/// what makes the GA9 restart genuinely load-bearing: after this call the goal /
+/// continuation / audit reads are EMPTY, so they come back ONLY via the replay path,
+/// not because stale projection rows happened to survive the process boundary.
+fn clear_read_models(state: &capo_state::SqliteStateStore) {
+    let connection = rusqlite::Connection::open(state.db_path()).expect("open store db directly");
+    for table in [
+        "goals",
+        "requirement_ledgers",
+        "goal_reports",
+        "goal_continuations",
+        "delegated_provider_goals",
+        "goal_audit_decisions",
+        "evidence",
+        "projection_watermarks",
+    ] {
+        connection
+            .execute(&format!("DELETE FROM {table}"), [])
+            .unwrap_or_else(|err| panic!("clear {table}: {err}"));
+    }
 }
 
 /// GA9: the END-TO-END restart/replay gate.
@@ -828,8 +917,16 @@ fn goal_autonomy_e2e_full_state_survives_server_restart_and_rebuild() {
     assert!(complete_audit.verdict.is_complete());
     assert_eq!(complete_audit.reason, "all_requirements_met");
 
-    // Capture the pre-restart read-model state the restart must reproduce.
-    let report_before = render_historical_report(&controller, &goal_id);
+    // Capture the pre-restart read-model state the restart must reproduce. Pin a REAL,
+    // non-empty `## Timeline` (rebuilt from the durable event log) so the restart
+    // exercises the event-log-derived report section, not just the projections.
+    let timeline_before = goal_timeline_entries(&controller, &goal_id);
+    assert!(
+        !timeline_before.is_empty(),
+        "the lifecycle above must produce a non-empty event timeline"
+    );
+    let report_before =
+        render_historical_report_with_timeline(&controller, &goal_id, &timeline_before);
     let continuations_before = continuation_decisions(&controller);
     let verdict_before = controller
         .state()
@@ -849,6 +946,10 @@ fn goal_autonomy_e2e_full_state_survives_server_restart_and_rebuild() {
     //     rebuild every projection from the durable event log alone.
     drop(controller);
     let restarted = reopen(&state_root);
+    // Make the replay path load-bearing: clear the goal-domain read models the cold
+    // open served from disk so the post-restart assertions can pass ONLY because
+    // `rebuild_projections()` replayed the durable `projection_records` log.
+    clear_read_models(restarted.state());
     restarted
         .state()
         .rebuild_projections()
@@ -887,8 +988,15 @@ fn goal_autonomy_e2e_full_state_survives_server_restart_and_rebuild() {
     assert!(re_audit.verdict.is_complete());
     assert_eq!(re_audit.reason, "all_requirements_met");
 
-    // The historical report rebuilds from the durable log to the identical bytes.
-    let report_after = render_historical_report(&restarted, &goal_id);
+    // The historical report (timeline included) rebuilds from the durable log to the
+    // identical bytes -- including the `## Timeline` section rebuilt from the events log.
+    let timeline_after = goal_timeline_entries(&restarted, &goal_id);
+    assert_eq!(
+        timeline_after, timeline_before,
+        "the event-log-derived timeline rebuilds identically after a server restart"
+    );
+    let report_after =
+        render_historical_report_with_timeline(&restarted, &goal_id, &timeline_after);
     assert_eq!(
         report_after.body, report_before.body,
         "the historical report rebuilds identically after a server restart"
