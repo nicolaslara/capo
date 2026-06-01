@@ -37,6 +37,7 @@ mod checkpoint;
 mod completion_auditor;
 mod continuation_context;
 mod continuation_scheduler;
+mod dp10_consolidated;
 mod fake_session;
 mod goal_autonomy_e2e;
 mod grant_lifecycle;
