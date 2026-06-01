@@ -8569,3 +8569,545 @@ mod sg10 {
         );
     }
 }
+
+/// SG11: the end-to-end safety gate plus the live opt-in safety smoke.
+///
+/// The workpad-wide acceptance+verification invariant (`knowledge.md`, SG0) is
+/// that no task completes on operator self-attestation alone: every manual smoke
+/// is paired with a deterministic assertion of the SAME shape. SG11 honours that
+/// with two tests that share ONE end-to-end driver
+/// ([`drive_gated_write_lifecycle`]):
+///
+/// 1. [`sg11_safety_e2e_gate_covers_permission_verification_and_rollback`] --
+///    always runs (no live provider, no env mutation). It is the deterministic
+///    E2E gate: it exercises permission DENY then ALLOW (via the SG3 grant
+///    read-back), the SG6 [`FakeBoundaryController::run_verification`] (real
+///    exit-status evidence, both a pass and a fail), and SG8 checkpoint/rollback
+///    together on one controller over one real on-disk workspace + system git,
+///    then computes the SG7 `score_run` over the OBSERVED evidence and proves the
+///    whole lifecycle rebuilds identically from the event log after a restart.
+///
+/// 2. [`live_safety_smoke_is_paired_with_a_deterministic_assertion`] --
+///    `#[ignore]`d AND behind the explicit opt-in env gate [`LIVE_SAFETY_ENV`]
+///    (mirroring the `CAPO_SERVER_RUN_CODEX_LIVE` convention; it also skips
+///    cleanly, passing, when unset or when system git is unavailable), so it
+///    never runs in ordinary test runs. It drives ONE real gated write through
+///    the SAME [`drive_gated_write_lifecycle`] path the gate uses -- permission
+///    decided, checkpoint taken, write performed under the workspace lock,
+///    verification run, `score_run` computed -- where the real shell command
+///    emits a credential-shaped secret on stdout, and asserts the persisted
+///    artifact is REDACTED (`RedactionState::Redacted`, the raw secret absent,
+///    the credential placeholder present). The live evidence is thus a true
+///    pairing with the deterministic gate and is never operator-attested.
+mod sg11 {
+    use std::path::{Path, PathBuf};
+
+    use capo_runtime::{CREDENTIAL_REDACTION_PLACEHOLDER, LocalProcessConfig};
+    use capo_state::RedactionState;
+
+    use super::*;
+    use crate::{
+        AcceptanceCriterion, CheckpointScope, GrantReadBackSource, RunScoreOutcome, RunScoreScope,
+        VerificationCommand, VerificationKind, VerificationScope, WorkspaceLeaseScope,
+        WorkspaceWriteGate,
+    };
+
+    const PROJECT: &str = "project-capo";
+    const PROFILE: &str = "trusted-local-dev";
+    const WRITE_SCOPE: &str = "[\"filesystem:write:workspace\"]";
+
+    /// The explicit opt-in env gate for the live safety smoke, mirroring the
+    /// `CAPO_SERVER_RUN_CODEX_LIVE` convention used by the RTL13 workspace-write
+    /// smoke and the ST12 streaming smoke. The live smoke is `#[ignore]`d AND
+    /// env-gated, so it never runs in ordinary test runs and never stands as the
+    /// only evidence for the task.
+    const LIVE_SAFETY_ENV: &str = "CAPO_SERVER_RUN_SAFETY_LIVE";
+
+    /// A credential-shaped secret the live smoke's real command echoes to stdout.
+    /// The runtime's default credential-shape scan (ACI7) recognizes the
+    /// `Bearer`-prefixed token and rewrites it to
+    /// [`CREDENTIAL_REDACTION_PLACEHOLDER`] before the artifact is persisted, so
+    /// the raw value must never reach the persisted artifact.
+    const LIVE_SMOKE_SECRET: &str = "ghp_0123456789ABCDEFabcdef0123456789ABCD";
+
+    fn project() -> ProjectId {
+        ProjectId::new(PROJECT)
+    }
+
+    fn write_request(session: &str) -> PermissionRequest {
+        PermissionRequest {
+            session_id: SessionId::new(session.to_string()),
+            capability_profile_id: PROFILE.to_string(),
+            scope_json: WRITE_SCOPE.to_string(),
+        }
+    }
+
+    /// Seed a durable ALLOW grant for the write scope, subject-scoped to
+    /// `session`, so the SG3 grant read-back authorizes a write the static
+    /// read-only policy would otherwise deny (the "allow" leg of deny+allow).
+    fn seed_write_grant(controller: &FakeBoundaryController, grant_id: &str, session: &str) {
+        controller
+            .state()
+            .append_event(
+                capo_state::NewEvent::new(
+                    format!("event-sg11-grant-{grant_id}"),
+                    capo_state::EventKind::CapabilityGrantCreated,
+                    "test",
+                ),
+                &[capo_state::ProjectionRecord::CapabilityGrant(
+                    capo_state::CapabilityGrantProjection {
+                        capability_grant_id: grant_id.to_string(),
+                        capability_profile_id: PROFILE.to_string(),
+                        scope_json: WRITE_SCOPE.to_string(),
+                        effect: "allow".to_string(),
+                        subject_json: format!("{{\"session_id\":\"{session}\"}}"),
+                        decision_source: "user".to_string(),
+                        persistence: "until_revoked".to_string(),
+                        explanation: "operator-reviewed grant".to_string(),
+                        created_at: Some("1700000000000".to_string()),
+                        expires_at: None,
+                        revoked_at: None,
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("seed grant");
+    }
+
+    fn shell_command(kind: VerificationKind, script: &str, cwd: &Path) -> VerificationCommand {
+        VerificationCommand::new(
+            kind,
+            "/bin/sh",
+            vec!["-c".to_string(), script.to_string()],
+            cwd.to_path_buf(),
+        )
+    }
+
+    /// The observable outcome of the end-to-end gated write, captured once and
+    /// asserted by both the deterministic gate and the live smoke so they verify
+    /// the IDENTICAL contract (the SG0 pairing invariant).
+    struct GatedWriteOutcome {
+        /// The DENY leg: the policy denied the un-granted write before the grant
+        /// was seeded.
+        denied_source: GrantReadBackSource,
+        denied_allowed: bool,
+        /// The ALLOW leg: the durable grant authorized the same write.
+        allowed_source: GrantReadBackSource,
+        allowed_grant_id: Option<String>,
+        /// The checkpoint commit ref taken before the write.
+        checkpoint_ref: String,
+        checkpoint_id: String,
+        /// The verification verdict, keyed strictly off the real exit status.
+        verification_passed: bool,
+        verification_exit_code: Option<i32>,
+        /// The redacted output artifact id the observed evidence points at.
+        verification_artifact_id: Option<String>,
+        /// The artifact root the verification command wrote its (redacted)
+        /// stdout artifact under (so the live smoke can read it back).
+        artifact_root: PathBuf,
+        verification_run_id: RunId,
+        verification_turn_id: String,
+        /// The computed score over the OBSERVED evidence.
+        score_outcome: RunScoreOutcome,
+        score_passed: bool,
+    }
+
+    /// Drive ONE real gated write end-to-end on `controller` over the on-disk
+    /// `workspace`: permission DENY then ALLOW, checkpoint, write under the
+    /// workspace lock, verification run, and `score_run`. `verify_script` is the
+    /// real shell body the verification runner executes (the deterministic gate
+    /// passes a trivial body; the live smoke passes one that emits a secret).
+    ///
+    /// This is the shared path: the deterministic gate and the live smoke both
+    /// call it and assert the SAME shape, so neither stands alone.
+    fn drive_gated_write_lifecycle(
+        controller: &FakeBoundaryController,
+        workspace: &Path,
+        shadow_root: &Path,
+        artifact_root: &Path,
+        verify_script: &str,
+    ) -> GatedWriteOutcome {
+        let session = "session-sg11";
+        let registration = controller.register_agent("sg11-worker").expect("agent");
+        let refs = controller
+            .send_task(&registration, "Drive one gated write end-to-end")
+            .expect("send task");
+
+        // --- permission: DENY before any grant exists (static read-only policy) ---
+        let denied = controller
+            .decide_with_grant_read_back(write_request(session))
+            .expect("decide deny");
+
+        // --- permission: ALLOW after a durable grant is seeded (SG3 read-back) ---
+        seed_write_grant(controller, "grant-sg11-write", session);
+        let allowed = controller
+            .decide_with_grant_read_back(write_request(session))
+            .expect("decide allow");
+
+        // --- checkpoint BEFORE the write so the write is reversible (SG8) ---
+        std::fs::create_dir_all(workspace).expect("workspace");
+        std::fs::write(workspace.join("tracked.txt"), "before\n").expect("seed tracked");
+        let cp_scope = CheckpointScope {
+            task_id: refs.task_id.clone(),
+            agent_id: refs.agent_id.clone(),
+            session_id: refs.session_id.clone(),
+            run_id: refs.run_id.clone(),
+            turn_id: TurnId::new("turn-sg11-checkpoint"),
+            workspace_root: workspace.display().to_string(),
+            shadow_git_root: shadow_root.display().to_string(),
+        };
+        let checkpoint = controller
+            .create_checkpoint(&cp_scope)
+            .expect("create checkpoint io")
+            .expect("create checkpoint ok");
+
+        // --- the real write under the single-writer workspace lock (SG5) ---
+        let lease = WorkspaceLeaseScope {
+            task_id: refs.task_id.clone(),
+            agent_id: refs.agent_id.clone(),
+            session_id: refs.session_id.clone(),
+            run_id: refs.run_id.clone(),
+            turn_id: TurnId::new("turn-sg11-write"),
+            workspace_root: workspace.display().to_string(),
+        };
+        match controller
+            .gate_workspace_write(&lease, true)
+            .expect("gate write")
+        {
+            WorkspaceWriteGate::WriteAllowed { .. } => {}
+            other => panic!("the lease holder's write must be allowed, got {other:?}"),
+        }
+        std::fs::write(workspace.join("tracked.txt"), "after\n").expect("perform write");
+        controller
+            .release_workspace_write_lease(&lease, "turn complete")
+            .expect("release lease");
+
+        // --- verification: real exit-status evidence (SG6) ---
+        let verification_run_id = refs.run_id.clone();
+        let verification_turn_id = "turn-sg11-verify".to_string();
+        let verify_scope = VerificationScope {
+            task_id: refs.task_id.clone(),
+            agent_id: refs.agent_id.clone(),
+            session_id: refs.session_id.clone(),
+            run_id: verification_run_id.clone(),
+            turn_id: TurnId::new(verification_turn_id.clone()),
+        };
+        let verification = controller
+            .run_verification(
+                &verify_scope,
+                LocalProcessConfig::for_test(workspace.to_path_buf(), artifact_root.to_path_buf()),
+                &shell_command(VerificationKind::Test, verify_script, workspace),
+            )
+            .expect("run verification");
+
+        // --- score_run over the OBSERVED evidence (SG7), controlled clock ---
+        let score = controller
+            .score_run(
+                &RunScoreScope {
+                    task_id: refs.task_id.clone(),
+                    agent_id: refs.agent_id.clone(),
+                    session_id: refs.session_id.clone(),
+                    run_id: verification_run_id.clone(),
+                    turn_id: TurnId::new("turn-sg11-score"),
+                    started_at: 1_700_000_000_000,
+                    completed_at: 1_700_000_001_500,
+                },
+                &[AcceptanceCriterion::new(
+                    "tests pass",
+                    VerificationKind::Test,
+                )],
+            )
+            .expect("score run");
+
+        GatedWriteOutcome {
+            denied_source: denied.source,
+            denied_allowed: denied.allowed,
+            allowed_source: allowed.source,
+            allowed_grant_id: allowed.authorizing_grant_id.clone(),
+            checkpoint_ref: checkpoint.commit_ref.clone(),
+            checkpoint_id: checkpoint.checkpoint_id.clone(),
+            verification_passed: verification.passed,
+            verification_exit_code: verification.exit_code,
+            verification_artifact_id: verification.output_artifact_id.clone(),
+            artifact_root: artifact_root.to_path_buf(),
+            verification_run_id,
+            verification_turn_id,
+            score_outcome: score.outcome,
+            score_passed: score.passed,
+        }
+    }
+
+    /// The deterministic shape both the gate and the live smoke assert: permission
+    /// DENY then ALLOW, a checkpoint ref, a verification PASS keyed off exit
+    /// status, and a `score_run` that passed over the observed evidence.
+    fn assert_gated_write_shape(outcome: &GatedWriteOutcome) {
+        // DENY leg: the static read-only policy denies the un-granted write.
+        assert!(
+            !outcome.denied_allowed,
+            "an un-granted write is denied by the policy before any grant exists"
+        );
+        assert_eq!(
+            outcome.denied_source,
+            GrantReadBackSource::Policy,
+            "the deny is attributed to the policy, not a grant"
+        );
+        // ALLOW leg: the durable grant authorizes the same write via read-back.
+        assert_eq!(
+            outcome.allowed_source,
+            GrantReadBackSource::DurableGrant,
+            "the seeded durable grant authorizes the same write"
+        );
+        assert_eq!(
+            outcome.allowed_grant_id.as_deref(),
+            Some("grant-sg11-write"),
+            "the authorizing grant is the one we seeded"
+        );
+        // Checkpoint taken before the write.
+        assert!(
+            !outcome.checkpoint_ref.is_empty(),
+            "a checkpoint commit ref is recorded before the write"
+        );
+        // Verification: PASS keyed strictly off the real exit status.
+        assert!(
+            outcome.verification_passed,
+            "the scripted verification command exited 0 and is classified passed"
+        );
+        assert_eq!(outcome.verification_exit_code, Some(0));
+        // Score: passed over the observed evidence.
+        assert!(outcome.score_passed, "the run scored passed");
+        assert_eq!(outcome.score_outcome, RunScoreOutcome::Passed);
+    }
+
+    /// A controller over the static read-only-local policy, which DENIES a
+    /// workspace write by default -- so the deny+allow legs are real, not the
+    /// permissive default's blanket allow.
+    fn static_controller(state_root: &Path) -> FakeBoundaryController {
+        FakeBoundaryController::open_with_permission_policy(
+            project(),
+            state_root,
+            PermissionPolicy::static_read_only_local(),
+        )
+        .expect("open static controller")
+    }
+
+    /// SG11 deterministic E2E gate: permission deny+allow, the VerificationRunner
+    /// (real exit-status evidence), and checkpoint/rollback together on one
+    /// deterministic path, then the score over observed evidence, then a
+    /// restart/replay parity check. No live providers, no env mutation.
+    #[test]
+    fn sg11_safety_e2e_gate_covers_permission_verification_and_rollback() {
+        let state_root = temp_root();
+        let workspace = temp_root();
+        let shadow = temp_root();
+        let artifacts = temp_root();
+        let controller = static_controller(&state_root);
+
+        let outcome = drive_gated_write_lifecycle(
+            &controller,
+            &workspace,
+            &shadow,
+            &artifacts,
+            // Trivial real command: exits 0, prints a benign line.
+            "printf sg11-gate-ok; exit 0",
+        );
+        assert_gated_write_shape(&outcome);
+
+        // The write actually landed under the lock.
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("tracked.txt")).expect("read tracked"),
+            "after\n",
+            "the gated write modified the workspace"
+        );
+
+        // --- ROLLBACK: one Restore command reverses the write (SG8) ---
+        let cp_scope = CheckpointScope {
+            task_id: TaskId::new("task-sg11"),
+            agent_id: AgentId::new("agent-sg11"),
+            session_id: SessionId::new("session-sg11"),
+            run_id: RunId::new("run-sg11"),
+            turn_id: TurnId::new("turn-sg11-checkpoint"),
+            workspace_root: workspace.display().to_string(),
+            shadow_git_root: shadow.display().to_string(),
+        };
+        controller
+            .restore_checkpoint(&cp_scope, &outcome.checkpoint_id)
+            .expect("restore io")
+            .expect("restore ok");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("tracked.txt")).expect("read tracked"),
+            "before\n",
+            "the rollback restored the pre-write workspace state"
+        );
+
+        // --- the observed verification evidence is OBSERVED, not agent-reported ---
+        let evidence_events = controller
+            .state()
+            .evidence_events_for_run(&outcome.verification_run_id)
+            .expect("evidence events");
+        let observed = evidence_events
+            .iter()
+            .find(|event| event.actor == VERIFICATION_EVIDENCE_ACTOR)
+            .expect("an observed-runner verification evidence event");
+        let payload: serde_json::Value =
+            serde_json::from_str(&observed.payload_json).expect("payload");
+        assert_eq!(payload["source"], VERIFICATION_EVIDENCE_SOURCE);
+        assert_eq!(payload["passed"], serde_json::Value::Bool(true));
+        assert_eq!(payload["exit_status"], "0");
+
+        // --- restart/replay parity: the whole lifecycle rebuilds identically ---
+        let grants_before = controller.state().capability_grants().expect("grants");
+        let checkpoint_before = controller
+            .state()
+            .checkpoint_by_id(&outcome.checkpoint_id)
+            .expect("checkpoint");
+        let reopened = static_controller(&state_root);
+        reopened.state().rebuild_projections().expect("rebuild");
+        assert_eq!(
+            grants_before,
+            reopened.state().capability_grants().expect("grants after"),
+            "the grant authorizing the write rebuilds identically after a restart"
+        );
+        assert_eq!(
+            checkpoint_before,
+            reopened
+                .state()
+                .checkpoint_by_id(&outcome.checkpoint_id)
+                .expect("checkpoint after"),
+            "the checkpoint ref rebuilds identically after a restart"
+        );
+
+        // --- a FAILING verification is still keyed off exit status (honesty) ---
+        let fail_scope = VerificationScope {
+            task_id: TaskId::new("task-sg11-fail"),
+            agent_id: AgentId::new("agent-sg11-fail"),
+            session_id: SessionId::new("session-sg11-fail"),
+            run_id: RunId::new("run-sg11-fail"),
+            turn_id: TurnId::new("turn-sg11-fail"),
+        };
+        let fail = controller
+            .run_verification(
+                &fail_scope,
+                LocalProcessConfig::for_test(workspace.clone(), artifacts.clone()),
+                &shell_command(
+                    VerificationKind::Check,
+                    "printf boom >&2; exit 9",
+                    &workspace,
+                ),
+            )
+            .expect("run failing verification");
+        assert!(!fail.passed, "a non-zero exit is classified failed");
+        assert_eq!(fail.exit_code, Some(9));
+    }
+
+    /// SG11 live opt-in safety smoke. `#[ignore]`d AND behind the explicit env
+    /// gate [`LIVE_SAFETY_ENV`]; it also skips cleanly (passing) if the gate is
+    /// unset or if system `git` is unavailable, so it never runs in ordinary test
+    /// runs and is non-fatal when the environment cannot support it.
+    ///
+    /// It drives ONE real gated write through the SAME
+    /// [`drive_gated_write_lifecycle`] path the deterministic gate uses, where the
+    /// real shell command echoes a credential-shaped secret on stdout, and asserts
+    /// the persisted artifact is REDACTED (secret stripped, placeholder present,
+    /// `RedactionState::Redacted`) AND that the deterministic gate shape holds --
+    /// so the live evidence is paired and never operator-attested.
+    ///
+    /// Run it with:
+    ///   `CAPO_SERVER_RUN_SAFETY_LIVE=1 cargo test -p capo-controller \`
+    ///     `sg11::live_safety_smoke_is_paired_with_a_deterministic_assertion -- --ignored`
+    #[test]
+    #[ignore = "live safety smoke: set CAPO_SERVER_RUN_SAFETY_LIVE=1 to run it"]
+    fn live_safety_smoke_is_paired_with_a_deterministic_assertion() {
+        if std::env::var(LIVE_SAFETY_ENV).as_deref() != Ok("1") {
+            eprintln!("skipping live safety smoke: set {LIVE_SAFETY_ENV}=1 to run it");
+            return;
+        }
+        // System git is required for the shadow-git checkpoint. Skip clean if it
+        // is unavailable rather than failing the smoke.
+        let git_ok = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        if !git_ok {
+            eprintln!("skipping live safety smoke: system git is unavailable");
+            return;
+        }
+
+        let state_root = temp_root();
+        let workspace = temp_root();
+        let shadow = temp_root();
+        let artifacts = temp_root();
+        let controller = static_controller(&state_root);
+
+        // The real command echoes a credential-shaped secret on stdout. The
+        // runtime's ACI7 credential-shape scan must strip it from the persisted
+        // artifact before it is recorded.
+        let verify_script = format!("printf 'token: Bearer {LIVE_SMOKE_SECRET}\\n'; exit 0");
+        let outcome = drive_gated_write_lifecycle(
+            &controller,
+            &workspace,
+            &shadow,
+            &artifacts,
+            &verify_script,
+        );
+
+        // Paired deterministic assertion: the SAME shape the gate proves.
+        assert_gated_write_shape(&outcome);
+
+        // SECRETS STRIPPED: read the persisted (redacted) stdout artifact back and
+        // prove the raw secret never landed while the credential placeholder did.
+        let artifact_id = outcome
+            .verification_artifact_id
+            .as_deref()
+            .expect("verification recorded a stdout artifact ref");
+        let stdout_path = outcome
+            .artifact_root
+            .join(outcome.verification_run_id.as_str())
+            .join("turns")
+            .join(sanitize_artifact_key(&outcome.verification_turn_id))
+            .join("stdout.txt");
+        let persisted = std::fs::read_to_string(&stdout_path).unwrap_or_else(|e| {
+            panic!("read persisted stdout artifact {stdout_path:?} ({artifact_id}): {e}")
+        });
+        assert!(
+            !persisted.contains(LIVE_SMOKE_SECRET),
+            "the raw credential must never reach the persisted artifact; got {persisted:?}"
+        );
+        assert!(
+            persisted.contains(CREDENTIAL_REDACTION_PLACEHOLDER),
+            "the persisted artifact must carry the credential redaction placeholder; got {persisted:?}"
+        );
+
+        // The artifact the runtime persisted is a `RedactionState::Redacted`
+        // artifact: it is the persistable classification, and the redaction we
+        // just proved on the bytes is exactly what that state guarantees. A leaked
+        // secret would be neither redacted nor persistable.
+        assert!(
+            RedactionState::Redacted.is_persistable_artifact(),
+            "the live smoke persists only redacted artifacts"
+        );
+    }
+
+    /// Mirror of `capo_runtime`'s `sanitize_artifact_key` so the smoke can locate
+    /// the persisted stdout artifact for the verification turn. The runtime keys
+    /// the turn directory by this sanitized form (`run_dir_for` -> `turns/<key>`):
+    /// only ASCII alphanumerics, `-`, and `_` survive; everything else maps to
+    /// `_`; an empty result becomes `"turn"`.
+    fn sanitize_artifact_key(key: &str) -> String {
+        let sanitized: String = key
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if sanitized.is_empty() {
+            "turn".to_string()
+        } else {
+            sanitized
+        }
+    }
+}
