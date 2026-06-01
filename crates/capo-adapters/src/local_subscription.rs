@@ -8,7 +8,7 @@ use capo_runtime::{
     RedactionRule, RuntimeError,
 };
 
-use super::{ClaudeCodeAdapter, CodexExecAdapter, NormalizedAdapterKind};
+use super::{AcpAdapter, ClaudeCodeAdapter, CodexExecAdapter, NormalizedAdapterKind};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalAdapterLaunchPlan {
@@ -348,6 +348,41 @@ impl ClaudeCodeAdapter {
             redaction_rules: launch_plan.redaction_rules,
             output_limit_bytes: launch_plan.output_limit_bytes,
             expected_output_marker: "CAPO_CLAUDE_SMOKE_OK",
+        }
+    }
+}
+
+impl AcpAdapter {
+    /// The launch plan for a generic ACP JSON-RPC 2.0 stdio agent (DP1).
+    ///
+    /// ACP is an interoperability boundary distinct from the subscription
+    /// connectors, so the launched agent is a generic ACP-compatible binary
+    /// (e.g. `acp-agent`) addressed by program + argv. The plan is
+    /// subscription-safe (the same scrubbed env allowlist + redaction rules as
+    /// the Codex/Claude launch plans) and confined to `workspace_root`; the
+    /// runtime owns the process group when this is spawned via
+    /// `LocalProcessRunner::spawn_piped_process`. The wire protocol itself
+    /// (`initialize`/`session/*`) is driven by the `acp_wire` client over the
+    /// piped stdio.
+    pub fn local_launch_plan(
+        program: impl Into<String>,
+        argv: Vec<String>,
+        workspace_root: PathBuf,
+        artifact_root: PathBuf,
+    ) -> LocalAdapterLaunchPlan {
+        LocalAdapterLaunchPlan {
+            adapter_kind: NormalizedAdapterKind::Acp,
+            provider_kind: "acp_jsonrpc_stdio".to_string(),
+            credential_scope: "user_local_subscription".to_string(),
+            program: program.into(),
+            argv,
+            workspace_root,
+            artifact_root,
+            env_allowlist: local_subscription_cli_env_allowlist(),
+            redaction_rules: local_adapter_redaction_rules(),
+            output_limit_bytes: 1024 * 1024,
+            stdout_format: "jsonrpc-line".to_string(),
+            stderr_policy: "logs_redacted".to_string(),
         }
     }
 }

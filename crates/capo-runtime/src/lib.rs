@@ -714,6 +714,80 @@ impl LocalProcessRunner {
         })
     }
 
+    /// Spawn a long-lived process with PIPED stdin+stdout for a bidirectional
+    /// line protocol (e.g. an ACP JSON-RPC 2.0 stdio agent), reusing the same
+    /// env-scrub, workspace confinement, and process-group ownership as
+    /// [`Self::spawn_process`].
+    ///
+    /// Unlike [`Self::spawn_process`] (which redirects the child's stdout/stderr
+    /// to artifact files for a one-shot read), this keeps stdin/stdout as pipes
+    /// so a caller can drive a request/response + notification protocol over the
+    /// wire. The RUNTIME still owns the process group (`process_group(0)` on
+    /// unix), so an adapter that drives the protocol never owns the process
+    /// group itself -- it only borrows the pipe handles via
+    /// [`PipedRunningProcess`]. stderr is still redirected to an artifact file so
+    /// the child's diagnostics are captured and redacted out-of-band.
+    pub fn spawn_piped_process(
+        &self,
+        request: LocalProcessRequest,
+    ) -> RuntimeResult<PipedRunningProcess> {
+        self.ensure_cwd_allowed(&request.cwd)?;
+        fs::create_dir_all(&self.config.artifact_root)?;
+
+        let run_dir = self.run_dir_for(&request.run_id, request.turn_id.as_deref());
+        fs::create_dir_all(&run_dir)?;
+        let stderr_path = run_dir.join("stderr.txt");
+
+        let mut command = Command::new(&request.program);
+        command.args(&request.argv);
+        command.current_dir(&request.cwd);
+        command.env_clear();
+        for name in &self.config.env_allowlist {
+            if let Ok(value) = std::env::var(name) {
+                command.env(name, value);
+            }
+        }
+        self.apply_request_env(&mut command, &request)?;
+        command.stdin(Stdio::piped());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::from(File::create(&stderr_path)?));
+        #[cfg(unix)]
+        {
+            command.process_group(0);
+        }
+
+        let mut child = command.spawn()?;
+        let external_pid = child.id();
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take();
+        Ok(PipedRunningProcess {
+            process: LocalRuntimeProcessRef {
+                run_id: request.run_id.clone(),
+                runtime_process_ref: format!("local-piped-process-{}", request.run_id),
+                external_pid: Some(external_pid),
+                boot_id: boot_id(),
+                status: "running".to_string(),
+                redaction_state: "redacted".to_string(),
+            },
+            child,
+            stdin,
+            stdout,
+            stderr_path,
+            events: vec![
+                RuntimeEvent {
+                    kind: "runtime.start_requested".to_string(),
+                    status: "pending".to_string(),
+                    detail: request.program,
+                },
+                RuntimeEvent {
+                    kind: "runtime.process_started".to_string(),
+                    status: "started".to_string(),
+                    detail: external_pid.to_string(),
+                },
+            ],
+        })
+    }
+
     pub fn interrupt(
         &self,
         process: &LocalRuntimeProcessRef,
@@ -1328,6 +1402,63 @@ pub struct LocalRunningProcess {
     stdout_path: PathBuf,
     stderr_path: PathBuf,
     pub events: Vec<RuntimeEvent>,
+}
+
+/// A runtime-owned process spawned with PIPED stdin+stdout for a bidirectional
+/// line protocol (see [`LocalProcessRunner::spawn_piped_process`]).
+///
+/// The runtime owns the process group; the caller borrows the pipe handles to
+/// drive the protocol and calls [`Self::wait`] (or drops the handle) to reap the
+/// child. The pipe handles are `take`-able exactly once so a wire client can own
+/// them for the lifetime of the protocol.
+#[derive(Debug)]
+pub struct PipedRunningProcess {
+    pub process: LocalRuntimeProcessRef,
+    child: Child,
+    stdin: Option<std::process::ChildStdin>,
+    stdout: Option<std::process::ChildStdout>,
+    stderr_path: PathBuf,
+    pub events: Vec<RuntimeEvent>,
+}
+
+impl PipedRunningProcess {
+    /// Take the child's stdin pipe (writable) exactly once.
+    pub fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        self.stdin.take()
+    }
+
+    /// Take the child's stdout pipe (readable) exactly once.
+    pub fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.stdout.take()
+    }
+
+    /// The artifact path the child's stderr is captured to.
+    pub fn stderr_path(&self) -> &Path {
+        &self.stderr_path
+    }
+
+    /// Signal the whole process group and reap the child, returning its exit
+    /// status string. Closing the wire (dropping the taken stdin) typically lets
+    /// a well-behaved agent exit; this is the explicit teardown path.
+    pub fn shutdown(&mut self, reason: &str) -> RuntimeControlResult {
+        // Drop any retained pipe handle so the child sees EOF on stdin.
+        self.stdin = None;
+        #[cfg(unix)]
+        if let Some(pid) = self.process.external_pid {
+            kill_process_group(pid, "-TERM");
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.process.status = "exited".to_string();
+        RuntimeControlResult {
+            process: self.process.clone(),
+            events: vec![RuntimeEvent {
+                kind: "runtime.stop_requested".to_string(),
+                status: "exited".to_string(),
+                detail: reason.to_string(),
+            }],
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

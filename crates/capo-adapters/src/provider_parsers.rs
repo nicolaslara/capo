@@ -33,6 +33,18 @@ impl AcpAdapter {
     pub fn parse_replay_jsonl(input: &str) -> AdapterParseResult<AdapterFixtureParse> {
         parse_jsonl(input, parse_acp_record)
     }
+
+    /// Normalize a SINGLE raw ACP JSON-RPC value (a `session/update`
+    /// notification frame, or a `session/new`/`initialize` response) into the
+    /// loop's [`NormalizedAdapterEvent`]s.
+    ///
+    /// The live wire client (DP1) ingests `session/update` notifications as they
+    /// arrive off the wire and reuses THIS shared mapper -- the exact same
+    /// `parse_acp_record` path the deterministic replay fixtures exercise -- so
+    /// the live adapter never opens a parallel ingestion route.
+    pub fn normalize_update(raw: &Value) -> Vec<NormalizedAdapterEvent> {
+        parse_acp_record(raw)
+    }
 }
 
 fn parse_codex_record(raw: &Value) -> Vec<NormalizedAdapterEvent> {

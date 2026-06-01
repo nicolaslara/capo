@@ -809,6 +809,215 @@ fn artifact_scanner_allows_redacted_markers_and_rejects_raw_secrets() {
     ));
 }
 
+fn acp_live_setup_plan() -> AcpSessionSetupPlan {
+    let wrappers =
+        capo_tools::RuntimeToolWrappers::new(capo_tools::RuntimeToolConfig::local_workspace(
+            PathBuf::from("/tmp/capo-acp-live-ws"),
+            PathBuf::from("/tmp/capo-acp-live-art"),
+        ));
+    AcpAdapter::session_setup_plan(
+        &wrappers.list_tools(),
+        &capo_tools::PermissionPolicy::allow_trusted_local(),
+        SessionId::new("session-acp-live"),
+    )
+}
+
+fn acp_live_adapter() -> AcpLiveAdapter {
+    AcpLiveAdapter::new(
+        "acp-agent",
+        vec!["--stdio".to_string()],
+        PathBuf::from("/tmp/capo-acp-live-ws"),
+        PathBuf::from("/tmp/capo-acp-live-art"),
+        acp_live_setup_plan(),
+    )
+}
+
+#[test]
+fn acp_live_adapter_drives_scripted_transcript_to_turn_output() {
+    // DP1: the live ACP adapter drives `initialize -> session/new ->
+    // session/prompt` over a SCRIPTED transport (no live process) and reduces the
+    // ingested `session/update` notifications to a provider-neutral TurnOutput,
+    // reusing the same `parse_acp_record` normalizer the replay fixtures use.
+    let transport = ScriptedAcpTransport::new()
+        .on_request(
+            "initialize",
+            vec![ScriptedServerFrame::Response(
+                serde_json::json!({ "protocolVersion": 1 }),
+            )],
+        )
+        .on_request(
+            "session/new",
+            vec![ScriptedServerFrame::Response(
+                serde_json::json!({ "sessionId": "acp-live-session-1" }),
+            )],
+        )
+        .on_request(
+            "session/prompt",
+            vec![
+                ScriptedServerFrame::Update(serde_json::json!({
+                    "sessionId": "acp-live-session-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": "Final answer." }
+                    }
+                })),
+                ScriptedServerFrame::Response(serde_json::json!({ "stopReason": "end_turn" })),
+            ],
+        );
+
+    let adapter = acp_live_adapter();
+    let transcript = adapter.drive(transport, "do the task").expect("drive");
+
+    let session = adapter.open_session(AdapterSessionRequest {
+        session_id: SessionId::new("session-acp-live"),
+        agent_name: "acp-worker".to_string(),
+    });
+    let output = turn_output_from_transcript(
+        &session,
+        &TurnRequest {
+            turn_id: capo_core::TurnId::new("turn-acp-live"),
+            agent_name: "acp-worker".to_string(),
+            goal: "do the task".to_string(),
+        },
+        &transcript,
+    );
+
+    assert_eq!(output.turn_id.as_str(), "turn-acp-live");
+    assert_eq!(output.summary, "Final answer.");
+    assert_eq!(output.status, "completed");
+    assert_eq!(output.external_session_ref, "acp-live-session-1");
+}
+
+#[test]
+fn acp_live_cancel_accepts_late_update_and_finalizes_cancelled() {
+    // DP1: a `session/cancel` issued mid-prompt; the agent still streams a late
+    // `session/update` and answers the prompt with `stopReason: cancelled`. The
+    // late update is ingested and the turn finalizes `canceled`.
+    let transport = ScriptedAcpTransport::new()
+        .on_request(
+            "initialize",
+            vec![ScriptedServerFrame::Response(
+                serde_json::json!({ "protocolVersion": 1 }),
+            )],
+        )
+        .on_request(
+            "session/new",
+            vec![ScriptedServerFrame::Response(
+                serde_json::json!({ "sessionId": "acp-cancel-1" }),
+            )],
+        )
+        // The cancel notification is a client->server frame with no response;
+        // scripting it as a reaction lets the server emit a late update + the
+        // cancelled prompt response in the SAME pump.
+        .on_request(
+            "session/cancel",
+            vec![ScriptedServerFrame::Update(serde_json::json!({
+                "sessionId": "acp-cancel-1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": "late chunk after cancel" }
+                }
+            }))],
+        )
+        .on_request(
+            "session/prompt",
+            vec![ScriptedServerFrame::Response(
+                serde_json::json!({ "stopReason": "cancelled" }),
+            )],
+        );
+
+    // Drive the wire client directly so we can interleave a cancel before the
+    // prompt response is pumped.
+    let mut client = AcpWireClient::attach(transport, acp_live_setup_plan());
+    client.initialize().unwrap();
+    let session_id = client.session_new("/tmp/capo-acp-live-ws").unwrap();
+    // Issue cancel, then drive the prompt (the prompt's scripted response carries
+    // stopReason cancelled, and the cancel reaction queued a late update which the
+    // prompt pump ingests).
+    client.cancel(&session_id).unwrap();
+    let transcript = client.prompt(&session_id, "do the task").unwrap();
+
+    assert_eq!(transcript.stop_reason.as_deref(), Some("cancelled"));
+    assert!(
+        transcript
+            .events
+            .iter()
+            .any(|event| event.content.as_deref() == Some("late chunk after cancel")),
+        "the late update after cancel must still be ingested"
+    );
+
+    let session = AdapterSession {
+        session_id: SessionId::new("session-acp-live"),
+        external_session_ref: "acp-cancel-1".to_string(),
+        adapter_capability: "acp-jsonrpc-stdio".to_string(),
+    };
+    let output = turn_output_from_transcript(
+        &session,
+        &TurnRequest {
+            turn_id: capo_core::TurnId::new("turn-acp-cancel"),
+            agent_name: "acp-worker".to_string(),
+            goal: "do the task".to_string(),
+        },
+        &transcript,
+    );
+    assert_eq!(output.status, "canceled");
+}
+
+#[test]
+fn acp_live_send_turn_fails_closed_fast_when_gate_off() {
+    // DP1 safety floor: with the live opt-in gate OFF (the default in tests), a
+    // live ACP `send_turn` must NOT spawn a process; it fails closed fast and
+    // surfaces the blocked status with the missing-gate detail.
+    assert!(!acp_live_gate_open());
+    let adapter = acp_live_adapter();
+    let session = adapter.open_session(AdapterSessionRequest {
+        session_id: SessionId::new("session-acp-gate"),
+        agent_name: "acp-worker".to_string(),
+    });
+    let output = adapter.send_turn(
+        &session,
+        TurnRequest {
+            turn_id: capo_core::TurnId::new("turn-acp-gate"),
+            agent_name: "acp-worker".to_string(),
+            goal: "do the task".to_string(),
+        },
+    );
+    assert_eq!(output.status, "blocked");
+    assert!(
+        output.summary.contains("CAPO_SERVER_RUN_ACP_LIVE"),
+        "the blocked summary must name the missing live run gate, got: {}",
+        output.summary
+    );
+}
+
+#[test]
+fn acp_live_adapter_reports_real_provider_binding() {
+    let adapter = acp_live_adapter();
+    assert_eq!(adapter.binding().kind, BoundaryKind::AgentAdapter);
+    assert_eq!(adapter.binding().variant, "acp-live");
+    assert!(!adapter.binding().fake);
+}
+
+#[test]
+fn acp_local_launch_plan_is_subscription_safe_and_confined() {
+    let workspace = temp_root("acp-launch-workspace");
+    let artifacts = temp_root("acp-launch-artifacts");
+    let plan = AcpAdapter::local_launch_plan(
+        "acp-agent",
+        vec!["--stdio".to_string()],
+        workspace.clone(),
+        artifacts.clone(),
+    );
+    plan.assert_subscription_safe().unwrap();
+    assert_eq!(plan.adapter_kind, NormalizedAdapterKind::Acp);
+    assert_eq!(plan.provider_kind, "acp_jsonrpc_stdio");
+    assert_eq!(plan.credential_scope, "user_local_subscription");
+    assert_eq!(plan.stdout_format, "jsonrpc-line");
+    assert_eq!(plan.runtime_config().workspace_roots, vec![workspace]);
+    assert!(!plan.env_allowlist.iter().any(|name| name.contains("KEY")));
+    assert_eq!(plan.artifact_root, artifacts);
+}
+
 fn temp_root(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

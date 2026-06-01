@@ -5,6 +5,8 @@
 //! normalized adapter events for the controller pipeline.
 
 mod acp_client;
+mod acp_live;
+mod acp_wire;
 mod adapter;
 mod codex_live;
 mod event;
@@ -14,6 +16,14 @@ mod provider_parsers;
 mod scripted_mock_agent;
 
 pub use acp_client::{AcpClientCall, AcpSessionSetupPlan};
+pub use acp_live::{
+    ACP_LIVE_PREFLIGHT_OPT_IN_ENV, ACP_LIVE_RUN_OPT_IN_ENV, AcpLiveAdapter, AcpLiveError,
+    acp_live_gate_open, turn_output_from_transcript,
+};
+pub use acp_wire::{
+    ACP_PROTOCOL_VERSION, AcpPermissionRoundTrip, AcpTransport, AcpTurnTranscript, AcpWireClient,
+    AcpWireError, PipedProcessTransport, ScriptedAcpTransport, ScriptedServerFrame,
+};
 pub use adapter::{
     AdapterSession, AdapterSessionRequest, AgentAdapter, AgentAdapterHandle, FakeAdapter,
     FakeProviderConnector, FakeProviderInfo, PermissionDeliveryAck, ProviderConnector, TurnOutput,

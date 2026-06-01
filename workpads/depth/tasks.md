@@ -81,7 +81,7 @@ Evidence:
 
 ## DP1 - Live ACP JSON-RPC Adapter: initialize/session.new/prompt/update/cancel/request_permission
 
-Status: pending.
+Status: done.
 
 Prerequisite: `real-turn-loop` + `tools-aci`.
 
@@ -123,6 +123,45 @@ Verification:
 - `cargo fmt`
 - Live ACP smoke deferred to DP11; here only the deterministic transcript runs.
 - `git diff --check`
+
+Evidence (DP1 landed 2026-06-01):
+
+- New `crates/capo-adapters/src/acp_wire.rs`: a live JSON-RPC 2.0 ACP wire client
+  (`AcpWireClient`) over an abstract `AcpTransport`. Implements `initialize`
+  (records negotiated integer `protocolVersion`, stable `1`), `session/new`,
+  `session/prompt` (pumps interleaved frames), and `session/cancel`. Ingests
+  `session/update` notifications through the SAME `AcpAdapter::normalize_update`
+  / `parse_acp_record` path the replay fixtures use (no parallel route), and
+  implements the LIVE `session/request_permission` CLIENT round-trip on the wire
+  via `map_acp_options_trusted_local`, writing the chosen `optionId`/`cancelled`
+  back. Ships a deterministic `ScriptedAcpTransport` (no live process) and a
+  `PipedProcessTransport` for the runtime-spawned pipes.
+- New `crates/capo-adapters/src/acp_live.rs`: `AcpLiveAdapter` (an `AgentAdapter`
+  trait impl, `binding.variant = "acp-live"`, real provider) that launches the
+  ACP agent through `RuntimeRunner` (`LocalProcessRunner::spawn_piped_process`,
+  so the runtime owns the process group) and drives the wire client; fail-closed
+  fast behind `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT` + `CAPO_SERVER_RUN_ACP_LIVE`.
+- `crates/capo-runtime/src/lib.rs`: added `LocalProcessRunner::spawn_piped_process`
+  + `PipedRunningProcess` (piped stdin/stdout for a bidirectional line protocol,
+  reusing the existing env-scrub/confinement/process-group ownership).
+- `provider_parsers.rs` exposes `AcpAdapter::normalize_update`;
+  `local_subscription.rs` adds `AcpAdapter::local_launch_plan` (subscription-safe,
+  confined). `fs/*`+`terminal/*` client-call routing reuses the existing
+  `wrapper_request_for_client_call` mapping (advertise-only capabilities).
+- Deterministic tests (no live process): `scripted_transcript_drives_full_acp_flow`
+  (initialize -> session/new -> prompt -> updates -> request_permission ->
+  response), `client_writes_wellformed_jsonrpc_including_permission_response`,
+  `agent_error_response_surfaces_typed_error`,
+  `acp_live_adapter_drives_scripted_transcript_to_turn_output`,
+  `acp_live_cancel_accepts_late_update_and_finalizes_cancelled`,
+  `acp_live_send_turn_fails_closed_fast_when_gate_off`,
+  `acp_live_adapter_reports_real_provider_binding`,
+  `acp_local_launch_plan_is_subscription_safe_and_confined`.
+- Gate (run from `/Users/nicolas/devel/capo-wt/depth`): `cargo fmt --check` PASS;
+  `cargo clippy --all-targets --all-features -- -D warnings` PASS;
+  `cargo test --workspace` PASS (0 failed across all crates; capo-adapters 45
+  passed / 2 ignored). `git diff --check` clean. Live ACP smoke remains deferred
+  to DP11.
 
 ## DP2 - ACP session/load + session/resume And Raw-Update Reconciliation/Dedupe
 
