@@ -602,6 +602,65 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             requirement_detail_json TEXT NOT NULL,
             updated_sequence INTEGER NOT NULL
         );
+        -- DP2 (acp-replay-dedupe.md): the ACP replay/dedupe read models. One
+        -- `adapter_replay_batches` row per bounded ACP update stream (a
+        -- `session/load`, a `session/resume` attach, a live prompt, or restart
+        -- recovery); one `adapter_raw_updates` row per raw `session/update`
+        -- observed BEFORE normalization (pointing at an artifact for large
+        -- payloads, never mutating read models directly); one
+        -- `adapter_timeline_keys` row per protocol-aware key (tool/plan/message)
+        -- with its dedupe confidence. All three rebuild identically from
+        -- `projection_records`.
+        CREATE TABLE IF NOT EXISTS adapter_replay_batches (
+            acp_replay_batch_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            external_session_ref TEXT NOT NULL,
+            source TEXT NOT NULL,
+            status TEXT NOT NULL,
+            load_request_id TEXT,
+            prompt_request_id TEXT,
+            recovery_attempt_id TEXT,
+            raw_update_count INTEGER NOT NULL,
+            imported_count INTEGER NOT NULL,
+            duplicate_count INTEGER NOT NULL,
+            ambiguous_count INTEGER NOT NULL,
+            normalized_sequence_start INTEGER,
+            normalized_sequence_end INTEGER,
+            started_at TEXT,
+            completed_at TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS adapter_raw_updates (
+            acp_raw_update_id TEXT PRIMARY KEY,
+            acp_replay_batch_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            external_session_ref TEXT NOT NULL,
+            batch_index INTEGER NOT NULL,
+            jsonrpc_method TEXT NOT NULL,
+            session_update_kind TEXT,
+            external_item_ref TEXT,
+            acp_timeline_key TEXT,
+            payload_hash TEXT NOT NULL,
+            payload_artifact_id TEXT,
+            replay_source TEXT NOT NULL,
+            dedupe_confidence TEXT NOT NULL,
+            observed_at TEXT,
+            updated_sequence INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS adapter_timeline_keys (
+            adapter_timeline_key_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            external_session_ref TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            stable_ref TEXT,
+            synthetic_ref TEXT,
+            confidence TEXT NOT NULL,
+            first_sequence INTEGER,
+            last_sequence INTEGER,
+            updated_sequence INTEGER NOT NULL
+        );
         ",
     )?;
     add_missing_column(
@@ -696,6 +755,10 @@ pub(crate) fn clear_projection_tables(transaction: &Transaction<'_>) -> StateRes
         "goal_continuations",
         "delegated_provider_goals",
         "goal_audit_decisions",
+        // DP2 ACP replay/dedupe read models.
+        "adapter_replay_batches",
+        "adapter_raw_updates",
+        "adapter_timeline_keys",
         "projection_watermarks",
     ] {
         transaction.execute(&format!("DELETE FROM {table}"), [])?;

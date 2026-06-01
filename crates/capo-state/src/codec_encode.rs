@@ -714,5 +714,72 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
             })
             .to_string(),
         },
+        // DP2 (acp-replay-dedupe.md): the ACP replay-batch summary. The
+        // reconciliation counts and lifecycle timestamps exceed the positional
+        // slots, so they ride in the payload to survive a rebuild.
+        ProjectionRecord::AdapterReplayBatch(batch) => ProjectionRecordRow {
+            kind: "adapter_replay_batch",
+            record_id: batch.acp_replay_batch_id.clone(),
+            a: Some(batch.session_id.to_string()),
+            b: Some(batch.project_id.to_string()),
+            c: Some(batch.external_session_ref.clone()),
+            d: Some(batch.source.clone()),
+            e: Some(batch.status.clone()),
+            f: batch.load_request_id.clone(),
+            g: batch.prompt_request_id.clone(),
+            h: batch.recovery_attempt_id.clone(),
+            payload_json: json!({
+                "raw_update_count": batch.raw_update_count,
+                "imported_count": batch.imported_count,
+                "duplicate_count": batch.duplicate_count,
+                "ambiguous_count": batch.ambiguous_count,
+                "normalized_sequence_start": batch.normalized_sequence_start,
+                "normalized_sequence_end": batch.normalized_sequence_end,
+                "started_at": batch.started_at,
+                "completed_at": batch.completed_at,
+            })
+            .to_string(),
+        },
+        // DP2 (acp-replay-dedupe.md): one raw ACP update observed before
+        // normalization. Large payloads are stored as `payload_artifact_id`, so
+        // only the hash + artifact ref are retained here.
+        ProjectionRecord::AdapterRawUpdate(raw) => ProjectionRecordRow {
+            kind: "adapter_raw_update",
+            record_id: raw.acp_raw_update_id.clone(),
+            a: Some(raw.acp_replay_batch_id.clone()),
+            b: Some(raw.project_id.to_string()),
+            c: Some(raw.external_session_ref.clone()),
+            d: Some(raw.batch_index.to_string()),
+            e: Some(raw.jsonrpc_method.clone()),
+            f: raw.session_update_kind.clone(),
+            g: raw.external_item_ref.clone(),
+            h: raw.acp_timeline_key.clone(),
+            payload_json: json!({
+                "payload_hash": raw.payload_hash,
+                "payload_artifact_id": raw.payload_artifact_id,
+                "replay_source": raw.replay_source,
+                "dedupe_confidence": raw.dedupe_confidence,
+                "observed_at": raw.observed_at,
+            })
+            .to_string(),
+        },
+        // DP2 (acp-replay-dedupe.md): a protocol-aware timeline key.
+        ProjectionRecord::AdapterTimelineKey(key) => ProjectionRecordRow {
+            kind: "adapter_timeline_key",
+            record_id: key.adapter_timeline_key_id.clone(),
+            a: Some(key.session_id.to_string()),
+            b: Some(key.project_id.to_string()),
+            c: Some(key.external_session_ref.clone()),
+            d: Some(key.kind.clone()),
+            e: key.stable_ref.clone(),
+            f: key.synthetic_ref.clone(),
+            g: Some(key.confidence.clone()),
+            h: None,
+            payload_json: json!({
+                "first_sequence": key.first_sequence,
+                "last_sequence": key.last_sequence,
+            })
+            .to_string(),
+        },
     }
 }

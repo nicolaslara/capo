@@ -81,6 +81,21 @@ pub enum EventKind {
     // decision. The auditor is the ONLY path to a Capo goal-complete verdict;
     // it decides on OBSERVED evidence, never on agent prose or model confidence.
     GoalAuditDecisionRecorded,
+    // DP2 (acp-replay-dedupe.md): the ACP attach/replay lifecycle event kinds. An
+    // `adapter.attach_*` pair brackets a `session/resume` reconnect (which creates
+    // NO message/item replay events); an `adapter.replay_*` pair brackets a
+    // `session/load` import/reconciliation, with `replay_duplicate_detected` /
+    // `replay_ambiguous` markers for low-confidence matches. Raw ACP updates are
+    // persisted (`adapter.raw_update_observed`) before normalization and never
+    // mutate read models directly.
+    AdapterAttachStarted,
+    AdapterAttachCompleted,
+    AdapterAttachFailed,
+    AdapterReplayStarted,
+    AdapterRawUpdateObserved,
+    AdapterReplayDuplicateDetected,
+    AdapterReplayAmbiguous,
+    AdapterReplayCompleted,
 }
 
 /// The terminal outcome a projected turn-ending event carries, in the
@@ -174,6 +189,14 @@ impl EventKind {
             Self::ContinuationDecisionRecorded => "goal.continuation_decision_recorded",
             Self::DelegatedProviderGoalObserved => "goal.delegated_provider_observed",
             Self::GoalAuditDecisionRecorded => "goal.audit_decision_recorded",
+            Self::AdapterAttachStarted => "adapter.attach_started",
+            Self::AdapterAttachCompleted => "adapter.attach_completed",
+            Self::AdapterAttachFailed => "adapter.attach_failed",
+            Self::AdapterReplayStarted => "adapter.replay_started",
+            Self::AdapterRawUpdateObserved => "adapter.raw_update_observed",
+            Self::AdapterReplayDuplicateDetected => "adapter.replay_duplicate_detected",
+            Self::AdapterReplayAmbiguous => "adapter.replay_ambiguous",
+            Self::AdapterReplayCompleted => "adapter.replay_completed",
         }
     }
 
@@ -257,6 +280,14 @@ impl EventKind {
             EventKind::ContinuationDecisionRecorded,
             EventKind::DelegatedProviderGoalObserved,
             EventKind::GoalAuditDecisionRecorded,
+            EventKind::AdapterAttachStarted,
+            EventKind::AdapterAttachCompleted,
+            EventKind::AdapterAttachFailed,
+            EventKind::AdapterReplayStarted,
+            EventKind::AdapterRawUpdateObserved,
+            EventKind::AdapterReplayDuplicateDetected,
+            EventKind::AdapterReplayAmbiguous,
+            EventKind::AdapterReplayCompleted,
         ];
         ALL.iter()
             .copied()

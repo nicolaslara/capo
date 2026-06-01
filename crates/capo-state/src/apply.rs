@@ -1339,6 +1339,128 @@ pub(crate) fn apply_projection_record(
                 sequence,
             ],
         )?,
+        // DP2 (acp-replay-dedupe.md): the ACP replay-batch summary read model.
+        ProjectionRecord::AdapterReplayBatch(batch) => transaction.execute(
+            "INSERT INTO adapter_replay_batches(
+                acp_replay_batch_id, session_id, project_id, external_session_ref,
+                source, status, load_request_id, prompt_request_id, recovery_attempt_id,
+                raw_update_count, imported_count, duplicate_count, ambiguous_count,
+                normalized_sequence_start, normalized_sequence_end, started_at,
+                completed_at, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+             ON CONFLICT(acp_replay_batch_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                project_id = excluded.project_id,
+                external_session_ref = excluded.external_session_ref,
+                source = excluded.source,
+                status = excluded.status,
+                load_request_id = excluded.load_request_id,
+                prompt_request_id = excluded.prompt_request_id,
+                recovery_attempt_id = excluded.recovery_attempt_id,
+                raw_update_count = excluded.raw_update_count,
+                imported_count = excluded.imported_count,
+                duplicate_count = excluded.duplicate_count,
+                ambiguous_count = excluded.ambiguous_count,
+                normalized_sequence_start = excluded.normalized_sequence_start,
+                normalized_sequence_end = excluded.normalized_sequence_end,
+                started_at = excluded.started_at,
+                completed_at = excluded.completed_at,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                batch.acp_replay_batch_id,
+                batch.session_id.as_str(),
+                batch.project_id.as_str(),
+                batch.external_session_ref,
+                batch.source,
+                batch.status,
+                batch.load_request_id,
+                batch.prompt_request_id,
+                batch.recovery_attempt_id,
+                batch.raw_update_count,
+                batch.imported_count,
+                batch.duplicate_count,
+                batch.ambiguous_count,
+                batch.normalized_sequence_start,
+                batch.normalized_sequence_end,
+                batch.started_at,
+                batch.completed_at,
+                sequence,
+            ],
+        )?,
+        // DP2 (acp-replay-dedupe.md): one raw ACP update observed before
+        // normalization. Never mutates a read model directly.
+        ProjectionRecord::AdapterRawUpdate(raw) => transaction.execute(
+            "INSERT INTO adapter_raw_updates(
+                acp_raw_update_id, acp_replay_batch_id, project_id, external_session_ref,
+                batch_index, jsonrpc_method, session_update_kind, external_item_ref,
+                acp_timeline_key, payload_hash, payload_artifact_id, replay_source,
+                dedupe_confidence, observed_at, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ON CONFLICT(acp_raw_update_id) DO UPDATE SET
+                acp_replay_batch_id = excluded.acp_replay_batch_id,
+                project_id = excluded.project_id,
+                external_session_ref = excluded.external_session_ref,
+                batch_index = excluded.batch_index,
+                jsonrpc_method = excluded.jsonrpc_method,
+                session_update_kind = excluded.session_update_kind,
+                external_item_ref = excluded.external_item_ref,
+                acp_timeline_key = excluded.acp_timeline_key,
+                payload_hash = excluded.payload_hash,
+                payload_artifact_id = excluded.payload_artifact_id,
+                replay_source = excluded.replay_source,
+                dedupe_confidence = excluded.dedupe_confidence,
+                observed_at = excluded.observed_at,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                raw.acp_raw_update_id,
+                raw.acp_replay_batch_id,
+                raw.project_id.as_str(),
+                raw.external_session_ref,
+                raw.batch_index,
+                raw.jsonrpc_method,
+                raw.session_update_kind,
+                raw.external_item_ref,
+                raw.acp_timeline_key,
+                raw.payload_hash,
+                raw.payload_artifact_id,
+                raw.replay_source,
+                raw.dedupe_confidence,
+                raw.observed_at,
+                sequence,
+            ],
+        )?,
+        // DP2 (acp-replay-dedupe.md): one protocol-aware timeline key.
+        ProjectionRecord::AdapterTimelineKey(key) => transaction.execute(
+            "INSERT INTO adapter_timeline_keys(
+                adapter_timeline_key_id, session_id, project_id, external_session_ref,
+                kind, stable_ref, synthetic_ref, confidence, first_sequence,
+                last_sequence, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(adapter_timeline_key_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                project_id = excluded.project_id,
+                external_session_ref = excluded.external_session_ref,
+                kind = excluded.kind,
+                stable_ref = excluded.stable_ref,
+                synthetic_ref = excluded.synthetic_ref,
+                confidence = excluded.confidence,
+                first_sequence = excluded.first_sequence,
+                last_sequence = excluded.last_sequence,
+                updated_sequence = excluded.updated_sequence",
+            params![
+                key.adapter_timeline_key_id,
+                key.session_id.as_str(),
+                key.project_id.as_str(),
+                key.external_session_ref,
+                key.kind,
+                key.stable_ref,
+                key.synthetic_ref,
+                key.confidence,
+                key.first_sequence,
+                key.last_sequence,
+                sequence,
+            ],
+        )?,
     };
     Ok(())
 }

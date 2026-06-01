@@ -47,6 +47,10 @@ pub enum ProjectionRecord {
     GoalContinuation(GoalContinuationProjection),
     DelegatedProviderGoal(DelegatedProviderGoalProjection),
     GoalAuditDecision(GoalAuditDecisionProjection),
+    // DP2 (acp-replay-dedupe.md): the ACP replay/dedupe read models.
+    AdapterReplayBatch(AdapterReplayBatchProjection),
+    AdapterRawUpdate(AdapterRawUpdateProjection),
+    AdapterTimelineKey(AdapterTimelineKeyProjection),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1173,4 +1177,117 @@ impl GoalAuditDecisionProjection {
     pub fn is_complete(&self) -> bool {
         self.verdict == Self::COMPLETE
     }
+}
+
+/// DP2 (acp-replay-dedupe.md): one bounded stream of ACP `session/update`
+/// notifications observed by Capo.
+///
+/// A batch brackets a `session/resume` attach (no message/item replay events), a
+/// `session/load` import/reconciliation, a live prompt turn, or restart recovery.
+/// The reconciliation outcome counts (`imported`/`duplicate`/`ambiguous`) make a
+/// `session/load` auditable. Raw ACP updates are persisted before normalization
+/// and never mutate read models directly; this batch row is the only authoritative
+/// summary of an ingest. It rebuilds identically from the event log.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterReplayBatchProjection {
+    pub acp_replay_batch_id: String,
+    pub session_id: SessionId,
+    pub project_id: ProjectId,
+    /// The adapter-owned external session handle this batch streamed from.
+    pub external_session_ref: String,
+    /// `live_prompt` / `session_load` / `session_resume_attach` /
+    /// `restart_recovery` / `foreign_import`.
+    pub source: String,
+    /// `open` / `completed` / `failed` / `superseded`.
+    pub status: String,
+    pub load_request_id: Option<String>,
+    pub prompt_request_id: Option<String>,
+    pub recovery_attempt_id: Option<String>,
+    pub raw_update_count: i64,
+    /// How many candidate items the reconciliation imported as missing history.
+    pub imported_count: i64,
+    /// How many candidates matched an existing Capo item (duplicate observation,
+    /// not re-projected as a new UI item).
+    pub duplicate_count: i64,
+    /// How many candidates were low-confidence / ambiguous matches.
+    pub ambiguous_count: i64,
+    pub normalized_sequence_start: Option<i64>,
+    pub normalized_sequence_end: Option<i64>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub updated_sequence: i64,
+}
+
+impl AdapterReplayBatchProjection {
+    pub const SOURCE_LIVE_PROMPT: &'static str = "live_prompt";
+    pub const SOURCE_SESSION_LOAD: &'static str = "session_load";
+    pub const SOURCE_SESSION_RESUME_ATTACH: &'static str = "session_resume_attach";
+    pub const SOURCE_RESTART_RECOVERY: &'static str = "restart_recovery";
+    pub const SOURCE_FOREIGN_IMPORT: &'static str = "foreign_import";
+
+    pub const STATUS_OPEN: &'static str = "open";
+    pub const STATUS_COMPLETED: &'static str = "completed";
+    pub const STATUS_FAILED: &'static str = "failed";
+    pub const STATUS_SUPERSEDED: &'static str = "superseded";
+}
+
+/// DP2 (acp-replay-dedupe.md): one raw `session/update` notification (or related
+/// ACP response) observed during a batch, persisted BEFORE normalization.
+///
+/// Raw update identity is `(acp_replay_batch_id, batch_index)`; large payloads are
+/// stored as artifact refs (`payload_artifact_id`) rather than inline JSON. A raw
+/// update is a raw observation only -- it never mutates a read model directly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterRawUpdateProjection {
+    pub acp_raw_update_id: String,
+    pub acp_replay_batch_id: String,
+    pub project_id: ProjectId,
+    pub external_session_ref: String,
+    /// Monotonically increasing within a batch.
+    pub batch_index: i64,
+    pub jsonrpc_method: String,
+    pub session_update_kind: Option<String>,
+    pub external_item_ref: Option<String>,
+    /// The protocol-aware timeline key this raw update mapped to, when known.
+    pub acp_timeline_key: Option<String>,
+    pub payload_hash: String,
+    pub payload_artifact_id: Option<String>,
+    /// Which batch source this raw update was observed under (mirrors the batch
+    /// `source`, carried on the row so a raw observation is self-describing).
+    pub replay_source: String,
+    /// `stable` / `heuristic` / `none`.
+    pub dedupe_confidence: String,
+    pub observed_at: Option<String>,
+    pub updated_sequence: i64,
+}
+
+impl AdapterRawUpdateProjection {
+    pub const CONFIDENCE_STABLE: &'static str = "stable";
+    pub const CONFIDENCE_HEURISTIC: &'static str = "heuristic";
+    pub const CONFIDENCE_NONE: &'static str = "none";
+}
+
+/// DP2 (acp-replay-dedupe.md): one protocol-aware timeline key used by
+/// normalization and projection to map ACP updates to Capo items.
+///
+/// Tool calls dedupe by stable `toolCallId`; plans use a single
+/// `acp:{session}:plan:current` key; message chunks lack stable IDs so they use a
+/// synthetic role/content-hash key with low confidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterTimelineKeyProjection {
+    pub adapter_timeline_key_id: String,
+    pub session_id: SessionId,
+    pub project_id: ProjectId,
+    pub external_session_ref: String,
+    /// `tool` / `plan` / `message` / `session_info`.
+    pub kind: String,
+    /// The stable external id (toolCallId / messageId) when one exists.
+    pub stable_ref: Option<String>,
+    /// The synthetic ref (role + content-hash window) when no stable id exists.
+    pub synthetic_ref: Option<String>,
+    /// `stable` / `heuristic` / `low`.
+    pub confidence: String,
+    pub first_sequence: Option<i64>,
+    pub last_sequence: Option<i64>,
+    pub updated_sequence: i64,
 }

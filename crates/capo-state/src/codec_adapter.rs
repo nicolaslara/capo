@@ -8,7 +8,8 @@ use crate::{
     AdapterDispatchExecutionProjection, AdapterDispatchExecutionRequestProjection,
     AdapterDispatchGateProjection, AdapterDispatchPlanProjection,
     AdapterDispatchPromptMaterializationProjection, AdapterDispatchPromptSourceProjection,
-    AdapterDispatchReplayProjection, AdapterReadinessProjection, AdapterSmokeReportProjection,
+    AdapterDispatchReplayProjection, AdapterRawUpdateProjection, AdapterReadinessProjection,
+    AdapterReplayBatchProjection, AdapterSmokeReportProjection, AdapterTimelineKeyProjection,
     ProjectionRecord,
 };
 
@@ -751,6 +752,189 @@ pub(crate) fn decode_adapter_projection(
                         "adapter_dispatch_prompt_materialization",
                         &payload,
                         "reason_codes",
+                    )?,
+                    updated_sequence: 0,
+                },
+            ))
+        }
+        "adapter_replay_batch" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::AdapterReplayBatch(
+                AdapterReplayBatchProjection {
+                    acp_replay_batch_id: record_id,
+                    session_id: SessionId::new(required_field(
+                        &projection_kind,
+                        "adapter_replay_batch",
+                        a,
+                        "session_id",
+                    )?),
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "adapter_replay_batch",
+                        b,
+                        "project_id",
+                    )?),
+                    external_session_ref: required_field(
+                        &projection_kind,
+                        "adapter_replay_batch",
+                        c,
+                        "external_session_ref",
+                    )?,
+                    source: required_field(&projection_kind, "adapter_replay_batch", d, "source")?,
+                    status: required_field(&projection_kind, "adapter_replay_batch", e, "status")?,
+                    load_request_id: f,
+                    prompt_request_id: g,
+                    recovery_attempt_id: h,
+                    raw_update_count: required_payload_i64(
+                        &projection_kind,
+                        "adapter_replay_batch",
+                        &payload,
+                        "raw_update_count",
+                    )?,
+                    imported_count: required_payload_i64(
+                        &projection_kind,
+                        "adapter_replay_batch",
+                        &payload,
+                        "imported_count",
+                    )?,
+                    duplicate_count: required_payload_i64(
+                        &projection_kind,
+                        "adapter_replay_batch",
+                        &payload,
+                        "duplicate_count",
+                    )?,
+                    ambiguous_count: required_payload_i64(
+                        &projection_kind,
+                        "adapter_replay_batch",
+                        &payload,
+                        "ambiguous_count",
+                    )?,
+                    normalized_sequence_start: payload_optional_i64(
+                        &projection_kind,
+                        "adapter_replay_batch",
+                        &payload,
+                        "normalized_sequence_start",
+                    )?,
+                    normalized_sequence_end: payload_optional_i64(
+                        &projection_kind,
+                        "adapter_replay_batch",
+                        &payload,
+                        "normalized_sequence_end",
+                    )?,
+                    started_at: payload_optional_string(&payload, "started_at"),
+                    completed_at: payload_optional_string(&payload, "completed_at"),
+                    updated_sequence: 0,
+                },
+            ))
+        }
+        "adapter_raw_update" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            let batch_index =
+                required_field(&projection_kind, "adapter_raw_update", d, "batch_index")?
+                    .parse::<i64>()
+                    .map_err(|error| {
+                        ProjectionDecodeError(format!(
+                            "invalid i64 for adapter_raw_update batch_index: {error}"
+                        ))
+                    })?;
+            Ok(ProjectionRecord::AdapterRawUpdate(
+                AdapterRawUpdateProjection {
+                    acp_raw_update_id: record_id,
+                    acp_replay_batch_id: required_field(
+                        &projection_kind,
+                        "adapter_raw_update",
+                        a,
+                        "acp_replay_batch_id",
+                    )?,
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "adapter_raw_update",
+                        b,
+                        "project_id",
+                    )?),
+                    external_session_ref: required_field(
+                        &projection_kind,
+                        "adapter_raw_update",
+                        c,
+                        "external_session_ref",
+                    )?,
+                    batch_index,
+                    jsonrpc_method: required_field(
+                        &projection_kind,
+                        "adapter_raw_update",
+                        e,
+                        "jsonrpc_method",
+                    )?,
+                    session_update_kind: f,
+                    external_item_ref: g,
+                    acp_timeline_key: h,
+                    payload_hash: required_payload_string(
+                        &projection_kind,
+                        "adapter_raw_update",
+                        &payload,
+                        "payload_hash",
+                    )?,
+                    payload_artifact_id: payload_optional_string(&payload, "payload_artifact_id"),
+                    replay_source: required_payload_string(
+                        &projection_kind,
+                        "adapter_raw_update",
+                        &payload,
+                        "replay_source",
+                    )?,
+                    dedupe_confidence: required_payload_string(
+                        &projection_kind,
+                        "adapter_raw_update",
+                        &payload,
+                        "dedupe_confidence",
+                    )?,
+                    observed_at: payload_optional_string(&payload, "observed_at"),
+                    updated_sequence: 0,
+                },
+            ))
+        }
+        "adapter_timeline_key" => {
+            let payload = parse_projection_payload(&projection_kind, &record_id, &payload_json)?;
+            Ok(ProjectionRecord::AdapterTimelineKey(
+                AdapterTimelineKeyProjection {
+                    adapter_timeline_key_id: record_id,
+                    session_id: SessionId::new(required_field(
+                        &projection_kind,
+                        "adapter_timeline_key",
+                        a,
+                        "session_id",
+                    )?),
+                    project_id: ProjectId::new(required_field(
+                        &projection_kind,
+                        "adapter_timeline_key",
+                        b,
+                        "project_id",
+                    )?),
+                    external_session_ref: required_field(
+                        &projection_kind,
+                        "adapter_timeline_key",
+                        c,
+                        "external_session_ref",
+                    )?,
+                    kind: required_field(&projection_kind, "adapter_timeline_key", d, "kind")?,
+                    stable_ref: e,
+                    synthetic_ref: f,
+                    confidence: required_field(
+                        &projection_kind,
+                        "adapter_timeline_key",
+                        g,
+                        "confidence",
+                    )?,
+                    first_sequence: payload_optional_i64(
+                        &projection_kind,
+                        "adapter_timeline_key",
+                        &payload,
+                        "first_sequence",
+                    )?,
+                    last_sequence: payload_optional_i64(
+                        &projection_kind,
+                        "adapter_timeline_key",
+                        &payload,
+                        "last_sequence",
                     )?,
                     updated_sequence: 0,
                 },

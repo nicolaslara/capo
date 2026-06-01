@@ -216,7 +216,7 @@ DP1 gate fix (2026-06-01):
 
 ## DP2 - ACP session/load + session/resume And Raw-Update Reconciliation/Dedupe
 
-Status: pending.
+Status: done.
 
 Prerequisite: `real-turn-loop` + `tools-aci` (builds on DP1).
 
@@ -258,6 +258,20 @@ Verification:
 - Restart/replay test proving reconciled projections rebuild identically.
 - Focused `cargo test -p capo-adapters -p capo-state`.
 - `cargo fmt`
+
+Evidence (DP2 gate fix 2026-06-01):
+
+- Objective gate had failed with `fmt=fail` only (clippy/test already ok). The
+  `adapter_raw_update` `batch_index` decode in
+  `crates/capo-state/src/codec_adapter.rs:832` was mis-indented (the long
+  `required_field(...)` call needed wrapping onto the next line). Ran `cargo fmt`
+  from `/Users/nicolas/devel/capo-wt/depth`, which reformatted exactly that
+  `let batch_index = ...` block and no other code. Files changed:
+  `crates/capo-state/src/codec_adapter.rs` (formatting only).
+- Gate re-run from `/Users/nicolas/devel/capo-wt/depth`: `cargo fmt --check` PASS;
+  `cargo clippy --all-targets --all-features -- -D warnings` PASS (no warnings);
+  `cargo test --workspace` PASS (every `test result:` line reports 0 failed across
+  all crates and doc-tests). Acceptance met.
 
 ## DP3 - ACP Raw-Update Storage, Provenance, And Cancel-While-Permission-Pending
 
