@@ -3446,4 +3446,75 @@ mod tests {
             "key AKIAIOSFODNN7EXAMPLE"
         );
     }
+
+    #[test]
+    fn spawn_piped_process_drives_a_line_protocol_and_reaps_on_shutdown() {
+        // DP1: deterministic coverage of the piped spawn path the live ACP wire
+        // client borrows. Spawn a trivial echoing program through the runtime,
+        // write one JSON-RPC-shaped line to the taken stdin, read the echoed line
+        // back from the taken stdout, confirm the runtime owns the process group,
+        // and assert shutdown() reaps the child to status "exited" with its stderr
+        // artifact captured.
+        use std::io::{BufRead, BufReader, Write};
+
+        let workspace = temp_root("piped-workspace");
+        let artifacts = temp_root("piped-artifacts");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner =
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+
+        // `/bin/cat` echoes each stdin line to stdout, a minimal bidirectional
+        // line protocol.
+        let mut process = runner
+            .spawn_piped_process(LocalProcessRequest::new(
+                RunId::new("run-piped"),
+                "/bin/cat",
+                Vec::new(),
+                workspace,
+                HashMap::new(),
+            ))
+            .expect("spawn piped process");
+
+        // The runtime owns the process group (process_group(0) on unix sets the
+        // child's pgid to its own pid); the adapter only borrows the pipe handles.
+        assert!(
+            process.process.external_pid.is_some(),
+            "runtime must record the owned process pid"
+        );
+        assert!(
+            process.events.iter().any(|event| {
+                event.kind == "runtime.process_started" && event.status == "started"
+            })
+        );
+
+        let mut stdin = process.take_stdin().expect("stdin pipe");
+        let stdout = process.take_stdout().expect("stdout pipe");
+        let mut reader = BufReader::new(stdout);
+
+        writeln!(
+            stdin,
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}}"
+        )
+        .unwrap();
+        stdin.flush().unwrap();
+
+        let mut echoed = String::new();
+        reader.read_line(&mut echoed).expect("read echoed line");
+        assert!(
+            echoed.contains("\"method\":\"ping\""),
+            "expected the echoed protocol line, got: {echoed}"
+        );
+
+        // The pipe handles are takeable exactly once.
+        assert!(process.take_stdin().is_none());
+        assert!(process.take_stdout().is_none());
+
+        let stderr_path = process.stderr_path().to_path_buf();
+        let shutdown = process.shutdown("piped protocol complete");
+        assert_eq!(shutdown.process.status, "exited");
+        assert!(
+            stderr_path.exists(),
+            "the child's stderr artifact must be captured at {stderr_path:?}"
+        );
+    }
 }

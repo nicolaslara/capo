@@ -13,8 +13,11 @@ impl AcpAdapter {
         policy: &PermissionPolicy,
         session_id: SessionId,
     ) -> AcpSessionSetupPlan {
-        let capability_plan =
-            AcpClientCapabilityPlan::from_tool_definitions(tool_definitions, policy, session_id);
+        let capability_plan = AcpClientCapabilityPlan::from_tool_definitions(
+            tool_definitions,
+            policy,
+            session_id.clone(),
+        );
         AcpSessionSetupPlan {
             protocol_version: 1,
             client_kind: "capo".to_string(),
@@ -30,6 +33,41 @@ impl AcpAdapter {
             credential_policy: "not_inspected".to_string(),
             runtime_started: false,
             provider_cli_executed: false,
+            session_id,
+            capability_profile_id: policy.default_profile_id().to_string(),
+            permission_profile: AcpPermissionProfile::from_policy(policy),
+        }
+    }
+}
+
+/// Which permission-decision profile the live wire client applies when it answers
+/// an inbound `session/request_permission` on the wire.
+///
+/// DP1 scopes the live permission round-trip + the `capability-permissions.md`
+/// option-mapping table to the TrustedLocal prototype profile (see DP1 acceptance
+/// and [`crate::map_acp_options_trusted_local`]). Carrying the profile here makes
+/// the wire client HONEST about that scope: a session running under the
+/// TrustedLocal profile uses the documented option mapping, while any OTHER
+/// profile fails CLOSED (the wire client cancels the request) rather than silently
+/// applying TrustedLocal allow semantics to a session whose policy never granted
+/// them. Full per-scope `PermissionPolicy::decide` integration for non-trusted
+/// profiles is owned by the controller seam that wires `AcpLiveAdapter` into the
+/// loop (alongside the `safety-gates` grant lifecycle), not by the wire client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AcpPermissionProfile {
+    /// The trusted-local-dev prototype profile: apply the documented ACP
+    /// option-mapping table.
+    TrustedLocal,
+    /// Any other profile: the wire client is not the policy authority, so it fails
+    /// closed (cancels) rather than self-authorizing on the wire.
+    Other,
+}
+
+impl AcpPermissionProfile {
+    fn from_policy(policy: &PermissionPolicy) -> Self {
+        match policy {
+            PermissionPolicy::TrustedLocal(_) => Self::TrustedLocal,
+            _ => Self::Other,
         }
     }
 }
@@ -46,6 +84,17 @@ pub struct AcpSessionSetupPlan {
     pub credential_policy: String,
     pub runtime_started: bool,
     pub provider_cli_executed: bool,
+    /// The Capo session this plan was built for. The live wire client uses it to
+    /// construct the [`AcpClientCall`] envelope when it routes an inbound
+    /// `fs/*` / `terminal/*` request through [`Self::wrapper_request_for_client_call`].
+    pub session_id: SessionId,
+    /// The capability profile id the session runs under (from the
+    /// [`PermissionPolicy`] default profile), carried so the wire client can build
+    /// a confined [`AcpClientCall`] without re-deriving it.
+    pub capability_profile_id: String,
+    /// The permission-decision profile the wire client applies to inbound
+    /// `session/request_permission` requests. See [`AcpPermissionProfile`].
+    pub permission_profile: AcpPermissionProfile,
 }
 
 impl AcpSessionSetupPlan {
@@ -94,6 +143,54 @@ impl AcpSessionSetupPlan {
             capability_profile_id: call.capability_profile_id,
             input,
         })
+    }
+
+    /// Whether `method` is a client-call the live wire client is expected to
+    /// service (one of the `fs/*` / `terminal/*` ACP client methods).
+    pub fn is_client_call_method(method: &str) -> bool {
+        matches!(
+            method,
+            "fs/read_text_file" | "fs/write_text_file" | "terminal/run"
+        )
+    }
+
+    /// Route one inbound ACP client-call request (`fs/*` / `terminal/*`) through
+    /// the confinement seam.
+    ///
+    /// This builds the [`AcpClientCall`] envelope from the plan's session/profile
+    /// context and the request params, then runs it through
+    /// [`Self::wrapper_request_for_client_call`], which (a) maps the method to the
+    /// backing wrapper tool, (b) extracts/validates the required params (path /
+    /// program / argv), and (c) REJECTS any capability the plan did not advertise.
+    /// The wire client turns `Ok` into a JSON-RPC result and `Err` into a JSON-RPC
+    /// error addressed to the agent's request id, so an inbound client-call is
+    /// never silently ingested without a confinement decision and a reply.
+    pub fn route_inbound_client_call(
+        &self,
+        method: &str,
+        params: &Value,
+        run_id: RunId,
+    ) -> Result<WrapperToolRequest, String> {
+        let tool_call_id = params
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                params
+                    .get("toolCall")
+                    .and_then(|tc| tc.get("toolCallId"))
+                    .and_then(Value::as_str)
+            })
+            .map(ToolCallId::new)
+            .unwrap_or_else(|| ToolCallId::new(format!("acp-client-call-{method}")));
+        let call = AcpClientCall {
+            method: method.to_string(),
+            params: params.clone(),
+            tool_call_id,
+            session_id: self.session_id.clone(),
+            run_id,
+            capability_profile_id: self.capability_profile_id.clone(),
+        };
+        self.wrapper_request_for_client_call(call)
     }
 }
 

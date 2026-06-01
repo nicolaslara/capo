@@ -1,5 +1,6 @@
 use capo_core::{BoundaryBinding, BoundaryKind, SessionId, TurnId};
 
+use crate::acp_live::AcpLiveAdapter;
 use crate::codex_live::{CodexLiveAdapter, CodexLiveChatError};
 use crate::{
     AdapterPermissionRequest, AdapterPermissionResponse, NormalizedAdapterEvent, ScriptedMockAgent,
@@ -126,6 +127,15 @@ pub enum AgentAdapterHandle {
     /// to the Codex adapter; it never replaces the fake adapter as a global
     /// default for unbound/mock agents.
     Codex(CodexLiveAdapter),
+    /// DP1: a real live ACP JSON-RPC adapter handle, bound ONLY for agents
+    /// explicitly routed to the ACP wire client. Like the Codex handle it is a
+    /// real provider binding (`is_real()`), never a default for unbound/mock
+    /// agents; the live spawn stays fail-closed behind the ACP live opt-in gate.
+    ///
+    /// Boxed because `AcpLiveAdapter` is by far the largest adapter variant
+    /// (wire-client + transport state); inlining it would bloat every
+    /// `AgentAdapterHandle` (`clippy::large_enum_variant`).
+    Acp(Box<AcpLiveAdapter>),
 }
 
 impl AgentAdapterHandle {
@@ -143,10 +153,18 @@ impl AgentAdapterHandle {
         Self::Codex(adapter)
     }
 
+    /// Bind a real live ACP adapter handle (DP1). The live spawn is fail-closed
+    /// behind the ACP live opt-in gate; with the gate off `send_turn` reports a
+    /// blocked turn rather than spawning a process.
+    pub fn acp(adapter: AcpLiveAdapter) -> Self {
+        Self::Acp(Box::new(adapter))
+    }
+
     /// Whether this handle drives a real (non-fake) provider. Fake/scripted are
-    /// deterministic test handles; the Codex handle is a real provider binding.
+    /// deterministic test handles; the Codex and ACP handles are real provider
+    /// bindings.
     pub fn is_real(&self) -> bool {
-        matches!(self, Self::Codex(_))
+        matches!(self, Self::Codex(_) | Self::Acp(_))
     }
 
     fn as_adapter(&self) -> &dyn AgentAdapter {
@@ -154,6 +172,7 @@ impl AgentAdapterHandle {
             Self::Fake(adapter) => adapter,
             Self::ScriptedMock(agent) => agent,
             Self::Codex(adapter) => adapter,
+            Self::Acp(adapter) => adapter.as_ref(),
         }
     }
 }

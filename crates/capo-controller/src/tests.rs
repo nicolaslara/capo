@@ -539,6 +539,159 @@ fn codex_fixture_replay_updates_controller_read_models_without_raw_content_paylo
 }
 
 #[test]
+fn acp_live_transcript_events_flow_through_the_loop_ingestion_route() {
+    // DP1: a DRIVEN `AcpLiveAdapter` transcript (off a scripted ACP transport, no
+    // live process) feeds its normalized `session/update` events through the SAME
+    // `apply_normalized_adapter_events_with_turn` ingestion route every other
+    // provider uses -- proving the live ACP events are event-sourced into the read
+    // models, not reduced to a summary string at the adapter boundary.
+    use capo_adapters::{AcpAdapter, AcpLiveAdapter, ScriptedAcpTransport, ScriptedServerFrame};
+
+    let root = temp_root();
+    let controller =
+        FakeBoundaryController::open(ProjectId::new("project-capo"), &root).expect("controller");
+    let registration = controller
+        .register_agent("acp-live-replay")
+        .expect("register acp agent");
+    let refs = controller
+        .send_task(&registration, "Drive a live ACP transcript")
+        .expect("send task");
+
+    let wrappers =
+        capo_tools::RuntimeToolWrappers::new(capo_tools::RuntimeToolConfig::local_workspace(
+            std::path::PathBuf::from("/tmp/capo-acp-ingest-ws"),
+            std::path::PathBuf::from("/tmp/capo-acp-ingest-art"),
+        ));
+    let setup_plan = AcpAdapter::session_setup_plan(
+        &wrappers.list_tools(),
+        &capo_tools::PermissionPolicy::allow_trusted_local(),
+        SessionId::new("session-acp-ingest"),
+    );
+    let adapter = AcpLiveAdapter::new(
+        "acp-agent",
+        vec!["--stdio".to_string()],
+        std::path::PathBuf::from("/tmp/capo-acp-ingest-ws"),
+        std::path::PathBuf::from("/tmp/capo-acp-ingest-art"),
+        setup_plan,
+    );
+
+    let transport = ScriptedAcpTransport::new()
+        .on_request(
+            "initialize",
+            vec![ScriptedServerFrame::Response(serde_json::json!({
+                "protocolVersion": 1
+            }))],
+        )
+        .on_request(
+            "session/new",
+            vec![ScriptedServerFrame::Response(serde_json::json!({
+                "sessionId": "acp-ingest-session-1"
+            }))],
+        )
+        .on_request(
+            "session/prompt",
+            vec![
+                ScriptedServerFrame::Update(serde_json::json!({
+                    "sessionId": "acp-ingest-session-1",
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tool-ingest-1",
+                        "title": "write file",
+                        "status": "pending"
+                    }
+                })),
+                ScriptedServerFrame::Update(serde_json::json!({
+                    "sessionId": "acp-ingest-session-1",
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "tool-ingest-1",
+                        "status": "completed",
+                        "content": { "type": "text", "text": "done" }
+                    }
+                })),
+                ScriptedServerFrame::Response(serde_json::json!({ "stopReason": "end_turn" })),
+            ],
+        );
+
+    let transcript = adapter.drive(transport, "do the task").expect("drive acp");
+    assert!(
+        !transcript.events.is_empty(),
+        "the driven transcript must carry normalized session/update events"
+    );
+
+    // The SAME ingestion route the loop uses for every other provider.
+    let report = controller
+        .apply_normalized_adapter_events(&refs, &transcript.events)
+        .expect("apply acp-live transcript through the loop ingestion route");
+    assert!(report.appended_event_count > 0);
+    assert!(report.tool_event_count > 0);
+
+    // The tool call observed off the ACP wire is event-sourced into the read model
+    // (not discarded into a TurnOutput summary).
+    let tools = controller
+        .state()
+        .tool_calls_for_session(&refs.session_id)
+        .expect("tool calls");
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.status == "completed" && tool.tool_origin == "adapter_native:acp"),
+        "the ACP tool call must land as a completed adapter-native read-model row"
+    );
+}
+
+#[test]
+fn acp_live_adapter_dispatches_through_the_agent_adapter_handle() {
+    // DP1: `AcpLiveAdapter` is reachable from the single orchestration seam --
+    // `AgentAdapterHandle::acp(..)` -- and reports as a real provider, so the loop
+    // can dispatch to it (with the live gate off it fails closed to a blocked
+    // turn rather than spawning a process).
+    use capo_adapters::{
+        AcpAdapter, AcpLiveAdapter, AdapterSessionRequest, AgentAdapter, AgentAdapterHandle,
+        TurnRequest,
+    };
+
+    let wrappers =
+        capo_tools::RuntimeToolWrappers::new(capo_tools::RuntimeToolConfig::local_workspace(
+            std::path::PathBuf::from("/tmp/capo-acp-handle-ws"),
+            std::path::PathBuf::from("/tmp/capo-acp-handle-art"),
+        ));
+    let setup_plan = AcpAdapter::session_setup_plan(
+        &wrappers.list_tools(),
+        &capo_tools::PermissionPolicy::allow_trusted_local(),
+        SessionId::new("session-acp-handle"),
+    );
+    let handle = AgentAdapterHandle::acp(AcpLiveAdapter::new(
+        "acp-agent",
+        vec!["--stdio".to_string()],
+        std::path::PathBuf::from("/tmp/capo-acp-handle-ws"),
+        std::path::PathBuf::from("/tmp/capo-acp-handle-art"),
+        setup_plan,
+    ));
+
+    assert!(
+        handle.is_real(),
+        "the ACP handle is a real provider binding"
+    );
+    assert_eq!(handle.binding().variant, "acp-live");
+
+    let session = handle.open_session(AdapterSessionRequest {
+        session_id: SessionId::new("session-acp-handle"),
+        agent_name: "acp-worker".to_string(),
+    });
+    // Gate off -> fail closed to a blocked turn (no process spawn).
+    let output = handle.send_turn(
+        &session,
+        TurnRequest {
+            turn_id: TurnId::new("turn-acp-handle"),
+            agent_name: "acp-worker".to_string(),
+            goal: "do the task".to_string(),
+        },
+    );
+    assert_eq!(output.status, "blocked");
+}
+
+#[test]
 fn claude_fixture_replay_updates_controller_read_models_without_raw_content_payloads() {
     let root = temp_root();
     let controller =

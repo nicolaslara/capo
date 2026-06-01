@@ -27,13 +27,35 @@
 //! an ACP agent backend.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::time::{Duration, Instant};
 
+use capo_core::RunId;
 use serde_json::{Value, json};
 
 use crate::{
     AcpAdapter, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionOutcome,
     AcpSessionSetupPlan, NormalizedAdapterEvent, map_acp_options_trusted_local,
 };
+
+/// The default per-read deadline on the live wire pump.
+///
+/// `pump_until_response` reads inbound frames in a loop; on the live
+/// [`PipedProcessTransport`] a stalled or malicious agent that never emits the
+/// awaited response would otherwise block the controller turn forever (holding a
+/// runtime-spawned process group). The pump fails closed with
+/// [`AcpWireError::Timeout`] when no awaited response arrives within this
+/// deadline so `run_turn` can tear the process group down. The scripted
+/// transport ignores the deadline (it never blocks).
+pub const ACP_PUMP_READ_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The JSON-RPC `method not found` error code, returned for an inbound agent
+/// REQUEST whose method the client does not service (so the agent gets an
+/// explicit error rather than blocking on a reply that never comes).
+const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
+/// The JSON-RPC `invalid params` / application error code, returned when a
+/// recognized client-call is rejected (un-advertised capability, missing param,
+/// or out-of-confinement path).
+const JSONRPC_INVALID_REQUEST: i64 = -32600;
 
 /// The negotiated ACP protocol version Capo proposes/accepts. Integer, stable
 /// `1` today per `protocol-provider.md` / `acp-replay-dedupe.md`.
@@ -48,6 +70,32 @@ pub const ACP_PROTOCOL_VERSION: i64 = 1;
 pub trait AcpTransport {
     fn send_line(&mut self, line: &str) -> Result<(), AcpWireError>;
     fn recv_line(&mut self) -> Result<Option<String>, AcpWireError>;
+
+    /// Read the next frame within `deadline`, returning a [`RecvOutcome`] that
+    /// distinguishes a delivered frame, a deadline timeout, and end-of-stream.
+    ///
+    /// The default implementation ignores the deadline and delegates to
+    /// [`Self::recv_line`]; the in-memory scripted transport never blocks, so the
+    /// deadline only matters for the live [`PipedProcessTransport`], which
+    /// overrides this with a real timeout-bounded wait so a stalled agent cannot
+    /// wedge the controller turn forever.
+    fn recv_line_within(&mut self, _deadline: Duration) -> Result<RecvOutcome, AcpWireError> {
+        Ok(match self.recv_line()? {
+            Some(line) => RecvOutcome::Frame(line),
+            None => RecvOutcome::Eof,
+        })
+    }
+}
+
+/// The outcome of a single deadline-bounded read.
+#[derive(Debug)]
+pub enum RecvOutcome {
+    /// A frame arrived.
+    Frame(String),
+    /// The deadline elapsed before any frame arrived (agent stalled).
+    TimedOut,
+    /// The stream is at end-of-file.
+    Eof,
 }
 
 /// A typed error from the live ACP wire client.
@@ -63,6 +111,10 @@ pub enum AcpWireError {
     UnexpectedEof { awaiting: String },
     /// A protocol invariant was violated (e.g. a response id we never sent).
     Protocol(String),
+    /// No awaited response arrived within the pump's read deadline. The live path
+    /// treats this as fail-closed: the runtime-spawned process group is torn down
+    /// rather than the turn hanging on a stalled agent.
+    Timeout { awaiting: String, after_ms: u128 },
 }
 
 impl std::fmt::Display for AcpWireError {
@@ -79,6 +131,10 @@ impl std::fmt::Display for AcpWireError {
                 write!(f, "acp stream ended while awaiting `{awaiting}`")
             }
             Self::Protocol(detail) => write!(f, "acp protocol violation: {detail}"),
+            Self::Timeout { awaiting, after_ms } => write!(
+                f,
+                "acp pump timed out after {after_ms}ms while awaiting `{awaiting}`"
+            ),
         }
     }
 }
@@ -99,11 +155,33 @@ pub struct AcpTurnTranscript {
     pub events: Vec<NormalizedAdapterEvent>,
     /// Every `session/request_permission` round-trip the client answered.
     pub permission_round_trips: Vec<AcpPermissionRoundTrip>,
+    /// Every inbound `fs/*` / `terminal/*` client-call the client serviced on the
+    /// wire, with the confinement decision, so a deterministic test can assert
+    /// that an un-advertised / out-of-confinement call was REJECTED (not silently
+    /// ingested) and an advertised one was routed through the wrapper seam.
+    pub client_calls: Vec<AcpClientCallRecord>,
     /// The `stopReason` the agent reported on the `session/prompt` response, if
     /// the prompt completed (e.g. `end_turn`, `cancelled`).
     pub stop_reason: Option<String>,
     /// Whether a `session/cancel` was issued during this turn.
     pub cancelled: bool,
+}
+
+/// The audited outcome of one inbound ACP client-call (`fs/*` / `terminal/*`)
+/// the wire client serviced.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcpClientCallRecord {
+    /// The inbound ACP method (e.g. `fs/write_text_file`).
+    pub method: String,
+    /// The backing Capo wrapper tool the call routed to when accepted, or `None`
+    /// when the call was rejected before routing.
+    pub routed_tool_id: Option<String>,
+    /// Whether the confinement seam ACCEPTED the call (advertised capability,
+    /// valid params). `false` means the client wrote a JSON-RPC error back.
+    pub accepted: bool,
+    /// The rejection reason when `accepted` is false (un-advertised capability,
+    /// missing param, etc.).
+    pub rejection: Option<String>,
 }
 
 /// The audited outcome of one live `session/request_permission` round-trip: what
@@ -127,6 +205,13 @@ pub struct AcpWireClient<T: AcpTransport> {
     setup_plan: AcpSessionSetupPlan,
     negotiated_protocol_version: Option<i64>,
     external_session_id: Option<String>,
+    /// The Capo run id this turn executes under, stamped onto the confined
+    /// [`crate::AcpClientCall`] envelope when the client services an inbound
+    /// `fs/*` / `terminal/*` request.
+    run_id: RunId,
+    /// The per-read deadline the pump enforces so a stalled agent cannot wedge the
+    /// turn forever on the live transport.
+    read_timeout: Duration,
 }
 
 impl<T: AcpTransport> AcpWireClient<T> {
@@ -135,13 +220,31 @@ impl<T: AcpTransport> AcpWireClient<T> {
     /// `RuntimeRunner` (live) or by a scripted server (tests); the client is
     /// "attached after start".
     pub fn attach(transport: T, setup_plan: AcpSessionSetupPlan) -> Self {
+        let run_id = RunId::new(format!("acp-wire-{}", setup_plan.session_id.as_str()));
         Self {
             transport,
             next_id: 1,
             setup_plan,
             negotiated_protocol_version: None,
             external_session_id: None,
+            run_id,
+            read_timeout: ACP_PUMP_READ_TIMEOUT,
         }
+    }
+
+    /// Override the Capo run id stamped onto serviced client calls (defaults to a
+    /// session-derived id).
+    #[must_use]
+    pub fn with_run_id(mut self, run_id: RunId) -> Self {
+        self.run_id = run_id;
+        self
+    }
+
+    /// Override the per-read pump deadline (defaults to [`ACP_PUMP_READ_TIMEOUT`]).
+    #[must_use]
+    pub fn with_read_timeout(mut self, read_timeout: Duration) -> Self {
+        self.read_timeout = read_timeout;
+        self
     }
 
     pub fn negotiated_protocol_version(&self) -> Option<i64> {
@@ -252,11 +355,28 @@ impl<T: AcpTransport> AcpWireClient<T> {
         transcript: &mut AcpTurnTranscript,
     ) -> Result<Value, AcpWireError> {
         let mut line_number = 0usize;
+        let deadline = Instant::now() + self.read_timeout;
         loop {
-            let Some(line) = self.transport.recv_line()? else {
-                return Err(AcpWireError::UnexpectedEof {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(AcpWireError::Timeout {
                     awaiting: method.to_string(),
+                    after_ms: self.read_timeout.as_millis(),
                 });
+            }
+            let line = match self.transport.recv_line_within(remaining)? {
+                RecvOutcome::Frame(line) => line,
+                RecvOutcome::TimedOut => {
+                    return Err(AcpWireError::Timeout {
+                        awaiting: method.to_string(),
+                        after_ms: self.read_timeout.as_millis(),
+                    });
+                }
+                RecvOutcome::Eof => {
+                    return Err(AcpWireError::UnexpectedEof {
+                        awaiting: method.to_string(),
+                    });
+                }
             };
             line_number += 1;
             let line = line.trim();
@@ -291,30 +411,124 @@ impl<T: AcpTransport> AcpWireClient<T> {
                 continue;
             }
 
-            // An inbound request or notification from the agent.
+            // An inbound request or notification from the agent. A REQUEST carries
+            // an `id` and is awaiting a JSON-RPC reply; a NOTIFICATION has no `id`.
+            // A request MUST be answered (a recognized result, or a JSON-RPC error
+            // for an un-serviced / rejected method) -- never silently ingested,
+            // which would deadlock a well-behaved agent blocking on the reply.
             let frame_method = value.get("method").and_then(Value::as_str).unwrap_or("");
-            match frame_method {
-                "session/update" => {
+            let inbound_id = value.get("id").cloned();
+            match (frame_method, inbound_id) {
+                ("session/update", _) => {
                     let events = AcpAdapter::normalize_update(&value);
                     transcript.events.extend(events);
                 }
-                "session/request_permission" => {
+                ("session/request_permission", _) => {
                     self.answer_permission(&value, transcript)?;
                 }
-                "session/cancel" => {
+                ("session/cancel", _) => {
                     // Agents do not normally send cancel TO the client; record it
                     // as observed if they do, but take no action.
                     transcript.cancelled = true;
                 }
-                _ => {
-                    // Unknown notification/request: ingest as a raw normalized
-                    // event so nothing is silently dropped, but never project it
-                    // authoritatively.
+                (method, Some(request_id))
+                    if AcpSessionSetupPlan::is_client_call_method(method) =>
+                {
+                    // An advertised `fs/*` / `terminal/*` client-call REQUEST:
+                    // route it through the confinement seam and answer on the wire.
+                    self.answer_client_call(method, &value, request_id, transcript)?;
+                }
+                (method, Some(request_id)) => {
+                    // An inbound REQUEST for a method we do not service: reply with
+                    // a JSON-RPC method-not-found error so the agent does not block
+                    // forever awaiting a reply.
+                    self.write_jsonrpc_error(
+                        request_id,
+                        JSONRPC_METHOD_NOT_FOUND,
+                        &format!("unsupported ACP client request: {method}"),
+                    )?;
+                }
+                (_, None) => {
+                    // An unknown NOTIFICATION (no `id`, no reply expected): ingest
+                    // as a raw normalized event so nothing is silently dropped, but
+                    // never project it authoritatively.
                     let events = AcpAdapter::normalize_update(&value);
                     transcript.events.extend(events);
                 }
             }
         }
+    }
+
+    /// Answer an inbound `fs/*` / `terminal/*` client-call request on the wire by
+    /// routing it through the confinement seam
+    /// ([`AcpSessionSetupPlan::route_inbound_client_call`]). An advertised,
+    /// well-formed call is acknowledged with a JSON-RPC result identifying the
+    /// backing wrapper tool; an un-advertised capability, missing param, or
+    /// out-of-confinement path is REJECTED with a JSON-RPC error -- never silently
+    /// ingested. The serviced call is recorded on the transcript for audit.
+    ///
+    /// Note: the wire client routes/validates and ACKS the call (the safety
+    /// decision: advertised? confined? valid params?) but does not itself execute
+    /// the runtime wrapper; the controller seam that wires `AcpLiveAdapter` into
+    /// the loop owns running the `WrapperToolRequest` against the runtime tools.
+    fn answer_client_call(
+        &mut self,
+        method: &str,
+        request: &Value,
+        request_id: Value,
+        transcript: &mut AcpTurnTranscript,
+    ) -> Result<(), AcpWireError> {
+        let params = request.get("params").cloned().unwrap_or(Value::Null);
+        match self
+            .setup_plan
+            .route_inbound_client_call(method, &params, self.run_id.clone())
+        {
+            Ok(wrapper_request) => {
+                let response = json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "routed": true,
+                        "toolId": wrapper_request.tool_id,
+                    },
+                });
+                self.transport
+                    .send_line(&serde_json::to_string(&response).unwrap())?;
+                transcript.client_calls.push(AcpClientCallRecord {
+                    method: method.to_string(),
+                    routed_tool_id: Some(wrapper_request.tool_id),
+                    accepted: true,
+                    rejection: None,
+                });
+                Ok(())
+            }
+            Err(reason) => {
+                self.write_jsonrpc_error(request_id, JSONRPC_INVALID_REQUEST, &reason)?;
+                transcript.client_calls.push(AcpClientCallRecord {
+                    method: method.to_string(),
+                    routed_tool_id: None,
+                    accepted: false,
+                    rejection: Some(reason),
+                });
+                Ok(())
+            }
+        }
+    }
+
+    /// Write a JSON-RPC 2.0 error response addressed to `request_id`.
+    fn write_jsonrpc_error(
+        &mut self,
+        request_id: Value,
+        code: i64,
+        message: &str,
+    ) -> Result<(), AcpWireError> {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": { "code": code, "message": message },
+        });
+        self.transport
+            .send_line(&serde_json::to_string(&response).unwrap())
     }
 
     /// Answer an inbound `session/request_permission` request on the wire: map
@@ -338,7 +552,17 @@ impl<T: AcpTransport> AcpWireClient<T> {
         let options = parse_permission_options(params);
         let offered_option_ids = options.iter().map(|o| o.option_id.clone()).collect();
 
-        let mapping = map_acp_options_trusted_local(&options);
+        // DP1 scopes the live wire permission round-trip + option mapping to the
+        // TrustedLocal prototype profile. Apply the documented option-mapping table
+        // under TrustedLocal; under ANY OTHER profile the wire client is not the
+        // policy authority, so it fails CLOSED (cancels) rather than self-authorizing
+        // -- it never applies TrustedLocal allow semantics to a session whose policy
+        // never granted them. Full per-scope policy integration for non-trusted
+        // profiles lives in the controller seam, not here.
+        let mapping = match self.setup_plan.permission_profile {
+            crate::AcpPermissionProfile::TrustedLocal => map_acp_options_trusted_local(&options),
+            crate::AcpPermissionProfile::Other => crate::AcpOptionMapping::cancelled(),
+        };
         let outcome_value = match &mapping.outcome {
             AcpPermissionOutcome::Selected { option_id } => {
                 json!({ "outcome": "selected", "optionId": option_id })
@@ -563,21 +787,54 @@ fn rewrite_response_id(frame: &str, request_id: Option<&Value>) -> String {
 /// (`LocalProcessRunner::spawn_piped_process`), which owns the process group; the
 /// adapter only borrows the taken pipe handles, so it never owns the process
 /// group itself.
-pub struct PipedProcessTransport<W: Write, R: Read> {
+///
+/// Reads are made deadline-bounded by draining the child's stdout on a dedicated
+/// reader thread that pushes each line onto an `mpsc` channel; [`recv_line_within`]
+/// then waits on the channel with a timeout. A blocking `BufReader::read_line` on
+/// the raw pipe cannot be interrupted, so without this a stalled or malicious
+/// agent that never emits the awaited response would wedge the controller turn
+/// forever (holding the runtime-spawned process group); the reader thread lets the
+/// pump fail closed with [`AcpWireError::Timeout`] instead.
+///
+/// [`recv_line_within`]: AcpTransport::recv_line_within
+pub struct PipedProcessTransport<W: Write> {
     writer: W,
-    reader: BufReader<R>,
+    lines: std::sync::mpsc::Receiver<std::io::Result<String>>,
+    /// `true` once the reader thread has signalled end-of-stream, so a subsequent
+    /// blocking `recv_line` reports EOF rather than blocking on a dead channel.
+    closed: bool,
 }
 
-impl<W: Write, R: Read> PipedProcessTransport<W, R> {
-    pub fn new(writer: W, reader: R) -> Self {
+impl<W: Write> PipedProcessTransport<W> {
+    pub fn new<R: Read + Send + 'static>(writer: W, reader: R) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(reader);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break, // EOF: drop the sender, closing the channel.
+                    Ok(_) => {
+                        if tx.send(Ok(line)).is_err() {
+                            break; // The client dropped; stop draining.
+                        }
+                    }
+                    Err(error) => {
+                        let _ = tx.send(Err(error));
+                        break;
+                    }
+                }
+            }
+        });
         Self {
             writer,
-            reader: BufReader::new(reader),
+            lines: rx,
+            closed: false,
         }
     }
 }
 
-impl<W: Write, R: Read> AcpTransport for PipedProcessTransport<W, R> {
+impl<W: Write> AcpTransport for PipedProcessTransport<W> {
     fn send_line(&mut self, line: &str) -> Result<(), AcpWireError> {
         self.writer
             .write_all(line.as_bytes())
@@ -587,11 +844,31 @@ impl<W: Write, R: Read> AcpTransport for PipedProcessTransport<W, R> {
     }
 
     fn recv_line(&mut self) -> Result<Option<String>, AcpWireError> {
-        let mut line = String::new();
-        match self.reader.read_line(&mut line) {
-            Ok(0) => Ok(None),
-            Ok(_) => Ok(Some(line)),
-            Err(error) => Err(AcpWireError::Transport(error.to_string())),
+        if self.closed {
+            return Ok(None);
+        }
+        match self.lines.recv() {
+            Ok(Ok(line)) => Ok(Some(line)),
+            Ok(Err(error)) => Err(AcpWireError::Transport(error.to_string())),
+            Err(_) => {
+                self.closed = true;
+                Ok(None)
+            }
+        }
+    }
+
+    fn recv_line_within(&mut self, deadline: Duration) -> Result<RecvOutcome, AcpWireError> {
+        if self.closed {
+            return Ok(RecvOutcome::Eof);
+        }
+        match self.lines.recv_timeout(deadline) {
+            Ok(Ok(line)) => Ok(RecvOutcome::Frame(line)),
+            Ok(Err(error)) => Err(AcpWireError::Transport(error.to_string())),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(RecvOutcome::TimedOut),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                self.closed = true;
+                Ok(RecvOutcome::Eof)
+            }
         }
     }
 }
@@ -840,5 +1117,302 @@ mod tests {
         let mut client = AcpWireClient::attach(transport, setup_plan());
         let error = client.initialize().expect_err("agent error must surface");
         assert!(matches!(error, AcpWireError::AgentError { .. }));
+    }
+
+    /// A setup plan under a non-TrustedLocal profile (read-only static), so the
+    /// wire client's permission profile is `Other` and the fs/terminal
+    /// capabilities are NOT advertised.
+    fn read_only_setup_plan() -> AcpSessionSetupPlan {
+        let wrappers =
+            capo_tools::RuntimeToolWrappers::new(capo_tools::RuntimeToolConfig::local_workspace(
+                std::path::PathBuf::from("/tmp/capo-acp-wire-ro-ws"),
+                std::path::PathBuf::from("/tmp/capo-acp-wire-ro-art"),
+            ));
+        AcpAdapter::session_setup_plan(
+            &wrappers.list_tools(),
+            &capo_tools::PermissionPolicy::static_read_only_local(),
+            SessionId::new("session-acp-wire-ro"),
+        )
+    }
+
+    /// Drive `initialize -> session/new -> prompt`, scripting `prompt_frames` as the
+    /// server's reaction to the `session/prompt` request. Returns the recorded
+    /// transport and the resulting transcript so a test can assert both the
+    /// on-wire frames and the normalized outcome.
+    fn drive_prompt(
+        plan: AcpSessionSetupPlan,
+        prompt_frames: Vec<ScriptedServerFrame>,
+    ) -> (ScriptedAcpTransport, AcpTurnTranscript) {
+        let mut transport = ScriptedAcpTransport::new()
+            .on_request(
+                "initialize",
+                vec![ScriptedServerFrame::Response(
+                    json!({ "protocolVersion": 1 }),
+                )],
+            )
+            .on_request(
+                "session/new",
+                vec![ScriptedServerFrame::Response(json!({ "sessionId": "s1" }))],
+            )
+            .on_request("session/prompt", prompt_frames);
+        let transcript = {
+            let mut client = AcpWireClient::attach(&mut transport, plan);
+            client.initialize().unwrap();
+            let session_id = client.session_new("/tmp").unwrap();
+            client.prompt(&session_id, "go").unwrap()
+        };
+        (transport, transcript)
+    }
+
+    /// Offering ONLY a reject option drives the reject branch of `answer_permission`:
+    /// the client selects the reject optionId and writes `selected` on the wire.
+    #[test]
+    fn permission_reject_only_writes_reject_option_on_the_wire() {
+        let (transport, transcript) = drive_prompt(
+            setup_plan(),
+            vec![
+                ScriptedServerFrame::RequestPermission(json!({
+                    "sessionId": "s1",
+                    "toolCall": { "toolCallId": "t-reject" },
+                    "options": [{ "optionId": "opt-reject", "name": "Reject", "kind": "reject_once" }]
+                })),
+                ScriptedServerFrame::Response(json!({ "stopReason": "end_turn" })),
+            ],
+        );
+
+        assert_eq!(transcript.permission_round_trips.len(), 1);
+        let round_trip = &transcript.permission_round_trips[0];
+        assert_eq!(round_trip.capo_decision, "reject");
+        assert_eq!(
+            round_trip.outcome,
+            AcpPermissionOutcome::Selected {
+                option_id: "opt-reject".to_string()
+            }
+        );
+
+        let response = transport
+            .recorded
+            .iter()
+            .find(|frame| {
+                frame.get("method").is_none() && frame.pointer("/result/outcome/optionId").is_some()
+            })
+            .expect("client wrote a permission response on the wire");
+        assert_eq!(
+            response
+                .pointer("/result/outcome/optionId")
+                .and_then(Value::as_str),
+            Some("opt-reject")
+        );
+    }
+
+    /// Offering an EMPTY (or unknown-kind) options array drives the
+    /// no-selectable-option path: the client writes `{"outcome":"cancelled"}` on
+    /// the wire.
+    #[test]
+    fn permission_no_selectable_option_writes_cancelled_on_the_wire() {
+        let (transport, transcript) = drive_prompt(
+            setup_plan(),
+            vec![
+                ScriptedServerFrame::RequestPermission(json!({
+                    "sessionId": "s1",
+                    "toolCall": { "toolCallId": "t-empty" },
+                    "options": []
+                })),
+                ScriptedServerFrame::Response(json!({ "stopReason": "end_turn" })),
+            ],
+        );
+
+        assert_eq!(transcript.permission_round_trips.len(), 1);
+        assert_eq!(
+            transcript.permission_round_trips[0].outcome,
+            AcpPermissionOutcome::Cancelled
+        );
+
+        let response = transport
+            .recorded
+            .iter()
+            .find(|frame| frame.pointer("/result/outcome/outcome").is_some())
+            .expect("client wrote a permission outcome on the wire");
+        assert_eq!(
+            response
+                .pointer("/result/outcome/outcome")
+                .and_then(Value::as_str),
+            Some("cancelled")
+        );
+        assert!(
+            response.pointer("/result/outcome/optionId").is_none(),
+            "a cancelled outcome carries no optionId"
+        );
+    }
+
+    /// Under a non-TrustedLocal profile the wire client is NOT the policy
+    /// authority: it fails CLOSED (cancels) even when the agent offers an allow
+    /// option, rather than self-authorizing on the wire.
+    #[test]
+    fn permission_non_trusted_local_profile_fails_closed() {
+        let (transport, transcript) = drive_prompt(
+            read_only_setup_plan(),
+            vec![
+                ScriptedServerFrame::RequestPermission(json!({
+                    "sessionId": "s1",
+                    "toolCall": { "toolCallId": "t-allow" },
+                    "options": [{ "optionId": "opt-allow", "name": "Allow", "kind": "allow_once" }]
+                })),
+                ScriptedServerFrame::Response(json!({ "stopReason": "end_turn" })),
+            ],
+        );
+
+        assert_eq!(
+            transcript.permission_round_trips[0].outcome,
+            AcpPermissionOutcome::Cancelled,
+            "a non-trusted-local session must not be granted an offered allow on the wire"
+        );
+        let response = transport
+            .recorded
+            .iter()
+            .find(|frame| frame.pointer("/result/outcome/outcome").is_some())
+            .expect("permission outcome on the wire");
+        assert_eq!(
+            response
+                .pointer("/result/outcome/outcome")
+                .and_then(Value::as_str),
+            Some("cancelled")
+        );
+    }
+
+    /// An inbound advertised `fs/write_text_file` REQUEST (carrying an `id`) is
+    /// routed through the confinement seam and answered with a JSON-RPC result
+    /// naming the backing wrapper tool -- never silently ingested.
+    #[test]
+    fn inbound_fs_write_request_is_routed_and_answered() {
+        let (transport, transcript) = drive_prompt(
+            setup_plan(),
+            vec![
+                ScriptedServerFrame::Raw(json!({
+                    "jsonrpc": "2.0",
+                    "id": "client-call-1",
+                    "method": "fs/write_text_file",
+                    "params": { "path": "/tmp/capo-acp-wire-ws/out.txt", "content": "hi" }
+                })),
+                ScriptedServerFrame::Response(json!({ "stopReason": "end_turn" })),
+            ],
+        );
+
+        assert_eq!(transcript.client_calls.len(), 1);
+        let call = &transcript.client_calls[0];
+        assert_eq!(call.method, "fs/write_text_file");
+        assert!(call.accepted, "advertised fs write must be accepted");
+        assert_eq!(call.routed_tool_id.as_deref(), Some("capo.file_write"));
+
+        let response = transport
+            .recorded
+            .iter()
+            .find(|frame| frame.get("id").and_then(Value::as_str) == Some("client-call-1"))
+            .expect("client answered the fs/write request on the wire");
+        assert_eq!(
+            response.pointer("/result/toolId").and_then(Value::as_str),
+            Some("capo.file_write")
+        );
+    }
+
+    /// An inbound `fs/write_text_file` under a profile that did NOT advertise the
+    /// write capability is REJECTED with a JSON-RPC error -- the un-advertised
+    /// capability is never silently accepted.
+    #[test]
+    fn inbound_fs_write_request_unadvertised_is_rejected_with_error() {
+        let (transport, transcript) = drive_prompt(
+            read_only_setup_plan(),
+            vec![
+                ScriptedServerFrame::Raw(json!({
+                    "jsonrpc": "2.0",
+                    "id": "client-call-ro",
+                    "method": "fs/write_text_file",
+                    "params": { "path": "/etc/passwd", "content": "x" }
+                })),
+                ScriptedServerFrame::Response(json!({ "stopReason": "end_turn" })),
+            ],
+        );
+
+        assert_eq!(transcript.client_calls.len(), 1);
+        assert!(
+            !transcript.client_calls[0].accepted,
+            "an un-advertised capability must be rejected"
+        );
+
+        let response = transport
+            .recorded
+            .iter()
+            .find(|frame| frame.get("id").and_then(Value::as_str) == Some("client-call-ro"))
+            .expect("client answered the un-advertised fs/write with an error");
+        assert!(
+            response
+                .pointer("/error/code")
+                .and_then(Value::as_i64)
+                .is_some(),
+            "rejection must be a JSON-RPC error, not a result"
+        );
+    }
+
+    /// An inbound REQUEST for an unknown method (carrying an `id`) is answered with
+    /// a JSON-RPC method-not-found error rather than silently swallowed (which
+    /// would deadlock the agent awaiting a reply).
+    #[test]
+    fn inbound_unknown_request_gets_method_not_found_error() {
+        let (transport, _transcript) = drive_prompt(
+            setup_plan(),
+            vec![
+                ScriptedServerFrame::Raw(json!({
+                    "jsonrpc": "2.0",
+                    "id": "unknown-1",
+                    "method": "agent/does_not_exist",
+                    "params": {}
+                })),
+                ScriptedServerFrame::Response(json!({ "stopReason": "end_turn" })),
+            ],
+        );
+
+        let response = transport
+            .recorded
+            .iter()
+            .find(|frame| frame.get("id").and_then(Value::as_str) == Some("unknown-1"))
+            .expect("client replied to the unknown request");
+        assert_eq!(
+            response.pointer("/error/code").and_then(Value::as_i64),
+            Some(JSONRPC_METHOD_NOT_FOUND)
+        );
+    }
+
+    /// A transport that never yields a frame and reports a timeout on every
+    /// deadline-bounded read, so the pump must fail with `Timeout` instead of
+    /// hanging forever.
+    struct StallingTransport;
+
+    impl AcpTransport for StallingTransport {
+        fn send_line(&mut self, _line: &str) -> Result<(), AcpWireError> {
+            Ok(())
+        }
+        fn recv_line(&mut self) -> Result<Option<String>, AcpWireError> {
+            // The blocking path is never exercised by the pump (it uses the
+            // deadline-bounded read), but a stall here would be reported as EOF.
+            Ok(None)
+        }
+        fn recv_line_within(&mut self, _deadline: Duration) -> Result<RecvOutcome, AcpWireError> {
+            Ok(RecvOutcome::TimedOut)
+        }
+    }
+
+    /// The pump fails closed with `Timeout` (not a hang) when no awaited response
+    /// arrives within the read deadline.
+    #[test]
+    fn pump_times_out_when_no_response_arrives() {
+        let mut client = AcpWireClient::attach(StallingTransport, setup_plan())
+            .with_read_timeout(Duration::from_millis(10));
+        let error = client
+            .initialize()
+            .expect_err("a stalled agent must time out");
+        assert!(
+            matches!(error, AcpWireError::Timeout { .. }),
+            "expected a typed timeout, got {error:?}"
+        );
     }
 }

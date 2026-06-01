@@ -163,6 +163,57 @@ Evidence (DP1 landed 2026-06-01):
   passed / 2 ignored). `git diff --check` clean. Live ACP smoke remains deferred
   to DP11.
 
+DP1 review fixes (2026-06-01):
+
+- Inbound agent REQUESTS are now answered, never silently swallowed. The wire
+  pump (`acp_wire.rs::pump_until_response`) distinguishes requests (carry `id`)
+  from notifications: advertised `fs/read_text_file` / `fs/write_text_file` /
+  `terminal/run` requests route through
+  `AcpSessionSetupPlan::route_inbound_client_call` -> `wrapper_request_for_client_call`
+  (which rejects un-advertised capabilities and validates path/program params) and
+  are answered with a JSON-RPC result naming the backing wrapper tool; an
+  un-advertised/invalid call is answered with a JSON-RPC error; any other unknown
+  request gets a JSON-RPC `-32601` method-not-found. This closes the deadlock where
+  an advertised fs/terminal call fell into the catch-all and got no reply.
+- The wire pump now has a read deadline (`ACP_PUMP_READ_TIMEOUT`, overridable via
+  `AcpWireClient::with_read_timeout`): a stalled/malicious agent yields
+  `AcpWireError::Timeout` instead of hanging the controller turn. The live
+  `PipedProcessTransport` drains stdout on a reader thread + `mpsc` so reads are
+  deadline-bounded without a blocking-fd hang.
+- Permission mapping is now profile-honest. `AcpSessionSetupPlan` carries an
+  `AcpPermissionProfile`; `answer_permission` applies the documented TrustedLocal
+  option-mapping ONLY under the TrustedLocal profile and FAILS CLOSED (cancels) for
+  any other profile rather than self-authorizing on the wire. Full per-scope
+  `PermissionPolicy::decide` integration for non-trusted profiles stays with the
+  controller seam (safety-gates grant lifecycle), not the wire client.
+- `AcpLiveAdapter` is wired into the single orchestration seam:
+  `AgentAdapterHandle::Acp` + `AgentAdapterHandle::acp(..)`, routed through
+  `as_adapter()`/`is_real()` so the loop can dispatch to it (gate-off -> blocked
+  turn, no spawn).
+- Reuse of the loop's ingestion route is now PROVEN, not self-attested: a new
+  capo-controller test drives an `AcpLiveAdapter` transcript and feeds
+  `transcript.events` through `apply_normalized_adapter_events_with_turn`,
+  asserting the ACP tool call lands as a completed `adapter_native:acp` read-model
+  row.
+- New deterministic tests: reject-only and empty/no-selectable-option permission
+  answers on the wire; non-trusted-local fail-closed; advertised fs/write routed +
+  answered; un-advertised fs/write rejected with a JSON-RPC error; unknown request
+  method-not-found; pump timeout (no hang); a capo-runtime `spawn_piped_process`
+  line-protocol + shutdown/reap test; `AgentAdapterHandle::acp` dispatch.
+
+DP1 gate fix (2026-06-01):
+
+- Fixed a `clippy::large_enum_variant` failure at
+  `crates/capo-adapters/src/adapter.rs`: the `AgentAdapterHandle::Acp` variant
+  inlined the large `AcpLiveAdapter` (>= 624 bytes), bloating every handle. Boxed
+  the large variant to `Acp(Box<AcpLiveAdapter>)`; the boxing is encapsulated in
+  the `AgentAdapterHandle::acp(..)` constructor (`Box::new`) and the `as_adapter()`
+  match derefs via `as_ref()`, so no callers changed.
+- Gate re-run from `/Users/nicolas/devel/capo-wt/depth`: `cargo fmt --check` PASS;
+  `cargo clippy --all-targets --all-features -- -D warnings` PASS (no warnings);
+  `cargo test --workspace` PASS (0 failed; capo-adapters 52 passed / 2 ignored).
+  `git diff --check` clean.
+
 ## DP2 - ACP session/load + session/resume And Raw-Update Reconciliation/Dedupe
 
 Status: pending.

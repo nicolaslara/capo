@@ -15,14 +15,15 @@ mod permission_request;
 mod provider_parsers;
 mod scripted_mock_agent;
 
-pub use acp_client::{AcpClientCall, AcpSessionSetupPlan};
+pub use acp_client::{AcpClientCall, AcpPermissionProfile, AcpSessionSetupPlan};
 pub use acp_live::{
     ACP_LIVE_PREFLIGHT_OPT_IN_ENV, ACP_LIVE_RUN_OPT_IN_ENV, AcpLiveAdapter, AcpLiveError,
     acp_live_gate_open, turn_output_from_transcript,
 };
 pub use acp_wire::{
-    ACP_PROTOCOL_VERSION, AcpPermissionRoundTrip, AcpTransport, AcpTurnTranscript, AcpWireClient,
-    AcpWireError, PipedProcessTransport, ScriptedAcpTransport, ScriptedServerFrame,
+    ACP_PROTOCOL_VERSION, ACP_PUMP_READ_TIMEOUT, AcpClientCallRecord, AcpPermissionRoundTrip,
+    AcpTransport, AcpTurnTranscript, AcpWireClient, AcpWireError, PipedProcessTransport,
+    RecvOutcome, ScriptedAcpTransport, ScriptedServerFrame,
 };
 pub use adapter::{
     AdapterSession, AdapterSessionRequest, AgentAdapter, AgentAdapterHandle, FakeAdapter,
