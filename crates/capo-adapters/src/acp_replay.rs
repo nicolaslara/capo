@@ -173,6 +173,40 @@ pub enum AcpReconcileDecision {
     Ambiguous,
 }
 
+/// DP3 (acp-replay-dedupe.md): how confident the import/reconciliation of a
+/// candidate is, recorded so a low-confidence reconciliation is AUDITABLE rather
+/// than silently projected.
+///
+/// `Stable`/`Heuristic`/`None` mirror the dedupe-confidence vocabulary: a stable
+/// timeline-keyed import is `stable`, a single inferred message group is
+/// `heuristic`, and an ambiguous collapsed-chunk import (or a duplicate observation
+/// with no usable key) is `none`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AcpImportConfidence {
+    Stable,
+    Heuristic,
+    None,
+}
+
+impl AcpImportConfidence {
+    /// The persisted string (`stable` / `heuristic` / `none`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Heuristic => "heuristic",
+            Self::None => "none",
+        }
+    }
+
+    fn from_dedupe(confidence: AcpDedupeConfidence) -> Self {
+        match confidence {
+            AcpDedupeConfidence::Stable => Self::Stable,
+            AcpDedupeConfidence::Heuristic => Self::Heuristic,
+            AcpDedupeConfidence::Low => Self::None,
+        }
+    }
+}
+
 /// A finalized candidate item the load replay staged, with its reconciliation
 /// decision. Message chunks are finalized to a content hash + chunk count; tool
 /// calls collapse their replacement updates into a single latest-state candidate.
@@ -188,6 +222,12 @@ pub struct AcpReconciledCandidate {
     pub chunk_count: i64,
     pub boundary_confidence: AcpDedupeConfidence,
     pub decision: AcpReconcileDecision,
+    /// DP3: how confident the import/reconciliation is, recorded so a
+    /// low-confidence reconciliation is AUDITABLE rather than silently projected. A
+    /// stable-keyed import is `stable`, a single inferred message group is
+    /// `heuristic`, and an ambiguous collapsed-chunk import (or a duplicate
+    /// observation with no usable key) is `none`.
+    pub import_confidence: AcpImportConfidence,
     /// The latest normalized event for this candidate (drives the imported item's
     /// projection at the controller seam).
     pub representative: NormalizedAdapterEvent,
@@ -363,6 +403,12 @@ impl AcpReplayEngine {
                 confidence: finalized.boundary_confidence,
             });
             let decision = reconcile(&finalized, existing_items);
+            // The import/reconciliation confidence tracks the candidate's boundary
+            // confidence: a stable-keyed candidate imports as `stable`, a single
+            // inferred message group as `heuristic`, and a collapsed ambiguous chunk
+            // (or any low-boundary candidate) as `none`, so a low-confidence
+            // reconciliation is auditable rather than silently projected.
+            let import_confidence = AcpImportConfidence::from_dedupe(finalized.boundary_confidence);
             candidates.push(AcpReconciledCandidate {
                 timeline_key: finalized.timeline_key,
                 kind: finalized.kind,
@@ -371,6 +417,7 @@ impl AcpReplayEngine {
                 chunk_count: finalized.chunk_count,
                 boundary_confidence: finalized.boundary_confidence,
                 decision,
+                import_confidence,
                 representative: finalized.representative,
             });
         }
@@ -745,5 +792,54 @@ mod tests {
         assert_eq!(plan.candidates.len(), 1, "one current-plan candidate");
         assert_eq!(plan.candidates[0].kind, AcpTimelineKind::Plan);
         assert_eq!(plan.candidates[0].timeline_key, "acp:s1:plan:current");
+    }
+
+    /// DP3: every reconciled candidate records an auditable `import_confidence` so a
+    /// low-confidence reconciliation is never silently projected. A stable-keyed
+    /// tool import is `stable`; an ID-less collapsed-chunk ambiguous import is
+    /// `none`.
+    #[test]
+    fn reconciled_candidates_record_auditable_import_confidence() {
+        let stable_frames = vec![update(
+            "s1",
+            json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tool-1",
+                "title": "write",
+                "status": "completed",
+                "content": { "type": "text", "text": "done" }
+            }),
+        )];
+        let stable_plan =
+            AcpReplayEngine::plan_load(AcpReplaySource::SessionLoad, "s1", &stable_frames, &[]);
+        assert_eq!(stable_plan.candidates.len(), 1);
+        let stable = &stable_plan.candidates[0];
+        assert_eq!(stable.decision, AcpReconcileDecision::Imported);
+        assert_eq!(stable.import_confidence, AcpImportConfidence::Stable);
+        assert_eq!(stable.import_confidence.as_str(), "stable");
+
+        let ambiguous_frames = vec![
+            update(
+                "s1",
+                json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": "hello" }
+                }),
+            ),
+            update(
+                "s1",
+                json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": "hello" }
+                }),
+            ),
+        ];
+        let ambiguous_plan =
+            AcpReplayEngine::plan_load(AcpReplaySource::SessionLoad, "s1", &ambiguous_frames, &[]);
+        assert_eq!(ambiguous_plan.candidates.len(), 1);
+        let ambiguous = &ambiguous_plan.candidates[0];
+        assert_eq!(ambiguous.decision, AcpReconcileDecision::Ambiguous);
+        assert_eq!(ambiguous.import_confidence, AcpImportConfidence::None);
+        assert_eq!(ambiguous.import_confidence.as_str(), "none");
     }
 }

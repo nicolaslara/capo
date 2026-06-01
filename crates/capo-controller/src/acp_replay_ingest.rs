@@ -216,7 +216,13 @@ impl FakeBoundaryController {
                         refs,
                         EventKind::AdapterReplayDuplicateDetected,
                         &slug(&candidate.timeline_key),
-                        &format!("duplicate:{}", candidate.content_hash),
+                        // Carry the import/reconciliation confidence on the marker so
+                        // a low-confidence dedupe is auditable, not silently dropped.
+                        &format!(
+                            "duplicate:{}:{}",
+                            candidate.import_confidence.as_str(),
+                            candidate.content_hash
+                        ),
                         &[],
                     )?;
                     appended_event_count += 1;
@@ -226,7 +232,11 @@ impl FakeBoundaryController {
                         refs,
                         EventKind::AdapterReplayAmbiguous,
                         &slug(&candidate.timeline_key),
-                        &format!("ambiguous:{}", candidate.content_hash),
+                        &format!(
+                            "ambiguous:{}:{}",
+                            candidate.import_confidence.as_str(),
+                            candidate.content_hash
+                        ),
                         &[],
                     )?;
                     appended_event_count += 1;

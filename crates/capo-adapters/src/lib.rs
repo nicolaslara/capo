@@ -22,9 +22,9 @@ pub use acp_live::{
     acp_live_gate_open, turn_output_from_transcript,
 };
 pub use acp_replay::{
-    AcpDedupeConfidence, AcpRawUpdateRecord, AcpReconcileDecision, AcpReconciledCandidate,
-    AcpReplayEngine, AcpReplayPlan, AcpReplaySource, AcpTimelineKeyRecord, AcpTimelineKind,
-    ExistingItemFingerprint,
+    AcpDedupeConfidence, AcpImportConfidence, AcpRawUpdateRecord, AcpReconcileDecision,
+    AcpReconciledCandidate, AcpReplayEngine, AcpReplayPlan, AcpReplaySource, AcpTimelineKeyRecord,
+    AcpTimelineKind, ExistingItemFingerprint,
 };
 pub use acp_wire::{
     ACP_PROTOCOL_VERSION, ACP_PUMP_READ_TIMEOUT, AcpClientCallRecord, AcpPermissionRoundTrip,
@@ -41,9 +41,9 @@ pub use codex_live::{
     CodexLiveChatError, codex_live_chat_gate_open,
 };
 pub use event::{
-    AdapterFixtureParse, AdapterParseError, AdapterParseResult, AdapterTerminalOutcome,
-    AdapterTimelineConfidence, AdapterToolObservation, NormalizedAdapterEvent,
-    NormalizedAdapterKind,
+    AcpExternalRef, AdapterFixtureParse, AdapterParseError, AdapterParseResult,
+    AdapterTerminalOutcome, AdapterTimelineConfidence, AdapterToolObservation,
+    NormalizedAdapterEvent, NormalizedAdapterKind,
 };
 pub use local_subscription::{
     LocalAdapterLaunchPlan, LocalAdapterSmokeError, LocalAdapterSmokePlan, LocalAdapterSmokeResult,

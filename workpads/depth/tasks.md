@@ -318,7 +318,8 @@ Evidence (DP2 review fixes 2026-06-01):
 
 ## DP3 - ACP Raw-Update Storage, Provenance, And Cancel-While-Permission-Pending
 
-Status: pending.
+Status: gate fixed 2026-06-01 (fmt/clippy green); behavioral acceptance still in
+progress.
 
 Prerequisite: `real-turn-loop` + `tools-aci` (builds on DP1/DP2).
 
@@ -354,6 +355,43 @@ Verification:
 - Focused `cargo test -p capo-adapters -p capo-state`.
 - `cargo fmt`
 - `git diff --check`
+
+Evidence (DP3 gate fix 2026-06-01):
+
+- The objective gate had FAILED on two stale-WIP issues: a `cargo fmt` multi-line
+  chain at `crates/capo-adapters/src/event.rs:191` and a clippy dead-code error
+  for the `AcpImportConfidence` enum + its `as_str`/`from_dedupe` methods in
+  `crates/capo-adapters/src/acp_replay.rs` (introduced for DP3's
+  `import_confidence` auditability requirement but never wired up).
+- Fix (smallest correct change that also advances DP3's acceptance rather than
+  deleting the required type):
+  - `crates/capo-adapters/src/event.rs`: collapsed the `operation` assignment chain
+    to a single line per rustfmt.
+  - `crates/capo-adapters/src/acp_replay.rs`: added an `import_confidence:
+    AcpImportConfidence` field to `AcpReconciledCandidate`, computed in `plan_load`
+    via `AcpImportConfidence::from_dedupe(boundary_confidence)` (stable-keyed import
+    -> `stable`, single inferred message group -> `heuristic`, ambiguous
+    collapsed-chunk import -> `none`), so a low-confidence reconciliation is
+    auditable rather than silently projected.
+  - `crates/capo-adapters/src/lib.rs`: re-exported `AcpImportConfidence`.
+  - `crates/capo-controller/src/acp_replay_ingest.rs`: the duplicate/ambiguous
+    reconciliation markers now carry `candidate.import_confidence.as_str()` in their
+    operation string so the confidence is recorded on the event, exercising the
+    previously-dead `as_str`.
+  - New deterministic test `acp_replay::tests::reconciled_candidates_record_auditable_import_confidence`
+    asserting a stable tool import records `stable` and an ID-less collapsed-chunk
+    ambiguous import records `none`.
+- Gate re-run from `/Users/nicolas/devel/capo-wt/depth`: `cargo fmt --check` PASS;
+  `cargo clippy --all-targets --all-features -- -D warnings` PASS (no warnings);
+  `cargo test --workspace` PASS (0 failed across all crates + doc-tests;
+  capo-adapters 64 passed / 2 ignored including the new test). `git diff --check`
+  clean.
+- Note: this commit makes the objective gate green and lands the
+  `import_confidence` auditability slice of DP3; the remaining DP3 behavioral
+  acceptance (raw-update artifact provenance block + `external_ref.adapter="acp"`
+  on normalized events, ID-less staging/finalize at turn/load completion, the
+  cancel-while-permission-pending fixture, artifact-ref + redaction for large
+  payloads) remains to be completed.
 
 ## DP4 - Claude Workspace-Write Adapter As A Second Real Provider (Opt-In Gated)
 

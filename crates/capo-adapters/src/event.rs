@@ -43,6 +43,40 @@ pub enum AdapterTimelineConfidence {
     None,
 }
 
+/// DP3 (acp-replay-dedupe.md): the `external_ref.adapter = "acp"` provenance block
+/// every NORMALIZED ACP event carries once it is reconciled into a batch.
+///
+/// The pure `parse_acp_record` mapper cannot know the Capo session id, the replay
+/// batch id, the raw-update id, or the replay source -- those are only known at the
+/// controller ingest seam where the raw frame has already been persisted as an
+/// `AcpRawUpdate`. So the provenance block is STAMPED onto the normalized event by
+/// the reconciliation engine / controller producer (see
+/// [`NormalizedAdapterEvent::stamp_acp_provenance`]), pointing the normalized event
+/// back at its raw observation and the batch it was reconciled in. This is exactly
+/// the design's "raw updates persisted before normalization; normalized events
+/// reference their raw observation" rule made concrete on the event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcpExternalRef {
+    /// Always `"acp"`.
+    pub adapter: &'static str,
+    /// The external (agent-side) session id this event was observed under.
+    pub external_session_id: String,
+    /// The ACP `session/update` variant kind (`tool_call`, `agent_message_chunk`,
+    /// `plan`, ...), carried so the provenance is self-describing without re-parsing
+    /// the raw frame.
+    pub acp_update_kind: String,
+    /// The replay batch this normalized event was reconciled in.
+    pub acp_replay_batch_id: String,
+    /// The raw observation this normalized event derives from.
+    pub acp_raw_update_id: String,
+    /// The protocol-aware timeline key when one exists (tool/plan keys, or a
+    /// synthetic message anchor).
+    pub acp_timeline_key: Option<String>,
+    /// Which batch source (`live_prompt` / `session_load` / `session_resume_attach`
+    /// / `restart_recovery` / `foreign_import`) the event was observed under.
+    pub replay_source: String,
+}
+
 /// The terminal classification of a normalized adapter event.
 ///
 /// This is the single source of truth for "this event ends a turn, and how".
@@ -76,6 +110,11 @@ pub struct NormalizedAdapterEvent {
     pub raw_event_hash: String,
     pub idempotency_key: Option<String>,
     pub provider_event_kind: String,
+    /// DP3: the `external_ref.adapter = "acp"` provenance block, stamped by the
+    /// reconciliation engine / controller producer once the event is tied to a
+    /// persisted raw observation + batch. `None` until stamped (the pure mapper
+    /// does not know the batch context).
+    pub external_ref: Option<AcpExternalRef>,
 }
 
 impl NormalizedAdapterEvent {
@@ -101,7 +140,63 @@ impl NormalizedAdapterEvent {
             raw_event_hash: json_hash(raw),
             idempotency_key: None,
             provider_event_kind: provider_event_kind.into(),
+            external_ref: None,
         }
+    }
+
+    /// The DP3 event family for an ACP normalized event, the `{event_family}`
+    /// segment of the design's idempotency-key shape
+    /// `acp:{capo_session_id}:{event_family}:{timeline_key}:{operation}:{operation_version}`.
+    ///
+    /// Derived from the kind so the family is the single, design-named bucket the
+    /// timeline belongs to (`tool` / `message` / `plan` / `session` / `turn`),
+    /// never the raw provider string.
+    pub fn acp_event_family(&self) -> &'static str {
+        match self.kind.as_str() {
+            "adapter.tool_call_requested"
+            | "adapter.tool_call_started"
+            | "adapter.tool_call_completed"
+            | "adapter.tool_call_failed" => "tool",
+            "adapter.plan_replaced" => "plan",
+            "adapter.session_started" => "session",
+            "adapter.turn_completed" | "adapter.turn_failed" | "adapter.turn_interrupted" => "turn",
+            _ => "message",
+        }
+    }
+
+    /// DP3: stamp the `external_ref.adapter = "acp"` provenance block AND rewrite
+    /// the idempotency key to the design's canonical
+    /// `acp:{capo_session_id}:{event_family}:{timeline_key}:{operation}:{operation_version}`
+    /// shape.
+    ///
+    /// The pure `parse_acp_record` mapper builds a provisional 4-part
+    /// `{adapter}:{kind}:{timeline_key}:{operation}` key (it cannot know the Capo
+    /// session id or the operation version). The reconciliation engine / controller
+    /// producer calls this once it has the batch context, replacing the provisional
+    /// key with the canonical 6-part key and attaching the provenance block that
+    /// points back at the persisted raw observation. `operation` defaults to the
+    /// event's status (or the kind suffix); `operation_version` is the
+    /// monotonically-increasing replacement version for replacement-field timelines
+    /// (tool/plan), `0` for a first observation.
+    #[must_use]
+    pub fn stamp_acp_provenance(
+        mut self,
+        capo_session_id: &str,
+        external_ref: AcpExternalRef,
+        operation_version: i64,
+    ) -> Self {
+        let family = self.acp_event_family();
+        let timeline_key = self
+            .timeline_key
+            .clone()
+            .or_else(|| external_ref.acp_timeline_key.clone())
+            .unwrap_or_else(|| format!("{family}:{}", self.raw_event_hash));
+        let operation = self.status.clone().unwrap_or_else(|| family.to_string());
+        self.idempotency_key = Some(format!(
+            "acp:{capo_session_id}:{family}:{timeline_key}:{operation}:{operation_version}"
+        ));
+        self.external_ref = Some(external_ref);
+        self
     }
 
     pub(crate) fn with_timeline(
