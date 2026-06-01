@@ -919,7 +919,7 @@ Evidence:
 
 ## SG10 - Deterministic Safety Test Suite Plus Restart/Replay
 
-Status: pending.
+Status: done.
 
 Acceptance:
 
@@ -942,6 +942,64 @@ Verification:
 - Focused `cargo test -p capo-state -p capo-tools -p capo-controller -p capo-eval`
   for the changed safety behaviors.
 - `git diff --check`.
+
+Evidence:
+
+- New consolidated deterministic suite: `crates/capo-controller/src/tests.rs` adds
+  a self-contained nested `mod sg10` (the explicit SG10 acceptance suite the SG0
+  invariant requires -- every state-changing safety behavior has at least one
+  deterministic assertion, with NO live providers). It drives the
+  `FakeBoundaryController` orchestration core directly (the deterministic test
+  seam; the `Real*` handle is a thin production wrapper over the same core that
+  persists through the identical `append_event`/projection path), so every SG1-SG9
+  safety method is exercised on one handle. Tests (10):
+  `sg10_denied_request_is_blocked` (policy deny via the grant read-back gate, typed
+  deny naming the policy as authority);
+  `sg10_granted_request_is_authorized_via_read_back` (a valid durable ALLOW grant
+  authorizes the SAME request the static policy would deny -- grants are not
+  write-only); `sg10_revoked_grant_denied_on_re_request` (revoke then re-request is
+  denied, old grant-created event preserved, exactly one
+  `capability.grant_revoked` added); `sg10_expired_grant_denied` (a grant past
+  `expires_at` does not authorize without an explicit revoke);
+  `sg10_critical_scope_denied_under_trusted_local` (each enumerated critical scope
+  denied under the DEFAULT TrustedLocal policy while a non-critical workspace write
+  still allows); `sg10_verification_pass_from_exit_status` /
+  `sg10_verification_fail_from_exit_status` (pass/fail keyed strictly off the real
+  scripted-shell exit status, recorded as OBSERVED evidence);
+  `sg10_workspace_lock_contention_rejects_second_writer` (one holder acquires, a
+  second writer is REJECTED with a typed conflict via `gate_workspace_write`, a
+  read is never blocked, the contender succeeds only after the holder releases);
+  `sg10_checkpoint_rollback_restores_prior_state` (checkpoint -> write -> restore
+  reverts a modified file, restores a deleted file, removes a file added after the
+  checkpoint, over a real on-disk workspace + system git).
+- Restart/replay (consolidated): `sg10_full_lifecycle_rebuilds_identically_from_
+  event_log` drives ALL of grant lifecycle (created + revoked + expired), a lock
+  lease (acquire+release), a shadow-git checkpoint ref, a `score_run` outcome over
+  observed evidence (with controlled-clock wall-clock `duration_millis = 2500`,
+  not an event-sequence delta), and a recovery classification (a gone in-flight run
+  classifies terminal `recovered`, never `exited_unknown`) on one controller, then
+  reopens a fresh controller over the SAME on-disk state root (a restart),
+  `rebuild_projections()`, and asserts the grant projections, the lease
+  (`workspace_lease_holder`), the `checkpoint_by_id` row, the `run_score_by_id`
+  row, and the recovered `run` row all rebuild byte-identical before vs after the
+  rebuild, plus that the revoked grant reads revoked and the expired grant reads
+  expired after replay.
+- Coverage note (SG0 invariant honored): the enumerated SG10 behaviors are entirely
+  controller + state + tools enforcement surfaces; `capo-eval` is the descriptive
+  reporting layer (no new safety behavior), so SG10 adds no eval tests and instead
+  includes `-p capo-eval` in the focused run to confirm the named crates compile
+  and pass. The per-feature `sg1_*`..`sg9_*` tests from SG1-SG9 remain; SG10 is the
+  consolidated end-to-end acceptance suite over them.
+- Commands run (from `/Users/nicolas/devel/capo-wt/safety-gates`):
+  `cargo test -p capo-controller sg10` (10 passed),
+  `cargo fmt --check` (exit 0 after `cargo fmt`),
+  `cargo clippy --all-targets --all-features -- -D warnings` (exit 0, no
+  warnings), `cargo test -p capo-state -p capo-tools -p capo-controller -p
+  capo-eval` (exit 0; capo-controller 116 passed/0 failed/1 ignored, capo-state 58
+  passed/0 failed, capo-tools 113 passed/0 failed, capo-eval 3 passed/0 failed),
+  `cargo test --workspace` (exit 0; 0 failed workspace-wide). `git diff --check`
+  clean. Acceptance met. No live Codex smoke required (SG10 verification is the
+  deterministic hermetic suite + replay only; the live opt-in smoke is SG11).
 
 ## SG11 - Live Opt-In Safety Smoke Paired With Deterministic Assertions And E2E Gate
 

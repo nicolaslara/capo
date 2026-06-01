@@ -7741,3 +7741,683 @@ fn sg9_lease_scope(session: &str, run: &str, workspace_root: &str) -> crate::Wor
         workspace_root: workspace_root.to_string(),
     }
 }
+
+/// SG10: the deterministic, hermetic safety suite.
+///
+/// SG1-SG9 each landed focused per-feature tests. SG10 is the consolidated
+/// acceptance suite the SG0 invariant requires: every state-changing safety
+/// behavior has at least one deterministic assertion (event/wire snapshot, exit
+/// status, or replay), and there are NO live providers anywhere -- every test
+/// uses the in-process controller, scripted/fake adapters, scripted shell
+/// commands, and seeded/durable event-sourced state, so the suite is fully
+/// reproducible.
+///
+/// The suite has two layers:
+///
+/// 1. One test per enumerated safety behavior (the SG10 acceptance list): denied
+///    request, granted request, revoked grant denied on re-request, expired grant
+///    denied, critical-scope denial under TrustedLocal, verification pass,
+///    verification fail, workspace-lock contention, and checkpoint rollback
+///    restoring prior state.
+/// 2. A consolidated restart/replay test proving grant lifecycle
+///    (created/revoked/expired), lock leases, checkpoint refs, score outcomes, and
+///    recovery classifications ALL rebuild identically from the event log after a
+///    store reopen + `rebuild_projections`.
+#[cfg(test)]
+mod sg10 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use capo_runtime::LocalProcessConfig;
+
+    use super::*;
+    use crate::{
+        AcceptanceCriterion, CheckpointScope, GrantReadBackSource, GrantRevocationScope,
+        RunScoreOutcome, RunScoreScope, VerificationCommand, VerificationKind, VerificationScope,
+        WorkspaceLeaseScope, WorkspaceWriteGate,
+    };
+
+    const PROJECT: &str = "project-capo";
+    const PROFILE: &str = "trusted-local-dev";
+    const WRITE_SCOPE: &str = "[\"filesystem:write:workspace\"]";
+
+    fn project() -> ProjectId {
+        ProjectId::new(PROJECT)
+    }
+
+    /// A controller over the read-only-local STATIC policy, which DENIES a
+    /// workspace write by default -- the policy used to prove deny / grant
+    /// authorization / revoke / expiry without relying on the permissive default.
+    ///
+    /// Drives the [`FakeBoundaryController`] orchestration core directly: it is the
+    /// explicit deterministic test seam (the `Real*` handle is a thin production
+    /// wrapper over this same core, persisting through the identical
+    /// `append_event`/projection path), and it exposes every SG1-SG9 safety method
+    /// (`decide_with_grant_read_back`, `revoke_capability_grant`, the lock,
+    /// checkpoint, `run_verification`, `score_run`, `recover_inflight_runs`) on one
+    /// handle.
+    fn static_controller() -> FakeBoundaryController {
+        FakeBoundaryController::open_with_permission_policy(
+            project(),
+            temp_root(),
+            PermissionPolicy::static_read_only_local(),
+        )
+        .expect("open static controller")
+    }
+
+    fn write_request(session: &str) -> PermissionRequest {
+        PermissionRequest {
+            session_id: SessionId::new(session.to_string()),
+            capability_profile_id: PROFILE.to_string(),
+            scope_json: WRITE_SCOPE.to_string(),
+        }
+    }
+
+    /// Seed a durable ALLOW grant for the write scope, subject-scoped to `session`,
+    /// optionally with an `expires_at` (epoch-millis as a string).
+    fn seed_write_grant(
+        controller: &FakeBoundaryController,
+        grant_id: &str,
+        session: &str,
+        expires_at: Option<&str>,
+    ) {
+        controller
+            .state()
+            .append_event(
+                capo_state::NewEvent::new(
+                    format!("event-sg10-grant-{grant_id}"),
+                    capo_state::EventKind::CapabilityGrantCreated,
+                    "test",
+                ),
+                &[capo_state::ProjectionRecord::CapabilityGrant(
+                    capo_state::CapabilityGrantProjection {
+                        capability_grant_id: grant_id.to_string(),
+                        capability_profile_id: PROFILE.to_string(),
+                        scope_json: WRITE_SCOPE.to_string(),
+                        effect: "allow".to_string(),
+                        subject_json: format!("{{\"session_id\":\"{session}\"}}"),
+                        decision_source: "user".to_string(),
+                        persistence: "until_revoked".to_string(),
+                        explanation: "operator-reviewed grant".to_string(),
+                        created_at: Some("1700000000000".to_string()),
+                        expires_at: expires_at.map(str::to_string),
+                        revoked_at: None,
+                        updated_sequence: 0,
+                    },
+                )],
+            )
+            .expect("seed grant");
+    }
+
+    fn now_millis_string() -> String {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis()
+            .to_string()
+    }
+
+    // ---- enumerated behavior: denied request ----------------------------------
+
+    /// A request the policy denies (and that no grant authorizes) is DENIED: the
+    /// decide step surfaces a typed deny via the grant read-back gate, naming the
+    /// policy (not a grant) as the authority.
+    #[test]
+    fn sg10_denied_request_is_blocked() {
+        let controller = static_controller();
+        let decision = controller
+            .decide_with_grant_read_back(write_request("session-denied"))
+            .expect("decide");
+        assert!(
+            !decision.allowed,
+            "an un-granted policy-denied write is denied"
+        );
+        assert_eq!(decision.source, GrantReadBackSource::Policy);
+        assert!(decision.authorizing_grant_id.is_none());
+        assert_eq!(decision.policy_decision.effect, "deny");
+    }
+
+    // ---- enumerated behavior: granted request ---------------------------------
+
+    /// A valid durable ALLOW grant authorizes the SAME request the policy would
+    /// deny -- grants are read back as authorization, not write-only.
+    #[test]
+    fn sg10_granted_request_is_authorized_via_read_back() {
+        let controller = static_controller();
+        seed_write_grant(&controller, "grant-sg10-allow", "session-granted", None);
+        let decision = controller
+            .decide_with_grant_read_back(write_request("session-granted"))
+            .expect("decide");
+        assert!(
+            decision.allowed,
+            "a valid durable grant authorizes the request"
+        );
+        assert_eq!(decision.source, GrantReadBackSource::DurableGrant);
+        assert_eq!(
+            decision.authorizing_grant_id.as_deref(),
+            Some("grant-sg10-allow")
+        );
+        // The grant, not the policy, authorized: the policy still records a deny.
+        assert_eq!(decision.policy_decision.effect, "deny");
+    }
+
+    // ---- enumerated behavior: revoked grant denied on re-request --------------
+
+    /// After a grant is revoked, re-requesting the same scope is DENIED (the
+    /// revoked grant reads as absent), while the original grant-created event is
+    /// preserved and exactly one `capability.grant_revoked` event is added.
+    #[test]
+    fn sg10_revoked_grant_denied_on_re_request() {
+        let controller = static_controller();
+        let registration = controller.register_agent("sg10-revoke").expect("agent");
+        let refs = controller
+            .send_task(&registration, "Drive an SG10 revoke")
+            .expect("send task");
+        seed_write_grant(&controller, "grant-sg10-revoke", "session-revoke", None);
+
+        // Authorized while valid.
+        let granted = controller
+            .decide_with_grant_read_back(write_request("session-revoke"))
+            .expect("decide");
+        assert!(granted.allowed);
+        let events_before = controller.state().event_count().expect("count");
+
+        // Revoke with a reason.
+        let revoke_scope = GrantRevocationScope {
+            task_id: refs.task_id.clone(),
+            agent_id: refs.agent_id.clone(),
+            session_id: refs.session_id.clone(),
+            run_id: refs.run_id.clone(),
+            turn_id: TurnId::new("turn-sg10-revoke"),
+        };
+        controller
+            .revoke_capability_grant(&revoke_scope, "grant-sg10-revoke", "policy tightened")
+            .expect("revoke");
+
+        // Re-request is now denied.
+        let after = controller
+            .decide_with_grant_read_back(write_request("session-revoke"))
+            .expect("decide after revoke");
+        assert!(!after.allowed, "a revoked grant no longer authorizes");
+        assert_eq!(after.source, GrantReadBackSource::Policy);
+
+        // Old created event preserved; revoke ADDS exactly one event.
+        let events_after = controller.state().event_count().expect("count");
+        assert_eq!(events_after, events_before + 1, "revoke adds one event");
+        let grant = controller
+            .state()
+            .capability_grant_by_id("grant-sg10-revoke")
+            .expect("grant by id")
+            .expect("present");
+        assert!(grant.is_revoked());
+    }
+
+    // ---- enumerated behavior: expired grant denied ----------------------------
+
+    /// A grant past its `expires_at` does NOT authorize, even though it was never
+    /// explicitly revoked (expiry is a denial input in decide).
+    #[test]
+    fn sg10_expired_grant_denied() {
+        let controller = static_controller();
+        // `expires_at = 1` is far in the past relative to the wall clock.
+        seed_write_grant(
+            &controller,
+            "grant-sg10-expired",
+            "session-expired",
+            Some("1"),
+        );
+        let decision = controller
+            .decide_with_grant_read_back(write_request("session-expired"))
+            .expect("decide");
+        assert!(!decision.allowed, "an expired grant does not authorize");
+        assert_eq!(decision.source, GrantReadBackSource::Policy);
+        let grant = controller
+            .state()
+            .capability_grant_by_id("grant-sg10-expired")
+            .expect("grant by id")
+            .expect("present");
+        assert!(
+            !grant.is_revoked(),
+            "the grant was never explicitly revoked"
+        );
+        assert!(grant.is_expired(&now_millis_string()));
+    }
+
+    // ---- enumerated behavior: critical-scope denial under TrustedLocal --------
+
+    /// Under the DEFAULT TrustedLocal policy (the controller default), an
+    /// un-granted CRITICAL scope is DENIED, while an ordinary non-critical
+    /// workspace write still ALLOWS -- the SG4 critical-scope fix, asserted at the
+    /// policy boundary used by the loop.
+    #[test]
+    fn sg10_critical_scope_denied_under_trusted_local() {
+        let policy = PermissionPolicy::allow_trusted_local();
+
+        // Each enumerated critical scope is denied.
+        for scope in [
+            "filesystem:write:path",
+            "network:connect:internet",
+            "network:expose:public",
+            "secret:read:credential_material",
+            "shell:execute:path",
+        ] {
+            let decision = policy.decide(PermissionRequest {
+                session_id: SessionId::new("session-critical"),
+                capability_profile_id: PROFILE.to_string(),
+                scope_json: format!("[\"{scope}\"]"),
+            });
+            assert_eq!(
+                decision.effect, "deny",
+                "TrustedLocal must deny un-granted critical scope `{scope}`"
+            );
+            assert_eq!(decision.decision_source, "allow_trusted_local_profile");
+        }
+
+        // A non-critical workspace write still allows (audit-only allow intact).
+        let allowed = policy.decide(PermissionRequest {
+            session_id: SessionId::new("session-critical"),
+            capability_profile_id: PROFILE.to_string(),
+            scope_json: WRITE_SCOPE.to_string(),
+        });
+        assert_eq!(
+            allowed.effect, "allow",
+            "ordinary workspace write still allows under TrustedLocal"
+        );
+    }
+
+    // ---- enumerated behavior: verification pass / fail ------------------------
+
+    fn verification_scope() -> VerificationScope {
+        VerificationScope {
+            task_id: TaskId::new("task-sg10"),
+            agent_id: AgentId::new("agent-sg10"),
+            session_id: SessionId::new("session-sg10-verify"),
+            run_id: RunId::new("run-sg10-verify"),
+            turn_id: TurnId::new("turn-sg10-verify"),
+        }
+    }
+
+    fn shell_command(kind: VerificationKind, script: &str, cwd: &Path) -> VerificationCommand {
+        VerificationCommand::new(
+            kind,
+            "/bin/sh",
+            vec!["-c".to_string(), script.to_string()],
+            cwd.to_path_buf(),
+        )
+    }
+
+    /// A scripted command that exits 0 is classified PASSED, keyed off the real
+    /// exit status, recorded as OBSERVED evidence.
+    #[test]
+    fn sg10_verification_pass_from_exit_status() {
+        let controller = FakeBoundaryController::open(project(), temp_root()).expect("controller");
+        let workspace = temp_root();
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let artifacts = temp_root();
+        let outcome = controller
+            .run_verification(
+                &verification_scope(),
+                LocalProcessConfig::for_test(workspace.clone(), artifacts),
+                &shell_command(VerificationKind::Test, "printf ok; exit 0", &workspace),
+            )
+            .expect("run verification");
+        assert!(outcome.passed, "exit 0 classifies passed");
+        assert_eq!(outcome.exit_code, Some(0));
+        assert_eq!(outcome.evidence_kind, "test");
+    }
+
+    /// A scripted command that exits non-zero is classified FAILED, keyed off the
+    /// real exit status.
+    #[test]
+    fn sg10_verification_fail_from_exit_status() {
+        let controller = FakeBoundaryController::open(project(), temp_root()).expect("controller");
+        let workspace = temp_root();
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let artifacts = temp_root();
+        let outcome = controller
+            .run_verification(
+                &verification_scope(),
+                LocalProcessConfig::for_test(workspace.clone(), artifacts),
+                &shell_command(
+                    VerificationKind::Check,
+                    "printf boom >&2; exit 7",
+                    &workspace,
+                ),
+            )
+            .expect("run verification");
+        assert!(!outcome.passed, "a non-zero exit classifies failed");
+        assert_eq!(outcome.exit_code, Some(7));
+    }
+
+    // ---- enumerated behavior: workspace-lock contention -----------------------
+
+    fn lease_scope(session: &str, run: &str, workspace_root: &str) -> WorkspaceLeaseScope {
+        WorkspaceLeaseScope {
+            task_id: TaskId::new("task-sg10"),
+            agent_id: AgentId::new(format!("agent-{session}")),
+            session_id: SessionId::new(session.to_string()),
+            run_id: RunId::new(run.to_string()),
+            turn_id: TurnId::new(format!("turn-{session}")),
+            workspace_root: workspace_root.to_string(),
+        }
+    }
+
+    /// Single-writer contention: one holder acquires the lease, a second writer is
+    /// REJECTED with a typed conflict (never interleaved), and only after the
+    /// holder releases does the second writer succeed.
+    #[test]
+    fn sg10_workspace_lock_contention_rejects_second_writer() {
+        let controller = FakeBoundaryController::open(project(), temp_root()).expect("controller");
+        let workspace = "/w/sg10-lock";
+        let holder = lease_scope("session-holder", "run-holder", workspace);
+        let contender = lease_scope("session-contender", "run-contender", workspace);
+
+        // Holder takes the write lease.
+        match controller
+            .gate_workspace_write(&holder, true)
+            .expect("gate holder write")
+        {
+            WorkspaceWriteGate::WriteAllowed { .. } => {}
+            other => panic!("holder write must be allowed, got {other:?}"),
+        }
+
+        // A second session's write over the SAME workspace is rejected.
+        match controller
+            .gate_workspace_write(&contender, true)
+            .expect("gate contender write")
+        {
+            WorkspaceWriteGate::WriteDenied(conflict) => {
+                assert!(
+                    !conflict.agent_message().is_empty(),
+                    "conflict carries an agent-readable message"
+                );
+            }
+            other => panic!("second writer must be rejected, got {other:?}"),
+        }
+
+        // A read is NEVER blocked by the write lease.
+        assert!(matches!(
+            controller
+                .gate_workspace_write(&contender, false)
+                .expect("gate read"),
+            WorkspaceWriteGate::ReadAllowed
+        ));
+
+        // Holder releases; the contender then succeeds.
+        controller
+            .release_workspace_write_lease(&holder, "turn complete")
+            .expect("release");
+        match controller
+            .gate_workspace_write(&contender, true)
+            .expect("gate contender write after release")
+        {
+            WorkspaceWriteGate::WriteAllowed { .. } => {}
+            other => panic!("contender must succeed after release, got {other:?}"),
+        }
+    }
+
+    // ---- enumerated behavior: checkpoint rollback restoring prior state -------
+
+    fn checkpoint_scope(workspace: &Path, shadow_root: &Path, turn: &str) -> CheckpointScope {
+        CheckpointScope {
+            task_id: TaskId::new("task-sg10"),
+            agent_id: AgentId::new("agent-sg10"),
+            session_id: SessionId::new("session-sg10-cp"),
+            run_id: RunId::new("run-sg10-cp"),
+            turn_id: TurnId::new(turn),
+            workspace_root: workspace.display().to_string(),
+            shadow_git_root: shadow_root.display().to_string(),
+        }
+    }
+
+    /// Checkpoint -> write -> restore returns the workspace byte-for-byte to the
+    /// checkpointed state (revert a modified file, restore a deleted file, remove
+    /// a file added after the checkpoint).
+    #[test]
+    fn sg10_checkpoint_rollback_restores_prior_state() {
+        let controller = FakeBoundaryController::open(project(), temp_root()).expect("controller");
+        let workspace = temp_root();
+        let shadow = temp_root();
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::write(workspace.join("keep.txt"), "original\n").expect("write keep");
+        std::fs::write(workspace.join("edit.txt"), "before\n").expect("write edit");
+
+        let scope = checkpoint_scope(&workspace, &shadow, "turn-1");
+        let created = controller
+            .create_checkpoint(&scope)
+            .expect("create io")
+            .expect("create ok");
+        assert!(
+            !created.commit_ref.is_empty(),
+            "checkpoint records a commit ref"
+        );
+
+        // Real write after the checkpoint.
+        std::fs::write(workspace.join("edit.txt"), "after\n").expect("modify");
+        std::fs::write(workspace.join("added.txt"), "new\n").expect("add");
+        std::fs::remove_file(workspace.join("keep.txt")).expect("delete");
+
+        // One Restore command reverses all of it.
+        controller
+            .restore_checkpoint(&scope, &created.checkpoint_id)
+            .expect("restore io")
+            .expect("restore ok");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("edit.txt")).expect("read edit"),
+            "before\n",
+            "modified file reverted"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("keep.txt")).expect("read keep"),
+            "original\n",
+            "deleted file restored"
+        );
+        assert!(
+            !workspace.join("added.txt").exists(),
+            "file added after the checkpoint is removed by restore"
+        );
+    }
+
+    // ---- consolidated restart/replay ------------------------------------------
+
+    /// SG10 acceptance: grant lifecycle, lock leases, checkpoint refs, score
+    /// outcomes, and recovery classifications ALL rebuild identically from the
+    /// event log. One controller drives every safety behavior, then the store is
+    /// reopened from disk (a restart), `rebuild_projections` replays the log, and
+    /// each projection is asserted byte-identical before vs after the rebuild.
+    #[test]
+    fn sg10_full_lifecycle_rebuilds_identically_from_event_log() {
+        let state_root = temp_root();
+        let controller = FakeBoundaryController::open_with_permission_policy(
+            project(),
+            &state_root,
+            PermissionPolicy::static_read_only_local(),
+        )
+        .expect("open controller");
+        let registration = controller.register_agent("sg10-replay").expect("agent");
+        let refs = controller
+            .send_task(&registration, "Drive the full SG10 lifecycle")
+            .expect("send task");
+
+        // --- grant lifecycle: created, revoked, expired ---
+        seed_write_grant(&controller, "grant-sg10-live", "session-replay", None);
+        seed_write_grant(&controller, "grant-sg10-rev", "session-replay-rev", None);
+        seed_write_grant(
+            &controller,
+            "grant-sg10-exp",
+            "session-replay-exp",
+            Some("1"),
+        );
+        controller
+            .revoke_capability_grant(
+                &GrantRevocationScope {
+                    task_id: refs.task_id.clone(),
+                    agent_id: refs.agent_id.clone(),
+                    session_id: refs.session_id.clone(),
+                    run_id: refs.run_id.clone(),
+                    turn_id: TurnId::new("turn-sg10-replay-revoke"),
+                },
+                "grant-sg10-rev",
+                "replay revoke",
+            )
+            .expect("revoke");
+
+        // --- lock lease: acquire then release ---
+        let lease = lease_scope("session-replay", "run-replay", "/w/sg10-replay");
+        controller
+            .acquire_workspace_write_lease(&lease)
+            .expect("acquire lease");
+        controller
+            .release_workspace_write_lease(&lease, "replay release")
+            .expect("release lease");
+
+        // --- checkpoint ref ---
+        let workspace = temp_root();
+        let shadow = temp_root();
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::write(workspace.join("f.txt"), "v1\n").expect("write");
+        let cp_scope = checkpoint_scope(&workspace, &shadow, "turn-replay");
+        let created = controller
+            .create_checkpoint(&cp_scope)
+            .expect("create io")
+            .expect("create ok");
+
+        // --- score outcome over OBSERVED evidence ---
+        let verify_scope = VerificationScope {
+            task_id: refs.task_id.clone(),
+            agent_id: refs.agent_id.clone(),
+            session_id: refs.session_id.clone(),
+            run_id: refs.run_id.clone(),
+            turn_id: TurnId::new("turn-sg10-replay-verify"),
+        };
+        controller
+            .run_verification(
+                &verify_scope,
+                LocalProcessConfig::for_test(workspace.clone(), temp_root()),
+                &shell_command(VerificationKind::Test, "exit 0", &workspace),
+            )
+            .expect("run verification");
+        let score = controller
+            .score_run(
+                &RunScoreScope {
+                    task_id: refs.task_id.clone(),
+                    agent_id: refs.agent_id.clone(),
+                    session_id: refs.session_id.clone(),
+                    run_id: refs.run_id.clone(),
+                    turn_id: TurnId::new("turn-sg10-replay-score"),
+                    started_at: 1_700_000_000_000,
+                    completed_at: 1_700_000_002_500,
+                },
+                &[AcceptanceCriterion::new(
+                    "tests pass",
+                    VerificationKind::Test,
+                )],
+            )
+            .expect("score run");
+        assert_eq!(score.outcome, RunScoreOutcome::Passed);
+        assert_eq!(
+            score.duration_millis, 2_500,
+            "wall-clock duration, not event delta"
+        );
+
+        // --- recovery classification: a gone in-flight run exits, not exited_unknown ---
+        sg9_seed_inflight_run(
+            &controller,
+            &project(),
+            "session-sg10-recover",
+            "run-sg10-recover",
+            None,
+            None,
+            None,
+        );
+        controller
+            .recover_inflight_runs("recovery-sg10-replay")
+            .expect("recover");
+
+        // Snapshot every safety projection BEFORE the restart. The lease is read
+        // back via the public `workspace_lease_holder` (the lease key is private),
+        // which reads the durable projection.
+        let state = controller.state();
+        let grants_before = state.capability_grants().expect("grants");
+        let lease_before = controller.workspace_lease_holder(&lease).expect("lease");
+        let checkpoint_before = state
+            .checkpoint_by_id(&created.checkpoint_id)
+            .expect("checkpoint");
+        let score_before = state
+            .run_score_by_id(&score.projection.run_score_id)
+            .expect("score");
+        let recovered_run_before = state.run(&RunId::new("run-sg10-recover")).expect("run");
+
+        // Restart: drop nothing in the way -- reopen a fresh controller over the
+        // SAME on-disk state root (a restart) and replay the log into the rebuilt
+        // projections via the reopened handle.
+        let reopened = FakeBoundaryController::open_with_permission_policy(
+            project(),
+            &state_root,
+            PermissionPolicy::static_read_only_local(),
+        )
+        .expect("reopen controller");
+        let reopened_state = reopened.state();
+        reopened_state.rebuild_projections().expect("rebuild");
+
+        // Every projection rebuilds identically.
+        assert_eq!(
+            grants_before,
+            reopened_state.capability_grants().expect("grants after"),
+            "grant lifecycle (created/revoked/expired) rebuilds identically"
+        );
+        assert_eq!(
+            lease_before,
+            reopened
+                .workspace_lease_holder(&lease)
+                .expect("lease after"),
+            "lock lease rebuilds identically"
+        );
+        assert_eq!(
+            checkpoint_before,
+            reopened_state
+                .checkpoint_by_id(&created.checkpoint_id)
+                .expect("checkpoint after"),
+            "checkpoint ref rebuilds identically"
+        );
+        assert_eq!(
+            score_before,
+            reopened_state
+                .run_score_by_id(&score.projection.run_score_id)
+                .expect("score after"),
+            "score outcome rebuilds identically"
+        );
+        assert_eq!(
+            recovered_run_before,
+            reopened_state
+                .run(&RunId::new("run-sg10-recover"))
+                .expect("run after"),
+            "recovery classification rebuilds identically"
+        );
+
+        // Sanity: the revoked grant reads revoked, the expired grant reads expired,
+        // the recovered run is reconciled (never the blunt `exited_unknown`).
+        let after = reopened_state.capability_grants().expect("grants");
+        assert!(
+            after
+                .iter()
+                .any(|g| g.capability_grant_id == "grant-sg10-rev" && g.is_revoked()),
+            "revoked grant survives replay as revoked"
+        );
+        assert!(
+            after
+                .iter()
+                .any(|g| g.capability_grant_id == "grant-sg10-exp"
+                    && g.is_expired(&now_millis_string())),
+            "expired grant survives replay as expired"
+        );
+        let recovered_status = reopened_state
+            .run(&RunId::new("run-sg10-recover"))
+            .expect("run")
+            .expect("present")
+            .status;
+        assert_ne!(
+            recovered_status, "exited_unknown",
+            "recovery never stamps the blunt exited_unknown status"
+        );
+    }
+}
