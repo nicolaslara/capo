@@ -232,74 +232,24 @@ impl FakeBoundaryController {
                 }
             }
         };
-        let memory_packet = self.memory.build_source_linked_packet(
-            SourceLinkedMemoryPacketRequest {
-                memory_packet_id: memory_packet_id.clone(),
-                session_id: session_id.clone(),
-                run_id: run_id.to_string(),
-                turn_id: turn_id.to_string(),
-                purpose: "turn_context".to_string(),
-                budget_tokens: 256,
-                candidates: vec![
-                    MemoryCandidate {
-                        title: "Active task goal".to_string(),
-                        body: goal.to_string(),
-                        source: MemorySourceRef {
-                            source_kind: MemorySourceKind::Event,
-                            source_ref: format!("event-task-started-{}", session_id),
-                            anchor: Some("goal".to_string()),
-                            content_hash: stable_hash(goal.as_bytes()),
-                        },
-                        review_state: MemoryReviewState::Reviewed,
-                        sensitivity: MemorySensitivity::Internal,
-                        estimated_tokens: 32,
-                        inclusion_reason: "current task goal for this turn".to_string(),
-                    },
-                    MemoryCandidate {
-                        title: "Adapter summary".to_string(),
-                        body: adapter_output.summary.clone(),
-                        source: MemorySourceRef {
-                            source_kind: MemorySourceKind::Artifact,
-                            source_ref: tool_result.output_artifact_id.clone(),
-                            anchor: Some("summary".to_string()),
-                            content_hash: stable_hash(adapter_output.summary.as_bytes()),
-                        },
-                        review_state: MemoryReviewState::Reviewed,
-                        sensitivity: MemorySensitivity::Internal,
-                        estimated_tokens: 48,
-                        inclusion_reason: "latest session summary from tool output".to_string(),
-                    },
-                    MemoryCandidate {
-                        title: "Prototype workpad authority".to_string(),
-                        body: "Prototype task status and evidence live in workpads/prototype/tasks.md and knowledge.md.".to_string(),
-                        source: MemorySourceRef {
-                            source_kind: MemorySourceKind::Markdown,
-                            source_ref: "workpads/prototype/tasks.md".to_string(),
-                            anchor: Some("P9".to_string()),
-                            content_hash: stable_hash(b"workpads/prototype/tasks.md#P9"),
-                        },
-                        review_state: MemoryReviewState::Reviewed,
-                        sensitivity: MemorySensitivity::Internal,
-                        estimated_tokens: 36,
-                        inclusion_reason: "current workpad is the planning authority".to_string(),
-                    },
-                    MemoryCandidate {
-                        title: "Generated scratch note".to_string(),
-                        body: "Generated notes require review before packet inclusion.".to_string(),
-                        source: MemorySourceRef {
-                            source_kind: MemorySourceKind::Artifact,
-                            source_ref: format!("artifact-scratch-{}", session_id),
-                            anchor: None,
-                            content_hash: stable_hash(b"generated scratch note"),
-                        },
-                        review_state: MemoryReviewState::Generated,
-                        sensitivity: MemorySensitivity::Internal,
-                        estimated_tokens: 16,
-                        inclusion_reason: "should be excluded until reviewed".to_string(),
-                    },
-                ],
-            },
-        );
+        // DP5: build the turn-context packet from REAL retrieved sources rather
+        // than four hardcoded literal candidates. The candidate corpus is the
+        // UNION of (a) the eligibility-filtered durable `memory_records` from the
+        // store -- gated by `packet_eligible_memory_records` so
+        // invalidated/rejected/superseded/secret/unreviewed records never become
+        // candidates -- and (b) the live turn sources (the task goal event, the
+        // adapter summary artifact, and the workpad authority markdown pointer),
+        // each carrying real provenance + content hashes. The corpus is then
+        // FTS5-ranked against the goal and budget-bounded in `build_live_packet`.
+        let memory_packet = self.build_turn_context_packet(
+            &memory_packet_id,
+            &session_id,
+            &run_id,
+            &turn_id,
+            goal,
+            &adapter_output.summary,
+            &tool_result.output_artifact_id,
+        )?;
 
         self.state.record_artifact(ArtifactRecord {
             artifact_id: tool_result.output_artifact_id.clone(),
@@ -1057,5 +1007,152 @@ impl FakeBoundaryController {
             )],
         )?;
         Ok(())
+    }
+
+    /// DP5: assemble the live turn-context packet from the eligibility-filtered
+    /// memory store plus the live turn sources, FTS5-ranked against the goal.
+    ///
+    /// Candidate corpus:
+    /// 1. Every `packet_eligible_memory_records` row for this project, projected
+    ///    into a reviewed `MemoryCandidate` with its first replayable source's
+    ///    content hash. The SQL filter already excludes
+    ///    invalidated/rejected/superseded/secret/unreviewed records, so this is
+    ///    the production wiring of the previously-dead eligibility gate.
+    /// 2. The active task goal (event provenance) and the adapter summary
+    ///    (artifact provenance) for THIS turn.
+    /// 3. The workpad authority markdown pointer, via `MarkdownMemoryBackend`.
+    ///
+    /// The corpus is ranked + budget-bounded by the FTS5 backend; the included
+    /// items now trace to retrieved sources, never to literal strings.
+    #[allow(clippy::too_many_arguments)]
+    fn build_turn_context_packet(
+        &self,
+        memory_packet_id: &MemoryPacketId,
+        session_id: &SessionId,
+        run_id: &RunId,
+        turn_id: &TurnId,
+        goal: &str,
+        adapter_summary: &str,
+        output_artifact_id: &str,
+    ) -> StateResult<MemoryPacketBuild> {
+        let mut candidates: Vec<MemoryCandidate> = Vec::new();
+
+        // (1) Eligibility-filtered durable store records (the dead gate, now live).
+        for record in self
+            .state
+            .packet_eligible_memory_records(&self.project_id)?
+        {
+            candidates.push(self.eligible_record_into_candidate(&record)?);
+        }
+
+        // (2) Live turn sources with real provenance.
+        candidates.push(MemoryCandidate {
+            title: "Active task goal".to_string(),
+            body: goal.to_string(),
+            source: MemorySourceRef {
+                source_kind: MemorySourceKind::Event,
+                source_ref: format!("event-task-started-{session_id}"),
+                anchor: Some("goal".to_string()),
+                content_hash: stable_hash(goal.as_bytes()),
+            },
+            review_state: MemoryReviewState::Reviewed,
+            sensitivity: MemorySensitivity::Internal,
+            estimated_tokens: 32,
+            inclusion_reason: "current task goal for this turn".to_string(),
+        });
+        candidates.push(MemoryCandidate {
+            title: "Adapter summary".to_string(),
+            body: adapter_summary.to_string(),
+            source: MemorySourceRef {
+                source_kind: MemorySourceKind::Artifact,
+                source_ref: output_artifact_id.to_string(),
+                anchor: Some("summary".to_string()),
+                content_hash: stable_hash(adapter_summary.as_bytes()),
+            },
+            review_state: MemoryReviewState::Reviewed,
+            sensitivity: MemorySensitivity::Internal,
+            estimated_tokens: 48,
+            inclusion_reason: "latest session summary from tool output".to_string(),
+        });
+
+        // (3) Workpad authority markdown pointer via the markdown backend.
+        let markdown = MarkdownMemoryBackend::new(vec![MarkdownSource {
+            title: "Prototype workpad authority".to_string(),
+            path: "workpads/prototype/tasks.md".to_string(),
+            anchor: Some("P9".to_string()),
+            content_hash: stable_hash(b"workpads/prototype/tasks.md#P9"),
+            body: "Prototype task status and evidence live in workpads/prototype/tasks.md and knowledge.md.".to_string(),
+            inclusion_reason: "current workpad is the planning authority".to_string(),
+        }]);
+        candidates.extend(markdown.candidates());
+
+        self.memory
+            .build_live_packet(LiveMemoryPacketRequest {
+                memory_packet_id: memory_packet_id.clone(),
+                session_id: session_id.clone(),
+                run_id: run_id.to_string(),
+                turn_id: turn_id.to_string(),
+                purpose: "turn_context".to_string(),
+                budget_tokens: 256,
+                query_text: goal.to_string(),
+                candidates,
+            })
+            .map_err(|error| StateError::MemoryRetrieval(error.to_string()))
+    }
+
+    /// Project an eligibility-filtered store record into a reviewed candidate,
+    /// carrying its first replayable source's content hash + anchor as provenance.
+    fn eligible_record_into_candidate(
+        &self,
+        record: &capo_state::MemoryRecordProjection,
+    ) -> StateResult<MemoryCandidate> {
+        let sources = self
+            .state
+            .memory_sources_for_record(&record.memory_record_id)?;
+        let first = sources.into_iter().next();
+        let (source_kind, source_ref, anchor, content_hash) = match first {
+            Some(source) => (
+                memory_source_kind_from_str(&source.source_kind),
+                source
+                    .source_artifact_id
+                    .or(source.source_event_id)
+                    .or(source.source_path)
+                    .unwrap_or_else(|| record.memory_record_id.clone()),
+                source.source_anchor,
+                source
+                    .source_content_hash
+                    .unwrap_or_else(|| stable_hash(record.body.as_bytes())),
+            ),
+            None => (
+                MemorySourceKind::Event,
+                record.memory_record_id.clone(),
+                None,
+                stable_hash(record.body.as_bytes()),
+            ),
+        };
+        Ok(MemoryCandidate {
+            title: record.subject.clone(),
+            body: record.body.clone(),
+            source: MemorySourceRef {
+                source_kind,
+                source_ref,
+                anchor,
+                content_hash,
+            },
+            review_state: MemoryReviewState::Reviewed,
+            sensitivity: MemorySensitivity::Internal,
+            estimated_tokens: (record.body.len() / 4).max(1),
+            inclusion_reason: "eligible reviewed memory record".to_string(),
+        })
+    }
+}
+
+/// Map a stored `memory_sources.source_kind` string to the candidate enum.
+fn memory_source_kind_from_str(kind: &str) -> MemorySourceKind {
+    match kind {
+        "artifact" => MemorySourceKind::Artifact,
+        "markdown" => MemorySourceKind::Markdown,
+        "external_import" => MemorySourceKind::ExternalImport,
+        _ => MemorySourceKind::Event,
     }
 }

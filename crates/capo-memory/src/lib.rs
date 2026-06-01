@@ -5,12 +5,24 @@
 
 use capo_core::{BoundaryBinding, BoundaryKind, MemoryPacketId, SessionId};
 
+mod retrieval;
+
+pub use retrieval::{
+    FtsError, MarkdownMemoryBackend, MarkdownSource, MemoryBudget, MemoryHit, MemoryQuery,
+    MemorySearchResult, SqliteFtsMemoryBackend,
+};
+
 /// The first memory backend proves packet provenance without semantic search.
 pub const PROTOTYPE_MEMORY_BACKEND: &str = "fake-packet-builder";
 
+/// DP5: the live memory backend now spans the fake packet builder, the markdown
+/// source-pointer backend, and the SQLite FTS5 retrieval backend. Vector /
+/// embedding / graph backends stay deferred per `memory-architecture.md`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MemoryBackend {
     Fake(FakeMemoryBackend),
+    Markdown(MarkdownMemoryBackend),
+    SqliteFts(SqliteFtsMemoryBackend),
 }
 
 impl MemoryBackend {
@@ -18,26 +30,97 @@ impl MemoryBackend {
         Self::Fake(FakeMemoryBackend)
     }
 
+    pub fn markdown(backend: MarkdownMemoryBackend) -> Self {
+        Self::Markdown(backend)
+    }
+
+    pub fn sqlite_fts(backend: SqliteFtsMemoryBackend) -> Self {
+        Self::SqliteFts(backend)
+    }
+
     pub fn binding(&self) -> BoundaryBinding {
         match self {
             Self::Fake(backend) => backend.binding(),
+            Self::Markdown(_) => {
+                BoundaryBinding::fake(BoundaryKind::MemoryBackend, "markdown-memory")
+            }
+            Self::SqliteFts(_) => {
+                BoundaryBinding::fake(BoundaryKind::MemoryBackend, "sqlite-fts-memory")
+            }
         }
     }
 
     pub fn build_packet(&self, request: FakeMemoryPacketRequest) -> FakeMemoryPacket {
-        match self {
-            Self::Fake(backend) => backend.build_packet(request),
-        }
+        // Packet provenance shape is identical across backends; only the
+        // CANDIDATE source differs (FTS retrieval vs literal). The fake
+        // summary-packet shortcut is kept for the e2e harness.
+        FakeMemoryBackend.build_packet(request)
     }
 
     pub fn build_source_linked_packet(
         &self,
         request: SourceLinkedMemoryPacketRequest,
     ) -> MemoryPacketBuild {
-        match self {
-            Self::Fake(backend) => backend.build_source_linked_packet(request),
-        }
+        // The selection/inclusion/exclusion semantics are shared; the FTS
+        // backend feeds this through [`Self::build_live_packet`] after ranking.
+        FakeMemoryBackend.build_source_linked_packet(request)
     }
+
+    /// DP5: build the LIVE turn-context packet from REAL retrieved sources.
+    ///
+    /// The eligibility-filtered candidate set (from
+    /// `packet_eligible_memory_records` + the markdown source pointers) is
+    /// ranked by the FTS5 backend against the query, then the surviving ranked
+    /// hits feed the shared `build_source_linked_packet` selection. This kills
+    /// the four hardcoded literal candidates: every included item now traces to
+    /// a retrieved source. Returns the packet build plus the FTS no-match /
+    /// ineligible exclusions merged into the build's `excluded` decisions.
+    pub fn build_live_packet(
+        &self,
+        request: LiveMemoryPacketRequest,
+    ) -> Result<MemoryPacketBuild, FtsError> {
+        let fts = match self {
+            Self::SqliteFts(backend) => backend.clone(),
+            _ => SqliteFtsMemoryBackend::new(),
+        };
+        let query = MemoryQuery::new(request.query_text, request.candidates);
+        let search = fts.search(&query, MemoryBudget::new(request.budget_tokens))?;
+
+        let ranked_candidates: Vec<MemoryCandidate> =
+            search.hits.into_iter().map(|hit| hit.candidate).collect();
+
+        let mut build =
+            FakeMemoryBackend.build_source_linked_packet(SourceLinkedMemoryPacketRequest {
+                memory_packet_id: request.memory_packet_id,
+                session_id: request.session_id,
+                run_id: request.run_id,
+                turn_id: request.turn_id,
+                purpose: request.purpose,
+                budget_tokens: request.budget_tokens,
+                candidates: ranked_candidates,
+            });
+
+        // Fold the FTS no-match / ineligible exclusions into the build so the
+        // packet explanation is honest about everything that was considered.
+        build.excluded.extend(search.excluded);
+        Ok(build)
+    }
+}
+
+/// DP5 live-packet request: the eligible candidate corpus plus the retrieval
+/// query that ranks it. Replaces the literal candidate list in `fake_session`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveMemoryPacketRequest {
+    pub memory_packet_id: MemoryPacketId,
+    pub session_id: SessionId,
+    pub run_id: String,
+    pub turn_id: String,
+    pub purpose: String,
+    pub budget_tokens: usize,
+    /// The free-text retrieval query (typically the active task goal).
+    pub query_text: String,
+    /// Eligibility-filtered candidate corpus to rank and select.
+    pub candidates: Vec<MemoryCandidate>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -155,6 +155,7 @@ name = "capo-memory"
 version = "0.1.0"
 dependencies = [
  "capo-core",
+ "rusqlite",
 ]
 
 [[package]]

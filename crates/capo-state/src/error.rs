@@ -30,6 +30,10 @@ pub enum StateError {
     /// protocol error). Carried as a typed error so the controller never ingests a
     /// fabricated transcript in place of a real ACP result.
     AcpLiveDrive(String),
+    /// DP5: the FTS5 memory retrieval backend failed while ranking the
+    /// eligibility-filtered candidate corpus for a turn-context packet. Carried
+    /// as a typed error so a packet is never silently built from no sources.
+    MemoryRetrieval(String),
     /// GA7 (GO11): a goal report/observation carried an unclassifiable `source`
     /// tag (neither observed evidence nor `agent_reported`). Rejected at the
     /// controller seam so a malformed tag never lands in the goal read model the

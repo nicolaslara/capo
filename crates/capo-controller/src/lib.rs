@@ -16,8 +16,8 @@ use capo_core::{
     SessionId, TaskId, ToolCallId, TurnId,
 };
 use capo_memory::{
-    MemoryBackend, MemoryCandidate, MemoryReviewState, MemorySensitivity, MemorySourceKind,
-    MemorySourceRef, SourceLinkedMemoryPacketRequest,
+    LiveMemoryPacketRequest, MarkdownMemoryBackend, MarkdownSource, MemoryBackend, MemoryCandidate,
+    MemoryPacketBuild, MemoryReviewState, MemorySensitivity, MemorySourceKind, MemorySourceRef,
 };
 use capo_runtime::{FakeRuntimeStartRequest, LocalProcessRunner, RuntimeRunner};
 use capo_state::{
@@ -170,7 +170,10 @@ impl FakeBoundaryController {
             provider: ProviderConnector::fake(),
             permission_policy,
             tools: ToolExposure::fake(),
-            memory: MemoryBackend::fake(),
+            // DP5: the live turn-context packet is built by the SQLite FTS5
+            // retrieval backend over the eligibility-filtered candidate corpus
+            // (see `build_turn_context_packet`), not the literal fake builder.
+            memory: MemoryBackend::sqlite_fts(capo_memory::SqliteFtsMemoryBackend::new()),
         })
     }
 
