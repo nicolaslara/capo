@@ -93,6 +93,15 @@ pub enum RuntimeError {
     RemoteControlRevoked {
         reason: String,
     },
+    /// RR3/RR7: git-based remote workspace materialization (push/fetch + `git
+    /// worktree add` the target commit on the remote) failed at the channel
+    /// transport. Surfaced as a `runtime.remote_workspace_materialized` FAILED
+    /// event rather than a silent fall-through to running in the wrong directory
+    /// (mirroring `WorktreeError`'s no-silent-fallthrough rule). The `message` is
+    /// already redaction-safe (the git transport URL passed the credential scan).
+    RemoteMaterializeFailed {
+        message: String,
+    },
 }
 
 impl From<std::io::Error> for RuntimeError {
@@ -1692,6 +1701,47 @@ pub struct WorkspaceReapOutcome {
     pub worktree_key: String,
 }
 
+/// RR3/RR7: the result of materializing a run's workspace ON the remote by git
+/// (push/fetch the target commit + `git worktree add` it into a dedicated remote
+/// worktree root). Content-addressed + auditable: the source commit SHA, the
+/// remote worktree path, and the resulting remote `HEAD` are recorded. The git
+/// transport URL has ALREADY passed the credential scan before this is built, so
+/// `transport_url_redaction` records whether anything was scrubbed and no embedded
+/// secret reaches the recorded URL.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteWorkspaceMaterialization {
+    /// The source commit SHA the run is pinned to (content-addressed).
+    pub source_commit: String,
+    /// The remote `HEAD` the materialized worktree resolved to; equals
+    /// `source_commit` on a clean materialization.
+    pub remote_head: String,
+    /// The remote worktree path the commit was checked out into; the run's cwd /
+    /// confinement is scoped here.
+    pub remote_worktree_path: String,
+    /// The (redaction-scanned) git transport URL recorded for audit — never
+    /// carries an embedded credential.
+    pub transport_url: String,
+    /// `"redacted"` when the credential scan scrubbed the transport URL, else
+    /// `"safe"`.
+    pub transport_url_redaction: String,
+    /// The append-ready `runtime.remote_workspace_materialized` event.
+    pub events: Vec<RuntimeEvent>,
+}
+
+/// RR3/RR7: the result of mapping a remote-produced commit BACK to Capo's host by
+/// git (fetch the remote worktree's tip into a named local ref, the same
+/// reconcile/merge-back point DP8 models). Recorded as
+/// `runtime.remote_workspace_reconciled`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteWorkspaceReconciliation {
+    /// The remote-produced commit SHA fetched back.
+    pub remote_commit: String,
+    /// The named local ref the remote commit was fetched into.
+    pub local_ref: String,
+    /// The append-ready `runtime.remote_workspace_reconciled` event.
+    pub events: Vec<RuntimeEvent>,
+}
+
 /// The shared execution + control contract both [`LocalProcessRunner`] and
 /// [`RemoteProcessRunner`] satisfy, so the controller drives them with the SAME
 /// method shapes (review finding 4 + 5). Defining it as a trait gives a
@@ -2062,6 +2112,30 @@ impl RemoteChannel {
             Self::Fake(channel) => channel.rollback_worktree(probe, checkpoint_ref),
         }
     }
+
+    /// RR3/RR7: materialize `source_commit` ON the remote by git over the channel.
+    /// Returns the resolved remote `HEAD` + remote worktree path.
+    fn materialize(&self, source_commit: &str) -> RuntimeResult<(String, PathBuf)> {
+        match self {
+            Self::Fake(channel) => channel.materialize(source_commit),
+        }
+    }
+
+    /// RR3/RR7: map a remote-produced commit BACK to Capo's host by git over the
+    /// channel, into the named `local_ref`.
+    fn reconcile(&self, remote_worktree_path: &Path, local_ref: &str) -> RuntimeResult<String> {
+        match self {
+            Self::Fake(channel) => channel.reconcile(remote_worktree_path, local_ref),
+        }
+    }
+
+    /// RR3/RR7: the (credential-scanned) git transport URL for the recorded
+    /// materialization event — never carries an embedded secret.
+    fn transport_url(&self) -> String {
+        match self {
+            Self::Fake(channel) => channel.transport_url(),
+        }
+    }
 }
 
 /// RR4: the RAW frames the channel forwarded for one stream read: the offset the
@@ -2211,6 +2285,164 @@ fn unwrap_sandbox_launcher(request: &LocalProcessRequest) -> LocalProcessRequest
     }
 }
 
+/// RR3/RR7: a REAL git-backed remote workspace model, NO network. It is the
+/// deterministic stand-in for "the remote machine's git repo + worktree root",
+/// built entirely from local directories so the git-materialization invariants are
+/// proven against actual `git` rather than an abstract flag:
+///
+/// - `local_origin`: the bare repo on Capo's host the run's commit is pushed FROM
+///   (the source of truth for the source SHA).
+/// - `remote_repo`: a bare repo standing in for the remote host's git store; the
+///   commit is fetched into it "over the channel".
+/// - `remote_worktree_root`: where the commit is `git worktree add`-ed on the
+///   remote; the run's cwd / confinement is scoped here.
+/// - `transport_url`: the (credential-scanned) git transport URL recorded for
+///   audit — a URL with an embedded secret is scrubbed before it is ever recorded.
+///
+/// Because every path is local, this is fully deterministic and replay-stable: a
+/// rebuild from the same fixture reproduces identical SHAs and refs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitRemote {
+    local_origin: PathBuf,
+    remote_repo: PathBuf,
+    remote_worktree_root: PathBuf,
+    transport_url: String,
+}
+
+impl GitRemote {
+    /// Build a git-backed remote workspace model from already-created local
+    /// directories. `transport_url` is recorded for audit AFTER the credential
+    /// scan, so a URL carrying an embedded secret is never persisted raw.
+    pub fn new(
+        local_origin: PathBuf,
+        remote_repo: PathBuf,
+        remote_worktree_root: PathBuf,
+        transport_url: impl Into<String>,
+    ) -> Self {
+        Self {
+            local_origin,
+            remote_repo,
+            remote_worktree_root,
+            transport_url: transport_url.into(),
+        }
+    }
+
+    /// The remote worktree path a given source commit materializes into. Stable per
+    /// commit so a re-materialization is idempotent and replay-stable.
+    fn worktree_path(&self, source_commit: &str) -> PathBuf {
+        self.remote_worktree_root.join(format!(
+            "wt-{}",
+            &source_commit[..source_commit.len().min(12)]
+        ))
+    }
+
+    /// RR3: materialize `source_commit` ON the remote by git — fetch it from the
+    /// local origin into the remote repo ("push/fetch over the channel"), then
+    /// `git worktree add` it into a dedicated remote worktree root. Returns the
+    /// resolved remote `HEAD` (equals the source commit on a clean materialization)
+    /// and the remote worktree path. A failure at any git step is a TYPED
+    /// [`RuntimeError::RemoteMaterializeFailed`], never a silent fall-through.
+    fn materialize(&self, source_commit: &str) -> RuntimeResult<(String, PathBuf)> {
+        let origin = self.local_origin.to_string_lossy().to_string();
+        // Fetch the exact commit into the remote repo (modelling push/fetch over
+        // the channel). `git fetch <origin> <sha>` brings the object graph across.
+        materialize_git(
+            &self.remote_repo,
+            &["fetch", "--no-tags", &origin, source_commit],
+        )?;
+        let worktree_path = self.worktree_path(source_commit);
+        // A re-materialization is idempotent: if the worktree already exists at the
+        // commit, reuse it rather than failing the `worktree add`.
+        if !worktree_path.exists() {
+            materialize_git(
+                &self.remote_repo,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    &worktree_path.to_string_lossy(),
+                    source_commit,
+                ],
+            )?;
+        }
+        let head = materialize_git_capture(&worktree_path, &["rev-parse", "HEAD"])?;
+        Ok((head.trim().to_string(), worktree_path))
+    }
+
+    /// RR3: map a remote-produced commit BACK to Capo's host by git — fetch the
+    /// remote worktree's tip into a named ref in the local origin. Returns the
+    /// remote commit SHA that was fetched back.
+    fn reconcile(&self, remote_worktree_path: &Path, local_ref: &str) -> RuntimeResult<String> {
+        let tip = materialize_git_capture(remote_worktree_path, &["rev-parse", "HEAD"])?
+            .trim()
+            .to_string();
+        let remote = self.remote_repo.to_string_lossy().to_string();
+        materialize_git(
+            &self.local_origin,
+            &["fetch", "--no-tags", &remote, &format!("{tip}:{local_ref}")],
+        )?;
+        Ok(tip)
+    }
+}
+
+/// RR3/RR7: run a git subcommand for remote workspace materialization with a
+/// deterministic capo identity (so the op never depends on a global git identity
+/// and never records the operator's). A failure is a TYPED
+/// [`RuntimeError::RemoteMaterializeFailed`] (redaction-safe message), mirroring
+/// `WorktreeError`'s no-silent-fallthrough rule.
+fn materialize_git(dir: &Path, args: &[&str]) -> RuntimeResult<()> {
+    let output = materialize_git_command(dir, args)
+        .output()
+        .map_err(|error| RuntimeError::RemoteMaterializeFailed {
+            message: format!("failed to spawn git {}: {error}", args.join(" ")),
+        })?;
+    if !output.status.success() {
+        return Err(RuntimeError::RemoteMaterializeFailed {
+            message: format!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// RR3/RR7: run a git subcommand and capture stdout (for reading a materialized
+/// HEAD / reconcile tip SHA).
+fn materialize_git_capture(dir: &Path, args: &[&str]) -> RuntimeResult<String> {
+    let output = materialize_git_command(dir, args)
+        .output()
+        .map_err(|error| RuntimeError::RemoteMaterializeFailed {
+            message: format!("failed to spawn git {}: {error}", args.join(" ")),
+        })?;
+    if !output.status.success() {
+        return Err(RuntimeError::RemoteMaterializeFailed {
+            message: format!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// `git -C <dir>` with a deterministic committer identity for materialization.
+fn materialize_git_command(dir: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(dir)
+        .env("GIT_AUTHOR_NAME", "capo-remote")
+        .env("GIT_AUTHOR_EMAIL", "remote@capo.local")
+        .env("GIT_COMMITTER_NAME", "capo-remote")
+        .env("GIT_COMMITTER_EMAIL", "remote@capo.local")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(args);
+    command
+}
+
 /// RR1 deterministic fake channel: it executes the program LOCALLY but is HONEST
 /// that it is a loopback (`is_loopback() == true`). It is scriptable so the
 /// fake-channel suite can drive a launch failure (with retryability) and an
@@ -2295,6 +2527,15 @@ pub struct FakeRemoteChannel {
     /// `revoke_control` (and the teardown escalations) ACTUALLY signalled the
     /// remote run rather than merely flipping a local flag.
     signals_sent: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// RR3/RR7: when set, the channel materializes the remote workspace with REAL
+    /// git against a local bare-repo "remote" + a remote checkout root (a second
+    /// local checkout reached "over the channel", NO network), so the
+    /// git-materialization invariants (HEAD matches the source SHA, an uncommitted
+    /// local file is ABSENT on the remote worktree, a remote-produced commit
+    /// fetches back as a named ref) are proven against actual git rather than an
+    /// abstract worktree-key flag. When `None`, materialization is modelled by the
+    /// deterministic worktree-key (RR6 semantics) only.
+    git_remote: Option<GitRemote>,
     loopback: LocalProcessRunner,
 }
 
@@ -2328,6 +2569,7 @@ impl PartialEq for FakeRemoteChannel {
             && self.remote_os == other.remote_os
             && self.sandbox_unenforceable == other.sandbox_unenforceable
             && self.cross_machine == other.cross_machine
+            && self.git_remote == other.git_remote
             && self.loopback == other.loopback
     }
 }
@@ -2377,11 +2619,29 @@ impl FakeRemoteChannel {
             remote_worktree: std::sync::Arc::new(std::sync::Mutex::new(None)),
             rolled_back_to: std::sync::Arc::new(std::sync::Mutex::new(None)),
             signals_sent: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            git_remote: None,
             loopback: LocalProcessRunner::new(LocalProcessConfig::for_test(
                 workspace_root,
                 artifact_root,
             )),
         }
+    }
+
+    /// RR3/RR7: attach a REAL git-backed remote workspace to this fake channel: a
+    /// local bare repo (the "remote origin" Capo pushes to) plus a remote checkout
+    /// root the commit is `git worktree add`-ed into — a second local checkout
+    /// reached "over the channel", NO network. The git transport URL is recorded
+    /// (after the credential scan) so the materialization event carries no embedded
+    /// secret. Materialization is then driven against actual git, proving the
+    /// content-addressing + uncommitted-scratch-not-synced + fetch-back invariants.
+    pub fn with_git_remote(mut self, git_remote: GitRemote) -> Self {
+        self.git_remote = Some(git_remote);
+        self
+    }
+
+    /// RR3/RR7: whether this channel models a real git-backed remote workspace.
+    pub fn has_git_remote(&self) -> bool {
+        self.git_remote.is_some()
     }
 
     /// RR6: pre-seed a DANGLING remote git worktree (a crash left it materialized
@@ -2394,6 +2654,49 @@ impl FakeRemoteChannel {
             .lock()
             .expect("fake remote worktree ledger poisoned") = Some(worktree_key.into());
         self
+    }
+
+    /// RR3/RR7: materialize `source_commit` ON the remote by git over the channel
+    /// and record the resulting remote worktree as the live worktree key (so a
+    /// later `cleanup_workspace`/`rollback_worktree` reaps/restores it). Returns the
+    /// remote `HEAD` + worktree path. Errors with
+    /// [`RuntimeError::RemoteMaterializeFailed`] if no git remote is attached or a
+    /// git step fails.
+    fn materialize(&self, source_commit: &str) -> RuntimeResult<(String, PathBuf)> {
+        let git_remote =
+            self.git_remote
+                .as_ref()
+                .ok_or_else(|| RuntimeError::RemoteMaterializeFailed {
+                    message: "no git remote attached to channel".to_string(),
+                })?;
+        let (head, worktree_path) = git_remote.materialize(source_commit)?;
+        *self
+            .remote_worktree
+            .lock()
+            .expect("fake remote worktree ledger poisoned") =
+            Some(worktree_path.to_string_lossy().to_string());
+        Ok((head, worktree_path))
+    }
+
+    /// RR3/RR7: map a remote-produced commit at `remote_worktree_path` BACK to
+    /// Capo's host by git, into the named `local_ref`. Returns the fetched-back SHA.
+    fn reconcile(&self, remote_worktree_path: &Path, local_ref: &str) -> RuntimeResult<String> {
+        let git_remote =
+            self.git_remote
+                .as_ref()
+                .ok_or_else(|| RuntimeError::RemoteMaterializeFailed {
+                    message: "no git remote attached to channel".to_string(),
+                })?;
+        git_remote.reconcile(remote_worktree_path, local_ref)
+    }
+
+    /// RR3/RR7: the recorded (credential-scanned) git transport URL, or a benign
+    /// placeholder when no git remote is attached.
+    fn transport_url(&self) -> String {
+        self.git_remote
+            .as_ref()
+            .map(|r| r.transport_url.clone())
+            .unwrap_or_else(|| "fake-channel://no-git-remote".to_string())
     }
 
     /// RR6: the checkpoint ref the LAST `rollback_worktree` restored to. A test
@@ -3211,6 +3514,88 @@ impl RemoteProcessRunner {
             .insert(idempotency_key, outcome.clone());
 
         Ok(outcome)
+    }
+
+    /// RR3/RR7: materialize the run's workspace ON the remote by git (push/fetch +
+    /// `git worktree add` the target commit), then record a
+    /// `runtime.remote_workspace_materialized` event. The materialization is
+    /// content-addressed (pinned to `source_commit`) and auditable (the source SHA,
+    /// the remote worktree path, the resulting remote `HEAD`, and the
+    /// credential-scanned git transport URL are recorded). A revoked remote-control
+    /// grant forbids materialization (it is a precondition for execution). A failed
+    /// git step is the TYPED [`RuntimeError::RemoteMaterializeFailed`], surfaced as a
+    /// FAILED materialization event — never a silent fall-through to the wrong dir.
+    pub fn materialize_workspace(
+        &self,
+        source_commit: &str,
+    ) -> RuntimeResult<RemoteWorkspaceMaterialization> {
+        self.ensure_control_granted()?;
+
+        // The git transport URL passes the credential scan BEFORE it is recorded,
+        // so a URL carrying an embedded secret is scrubbed, not persisted raw.
+        let raw_url = self.config.transport.transport_url();
+        let (scanned, redaction) = RedactionPolicy::new(Vec::new()).apply(raw_url.as_bytes());
+        let transport_url = String::from_utf8_lossy(&scanned).to_string();
+
+        match self.config.transport.materialize(source_commit) {
+            Ok((remote_head, worktree_path)) => {
+                let remote_worktree_path = worktree_path.to_string_lossy().to_string();
+                let event = RuntimeEvent {
+                    kind: EventKind::RuntimeRemoteWorkspaceMaterialized
+                        .as_str()
+                        .to_string(),
+                    status: "materialized".to_string(),
+                    detail: format!(
+                        "source_commit={source_commit} remote_head={remote_head} \
+                         worktree={remote_worktree_path} transport_url={transport_url} \
+                         uncommitted_scratch_synced=false"
+                    ),
+                };
+                Ok(RemoteWorkspaceMaterialization {
+                    source_commit: source_commit.to_string(),
+                    remote_head,
+                    remote_worktree_path,
+                    transport_url,
+                    transport_url_redaction: redaction,
+                    events: vec![event],
+                })
+            }
+            Err(error) => {
+                // A failed materialization is the TYPED error (mirrors
+                // `WorktreeError`'s no-silent-fallthrough rule); the caller records
+                // it as a FAILED `runtime.remote_workspace_materialized` event from
+                // the redaction-safe message rather than running in the wrong dir.
+                Err(error)
+            }
+        }
+    }
+
+    /// RR3/RR7: map a remote-produced commit at `remote_worktree_path` BACK to
+    /// Capo's host by git (fetch the remote tip into a named local ref), recording a
+    /// `runtime.remote_workspace_reconciled` event. The non-sync of uncommitted
+    /// scratch is an explicit recorded fact on the materialization event; the
+    /// reconcile maps back only committed remote state.
+    pub fn reconcile_workspace(
+        &self,
+        remote_worktree_path: &Path,
+        local_ref: &str,
+    ) -> RuntimeResult<RemoteWorkspaceReconciliation> {
+        let remote_commit = self
+            .config
+            .transport
+            .reconcile(remote_worktree_path, local_ref)?;
+        let event = RuntimeEvent {
+            kind: EventKind::RuntimeRemoteWorkspaceReconciled
+                .as_str()
+                .to_string(),
+            status: "reconciled".to_string(),
+            detail: format!("remote_commit={remote_commit} local_ref={local_ref}"),
+        };
+        Ok(RemoteWorkspaceReconciliation {
+            remote_commit,
+            local_ref: local_ref.to_string(),
+            events: vec![event],
+        })
     }
 
     /// Send an interrupt over the channel.
@@ -10211,5 +10596,635 @@ mod tests {
             stderr_path.exists(),
             "the child's stderr artifact must be captured at {stderr_path:?}"
         );
+    }
+
+    // ====================================================================
+    // RR7: deterministic fake-remote determinism consolidation.
+    //
+    // One `FakeRemoteProcessRunner` + fake-channel harness exercising the FULL
+    // contract end to end — start/stop/health/reattach, REAL git materialization
+    // against a local bare-repo "remote", output/stdin streaming, sandbox/worktree
+    // composition, crash-matrix recovery — with NO network and NO real SSH, then
+    // asserting the cross-cutting invariants are replay-stable. Every git path uses
+    // actual `git` against local directories so the materialization invariants are
+    // proven, not modelled by an abstract flag.
+    // ====================================================================
+
+    /// RR7 helper: run a git subcommand in `dir`, panicking on failure (test setup).
+    /// A FIXED author/committer identity + date makes a commit SHA fully
+    /// deterministic (so the replay-stable cross-fixture SHA equality holds), and
+    /// `commit.gpgsign=false` keeps the op independent of the operator's global git
+    /// config (which may force GPG signing).
+    fn rr7_git(dir: &Path, args: &[&str]) {
+        let fixed_date = "2026-06-02T00:00:00 +0000";
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+            .env("GIT_AUTHOR_NAME", "capo-test")
+            .env("GIT_AUTHOR_EMAIL", "test@capo.local")
+            .env("GIT_AUTHOR_DATE", fixed_date)
+            .env("GIT_COMMITTER_NAME", "capo-test")
+            .env("GIT_COMMITTER_EMAIL", "test@capo.local")
+            .env("GIT_COMMITTER_DATE", fixed_date)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(args)
+            .status()
+            .expect("spawn git");
+        assert!(status.success(), "git {} failed", args.join(" "));
+    }
+
+    fn rr7_git_capture(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(output.status.success(), "git {} failed", args.join(" "));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// RR7 fixture: a real local "origin" repo with one committed file plus a DIRTY
+    /// untracked file (proving uncommitted scratch never travels), the source commit
+    /// SHA, and the empty remote-repo + worktree-root directories the channel
+    /// materializes into. NO network — every path is local + deterministic.
+    struct GitRemoteFixture {
+        origin: PathBuf,
+        source_commit: String,
+        dirty_filename: String,
+        git_remote: GitRemote,
+    }
+
+    fn rr7_git_remote_fixture(name: &str) -> GitRemoteFixture {
+        let origin = temp_root(&format!("rr7-origin-{name}"));
+        let remote_repo = temp_root(&format!("rr7-remote-repo-{name}"));
+        let worktree_root = temp_root(&format!("rr7-remote-wt-{name}"));
+        fs::create_dir_all(&origin).unwrap();
+        fs::create_dir_all(&remote_repo).unwrap();
+        fs::create_dir_all(&worktree_root).unwrap();
+
+        // The "remote" git store is a real bare-ish repo we can fetch into.
+        rr7_git(&origin, &["init", "-q"]);
+        rr7_git(&remote_repo, &["init", "-q"]);
+
+        // One COMMITTED file — the only thing a git-based sync carries.
+        fs::write(origin.join("committed.txt"), "committed-content").unwrap();
+        rr7_git(&origin, &["add", "committed.txt"]);
+        rr7_git(&origin, &["commit", "-q", "-m", "rr7 committed state"]);
+        let source_commit = rr7_git_capture(&origin, &["rev-parse", "HEAD"]);
+
+        // A DIRTY untracked file that MUST NOT travel (uncommitted scratch is not
+        // auto-synced — the injected git-sync decision).
+        let dirty_filename = "uncommitted-scratch.txt".to_string();
+        fs::write(origin.join(&dirty_filename), "secret local scratch").unwrap();
+
+        let git_remote = GitRemote::new(
+            origin.clone(),
+            remote_repo,
+            worktree_root,
+            // A transport URL with an EMBEDDED credential — it MUST be redacted
+            // before it lands on the materialization event.
+            "ssh://git:AKIAIOSFODNN7EXAMPLE@remote.example/repo.git",
+        );
+        GitRemoteFixture {
+            origin,
+            source_commit,
+            dirty_filename,
+            git_remote,
+        }
+    }
+
+    /// RR7 harness: build a remote runner over a fake channel, optionally with a
+    /// real git-backed remote workspace and a stream/recovery script. NO network.
+    fn rr7_runner(
+        name: &str,
+        git_remote: Option<GitRemote>,
+        script: impl FnOnce(FakeRemoteChannel) -> FakeRemoteChannel,
+    ) -> (RemoteProcessRunner, PathBuf) {
+        let workspace = temp_root(&format!("rr7-ws-{name}"));
+        let artifacts = temp_root(&format!("rr7-art-{name}"));
+        fs::create_dir_all(&workspace).unwrap();
+        let channel = OpenChannel::for_test(
+            format!("chan-{name}"),
+            format!("endpoint-{name}"),
+            format!("fp-{name}"),
+        );
+        let mut base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts);
+        if let Some(git_remote) = git_remote {
+            base = base.with_git_remote(git_remote);
+        }
+        let transport = RemoteChannel::Fake(script(base));
+        let runner =
+            RemoteProcessRunner::new(RemoteProcessConfig::with_transport(channel, transport));
+        (runner, workspace)
+    }
+
+    #[test]
+    fn rr7_git_materialization_pins_head_to_the_source_sha() {
+        // INVARIANT: materialization is content-addressed — the remote worktree HEAD
+        // matches the source commit SHA exactly.
+        let fixture = rr7_git_remote_fixture("pins-head");
+        let (runner, _ws) = rr7_runner("pins-head", Some(fixture.git_remote.clone()), |c| c);
+
+        let materialized = runner
+            .materialize_workspace(&fixture.source_commit)
+            .expect("materialize");
+
+        assert_eq!(materialized.remote_head, fixture.source_commit);
+        assert_eq!(materialized.source_commit, fixture.source_commit);
+        // The materialized worktree carries the committed file at the SHA.
+        let head_committed =
+            fs::read_to_string(Path::new(&materialized.remote_worktree_path).join("committed.txt"))
+                .expect("committed file present on remote worktree");
+        assert_eq!(head_committed, "committed-content");
+        // The materialization is a RECORDED event naming the SHA + remote HEAD.
+        let event = &materialized.events[0];
+        assert_eq!(event.kind, "runtime.remote_workspace_materialized");
+        assert!(event.detail.contains(&fixture.source_commit));
+    }
+
+    #[test]
+    fn rr7_uncommitted_scratch_is_never_materialized_on_the_remote() {
+        // INVARIANT (injected git-sync decision): uncommitted/untracked scratch does
+        // NOT travel. A dirty local file is ABSENT on the materialized remote
+        // worktree, and the non-sync is an EXPLICIT recorded fact, not a silent gap.
+        let fixture = rr7_git_remote_fixture("no-scratch");
+        let (runner, _ws) = rr7_runner("no-scratch", Some(fixture.git_remote.clone()), |c| c);
+
+        // Sanity: the dirty file really exists locally.
+        assert!(fixture.origin.join(&fixture.dirty_filename).exists());
+
+        let materialized = runner
+            .materialize_workspace(&fixture.source_commit)
+            .expect("materialize");
+
+        let scratch_on_remote =
+            Path::new(&materialized.remote_worktree_path).join(&fixture.dirty_filename);
+        assert!(
+            !scratch_on_remote.exists(),
+            "uncommitted scratch must NOT be materialized on the remote worktree"
+        );
+        // The non-sync is recorded as an explicit fact on the event.
+        assert!(
+            materialized
+                .events
+                .iter()
+                .any(|e| e.detail.contains("uncommitted_scratch_synced=false")),
+            "the non-sync of uncommitted scratch must be an explicit recorded fact"
+        );
+    }
+
+    #[test]
+    fn rr7_materialization_event_redacts_an_embedded_credential_in_the_transport_url() {
+        // INVARIANT (safety boundary): the git transport URL passes the credential
+        // scan BEFORE it is recorded — a URL with an embedded secret is scrubbed, so
+        // no credential ever lands on a remote-runtime event.
+        let fixture = rr7_git_remote_fixture("redact-url");
+        let (runner, _ws) = rr7_runner("redact-url", Some(fixture.git_remote.clone()), |c| c);
+
+        let materialized = runner
+            .materialize_workspace(&fixture.source_commit)
+            .expect("materialize");
+
+        assert_eq!(materialized.transport_url_redaction, "redacted");
+        assert!(
+            !materialized.transport_url.contains("AKIAIOSFODNN7EXAMPLE"),
+            "the embedded credential must be scrubbed from the transport URL"
+        );
+        assert!(
+            !materialized.events[0]
+                .detail
+                .contains("AKIAIOSFODNN7EXAMPLE"),
+            "no credential may appear on the materialization event"
+        );
+    }
+
+    #[test]
+    fn rr7_remote_produced_commit_fetches_back_as_a_named_ref() {
+        // INVARIANT: results map back by git — a commit produced on the remote
+        // worktree fetches back into Capo's host as a named ref (the reconcile/
+        // merge-back point), recorded as `runtime.remote_workspace_reconciled`.
+        let fixture = rr7_git_remote_fixture("fetch-back");
+        let (runner, _ws) = rr7_runner("fetch-back", Some(fixture.git_remote.clone()), |c| c);
+
+        let materialized = runner
+            .materialize_workspace(&fixture.source_commit)
+            .expect("materialize");
+        let worktree = PathBuf::from(&materialized.remote_worktree_path);
+
+        // The agent produces a commit ON the remote worktree.
+        fs::write(worktree.join("produced.txt"), "remote-produced").unwrap();
+        rr7_git(&worktree, &["add", "produced.txt"]);
+        rr7_git(&worktree, &["commit", "-q", "-m", "rr7 remote produced"]);
+        let remote_tip = rr7_git_capture(&worktree, &["rev-parse", "HEAD"]);
+
+        let reconciled = runner
+            .reconcile_workspace(&worktree, "refs/capo/remote/rr7-fetch-back")
+            .expect("reconcile");
+
+        assert_eq!(reconciled.remote_commit, remote_tip);
+        // The named ref now resolves in the local origin to the remote-produced tip.
+        let landed = rr7_git_capture(
+            &fixture.origin,
+            &["rev-parse", "refs/capo/remote/rr7-fetch-back"],
+        );
+        assert_eq!(landed, remote_tip);
+        assert_eq!(
+            reconciled.events[0].kind,
+            "runtime.remote_workspace_reconciled"
+        );
+    }
+
+    #[test]
+    fn rr7_materialization_failure_is_a_typed_error_not_a_silent_fallthrough() {
+        // INVARIANT: a failed git step is a TYPED error, never a silent
+        // fall-through to running in the wrong directory.
+        let fixture = rr7_git_remote_fixture("typed-fail");
+        let (runner, _ws) = rr7_runner("typed-fail", Some(fixture.git_remote.clone()), |c| c);
+
+        // A commit SHA that does not exist cannot be fetched -> typed failure.
+        let result = runner.materialize_workspace("0000000000000000000000000000000000000000");
+        assert!(matches!(
+            result,
+            Err(RuntimeError::RemoteMaterializeFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn rr7_git_materialization_is_replay_stable_across_rebuilds() {
+        // INVARIANT: materialization + reconcile rebuild IDENTICALLY. Two
+        // independent fixtures built from the same committed state produce the same
+        // source SHA, the same remote HEAD, and the same materialized committed
+        // content, and a re-materialization against the SAME remote is idempotent.
+        let fixture_a = rr7_git_remote_fixture("replay-a");
+        let fixture_b = rr7_git_remote_fixture("replay-b");
+        // Same committed content -> same tree; SHAs match because the capo identity
+        // + commit message + content are deterministic.
+        assert_eq!(fixture_a.source_commit, fixture_b.source_commit);
+
+        let (runner_a, _wa) = rr7_runner("replay-a", Some(fixture_a.git_remote.clone()), |c| c);
+        let first = runner_a
+            .materialize_workspace(&fixture_a.source_commit)
+            .expect("materialize first");
+        // Re-materialize against the SAME remote: idempotent, same HEAD + path.
+        let again = runner_a
+            .materialize_workspace(&fixture_a.source_commit)
+            .expect("re-materialize");
+        assert_eq!(first.remote_head, again.remote_head);
+        assert_eq!(first.remote_worktree_path, again.remote_worktree_path);
+
+        let (runner_b, _wb) = rr7_runner("replay-b", Some(fixture_b.git_remote.clone()), |c| c);
+        let rebuilt = runner_b
+            .materialize_workspace(&fixture_b.source_commit)
+            .expect("materialize rebuilt");
+        assert_eq!(first.remote_head, rebuilt.remote_head);
+    }
+
+    #[test]
+    fn rr7_full_contract_end_to_end_is_replay_stable() {
+        // The consolidated end-to-end pass: a single fake remote runner is driven
+        // through start -> health -> stream -> stdin -> recover -> cleanup, and the
+        // cross-cutting invariants are asserted together. Re-running the identical
+        // script reproduces identical projected state (replay-stable).
+        let drive = |name: &str| -> Vec<String> {
+            let payload = b"token AKIAIOSFODNN7EXAMPLE done".to_vec();
+            let (runner, workspace) = rr7_runner(name, None, |c| {
+                c.recover_alive_reattachable()
+                    .with_streamed_output(payload.clone())
+            });
+
+            // INVARIANT: the runner performs NO endpoint resolution (channel
+            // injected) and the append-first start sequence holds.
+            assert!(runner.is_loopback());
+            let outcome = runner
+                .start_process(remote_request(
+                    &format!("run-{name}"),
+                    workspace,
+                    "printf ok",
+                ))
+                .expect("start");
+            let mut kinds: Vec<String> = outcome.events.iter().map(|e| e.kind.clone()).collect();
+            // Start sequence: requested -> resolved -> started, append-first.
+            let req = kinds
+                .iter()
+                .position(|k| k == "runtime.remote_start_requested")
+                .expect("start_requested");
+            let res = kinds
+                .iter()
+                .position(|k| k == "runtime.remote_target_resolved")
+                .expect("target_resolved");
+            let started = kinds
+                .iter()
+                .position(|k| k == "runtime.remote_process_started")
+                .expect("process_started");
+            assert!(req < res && res < started, "append-first start order");
+
+            let running = LocalRuntimeProcessRef {
+                status: "running".to_string(),
+                ..outcome.process.clone()
+            };
+
+            // INVARIANT: health derives from a real remote probe.
+            let health = runner.health(&running).expect("health");
+            assert!(health.live);
+
+            // INVARIANT: output is REDACTED + bounded before persistence.
+            let stream = runner.stream_output(&running, 0);
+            assert_eq!(stream.redaction_state, "redacted");
+            assert!(
+                !stream
+                    .deltas
+                    .iter()
+                    .any(|d| d.text.contains("AKIAIOSFODNN7EXAMPLE")),
+                "a credential must be scrubbed before any delta"
+            );
+            kinds.extend(stream.events.iter().map(|e| e.kind.clone()));
+
+            // INVARIANT: a reconnect from the last offset yields no duplicate bytes.
+            let resumed = runner.stream_output(&running, stream.next_offset);
+            assert!(resumed.deltas.is_empty(), "no duplicate deltas on resume");
+
+            // stdin write reaches the remote (byte count only on the event).
+            let stdin = runner.write_stdin(&running, b"hello").expect("stdin");
+            kinds.extend(stdin.events.iter().map(|e| e.kind.clone()));
+
+            // INVARIANT: recovery classification is truthful (alive+reattachable ->
+            // Recovered, in place, no relaunch).
+            let recovery = runner.recover_run(&running, &running_recorded_boot(&running));
+            assert_eq!(
+                recovery.classification,
+                RemoteRecoveryClassification::Recovered
+            );
+            kinds.extend(recovery.events.iter().map(|e| e.kind.clone()));
+
+            // INVARIANT: cleanup is idempotent.
+            let cleaned = runner
+                .cleanup_run(&running, CleanupPolicy::ReapAll)
+                .expect("cleanup");
+            kinds.extend(cleaned.events.iter().map(|e| e.kind.clone()));
+            let cleaned_again = runner
+                .cleanup_run(&running, CleanupPolicy::ReapAll)
+                .expect("cleanup again");
+            // Second cleanup completes without a second teardown event (idempotent).
+            assert!(
+                !cleaned_again
+                    .events
+                    .iter()
+                    .any(|e| e.kind == "runtime.remote_workspace_torn_down"),
+                "a re-run finds nothing to reap"
+            );
+            assert!(
+                cleaned_again
+                    .events
+                    .iter()
+                    .any(|e| e.kind == "runtime.remote_cleanup_completed")
+            );
+
+            kinds
+        };
+
+        let first = drive("e2e-1");
+        let second = drive("e2e-2");
+        assert_eq!(
+            first, second,
+            "the full contract must rebuild an identical projected event sequence"
+        );
+    }
+
+    /// RR7 helper: the boot id recorded in a stored remote ref, so recovery probes
+    /// the boot identity captured at launch (matching the happy reattach script).
+    fn running_recorded_boot(process: &LocalRuntimeProcessRef) -> String {
+        parse_remote_ref(&process.runtime_process_ref)
+            .map(|p| p.boot)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn rr7_revoked_grant_forbids_materialization_and_re_execution() {
+        // INVARIANT (safety boundary): a revoked remote-control grant stops the run
+        // and the runner cannot re-establish execution — materialization (a
+        // precondition for a run) and start are both refused under a revoked grant.
+        let fixture = rr7_git_remote_fixture("revoked");
+        let (runner, workspace) = rr7_runner("revoked", Some(fixture.git_remote.clone()), |c| c);
+
+        runner.revoke_control("rr7 operator revoke", None);
+
+        let mat = runner.materialize_workspace(&fixture.source_commit);
+        assert!(matches!(
+            mat,
+            Err(RuntimeError::RemoteControlRevoked { .. })
+        ));
+
+        let start = runner.start_process(remote_request("run-revoked", workspace, "printf ok"));
+        assert!(matches!(
+            start,
+            Err(RuntimeError::RemoteControlRevoked { .. })
+        ));
+    }
+
+    /// RR7 harness helper (sandbox composition): build a remote runner over a fake
+    /// channel whose remote OS + cross-machine boundary are scripted, mirroring the
+    /// RR5 `sandbox_runner` but wired into the RR7 consolidation block so the
+    /// "sandbox enforcement claims match the (fake) remote OS" cross-cutting
+    /// invariant is exercised end to end here, not only in isolation. NO network.
+    fn rr7_sandbox_runner(
+        name: &str,
+        workspace: &Path,
+        script: impl FnOnce(FakeRemoteChannel) -> FakeRemoteChannel,
+    ) -> RemoteProcessRunner {
+        let artifacts = temp_root(&format!("rr7-sb-art-{name}"));
+        let channel = OpenChannel::for_test(
+            format!("rr7-sb-chan-{name}"),
+            format!("rr7-sb-endpoint-{name}"),
+            format!("rr7-sb-fp-{name}"),
+        );
+        let base =
+            FakeRemoteChannel::from_open_channel(&channel, workspace.to_path_buf(), artifacts);
+        let transport = RemoteChannel::Fake(script(base));
+        RemoteProcessRunner::new(RemoteProcessConfig::with_transport(channel, transport))
+    }
+
+    #[test]
+    fn rr7_sandboxed_launch_enforcement_claim_matches_fake_remote_os() {
+        // CROSS-CUTTING INVARIANT (RR7 AC): "sandbox enforcement claims match the
+        // (fake) remote OS." Wired into the consolidation harness as a PAIR:
+        //   - a CROSS-MACHINE channel to an enforcing remote OS -> `sandbox.enforced`
+        //     (the boundary was crossed AND the remote OS enforces the tier);
+        //   - the DEFAULT loopback channel (no boundary crossed), even with the SAME
+        //     enforcing remote OS scripted -> `sandbox.unenforced` (Capo never claims
+        //     a confinement it could not apply over a boundary it did not cross).
+        let enforced_root = temp_root("rr7-sb-enforced");
+        fs::create_dir_all(&enforced_root).unwrap();
+        let enforced_runner = rr7_sandbox_runner("enforced", &enforced_root, |c| {
+            c.with_remote_os(RemoteOsFamily::Linux)
+                .with_enforceable_remote_sandbox()
+                .with_cross_machine_boundary()
+        });
+        let profile = SandboxProfile::workspace_confined([enforced_root.clone()]);
+        let enforced = enforced_runner
+            .start_process_sandboxed(
+                remote_request("run-rr7-enforced", enforced_root.clone(), "printf ok"),
+                &enforced_root,
+                &profile,
+                SandboxTier::LinuxLandlockBwrap,
+                false,
+                Some("refs/capo/materialized/rr7".to_string()),
+            )
+            .expect("enforced plan");
+        assert_eq!(
+            enforced.plan.enforcement,
+            SandboxEnforcement::Enforced {
+                tier: SandboxTier::LinuxLandlockBwrap
+            }
+        );
+        let enforced_outcome = enforced.outcome.expect("a confined remote process ran");
+        assert_eq!(enforced_outcome.events[0].kind, "sandbox.enforced");
+        // The claim is BACKED by enforcement reaching the transport (not a label):
+        // the bwrap-wrapped command is what the transport launched.
+        assert_eq!(
+            enforced_runner
+                .transport_last_launched_request()
+                .expect("transport launch")
+                .program,
+            "bwrap"
+        );
+
+        // Same enforcing remote OS, but the DEFAULT loopback channel: no boundary
+        // crossed -> honestly `Unenforced`, NEVER `Enforced`.
+        let loopback_root = temp_root("rr7-sb-loopback");
+        fs::create_dir_all(&loopback_root).unwrap();
+        let loopback_runner = rr7_sandbox_runner("loopback", &loopback_root, |c| {
+            c.with_remote_os(RemoteOsFamily::Linux)
+                .with_enforceable_remote_sandbox()
+        });
+        assert!(loopback_runner.is_loopback());
+        let loopback_profile = SandboxProfile::workspace_confined([loopback_root.clone()]);
+        let loopback_plan = loopback_runner
+            .plan_remote_sandbox(
+                &remote_request("run-rr7-loopback", loopback_root.clone(), "printf ok"),
+                &loopback_root,
+                &loopback_profile,
+                SandboxTier::LinuxLandlockBwrap,
+                false,
+            )
+            .expect("loopback plan");
+        assert!(matches!(
+            loopback_plan.enforcement,
+            SandboxEnforcement::Unenforced { .. }
+        ));
+        assert!(
+            loopback_plan
+                .events
+                .iter()
+                .any(|e| e.kind == "sandbox.unenforced")
+        );
+    }
+
+    #[test]
+    fn rr7_crash_matrix_recovery_is_replay_stable_across_all_classifications() {
+        // CROSS-CUTTING INVARIANT (RR7 AC): the consolidation harness exercises
+        // "crash-matrix recovery" — ALL FOUR classifications, not just the happy
+        // reattach — through the same fake-remote harness, and proves each is
+        // replay-stable (an identical script rebuilds an identical event sequence).
+        //
+        // Drives one classification through the harness and returns the projected
+        // (classification, event-kind-sequence) so two independent runs can be
+        // compared for replay stability.
+        type Scripter = fn(FakeRemoteChannel) -> FakeRemoteChannel;
+        let drive = |name: &str, script: Scripter| -> (RemoteRecoveryClassification, Vec<String>) {
+            let (runner, running, recorded_boot) = scripted_recovery_runner(name, script);
+            let recovery = runner.recover_run(&running, &recorded_boot);
+            // Append-first holds for every classification: the attempt precedes the
+            // single terminal event.
+            assert_eq!(
+                recovery.events.first().unwrap().kind,
+                "runtime.remote_recovery_attempted"
+            );
+            let kinds = recovery
+                .events
+                .iter()
+                .map(|e| e.kind.clone())
+                .collect::<Vec<_>>();
+            (recovery.classification, kinds)
+        };
+
+        // The four crash-matrix classifications (RR6) and their scripts.
+        let matrix: [(&str, Scripter, RemoteRecoveryClassification); 4] = [
+            (
+                "recovered",
+                FakeRemoteChannel::recover_alive_reattachable,
+                RemoteRecoveryClassification::Recovered,
+            ),
+            (
+                "orphaned",
+                FakeRemoteChannel::recover_alive_unattachable,
+                RemoteRecoveryClassification::Orphaned,
+            ),
+            (
+                "exited",
+                FakeRemoteChannel::recover_rebooted,
+                RemoteRecoveryClassification::Exited,
+            ),
+            (
+                "pending",
+                FakeRemoteChannel::recover_channel_unreachable,
+                RemoteRecoveryClassification::RecoveryPending,
+            ),
+        ];
+
+        for (name, script, expected) in matrix {
+            let (cls_a, kinds_a) = drive(&format!("rr7-cm-{name}-a"), script);
+            let (cls_b, kinds_b) = drive(&format!("rr7-cm-{name}-b"), script);
+            assert_eq!(cls_a, expected, "{name} classification");
+            assert_eq!(cls_b, expected, "{name} classification (rebuild)");
+            // Replay-stable: the identical script rebuilds an identical event trail.
+            assert_eq!(
+                kinds_a, kinds_b,
+                "{name} recovery rebuild must be identical"
+            );
+        }
+    }
+
+    #[test]
+    fn rr7_enum_level_remote_control_dispatches_to_the_real_remote_runner() {
+        // ROUTING (review finding 4): the `RuntimeRunner::{interrupt,terminate,
+        // kill,health}_local` methods MUST dispatch a `RemoteProcess` variant to the
+        // REAL `RemoteProcessRunner` over its channel (not the `FakeRuntimeRunner`
+        // fall-through). This both proves the routing and keeps the methods reachable
+        // (no dead code). Each control verb yields its distinct remote event kind.
+        let (runner, running, _boot) =
+            scripted_recovery_runner("rr7-enum-route", |c| c.recover_alive_reattachable());
+        let enum_runner = RuntimeRunner::RemoteProcess(Box::new(runner));
+
+        let interrupted = enum_runner.interrupt_local(&running, "rr7 interrupt");
+        assert_eq!(
+            interrupted.events[0].kind, "runtime.remote_interrupt_sent",
+            "interrupt_local must route to the real remote runner"
+        );
+
+        let terminated = enum_runner.terminate_local(&running, "rr7 terminate");
+        assert_eq!(terminated.events[0].kind, "runtime.remote_terminate_sent");
+
+        let killed = enum_runner.kill_local(&running, "rr7 kill");
+        assert_eq!(killed.events[0].kind, "runtime.remote_kill_sent");
+
+        // health_local routes to the ACTUAL remote probe over the channel.
+        let health = enum_runner.health_local(&running).expect("health");
+        assert!(health.live);
+    }
+
+    #[test]
+    fn rr7_remote_kill_yields_remote_kill_sent_event() {
+        // RR1 AC (review finding 5): `kill` over the channel produces the DISTINCT
+        // `runtime.remote_kill_sent` event — asserted directly on the runner, not
+        // only via the EventKind serialization round-trip.
+        let (runner, running, _boot) =
+            scripted_recovery_runner("rr7-kill", |c| c.recover_alive_reattachable());
+        let killed = runner.kill(&running, "rr7 operator kill");
+        assert_eq!(killed.process.status, "killed");
+        assert_eq!(killed.events[0].kind, "runtime.remote_kill_sent");
     }
 }

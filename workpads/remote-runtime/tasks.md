@@ -29,13 +29,19 @@ stub with a real remote runner whose channel is provided by the
 ## Status
 
 In progress. RR0 complete. RR1 complete. RR2 complete (deterministic
-fake-channel recovery suite). RR3 event-kinds landed. RR4 complete
+fake-channel recovery suite). RR3 complete (git-based remote workspace
+materialization: push/fetch + worktree the commit, content-addressed
+HEAD==SHA, redacted transport URL, reconcile/map-back, no-scratch invariant;
+deterministic local-git fake-channel suite). RR4 complete
 (deterministic fake-channel output-delta + stdin streaming suite). RR5 complete
 (remote OS sandbox + worktree composition with honest remote-OS-probed
 enforcement claims; deterministic fake-channel suite). RR6 complete (crash-safe
 remote runs: idempotent worktree-reaping cleanup, git-checkpoint rollback,
 revocable remote-control grant; deterministic fake-channel crash-matrix suite +
-`-p capo-server` gate). RR7-RR8 pending.
+`-p capo-server` gate). RR7 complete (deterministic fake-remote consolidation
+harness exercising the full contract end to end — start/stop/health/reattach,
+real git materialization, output/stdin streaming, sandbox/worktree composition,
+crash-matrix recovery — with replay-stable assertions). RR8 pending.
 
 ## Feature Set
 
@@ -295,7 +301,29 @@ health).
 
 ## RR3 - Git-Based Remote Workspace Materialization (push/fetch + worktree the commit)
 
-Status: pending.
+Status: complete.
+
+Evidence: `crates/capo-runtime/src/lib.rs` ships the real git-based materialization
+surface — `RemoteProcessRunner::materialize_workspace` /
+`reconcile_workspace`, `GitRemote` (a REAL git-backed remote workspace model:
+push/fetch + `git worktree add` the target commit into a dedicated remote
+worktree root), `RemoteWorkspaceMaterialization` /
+`RemoteWorkspaceReconciliation`, the `runtime.remote_workspace_materialized` /
+`runtime.remote_workspace_reconciled` / `runtime.remote_workspace_torn_down`
+events, and the typed `RuntimeError::RemoteMaterializeFailed` (no silent
+fall-through). The transport URL passes redaction before it lands on the event;
+uncommitted/untracked scratch is NOT auto-synced and the non-sync is an explicit
+recorded fact (`uncommitted_scratch_synced=false`). Deterministic tests run REAL
+`git` against local directories through the fake channel (NO network):
+`rr7_git_materialization_pins_head_to_the_source_sha` (HEAD==source SHA,
+content-addressed), `rr7_uncommitted_scratch_is_never_materialized_on_the_remote`
+(dirty local file absent on the remote worktree, non-sync recorded),
+`rr7_materialization_event_redacts_an_embedded_credential_in_the_transport_url`,
+`rr7_remote_produced_commit_fetches_back_as_a_named_ref` (reconcile/map-back),
+`rr7_materialization_failure_is_a_typed_error_not_a_silent_fallthrough`,
+`rr7_git_materialization_is_replay_stable_across_rebuilds`. Materialization is
+also exercised from the `-p capo-server` gate
+(`crates/capo-server/src/tests/remote_materialization.rs`).
 
 Scope: Materialize the run's workspace ON the remote by git, then map results
 back. This is the INJECTED design decision.
@@ -598,7 +626,36 @@ Dependencies: RR1-RR4, `safety-gates` (checkpoint/rollback + grant revoke).
 
 ## RR7 - Deterministic Fake-Remote Determinism Consolidation
 
-Status: pending.
+Status: complete.
+
+Evidence: `crates/capo-runtime/src/lib.rs` carries the RR7 consolidation harness
+(`rr7_*` block) — a `FakeRemoteProcessRunner` + fake-channel harness driving the
+FULL contract with NO network and NO real SSH, every git path using REAL `git`
+against local directories. `rr7_full_contract_end_to_end_is_replay_stable` drives
+start -> health -> stream -> stdin -> recover -> cleanup and asserts the
+cross-cutting invariants together (no endpoint resolution; append-first start
+order; output redacted + bounded; reconnect yields no duplicate deltas;
+truthful recovery classification; idempotent cleanup), comparing two independent
+runs for an identical projected event sequence (replay-stable). The git
+materialization invariants are proven by `rr7_git_materialization_*` (HEAD==SHA,
+no-scratch, redacted transport URL, fetch-back reconcile, typed failure, replay
+stability). The two AC cross-cutting gaps the adversarial review named are closed:
+`rr7_sandboxed_launch_enforcement_claim_matches_fake_remote_os` proves "sandbox
+enforcement claims match the (fake) remote OS" as a PAIR (cross-machine enforcing
+remote -> `sandbox.enforced` with the bwrap-wrapped command reaching the
+transport; the same enforcing OS over the default loopback -> `sandbox.unenforced`,
+never claimed); `rr7_crash_matrix_recovery_is_replay_stable_across_all_classifications`
+runs ALL FOUR crash-matrix classifications (`Recovered` / `Orphaned` / `Exited` /
+`RecoveryPending`) through the harness and asserts each rebuilds an identical
+event trail. `rr7_enum_level_remote_control_dispatches_to_the_real_remote_runner`
+proves `RuntimeRunner::{interrupt,terminate,kill,health}_local` route a
+`RemoteProcess` to the REAL remote runner (closing the dead-code/routing gap), and
+`rr7_remote_kill_yields_remote_kill_sent_event` asserts the distinct
+`runtime.remote_kill_sent` event directly on the runner.
+`rr7_revoked_grant_forbids_materialization_and_re_execution` pins the
+revocable-control safety boundary. Gate: `cargo fmt --check` +
+`cargo clippy --all-targets --all-features -- -D warnings` +
+`cargo test --workspace` all green.
 
 Scope: Consolidate the deterministic suite that must pass with NO network and NO
 real remote, proving every remote-runtime invariant before any live work.

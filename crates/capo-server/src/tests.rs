@@ -31,6 +31,7 @@ mod live_smoke;
 mod multi_turn_edit;
 mod per_turn_artifacts;
 mod remote_crash_safety;
+mod remote_materialization;
 mod remote_recovery;
 mod replay;
 mod safety_floor;
