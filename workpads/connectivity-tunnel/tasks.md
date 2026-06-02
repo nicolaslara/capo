@@ -502,7 +502,32 @@ Dependencies: CT0, CT3, CT4.
 
 ## CT6 - Anti-Sleep When Serving Locally (Opt-In Lifecycle, One-Way Coupling, Separate From Execution)
 
-Status: pending.
+Status: done. Anti-sleep lives in the NAMED lifecycle home `capo-runtime::anti_sleep`
+(`crates/capo-runtime/src/anti_sleep.rs`) — the same leaf-module home as the CT5
+`connectivity_health` heartbeat, depending on NOTHING but its injected backend +
+the held-exposure count (no controller/run/turn state, no `RuntimeRunner`). The
+sleep inhibitor is an INJECTABLE `SleepInhibitorBackend` trait: `FakeInhibitorBackend`
+(deterministic test backend, records acquire/release with NO OS call and NO spawned
+process) and `platform_backend()` (macOS IOKit power assertion — NO `caffeinate`;
+Linux `systemd-inhibit`/`gnome-session-inhibit`; `UnsupportedBackend` no-op
+elsewhere), modeled on the vendored codex `sleep-inhibitor`. `AntiSleepController` is
+OFF by default behind the explicit `CAPO_SERVER_ANTI_SLEEP=1` opt-in
+(`anti_sleep_enabled()` / `from_env()`); the SERVING driver is
+`set_active_exposures(count)`, engaging while a held non-loopback exposure count is
+> 0 and releasing at 0 (last-exposure-revoked / shutdown) — a ONE-WAY
+`exposure-state -> inhibitor` edge (the backend trait has no exposure/turn input, so
+it structurally cannot read state back; CT7 may CALL `release` on the last revoke).
+Each update returns an observable `AntiSleepTransition`
+(`Engaged`/`Released`/`EngageUnsupported`/`Unchanged`, secret-free `detail()`) and an
+auditable `AntiSleepStatus` (`enabled`/`engaged`/`enforced`/`active_exposures`/
+`limitation`). On an unsupported platform the intent is recorded as
+`EngageUnsupported`, the assertion is NEVER held, and the status records the
+limitation WITHOUT claiming the laptop stays awake (`keeping_awake()` is
+intent-AND-enforceable). Tests: `capo-runtime` `anti_sleep::tests::ct6_*`
+(off-by-default, engage-on-active/release-on-revoke, idempotent release, unsupported
+limitation, one-way pure-function coupling, secret-free status). Live power-assertion
+behavior is deferred to CT10 behind the opt-in gate. Status field/lifecycle-event
+wiring at the server/CLI layer follows when CT7 wires the last-revoke release edge.
 
 Scope:
 

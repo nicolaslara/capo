@@ -262,15 +262,17 @@ impl HeartbeatMonitor {
         self.last_reachable = Some(effective_reachable);
         if effective_reachable {
             self.last_reachable_ms = Some(now_ms);
-        } else if stalled {
-            // A stall IS an unreachable window. Clear the frozen last-reachable
-            // instant so the deadline window restarts fresh: otherwise every
-            // subsequent reachable probe would re-evaluate the stall check against
-            // the pre-stall instant and re-`Stalled` forever, making the stall
-            // transition irreversible and blocking the normal `Reconnected` path.
-            // After a stall the next successful probe transitions `Reconnected`
-            // (recovery after an unreachable window) per the CT5 acceptance
-            // criterion, exactly like recovery from a probe failure (`Lost`).
+        } else {
+            // ANY unreachable window — a probe failure (`Lost`) OR a stall past the
+            // deadline — clears the frozen last-reachable instant so the deadline
+            // window restarts fresh. Otherwise the pre-window instant survives and a
+            // later recovery beat (after a gap that itself exceeds the deadline)
+            // would re-evaluate the stall check against it and wrongly emit `Stalled`
+            // instead of `Reconnected`. A stall is defined as "no successful beat
+            // within the deadline"; once we are already unreachable, the deadline must
+            // not keep counting from a pre-unreachable success. After ANY unreachable
+            // window the next successful probe transitions `Reconnected` (recovery
+            // after an unreachable window) per the CT5 acceptance criterion.
             self.last_reachable_ms = None;
         }
 
@@ -288,12 +290,6 @@ impl HeartbeatMonitor {
     /// from the scripted health timeline.
     pub fn exposure(&self) -> ExposureScope {
         self.exposure_scope
-    }
-
-    /// Whether the monitor's lifecycle is still running (i.e. not yet stopped).
-    /// A [`HeartbeatHandle`] flips this to `false` on [`HeartbeatHandle::stop`].
-    fn running_flag() -> Arc<AtomicBool> {
-        Arc::new(AtomicBool::new(true))
     }
 }
 
@@ -326,7 +322,8 @@ impl HeartbeatHandle {
     pub fn start(monitor: HeartbeatMonitor) -> Self {
         Self {
             monitor,
-            running: HeartbeatMonitor::running_flag(),
+            // Running until `stop()` (CT7 revoke / shutdown) flips it false.
+            running: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -469,6 +466,41 @@ mod tests {
         // And it stays Steady afterwards — no spurious re-stall on every beat.
         clock.advance(10_000);
         assert_eq!(monitor.beat().transition, HealthTransition::Steady);
+    }
+
+    #[test]
+    fn ct5_lost_then_long_recovery_reconnects_not_stalls() {
+        // Regression: after a `Lost` (probe failure), the unreachable window must
+        // reset the stall deadline. If the probe stays down LONGER than the deadline
+        // and then recovers, the recovery beat is `Reconnected`, NOT `Stalled` — a
+        // stall is "no successful beat within the deadline" measured from a SUCCESS,
+        // not from a pre-unreachable success that the deadline kept counting from.
+        // Timeline: reachable (t=0) -> Lost (t=10_000) -> recovery (t=70_000) with a
+        // 30_000 deadline; the Lost->recovery gap (60_000) exceeds the deadline.
+        let clock = ConnectivityClock::manual(0);
+        let mut monitor = HeartbeatMonitor::new(
+            scripted(vec![true, false, true]),
+            clock.clone(),
+            HeartbeatConfig::new(10_000, 30_000),
+        );
+
+        assert_eq!(monitor.beat().transition, HealthTransition::Initial);
+
+        clock.advance(10_000);
+        let lost = monitor.beat();
+        assert_eq!(lost.transition, HealthTransition::Lost);
+        assert!(!lost.reachable);
+
+        // Recovery after an unreachable window longer than the deadline.
+        clock.advance(60_000);
+        let recovered = monitor.beat();
+        assert_eq!(
+            recovered.transition,
+            HealthTransition::Reconnected,
+            "recovery after a Lost window is Reconnected even past the stall deadline"
+        );
+        assert!(recovered.reachable);
+        assert_eq!(recovered.health.status, "available");
     }
 
     #[test]

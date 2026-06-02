@@ -311,6 +311,21 @@ implement it coherently so the enum stays exhaustive.
 - Degrades cleanly: on an unsupported platform Capo records the limitation and does
   NOT claim the laptop stays awake (the DP7 "don't claim what the OS can't enforce"
   discipline).
+- RESOLVED (CT6): the anti-sleep lifecycle home is `capo-runtime::anti_sleep`
+  (`crates/capo-runtime/src/anti_sleep.rs`) — the same leaf-module home as the CT5
+  `connectivity_health` heartbeat, with NO `RuntimeRunner`/controller/run/turn
+  coupling. The inhibitor is an INJECTABLE `SleepInhibitorBackend` trait (a pure
+  acquire/release/capability SINK with NO exposure/turn input, so the one-way
+  `exposure-state -> inhibitor` edge is structural): `FakeInhibitorBackend` for the
+  deterministic suite (no OS call, no spawned process), `platform_backend()` for the
+  live CT10 path (macOS IOKit / Linux `systemd-inhibit`, no `caffeinate`; no-op
+  `UnsupportedBackend` elsewhere). `AntiSleepController` is OFF by default behind
+  `CAPO_SERVER_ANTI_SLEEP=1`; the SERVING driver is `set_active_exposures(count)`
+  (engage while > 0, release at 0). Each update returns an observable secret-free
+  `AntiSleepTransition` + `AntiSleepStatus`; `keeping_awake()` is intent AND
+  enforceability, so an unsupported platform reports `EngageUnsupported` + a recorded
+  limitation rather than a false "awake" claim. CT7 wires the last-revoke `release`
+  edge.
 
 ## Auditable + Revocable Exposure
 

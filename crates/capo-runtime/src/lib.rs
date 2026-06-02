@@ -16,6 +16,11 @@ use capo_core::{BoundaryBinding, BoundaryKind, RunId};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+/// CT6: anti-sleep when serving locally — an OPT-IN server-lifecycle concern that
+/// keeps a laptop awake while a non-loopback exposure is held. A separate boundary
+/// from agent execution and `RuntimeRunner`; the coupling is ONE-WAY
+/// (exposure-state -> inhibitor). Shares the `connectivity_health` lifecycle home.
+pub mod anti_sleep;
 mod async_runner;
 /// CT5: tunnel health — the heartbeat loop, `last_heartbeat_at`, and reconnect
 /// events, driven by an injectable clock. A separate boundary from controller/turn
