@@ -23,6 +23,11 @@
 | **safety-gates** | Planned | PermissionPolicy wired into the loop + grant read-back/revoke + real VerificationRunner + checkpoint/rollback + liveness-aware recovery |
 | **goal-autonomy** | Planned | Implements the goal-orchestration design: goal/evidence model + continuation scheduler + evidence-gated completion auditor + reattach-after-compaction |
 | **depth** | Planned | Live ACP/Claude adapters + real memory packet/FTS5 retrieval + OS sandbox/worktrees + optional OTel; differentiated per-task prerequisites |
+| **claude-subscription** | Planned | Lift Claude from gated stub to a real subscription-backed workspace-write + chat provider at Codex parity; privileged token-safe connector, `stream-json` into the normalized-event route, dispatch Claude spawn arm. Runs in parallel |
+| **connectivity-tunnel** | Planned | Real `ConnectivityTunnel` beyond loopback (first adapter: Tailscale) for cross-device reachability; `ExposurePolicy`, `auth_ref` handles, health/reconnect, auditable + revocable exposure. Reachability only, strictly separate from execution |
+| **remote-runtime** | Planned | Real remote `RuntimeRunner` (`SshRemoteProcessRunner` + `FakeRemoteProcessRunner`) so an agent executes on a different machine over the tunnel; git-based remote workspace materialization, lifecycle/health/reattach across a machine boundary |
+| **distributed-topology** | Planned | Capstone integration: prove Capo as three roles (server/controller, remote runner, client) on different devices over a tailnet, all-local default protected; keep-alive, resumable streaming, cross-device smoke, auditable/revocable remote control |
+| **web-console** | Planned | Polish `web/app` into a finished seven-screen terminal-native console; tighten live streaming-chat UX over the real event-tail/thread contract; remote-aware client over the connectivity-tunnel with reconnect/resume + offline fixture fallback. Runs fully in parallel |
 
 ## research
 
@@ -660,6 +665,191 @@ workpads/safety-gates/knowledge.md
 - Live ACP/Claude/sandbox work stays behind explicit opt-in gates with deterministic fake/replay tests first.
 - Keep runtime, connectivity/tunnel, protocol, and memory boundaries modular and swappable.
 - Real memory packets are fractional, sourced, and staleness-tracked; do not dump whole transcripts.
+
+## claude-subscription
+
+**Status:** Planned. New highest-priority work (connectivity + console track, registered 2026-06-02). Runs in parallel; no chain dependency.
+
+**Prerequisites:** real-turn-loop substrate + the live-provider/dispatch path (`crates/capo-server/src/live_provider.rs`, `safety_floor.rs`); the existing `ClaudeCodeLiveAdapter` slice landed under `depth` DP4.
+
+**Objective:** Lift Claude from a gated stub to a real subscription-backed workspace-write + chat provider at Codex parity. Treat the `claude` subscription CLI as a privileged connector whose tokens are never logged and never passed to the spawned process; deliver a real one-shot chat turn and a real workspace-write run; parse `stream-json` into the loop's existing normalized-event ingestion route; observed-only tool-result round-trip; unblock to parity across the CLI register seam and the dispatch live-provider executor (new Claude spawn arm + `CAPO_CLAUDE_BIN` override); deterministic stub tests plus a live opt-in chat-and-write smoke that skips cleanly.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/claude-subscription/tasks.md
+workpads/claude-subscription/knowledge.md
+workpads/claude-subscription/references.md
+workpads/architecture/protocol-provider.md
+workpads/architecture/capability-permissions.md
+workpads/architecture/tool-exposure.md
+workpads/real-turn-loop/knowledge.md
+workpads/depth/knowledge.md
+```
+
+**Quick nav:**
+
+- `tasks.md` ordered slices from the existing `ClaudeCodeLiveAdapter` to parity chat + workspace write.
+- `knowledge.md` token-safety model, `stream-json` ingestion, and parity decisions.
+- `references.md` local adapter/live-provider source links.
+
+**Rules:**
+
+- Subscription tokens are never logged and never passed to the spawned process; assert subscription-safe before every spawn.
+- Reach the SAME two real surfaces Codex proves (one-shot chat + workspace-write dispatch) through the SAME provider-agnostic write-mode gate.
+- Deterministic stub tests before any live path; the live chat-and-write smoke is opt-in and skips cleanly.
+- Build on the in-tree Claude adapter slice; do not greenfield a parallel provider.
+
+## connectivity-tunnel
+
+**Status:** Planned. New highest-priority work (registered 2026-06-02). First link of the connectivity dependency chain: connectivity-tunnel -> remote-runtime -> distributed-topology.
+
+**Prerequisites:** the existing exposure lifecycle in `crates/capo-cli/src/connectivity.rs` and the `ConnectivityTunnel { Fake, LocalLoopback, EndpointStub }` + `ExposureScope` enums in `crates/capo-runtime/src/lib.rs`.
+
+**Objective:** Implement the `ConnectivityTunnel` boundary beyond `LocalLoopbackTunnel`/`FakeTunnel` so the Capo server is reachable by clients and by runtime targets that resolve through the tunnel on other devices, with the first real adapter being Tailscale. Deliver reachability only (never the remote runner). Add a real `TailscaleTunnel` adapter behind the enum, an explicit `ExposurePolicy`, `auth_ref` credential handles (never raw, never logged), tunnel health (heartbeat + `last_heartbeat_at` + reconnect events), opt-in anti-sleep, and auditable + revocable exposure end-to-end. Tailscale Funnel / public exposure stays out of scope.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/connectivity-tunnel/tasks.md
+workpads/connectivity-tunnel/knowledge.md
+workpads/connectivity-tunnel/references.md
+workpads/architecture/runtime-tunnel.md
+workpads/architecture/capability-permissions.md
+workpads/architecture/boundaries.md
+```
+
+**Quick nav:**
+
+- `tasks.md` CT0 (incl. the new `distributed-topology` gate) through the live Tailscale path.
+- `knowledge.md` exposure policy, credential-handle model, and health/reconnect design.
+- `references.md` Tailscale + local exposure-lifecycle source links.
+
+**Rules:**
+
+- Connectivity stays strictly separate from execution: no process handles, no `RuntimeRunner` coupling, no controller/turn state.
+- Credentials are `auth_ref` handles, never raw and never logged.
+- Deterministic `FakeTunnel`/replay tests land before any live Tailscale path; the live path is opt-in behind an explicit env gate and skips cleanly when the tailnet/CLI is unavailable.
+- Tailscale Funnel / public exposure stays out of scope and behind explicit permission, short-lived grants, and audit events.
+- No acceptance criterion rests on operator self-attestation.
+
+## remote-runtime
+
+**Status:** Planned. New highest-priority work (registered 2026-06-02). Second link of the connectivity chain: depends on connectivity-tunnel; gates distributed-topology.
+
+**Prerequisites:** connectivity-tunnel (provides the channel); the in-tree loopback-decorating `RemoteProcessRunner` stub and the `RuntimeRunner` contract in `crates/capo-runtime/src/lib.rs`; the existing worktree-isolation and checkpoint/rollback model.
+
+**Objective:** Implement a real remote `RuntimeRunner` so an agent can execute on a different machine than the one where Capo's controller + event-sourced state live, behind the SAME `RuntimeRunner` contract as `LocalProcessRunner`. Realize the `RemoteProcessRunner`/`SshRemoteProcessRunner` from `runtime-tunnel.md`'s Remote Runtime Abstraction with a deterministic `FakeRemoteProcessRunner` behind it. Workspace materialization on the remote is git-based (push/fetch + `git worktree` the target commit); uncommitted/untracked scratch is not auto-synced. Replace the loopback-decorating stub with a real cross-machine runner whose channel comes from connectivity-tunnel.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/remote-runtime/tasks.md
+workpads/remote-runtime/knowledge.md
+workpads/remote-runtime/references.md
+workpads/architecture/runtime-tunnel.md
+workpads/architecture/state-model.md
+workpads/architecture/capability-permissions.md
+workpads/connectivity-tunnel/knowledge.md
+workpads/real-turn-loop/knowledge.md
+```
+
+**Quick nav:**
+
+- `tasks.md` from the loopback stub to a real `SshRemoteProcessRunner` + `FakeRemoteProcessRunner`.
+- `knowledge.md` remote lifecycle (start/stop/health/reattach), git-based workspace materialization, and recovery across a machine boundary.
+- `references.md` runtime-tunnel + local runtime source links.
+
+**Rules:**
+
+- The runner owns execution; the `ConnectivityTunnel` only provides reachability — keep the two boundaries separate.
+- The controller drives the remote runner identically to `LocalProcessRunner`; do not fork the contract.
+- Workspace materialization is git-based; uncommitted/untracked scratch is never auto-synced.
+- Deterministic `FakeRemoteProcessRunner`/replay tests before any live SSH/tailnet path; the live path is opt-in and skips cleanly.
+
+## distributed-topology
+
+**Status:** Planned. New highest-priority work (registered 2026-06-02). Capstone of the connectivity chain: depends on connectivity-tunnel and remote-runtime. Hard do-not-start gate (DT0) — must not start until its substrate has actually landed in-tree.
+
+**Prerequisites:** connectivity-tunnel (`ConnectivityTunnel`/`TailscaleTunnel`, exposure lifecycle), remote-runtime (`RemoteProcessRunner`), and the `Subscribe { session_id, from_sequence }` event tail + `EventStream` watermark + `subscribe_tcp`/`SubscribeStream` resume cursor from streaming-transport. None are all present today; DT0 records the gate with concrete completion signals.
+
+**Objective:** Prove Capo runs as three roles — server/controller, remote runner, and client — on different devices end-to-end over a tailnet, while keeping the all-local single-box path the default and a protected regression. Integrate (not re-architect) the `RuntimeRunner`/`RemoteProcessRunner`, `ConnectivityTunnel`, the connectivity exposure lifecycle, and the streaming event-tail/resume into a coherent three-role deployment with keep-alive, resumable streaming, an end-to-end cross-device smoke, operator docs, and auditable/revocable remote control. Deterministic-first: three separate processes over loopback/`FakeTunnel` in the always-on suite; the real tailnet/SSH path opt-in behind an env gate that skips cleanly.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/distributed-topology/tasks.md
+workpads/distributed-topology/knowledge.md
+workpads/distributed-topology/references.md
+workpads/architecture/runtime-tunnel.md
+workpads/architecture/state-model.md
+workpads/architecture/boundaries.md
+workpads/connectivity-tunnel/knowledge.md
+workpads/remote-runtime/knowledge.md
+workpads/streaming-transport/knowledge.md
+```
+
+**Quick nav:**
+
+- `tasks.md` DT0 (substrate gate, role config, mechanism decisions, safety invariant) through the cross-device smoke and operator docs.
+- `knowledge.md` three-role deployment, runner<->server channel, runner-reconnect reconciliation, and the all-local regression guard.
+- `references.md` local connectivity/runtime/streaming source links.
+
+**Rules:**
+
+- This is an integration/capstone workpad: do not re-architect the turn loop, streaming transport, permission/grant model, or goal model.
+- No DT task begins before its named prerequisite has actually landed in-tree (not merely been named).
+- The all-local single-box path stays the default and a protected regression.
+- The cross-device proof is deterministic-first (loopback/`FakeTunnel` processes); the real-network path is opt-in and skips cleanly.
+
+## web-console
+
+**Status:** Planned. New highest-priority work (registered 2026-06-02). Runs fully in parallel with the entire daily-driver harness track and the connectivity-tunnel track.
+
+**Prerequisites:** the in-tree `web/app` React console; the streaming-transport ST4/ST5 event-tail + thread wire contract (consumed as a cross-workpad dependency); the connectivity-tunnel exposure/auth model (coordinated with, not implemented).
+
+**Objective:** Polish and complete the Capo operator console (`web/app`) into a finished seven-screen, terminal-native (light + dark) supervision surface; tighten the live streaming-chat UX over the real ST4/ST5 event-tail + thread contract; make the web client remote-aware so it can connect to a Capo server reached over the connectivity-tunnel (configurable endpoint + auth handle) and survive keep-alive/reconnect by resuming the event tail via `from_sequence`; and preserve the offline fixture fallback throughout. The surface is the `web/app` React console only.
+
+**Load:**
+
+```text
+../TASKS.md
+../project.md
+../WORKING.md
+workpads/web-console/tasks.md
+workpads/web-console/knowledge.md
+workpads/web-console/references.md
+workpads/dashboard-webclient/knowledge.md
+workpads/dashboard-webclient/design.md
+workpads/streaming-transport/knowledge.md
+workpads/connectivity-tunnel/knowledge.md
+workpads/architecture/boundaries.md
+```
+
+**Quick nav:**
+
+- `tasks.md` seven-screen completion, streaming-chat UX, and remote-aware client slices.
+- `knowledge.md` design parity, the ST4/ST5 client contract consumption, and reconnect/resume model.
+- `references.md` local `web/app` + wire-contract source links and visual QA evidence requirements.
+
+**Rules:**
+
+- The web console is a client/input surface only: it submits commands and renders read models, and never owns orchestration state, the loop, the transport protocol, the permission model, the goal model, or the server-side `crates/capo-web` facade.
+- The server-side `crates/capo-web` facade is owned by the streaming-transport / harness track; record facade asks as cross-workpad dependencies, do not implement them.
+- Coordinate with the connectivity-tunnel exposure/auth model; implement none of the tunnel itself.
+- Preserve the offline fixture fallback; use screenshots/browser checks as required acceptance evidence.
 
 ## How To Switch Focus
 
