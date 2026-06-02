@@ -1644,10 +1644,21 @@ impl CleanupOutcome {
 /// method shapes (review finding 4 + 5). Defining it as a trait gives a
 /// COMPILE-TIME check that the two runners never silently diverge on the control
 /// surface: if a future method drifts (e.g. drops the `reason` arg, or returns a
-/// different cleanup shape), the `impl` stops compiling. The async streaming and
-/// the runner-specific spawn paths stay off this trait on purpose; this is the
-/// control parity surface the dispatcher folds over.
+/// different cleanup shape), the `impl` stops compiling.
+///
+/// `start_process` is on the trait (review finding 5): it is the most critical
+/// path and BOTH runners share the EXACT shape
+/// (`LocalProcessRequest -> RuntimeResult<LocalProcessOutcome>`), so drift there is
+/// caught at compile time. `stream_output` / `write_stdin` are DELIBERATELY off the
+/// trait because the two runners do NOT share a signature there: the local runner's
+/// streaming surface is the async `AsyncLocalProcessRunner` / `StreamSource` path
+/// (`async_runner.rs`), while the remote runner streams synchronously over the
+/// channel by byte offset (`stream_output(&ref, from_offset) -> RemoteStreamOutcome`,
+/// `write_stdin(&ref, &[u8]) -> RuntimeControlResult`). Forcing a single trait
+/// signature there would invent a false parity; the divergence is documented here
+/// instead of papered over.
 pub trait RuntimeRunnerContract {
+    fn start_process(&self, request: LocalProcessRequest) -> RuntimeResult<LocalProcessOutcome>;
     fn interrupt(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult;
     fn terminate(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult;
     fn kill(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult;
@@ -1656,6 +1667,9 @@ pub trait RuntimeRunnerContract {
 }
 
 impl RuntimeRunnerContract for LocalProcessRunner {
+    fn start_process(&self, request: LocalProcessRequest) -> RuntimeResult<LocalProcessOutcome> {
+        LocalProcessRunner::start_process(self, request)
+    }
     fn interrupt(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult {
         LocalProcessRunner::interrupt(self, process, reason)
     }
@@ -1674,6 +1688,9 @@ impl RuntimeRunnerContract for LocalProcessRunner {
 }
 
 impl RuntimeRunnerContract for RemoteProcessRunner {
+    fn start_process(&self, request: LocalProcessRequest) -> RuntimeResult<LocalProcessOutcome> {
+        RemoteProcessRunner::start_process(self, request)
+    }
     fn interrupt(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult {
         RemoteProcessRunner::interrupt(self, process, reason)
     }
@@ -1945,6 +1962,24 @@ impl RemoteChannel {
             Self::Fake(channel) => channel.write_stdin(probe, bytes),
         }
     }
+
+    /// RR5: probe the REMOTE host for its OS family + whether it can enforce
+    /// `tier`. The remote OS — not the controller — is the authority, so the
+    /// runner's enforcement claim reads this, never `tier.is_enforced_here()`.
+    fn sandbox_probe(&self, tier: SandboxTier) -> RuntimeResult<RemoteSandboxProbe> {
+        match self {
+            Self::Fake(channel) => channel.sandbox_probe(tier),
+        }
+    }
+
+    /// RR5 test/observability hook: the LAST request the transport was asked to
+    /// launch. Used to prove the enforced path handed the transport a
+    /// `bwrap`/`sandbox-exec`-wrapped command, not the bare original.
+    fn last_launched_request(&self) -> Option<LocalProcessRequest> {
+        match self {
+            Self::Fake(channel) => channel.last_launched_request(),
+        }
+    }
 }
 
 /// RR4: the RAW frames the channel forwarded for one stream read: the offset the
@@ -1957,6 +1992,57 @@ struct RemoteRawStream {
     from_offset: usize,
     bytes: Vec<u8>,
     dropped: bool,
+}
+
+/// RR5: the OS family the REMOTE host runs, as reported by a probe over the
+/// channel. This is the load-bearing honesty input: a sandbox tier is `Enforced`
+/// only when the REMOTE OS supports it, NOT when the controller's host does. The
+/// `Other` variant carries the reported family string so a remote that is neither
+/// macOS nor linux is recorded honestly (and never claims sandboxing).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RemoteOsFamily {
+    Macos,
+    Linux,
+    Other(String),
+}
+
+impl RemoteOsFamily {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Macos => "macos",
+            Self::Linux => "linux",
+            Self::Other(name) => name.as_str(),
+        }
+    }
+
+    /// Whether `tier` is enforceable on THIS remote OS family — the remote
+    /// analogue of [`SandboxTier::is_enforced_here`], evaluated against the
+    /// REMOTE host's reported family rather than the controller's `cfg!` target.
+    /// Seatbelt enforces only on a macOS remote; landlock+bwrap only on a linux
+    /// remote; [`SandboxTier::None`] never enforces.
+    fn enforces(&self, tier: SandboxTier) -> bool {
+        match tier {
+            SandboxTier::None => false,
+            SandboxTier::MacosSeatbelt => matches!(self, Self::Macos),
+            SandboxTier::LinuxLandlockBwrap => matches!(self, Self::Linux),
+        }
+    }
+}
+
+/// RR5: what the channel reports about the REMOTE host's sandbox capability when
+/// the runner probes it before composing the OS sandbox. The remote OS — not the
+/// controller — is the authority on whether a tier can be enforced, so the runner
+/// reads this rather than its own build target. A real transport fills this from a
+/// remote-side probe; the fake channel scripts it deterministically (NO network).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteSandboxProbe {
+    /// The OS family the remote host reports.
+    pub os_family: RemoteOsFamily,
+    /// Whether the remote host can ACTUALLY enforce the requested tier. Usually
+    /// derived from `os_family.enforces(tier)`, but kept explicit so a remote that
+    /// reports a matching family yet lacks the mechanism (e.g. a linux without
+    /// landlock/bwrap installed) can still report `false` honestly.
+    pub tier_enforceable: bool,
 }
 
 /// A lightweight remote-process handle reconstructed from a stored
@@ -1990,6 +2076,57 @@ pub struct RemoteLaunch {
     /// program once and carries its artifacts here so `start_process` never
     /// double-spawns.
     pub captured: LocalProcessOutcome,
+}
+
+/// RR5 deterministic helper: if `request` is a sandbox-launcher-wrapped command
+/// (`bwrap ... <program> <argv>` or `/usr/bin/sandbox-exec -f <policy> <program>
+/// <argv>`), return the request with the launcher peeled off so the inner program
+/// runs (modelling the launcher exec-ing its child); otherwise return the request
+/// unchanged. The fake loopback uses this so the enforced wrapping path is testable
+/// WITHOUT the `bwrap`/`sandbox-exec` binaries being present. The wrapped argv is
+/// still recorded by the caller, so the verification (transport saw `bwrap`) holds.
+fn unwrap_sandbox_launcher(request: &LocalProcessRequest) -> LocalProcessRequest {
+    let inner: Option<(String, Vec<String>)> = match request.program.as_str() {
+        "bwrap" => {
+            // The original program is the first argv token that is NOT a bwrap flag
+            // or a flag value. bwrap flags we emit: --die-with-parent, --ro-bind A B,
+            // --dev A, --proc A, --bind A B, --unshare-net. Scan past them.
+            let mut i = 0usize;
+            let argv = &request.argv;
+            while i < argv.len() {
+                match argv[i].as_str() {
+                    "--die-with-parent" | "--unshare-net" => i += 1,
+                    "--dev" | "--proc" => i += 2,
+                    "--ro-bind" | "--bind" => i += 3,
+                    // First non-flag token is the wrapped program.
+                    _ => break,
+                }
+            }
+            if i < argv.len() {
+                Some((argv[i].clone(), argv[i + 1..].to_vec()))
+            } else {
+                None
+            }
+        }
+        "/usr/bin/sandbox-exec" => {
+            // Shape: -f <policy> <program> <argv...>
+            let argv = &request.argv;
+            if argv.len() >= 3 && argv[0] == "-f" {
+                Some((argv[2].clone(), argv[3..].to_vec()))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    match inner {
+        Some((program, argv)) => LocalProcessRequest {
+            program,
+            argv,
+            ..request.clone()
+        },
+        None => request.clone(),
+    }
 }
 
 /// RR1 deterministic fake channel: it executes the program LOCALLY but is HONEST
@@ -2036,6 +2173,29 @@ pub struct FakeRemoteChannel {
     /// leaves this at 1 — proving the runner de-duplicated rather than relying on
     /// a constant pid happening to match.
     spawn_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// RR5: the OS family this fake remote host reports when the runner probes it
+    /// for sandbox capability. Defaults to linux (an enforcing family for the
+    /// landlock+bwrap tier) so the happy enforced path is the default; scriptable
+    /// to a non-enforcing family to drive the honest `Unenforced` path.
+    remote_os: RemoteOsFamily,
+    /// RR5: when `true`, the remote host reports it CANNOT enforce the requested
+    /// tier even if its family would otherwise match — modelling a remote OS that
+    /// lacks the mechanism (e.g. a linux without landlock/bwrap). The runner then
+    /// records `sandbox.unenforced` and Capo does NOT claim sandboxing.
+    sandbox_unenforceable: bool,
+    /// RR5 HONESTY: whether this fake channel models a REAL cross-machine boundary
+    /// (`is_loopback() == false`). Defaults to `false` (a loopback that never
+    /// crossed a machine boundary), so the default fake channel is HONESTLY
+    /// `Unenforced` for a remote OS sandbox — Capo never claims a `bwrap`/
+    /// `sandbox-exec` confinement was applied over a loopback. A test that wants to
+    /// exercise the ENFORCED wrapping path opts in explicitly with
+    /// [`Self::with_cross_machine_boundary`] (modelling a real SSH remote).
+    cross_machine: bool,
+    /// RR5: the LAST request the transport was asked to launch, captured so a test
+    /// can prove the ENFORCED path actually handed the transport a `bwrap` /
+    /// `sandbox-exec`-wrapped command rather than the bare original. Shared (`Arc`)
+    /// so a cloned channel observes the same launches.
+    last_launched: std::sync::Arc<std::sync::Mutex<Option<LocalProcessRequest>>>,
     loopback: LocalProcessRunner,
 }
 
@@ -2052,6 +2212,9 @@ impl PartialEq for FakeRemoteChannel {
             && self.probe_reports_dead == other.probe_reports_dead
             && self.streamed_output == other.streamed_output
             && self.stream_drop_after == other.stream_drop_after
+            && self.remote_os == other.remote_os
+            && self.sandbox_unenforceable == other.sandbox_unenforceable
+            && self.cross_machine == other.cross_machine
             && self.loopback == other.loopback
     }
 }
@@ -2088,11 +2251,81 @@ impl FakeRemoteChannel {
             stream_drop_after: None,
             stdin_written: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             spawn_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            remote_os: RemoteOsFamily::Linux,
+            // HONESTY default (review finding 7): the default fake channel is a
+            // loopback that never crossed a machine boundary, so it cannot enforce a
+            // remote OS sandbox. Defaulting `sandbox_unenforceable = true` means a
+            // test that constructs a default fake channel gets an HONEST `Unenforced`
+            // claim; the enforced path must be opted into explicitly
+            // (`with_cross_machine_boundary` + an enforcing `with_remote_os`).
+            sandbox_unenforceable: true,
+            cross_machine: false,
+            last_launched: std::sync::Arc::new(std::sync::Mutex::new(None)),
             loopback: LocalProcessRunner::new(LocalProcessConfig::for_test(
                 workspace_root,
                 artifact_root,
             )),
         }
+    }
+
+    /// RR5: model a REAL cross-machine boundary (`is_loopback() == false`) so the
+    /// deterministic suite can exercise the ENFORCED remote-sandbox wrapping path
+    /// (a `bwrap`/`sandbox-exec`-wrapped command handed to the transport) WITHOUT a
+    /// real network. Pairs with [`Self::with_enforceable_remote_sandbox`] +
+    /// [`Self::with_remote_os`] to script an enforcing remote. Honestly named: the
+    /// transport still runs the program on loopback for determinism, but it reports
+    /// it crossed a boundary so the enforcement claim is the one a real SSH remote
+    /// would make; the live cross-machine proof is RR8.
+    pub fn with_cross_machine_boundary(mut self) -> Self {
+        self.cross_machine = true;
+        self
+    }
+
+    /// RR5: script the remote host as ABLE to enforce the requested tier (the
+    /// inverse of [`Self::with_unenforceable_remote_sandbox`]). Needed because the
+    /// default fake channel is honestly unenforceable; the enforced path opts in.
+    pub fn with_enforceable_remote_sandbox(mut self) -> Self {
+        self.sandbox_unenforceable = false;
+        self
+    }
+
+    /// RR5: the LAST request the transport was asked to launch. A test reads this to
+    /// prove the ENFORCED path handed the transport a `bwrap`/`sandbox-exec`-wrapped
+    /// command, not the bare original — the verification the review required.
+    pub fn last_launched_request(&self) -> Option<LocalProcessRequest> {
+        self.last_launched
+            .lock()
+            .expect("fake remote last-launched ledger poisoned")
+            .clone()
+    }
+
+    /// RR5: script the OS family the remote host reports for a sandbox probe. The
+    /// remote OS — not the controller — decides whether a tier is enforceable, so
+    /// scripting a non-enforcing family (e.g. [`RemoteOsFamily::Other`]) drives the
+    /// honest `Unenforced` path with NO network.
+    pub fn with_remote_os(mut self, os_family: RemoteOsFamily) -> Self {
+        self.remote_os = os_family;
+        self
+    }
+
+    /// RR5: script the remote host to report it CANNOT enforce the requested tier
+    /// even when its family would match — modelling a remote OS that lacks the
+    /// mechanism. The runner then records `sandbox.unenforced` and Capo does NOT
+    /// claim sandboxing.
+    pub fn with_unenforceable_remote_sandbox(mut self) -> Self {
+        self.sandbox_unenforceable = true;
+        self
+    }
+
+    /// RR5: probe the remote host's sandbox capability. The reported family + the
+    /// scripted enforceability decide the runner's HONEST enforcement claim; the
+    /// runner never substitutes its own build target.
+    fn sandbox_probe(&self, tier: SandboxTier) -> RuntimeResult<RemoteSandboxProbe> {
+        let tier_enforceable = !self.sandbox_unenforceable && self.remote_os.enforces(tier);
+        Ok(RemoteSandboxProbe {
+            os_family: self.remote_os.clone(),
+            tier_enforceable,
+        })
     }
 
     /// How many times this channel ACTUALLY spawned a remote process. Used by the
@@ -2179,7 +2412,7 @@ impl FakeRemoteChannel {
     }
 
     fn is_loopback(&self) -> bool {
-        true
+        !self.cross_machine
     }
 
     fn target_fingerprint(&self) -> String {
@@ -2198,7 +2431,23 @@ impl FakeRemoteChannel {
         // actual spawn mints a DISTINCT remote pid (base + spawn index) so the
         // idempotency invariant cannot pass by accident on a constant pid: a
         // second real spawn would produce a different pid and a different ref.
-        let captured = self.loopback.start_process(request.clone())?;
+        // Capture the request the transport was actually asked to launch (the
+        // wrapped `bwrap`/`sandbox-exec` command on the enforced path) so a test can
+        // assert the enforcement layer reached the transport, not just the claim.
+        *self
+            .last_launched
+            .lock()
+            .expect("fake remote last-launched ledger poisoned") = Some(request.clone());
+        // The transport receives the WRAPPED command on the enforced path
+        // (`bwrap ... <program> <argv>` / `/usr/bin/sandbox-exec -f <policy>
+        // <program> <argv>`). A real remote OS sandbox launcher execs its CHILD; the
+        // deterministic loopback models that by running the UNWRAPPED inner program
+        // (the `bwrap`/`sandbox-exec` binaries are not assumed present on the test
+        // host). `last_launched` still records the full wrapped argv, so a test
+        // proves the enforcement layer reached the transport without depending on a
+        // sandbox launcher binary. NO network.
+        let to_run = unwrap_sandbox_launcher(request);
+        let captured = self.loopback.start_process(to_run)?;
         let spawn_index = self
             .spawn_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2458,6 +2707,62 @@ pub struct RemoteStreamOutcome {
     pub events: Vec<RuntimeEvent>,
 }
 
+/// RR5: the decision to run a remote process inside the `depth` OS sandbox tier +
+/// the git worktree ON the remote host, with an HONEST enforcement claim evaluated
+/// against the REMOTE OS (probed over the channel), not the controller's host.
+///
+/// The composition is identical in shape to the local [`SandboxPlan`]: an
+/// un-granted critical scope (network egress under a forbidding profile, or a cwd
+/// outside the confined remote worktree root) is REFUSED before the remote sandbox
+/// launches (`SandboxEnforcement::Refused` + a `sandbox.launch_refused` event, no
+/// remote process spawned); when the remote OS cannot enforce the tier the run is
+/// honestly `Unenforced` (`sandbox.unenforced`, Capo does NOT claim sandboxing);
+/// only when the remote OS enforces the tier is the run `Enforced`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteSandboxPlan {
+    /// The honest enforcement decision, reusing the DP7 [`SandboxEnforcement`]
+    /// vocabulary but evaluated against the REMOTE OS family.
+    pub enforcement: SandboxEnforcement,
+    /// The OS family the remote host reported, recorded for audit.
+    pub remote_os: String,
+    /// The append-ready events: a `sandbox.launch_refused` (refused),
+    /// `sandbox.unenforced` (platform limitation), or `sandbox.enforced`.
+    pub events: Vec<RuntimeEvent>,
+    /// `true` when a remote process may be spawned for this plan (enforced OR
+    /// honestly unenforced). `false` for a refusal (nothing runs).
+    pub may_launch: bool,
+    /// The request to ACTUALLY launch on the remote. When `Enforced`, this is the
+    /// ORIGINAL request REWRITTEN to launch under the remote OS sandbox launcher
+    /// (`bwrap` on a linux remote, `/usr/bin/sandbox-exec` on a macOS remote) — the
+    /// additional enforcement layer the RR5 acceptance criterion requires, not just
+    /// a claim. When `Unenforced`, this is the original request UNCHANGED (run
+    /// honestly un-sandboxed; Capo does NOT claim sandboxing). `None` when refused
+    /// (nothing runs). This mirrors the local DP7 [`SandboxPlan::request`] so the
+    /// enforced path is verifiable: the transport receives a `bwrap`/`sandbox-exec`
+    /// program, never the bare original under an `Enforced` claim.
+    pub wrapped_request: Option<LocalProcessRequest>,
+    /// For an enforced macOS-seatbelt remote: the generated `.sbpl` policy text the
+    /// transport materializes on the REMOTE (never on the controller host). `None`
+    /// for bwrap / unenforced / refused plans.
+    pub seatbelt_policy: Option<String>,
+}
+
+/// RR5: the result of composing the remote OS sandbox + worktree with the launch.
+/// A refusal carries the plan and NO outcome (no remote process spawned); an
+/// enforced/unenforced launch carries the plan plus the started run's outcome and
+/// the reversible checkpoint (the materialized commit ref from RR3) so the sandbox
+/// is additive, never a replacement for git-backed rollback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteSandboxedStart {
+    pub plan: RemoteSandboxPlan,
+    /// The started remote run when a process actually ran (`None` when refused).
+    pub outcome: Option<LocalProcessOutcome>,
+    /// The reversible checkpoint for this confined run: the git-materialized commit
+    /// ref (RR3). `None` when refused (nothing ran) or when no checkpoint was
+    /// supplied. Recorded so the sandbox composes WITH rollback, not instead of it.
+    pub checkpoint_ref: Option<String>,
+}
+
 /// RR1 remote runner: drives `start_process`/`interrupt`/`terminate`/`kill`/
 /// `health`/`recover_orphan` across the injected [`RemoteChannel`], emitting the
 /// append-first Start Sequence. It performs NO endpoint resolution: the channel is
@@ -2520,6 +2825,14 @@ impl RemoteProcessRunner {
     /// across a duplicate start, proving real de-duplication (not a constant pid).
     pub fn transport_spawn_count(&self) -> usize {
         self.config.transport.spawn_count()
+    }
+
+    /// RR5 test/observability hook: the LAST request the transport was asked to
+    /// launch. The enforced-sandbox test asserts this is a `bwrap`/`sandbox-exec`-
+    /// wrapped command so the enforcement layer is PROVEN to reach the transport,
+    /// not merely claimed by the event label.
+    pub fn transport_last_launched_request(&self) -> Option<LocalProcessRequest> {
+        self.config.transport.last_launched_request()
     }
 
     /// Implements `runtime-tunnel.md`'s append-first Start Sequence across the
@@ -2844,6 +3157,198 @@ impl RemoteProcessRunner {
                     bytes.len()
                 ),
             }],
+        })
+    }
+
+    /// RR5: decide whether `request` may run inside the `depth` OS sandbox tier +
+    /// worktree ON the remote host, with an HONEST enforcement claim.
+    ///
+    /// `remote_worktree_root` is the confined remote worktree root (RR3's
+    /// `git worktree add` target); the run's cwd must be inside it. `profile`
+    /// carries the GRANTED `safety-gates` capability scopes (writable roots +
+    /// network egress). The gate order mirrors the local DP7 [`OsSandbox::plan`]:
+    ///
+    ///   1. an un-granted critical scope (network egress under a forbidding
+    ///      profile, or a cwd outside the confined remote root) is REFUSED before
+    ///      the remote sandbox launches — `sandbox.launch_refused`, no spawn;
+    ///   2. otherwise the runner PROBES the remote OS over the channel. If the
+    ///      remote OS cannot enforce the tier, the plan is `Unenforced`
+    ///      (`sandbox.unenforced`) — Capo does NOT claim sandboxing on a remote it
+    ///      cannot enforce;
+    ///   3. only when the remote OS enforces the tier is the plan `Enforced`.
+    ///
+    /// HONESTY: the enforcement decision reads the REMOTE OS probe, never
+    /// `tier.is_enforced_here()` (the controller's build target).
+    pub fn plan_remote_sandbox(
+        &self,
+        request: &LocalProcessRequest,
+        remote_worktree_root: &Path,
+        profile: &SandboxProfile,
+        tier: SandboxTier,
+        requires_network_egress: bool,
+    ) -> RuntimeResult<RemoteSandboxPlan> {
+        let fingerprint = self.config.transport.target_fingerprint();
+
+        // Pre-launch gate 1: egress under a forbidding profile is refused.
+        if requires_network_egress && !profile.allow_network_egress {
+            return Ok(Self::remote_refusal(
+                SandboxRefusal::NetworkEgressForbidden,
+                &fingerprint,
+            ));
+        }
+        // Pre-launch gate 2: the cwd must be inside the confined remote worktree
+        // root AND a granted writable root. A cwd outside the confined remote root
+        // is a critical-scope violation refused before any remote spawn.
+        let cwd_in_remote_root =
+            normalize_path(&request.cwd)?.starts_with(normalize_path(remote_worktree_root)?);
+        if !cwd_in_remote_root || !profile.write_allowed(&request.cwd)? {
+            return Ok(Self::remote_refusal(
+                SandboxRefusal::WriteOutsideConfinedRoot {
+                    path: request.cwd.clone(),
+                },
+                &fingerprint,
+            ));
+        }
+
+        // Probe the REMOTE OS — the authority on whether the tier is enforceable.
+        let probe = self.config.transport.sandbox_probe(tier)?;
+        let os = probe.os_family.as_str().to_string();
+
+        // HONESTY GATE (review findings 2 + 7): a loopback / fake channel never
+        // crossed a machine boundary, so Capo CANNOT have applied an OS sandbox on a
+        // real remote host. Even when the channel SCRIPTS an enforcing remote OS,
+        // claiming `Enforced` here would assert a `bwrap`/`sandbox-exec` confinement
+        // that was never applied across a boundary. We therefore short-circuit a
+        // loopback transport to `Unenforced` and record the limitation, mirroring
+        // the `BoundaryBinding::fake` honesty rule. The enforced wrapping is proven
+        // deterministically by the non-loopback unit path below + verified live in
+        // RR8 against a real SSH host.
+        let enforce = probe.tier_enforceable
+            && !self.config.transport.is_loopback()
+            && tier != SandboxTier::None;
+
+        if !enforce {
+            // Honest platform limitation: do NOT claim sandboxing on the remote. The
+            // request runs UNCHANGED (un-sandboxed), never wrapped under a launcher
+            // we cannot honestly say enforced anything.
+            let reason = if self.config.transport.is_loopback() && probe.tier_enforceable {
+                "loopback/fake channel did not cross a machine boundary; \
+                 Capo cannot enforce a remote OS sandbox over it"
+                    .to_string()
+            } else {
+                format!(
+                    "tier {} is not enforceable on the remote os {}",
+                    tier.variant(),
+                    os
+                )
+            };
+            return Ok(RemoteSandboxPlan {
+                events: vec![RuntimeEvent {
+                    kind: EventKind::SandboxUnenforced.as_str().to_string(),
+                    status: "unenforced".to_string(),
+                    detail: format!("fingerprint={fingerprint} remote_os={os} {reason}"),
+                }],
+                enforcement: SandboxEnforcement::Unenforced { tier, reason },
+                remote_os: os,
+                may_launch: true,
+                wrapped_request: Some(request.clone()),
+                seatbelt_policy: None,
+            });
+        }
+
+        // Enforced: REWRITE the request to launch the ORIGINAL program under the
+        // remote OS sandbox launcher (`bwrap` on linux, `/usr/bin/sandbox-exec` on
+        // macOS), reusing the DP7 `OsSandbox` argv-builder driven by the REMOTE OS
+        // family. This is the additional enforcement layer the acceptance criterion
+        // requires — not just a claim. The transport then launches the WRAPPED
+        // program on the remote.
+        let sandbox = OsSandbox::new(tier, profile.clone());
+        let (wrapped, seatbelt_policy) = sandbox.wrap_command_for_remote(request.clone(), tier)?;
+        Ok(RemoteSandboxPlan {
+            events: vec![RuntimeEvent {
+                kind: EventKind::SandboxEnforced.as_str().to_string(),
+                status: "enforced".to_string(),
+                detail: format!(
+                    "fingerprint={fingerprint} remote_os={os} tier={} launcher={}",
+                    tier.variant(),
+                    wrapped.program
+                ),
+            }],
+            enforcement: SandboxEnforcement::Enforced { tier },
+            remote_os: os,
+            may_launch: true,
+            wrapped_request: Some(wrapped),
+            seatbelt_policy,
+        })
+    }
+
+    fn remote_refusal(refusal: SandboxRefusal, fingerprint: &str) -> RemoteSandboxPlan {
+        RemoteSandboxPlan {
+            events: vec![RuntimeEvent {
+                kind: EventKind::SandboxLaunchRefused.as_str().to_string(),
+                status: refusal.reason_code().to_string(),
+                detail: format!("fingerprint={fingerprint} {}", refusal.detail()),
+            }],
+            enforcement: SandboxEnforcement::Refused {
+                refusal: refusal.clone(),
+            },
+            remote_os: String::new(),
+            may_launch: false,
+            wrapped_request: None,
+            seatbelt_policy: None,
+        }
+    }
+
+    /// RR5: compose the remote OS sandbox + worktree with the launch. The sandbox
+    /// is planned FIRST against the remote OS + granted scopes; only if the plan
+    /// permits a launch (`may_launch`) does the runner spawn the remote process
+    /// through the append-first Start Sequence. A refusal returns the plan with NO
+    /// outcome (nothing spawned), never a silent fall-through to an un-confined run.
+    ///
+    /// `checkpoint_ref` is the git-materialized commit ref (RR3) recorded as the
+    /// reversible checkpoint for the confined run, so the sandbox is additive to
+    /// git-backed rollback, not a replacement.
+    pub fn start_process_sandboxed(
+        &self,
+        request: LocalProcessRequest,
+        remote_worktree_root: &Path,
+        profile: &SandboxProfile,
+        tier: SandboxTier,
+        requires_network_egress: bool,
+        checkpoint_ref: Option<String>,
+    ) -> RuntimeResult<RemoteSandboxedStart> {
+        let plan = self.plan_remote_sandbox(
+            &request,
+            remote_worktree_root,
+            profile,
+            tier,
+            requires_network_egress,
+        )?;
+        if !plan.may_launch {
+            // Refused: nothing spawned, no checkpoint claimed.
+            return Ok(RemoteSandboxedStart {
+                plan,
+                outcome: None,
+                checkpoint_ref: None,
+            });
+        }
+        // Launch the PLANNED request: when `Enforced` this is the original program
+        // REWRITTEN under the remote OS sandbox launcher (`bwrap`/`sandbox-exec`),
+        // so the transport actually receives the sandbox-wrapped command — the
+        // enforcement layer, not just the claim. When `Unenforced` it is the
+        // original request unchanged. (`may_launch` guarantees `wrapped_request` is
+        // `Some` here; fall back to the original defensively.)
+        let launch_request = plan.wrapped_request.clone().unwrap_or(request);
+        let mut outcome = self.start_process(launch_request)?;
+        // Prepend the sandbox decision events so the confined-launch trail records
+        // the enforcement claim BEFORE the start-sequence events.
+        let mut events = plan.events.clone();
+        events.append(&mut outcome.events);
+        outcome.events = events;
+        Ok(RemoteSandboxedStart {
+            plan,
+            outcome: Some(outcome),
+            checkpoint_ref,
         })
     }
 
@@ -7105,6 +7610,392 @@ mod tests {
             cwd: workspace,
             env: HashMap::new(),
         }
+    }
+
+    /// RR5 helper: build a remote runner over a fake channel whose REMOTE OS +
+    /// sandbox enforceability are scripted, with the loopback rooted at
+    /// `workspace` (which doubles as the confined remote worktree root). NO
+    /// network.
+    fn sandbox_runner(
+        name: &str,
+        workspace: &Path,
+        script: impl FnOnce(FakeRemoteChannel) -> FakeRemoteChannel,
+    ) -> RemoteProcessRunner {
+        let artifacts = temp_root(&format!("artifacts-{name}"));
+        let channel = OpenChannel::for_test(
+            format!("chan-{name}"),
+            format!("endpoint-{name}"),
+            format!("fp-{name}"),
+        );
+        let base =
+            FakeRemoteChannel::from_open_channel(&channel, workspace.to_path_buf(), artifacts);
+        let transport = RemoteChannel::Fake(script(base));
+        RemoteProcessRunner::new(RemoteProcessConfig::with_transport(channel, transport))
+    }
+
+    #[test]
+    fn remote_sandbox_refuses_ungranted_network_egress_before_launch() {
+        let workspace = temp_root("rr5-egress-root");
+        fs::create_dir_all(&workspace).unwrap();
+        // Remote OS would enforce, but the run declares egress under a
+        // network-forbidding profile -> refused BEFORE any remote spawn.
+        let runner = sandbox_runner("rr5-egress", &workspace, |c| {
+            c.with_remote_os(RemoteOsFamily::Linux)
+        });
+        let request = remote_request("run-rr5-egress", workspace.clone(), "printf ok");
+        let profile = SandboxProfile::workspace_confined([workspace.clone()]);
+        let start = runner
+            .start_process_sandboxed(
+                request,
+                &workspace,
+                &profile,
+                SandboxTier::LinuxLandlockBwrap,
+                /* requires_network_egress */ true,
+                Some("refs/capo/materialized/abc123".to_string()),
+            )
+            .expect("plan");
+
+        assert!(matches!(
+            start.plan.enforcement,
+            SandboxEnforcement::Refused {
+                refusal: SandboxRefusal::NetworkEgressForbidden
+            }
+        ));
+        // Refusal is an EVENT, not a silent failure, and NOTHING spawned.
+        assert!(start.outcome.is_none());
+        assert!(start.checkpoint_ref.is_none());
+        assert_eq!(runner.transport_spawn_count(), 0);
+        assert!(start.plan.events.iter().any(|e| {
+            e.kind == "sandbox.launch_refused" && e.status == "network-egress-forbidden"
+        }));
+    }
+
+    #[test]
+    fn remote_sandbox_refuses_cwd_outside_confined_remote_root_before_launch() {
+        let workspace = temp_root("rr5-root");
+        let outside = temp_root("rr5-outside");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let runner = sandbox_runner("rr5-outside", &workspace, |c| {
+            c.with_remote_os(RemoteOsFamily::Linux)
+        });
+        // cwd is OUTSIDE the confined remote worktree root -> refused pre-launch.
+        let request = remote_request("run-rr5-outside", outside.clone(), "printf ok");
+        let profile = SandboxProfile::workspace_confined([workspace.clone()]);
+        let start = runner
+            .start_process_sandboxed(
+                request,
+                &workspace,
+                &profile,
+                SandboxTier::LinuxLandlockBwrap,
+                false,
+                None,
+            )
+            .expect("plan");
+
+        match start.plan.enforcement {
+            SandboxEnforcement::Refused {
+                refusal: SandboxRefusal::WriteOutsideConfinedRoot { .. },
+            } => {}
+            other => panic!("expected write-outside-root refusal, got {other:?}"),
+        }
+        assert!(start.outcome.is_none());
+        assert_eq!(runner.transport_spawn_count(), 0);
+        assert!(start.plan.events.iter().any(|e| {
+            e.kind == "sandbox.launch_refused" && e.status == "write-outside-confined-root"
+        }));
+    }
+
+    #[test]
+    fn remote_sandbox_is_enforced_when_the_remote_os_supports_the_tier() {
+        let workspace = temp_root("rr5-enforced-root");
+        fs::create_dir_all(&workspace).unwrap();
+        // The REMOTE os is linux, which enforces landlock+bwrap — regardless of
+        // what the controller's build target is. The channel models a REAL
+        // cross-machine boundary (opt-in), so the `Enforced` claim is honest: Capo
+        // only claims enforcement where a boundary was crossed AND the remote OS
+        // enforces the tier. (The fake transport still runs on loopback for
+        // determinism; the live cross-machine proof is RR8.)
+        let runner = sandbox_runner("rr5-enforced", &workspace, |c| {
+            c.with_remote_os(RemoteOsFamily::Linux)
+                .with_enforceable_remote_sandbox()
+                .with_cross_machine_boundary()
+        });
+        let request = remote_request("run-rr5-enforced", workspace.clone(), "printf ok");
+        let profile = SandboxProfile::workspace_confined([workspace.clone()]);
+        let start = runner
+            .start_process_sandboxed(
+                request,
+                &workspace,
+                &profile,
+                SandboxTier::LinuxLandlockBwrap,
+                false,
+                Some("refs/capo/materialized/deadbeef".to_string()),
+            )
+            .expect("plan");
+
+        assert_eq!(
+            start.plan.enforcement,
+            SandboxEnforcement::Enforced {
+                tier: SandboxTier::LinuxLandlockBwrap
+            }
+        );
+        assert_eq!(start.plan.remote_os, "linux");
+        // NOT SELF-ATTESTATION: the plan rewrote the command to launch under the
+        // remote OS sandbox launcher, and the transport ACTUALLY received that
+        // `bwrap`-wrapped command — the additional enforcement layer, not just a
+        // claim. The original program is carried as an argv token after the bwrap
+        // flags.
+        let wrapped = start
+            .plan
+            .wrapped_request
+            .as_ref()
+            .expect("enforced plan carries a wrapped request");
+        assert_eq!(wrapped.program, "bwrap");
+        assert!(
+            wrapped.argv.iter().any(|a| a == "/bin/sh"),
+            "the original program is launched UNDER bwrap: {:?}",
+            wrapped.argv
+        );
+        assert!(
+            wrapped.argv.iter().any(|a| a == "--unshare-net"),
+            "a network-forbidding profile drops egress at the bwrap layer: {:?}",
+            wrapped.argv
+        );
+        let launched = runner
+            .transport_last_launched_request()
+            .expect("the transport was handed a launch request");
+        assert_eq!(
+            launched.program, "bwrap",
+            "the transport received the bwrap-wrapped command, not the bare original"
+        );
+        // A confined run actually spawned, and it carries the reversible checkpoint
+        // (the git-materialized commit ref) so the sandbox is ADDITIVE to rollback.
+        let outcome = start.outcome.expect("a confined remote process ran");
+        assert_eq!(runner.transport_spawn_count(), 1);
+        assert_eq!(
+            start.checkpoint_ref.as_deref(),
+            Some("refs/capo/materialized/deadbeef")
+        );
+        // The enforced fact precedes the start-sequence events in the trail.
+        assert_eq!(outcome.events[0].kind, "sandbox.enforced");
+        assert!(
+            outcome
+                .events
+                .iter()
+                .any(|e| e.kind == "runtime.remote_process_started")
+        );
+    }
+
+    /// RR5 HONESTY (review findings 2 + 7): a LOOPBACK / fake channel never crossed
+    /// a machine boundary, so even when it scripts an enforcing remote OS the runner
+    /// must NOT claim `Enforced` (it cannot have applied `bwrap`/`sandbox-exec` over
+    /// a boundary it never crossed). The default fake channel is a loopback, so the
+    /// plan is honestly `Unenforced` and the command is NOT wrapped.
+    #[test]
+    fn remote_sandbox_loopback_channel_is_never_enforced_even_with_enforcing_remote_os() {
+        let workspace = temp_root("rr5-loopback-root");
+        fs::create_dir_all(&workspace).unwrap();
+        // Enforcing remote OS + mechanism present, but NO cross-machine boundary.
+        let runner = sandbox_runner("rr5-loopback", &workspace, |c| {
+            c.with_remote_os(RemoteOsFamily::Linux)
+                .with_enforceable_remote_sandbox()
+        });
+        assert!(runner.is_loopback());
+        let request = remote_request("run-rr5-loopback", workspace.clone(), "printf ok");
+        let profile = SandboxProfile::workspace_confined([workspace.clone()]);
+        let plan = runner
+            .plan_remote_sandbox(
+                &request,
+                &workspace,
+                &profile,
+                SandboxTier::LinuxLandlockBwrap,
+                false,
+            )
+            .expect("plan");
+        match &plan.enforcement {
+            SandboxEnforcement::Unenforced { reason, .. } => {
+                assert!(
+                    reason.contains("loopback"),
+                    "the limitation names the loopback boundary: {reason}"
+                );
+            }
+            other => panic!("a loopback must be Unenforced, got {other:?}"),
+        }
+        // NOT wrapped: the command Capo would launch is the bare original, never a
+        // `bwrap`/`sandbox-exec` we cannot honestly say enforced anything.
+        let wrapped = plan
+            .wrapped_request
+            .as_ref()
+            .expect("unenforced plan still runs the original");
+        assert_eq!(wrapped.program, "/bin/sh");
+        assert!(plan.events.iter().any(|e| e.kind == "sandbox.unenforced"));
+    }
+
+    #[test]
+    fn remote_sandbox_is_unenforced_and_recorded_when_remote_os_cannot_enforce() {
+        let workspace = temp_root("rr5-unenf-root");
+        fs::create_dir_all(&workspace).unwrap();
+        // The remote reports a NON-enforcing OS family: Capo must NOT claim
+        // sandboxing; it runs honestly un-enforced and records the limitation.
+        let runner = sandbox_runner("rr5-unenf", &workspace, |c| {
+            c.with_remote_os(RemoteOsFamily::Other("freebsd".to_string()))
+        });
+        let request = remote_request("run-rr5-unenf", workspace.clone(), "printf ok");
+        let profile = SandboxProfile::workspace_confined([workspace.clone()]);
+        let start = runner
+            .start_process_sandboxed(
+                request,
+                &workspace,
+                &profile,
+                SandboxTier::LinuxLandlockBwrap,
+                false,
+                None,
+            )
+            .expect("plan");
+
+        match &start.plan.enforcement {
+            SandboxEnforcement::Unenforced { tier, reason } => {
+                assert_eq!(*tier, SandboxTier::LinuxLandlockBwrap);
+                assert!(
+                    reason.contains("freebsd"),
+                    "reason names remote os: {reason}"
+                );
+            }
+            other => panic!("expected Unenforced, got {other:?}"),
+        }
+        assert_eq!(start.plan.remote_os, "freebsd");
+        // The run still happens (honestly un-sandboxed), and the limitation is an
+        // EVENT, never a silent claim of confinement.
+        assert!(start.outcome.is_some());
+        assert!(
+            start
+                .plan
+                .events
+                .iter()
+                .any(|e| { e.kind == "sandbox.unenforced" && e.detail.contains("freebsd") })
+        );
+    }
+
+    #[test]
+    fn remote_sandbox_unenforced_when_remote_lacks_the_mechanism_even_on_matching_family() {
+        let workspace = temp_root("rr5-nomech-root");
+        fs::create_dir_all(&workspace).unwrap();
+        // A linux remote whose landlock/bwrap mechanism is unavailable: the family
+        // matches but the host reports it cannot enforce -> honest Unenforced.
+        let runner = sandbox_runner("rr5-nomech", &workspace, |c| {
+            c.with_remote_os(RemoteOsFamily::Linux)
+                .with_unenforceable_remote_sandbox()
+        });
+        let request = remote_request("run-rr5-nomech", workspace.clone(), "printf ok");
+        let profile = SandboxProfile::workspace_confined([workspace.clone()]);
+        let plan = runner
+            .plan_remote_sandbox(
+                &request,
+                &workspace,
+                &profile,
+                SandboxTier::LinuxLandlockBwrap,
+                false,
+            )
+            .expect("plan");
+        assert!(matches!(
+            plan.enforcement,
+            SandboxEnforcement::Unenforced { .. }
+        ));
+        assert!(plan.events.iter().any(|e| e.kind == "sandbox.unenforced"));
+    }
+
+    #[test]
+    fn remote_sandbox_enforcement_reads_the_remote_os_not_the_controller_host() {
+        let workspace = temp_root("rr5-honesty-root");
+        fs::create_dir_all(&workspace).unwrap();
+        // Probe the SAME tier against two different scripted remote OSes. The claim
+        // must follow the REMOTE os, not the controller's build target: only the
+        // matching-family remote enforces, the other is honestly unenforced.
+        // Both model a real cross-machine boundary with the mechanism present, so
+        // the ONLY difference is the remote OS family — isolating that the claim
+        // follows the remote OS, not the controller host or the loopback gate.
+        let linux = sandbox_runner("rr5-h-linux", &workspace, |c| {
+            c.with_remote_os(RemoteOsFamily::Linux)
+                .with_enforceable_remote_sandbox()
+                .with_cross_machine_boundary()
+        });
+        let macos = sandbox_runner("rr5-h-macos", &workspace, |c| {
+            c.with_remote_os(RemoteOsFamily::Macos)
+                .with_enforceable_remote_sandbox()
+                .with_cross_machine_boundary()
+        });
+        let request = remote_request("run-rr5-honesty", workspace.clone(), "printf ok");
+        let profile = SandboxProfile::workspace_confined([workspace.clone()]);
+
+        let on_linux = linux
+            .plan_remote_sandbox(
+                &request,
+                &workspace,
+                &profile,
+                SandboxTier::LinuxLandlockBwrap,
+                false,
+            )
+            .expect("plan linux");
+        let on_macos = macos
+            .plan_remote_sandbox(
+                &request,
+                &workspace,
+                &profile,
+                SandboxTier::LinuxLandlockBwrap,
+                false,
+            )
+            .expect("plan macos");
+
+        // landlock+bwrap is enforced on the linux remote, unenforced on the macos
+        // remote — decided by the remote probe, identical controller host.
+        assert!(matches!(
+            on_linux.enforcement,
+            SandboxEnforcement::Enforced {
+                tier: SandboxTier::LinuxLandlockBwrap
+            }
+        ));
+        assert!(matches!(
+            on_macos.enforcement,
+            SandboxEnforcement::Unenforced { .. }
+        ));
+    }
+
+    #[test]
+    fn remote_sandbox_plan_is_replay_stable() {
+        let workspace = temp_root("rr5-replay-root");
+        fs::create_dir_all(&workspace).unwrap();
+        let request = remote_request("run-rr5-replay", workspace.clone(), "printf ok");
+        let profile = SandboxProfile::workspace_confined([workspace.clone()]);
+        // Two independent runners over the same scripted remote produce identical
+        // plans (enforcement + events), so a restart rebuilds the same projection.
+        let plan_a = sandbox_runner("rr5-replay", &workspace, |c| {
+            c.with_remote_os(RemoteOsFamily::Linux)
+                .with_enforceable_remote_sandbox()
+                .with_cross_machine_boundary()
+        })
+        .plan_remote_sandbox(
+            &request,
+            &workspace,
+            &profile,
+            SandboxTier::LinuxLandlockBwrap,
+            false,
+        )
+        .expect("plan a");
+        let plan_b = sandbox_runner("rr5-replay", &workspace, |c| {
+            c.with_remote_os(RemoteOsFamily::Linux)
+                .with_enforceable_remote_sandbox()
+                .with_cross_machine_boundary()
+        })
+        .plan_remote_sandbox(
+            &request,
+            &workspace,
+            &profile,
+            SandboxTier::LinuxLandlockBwrap,
+            false,
+        )
+        .expect("plan b");
+        assert_eq!(plan_a, plan_b);
     }
 
     #[test]

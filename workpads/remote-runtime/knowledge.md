@@ -202,6 +202,34 @@ self-attestation.
   deferred to the controller-integration scope; RR2 ships the runner-level
   `recover_run` + its truthful classification matrix.
 
+## RR5 Decisions (implemented)
+
+- Enforcement honesty is decided by a REMOTE-OS probe, never the controller host.
+  `RemoteChannel::sandbox_probe(tier) -> RemoteSandboxProbe { os_family,
+  tier_enforceable }` is the authority; `RemoteOsFamily::enforces(tier)` is the
+  remote analogue of DP7's `SandboxTier::is_enforced_here()` but evaluated against
+  the remote host's reported family. A matching family that nonetheless lacks the
+  mechanism (e.g. a linux without landlock/bwrap) still reports
+  `tier_enforceable=false`, so Capo records `sandbox.unenforced` rather than
+  claiming confinement it cannot prove. This is asserted directly by
+  `remote_sandbox_enforcement_reads_the_remote_os_not_the_controller_host` (same
+  controller, two scripted remote OSes, opposite claims).
+- The DP7 sandbox primitives are REUSED, not re-authored: `SandboxTier`,
+  `SandboxProfile`, `SandboxRefusal`, `SandboxEnforcement` come straight from
+  `sandbox.rs` (only `SandboxProfile::write_allowed` + `SandboxRefusal::reason_code`
+  were made `pub` so the remote runner shares the SAME confinement gate + refusal
+  vocabulary). The remote worktree root is the confined cwd; a cwd outside it is a
+  critical-scope refusal before any spawn.
+- The composition refuses pre-launch exactly like DP7 (network egress under a
+  forbidding profile, or a cwd outside the confined remote root) with
+  `sandbox.launch_refused` and `transport_spawn_count()==0` — no remote process
+  spawned, never a silent fall-through. The refusal/unenforced facts are events.
+- The sandbox is ADDITIVE to git-backed rollback: a successful confined run carries
+  the RR3 git-materialized commit ref as `checkpoint_ref` on `RemoteSandboxedStart`.
+- The platform-gated REMOTE refusal-mode smoke (an out-of-root write actually
+  refused by the remote OS) stays deferred to RR8 behind the opt-in env gate; RR5
+  ships the platform-independent pre-launch refusal + honest-claim matrix.
+
 ## Non-Goals
 
 - The channel itself (endpoint resolution, SSH/Tailscale/reverse transport,

@@ -30,8 +30,9 @@ stub with a real remote runner whose channel is provided by the
 
 In progress. RR0 complete. RR1 complete. RR2 complete (deterministic
 fake-channel recovery suite). RR3 event-kinds landed. RR4 complete
-(deterministic fake-channel output-delta + stdin streaming suite). RR5-RR8
-pending.
+(deterministic fake-channel output-delta + stdin streaming suite). RR5 complete
+(remote OS sandbox + worktree composition with honest remote-OS-probed
+enforcement claims; deterministic fake-channel suite). RR6-RR8 pending.
 
 ## Feature Set
 
@@ -408,7 +409,76 @@ from_sequence). Cross-workpad: `connectivity-tunnel` (stdio channel kind).
 
 ## RR5 - Compose OS Sandbox + Worktree Isolation ON The Remote (honest claims)
 
-Status: pending.
+Status: complete.
+
+Evidence: `RemoteProcessRunner::plan_remote_sandbox` /
+`start_process_sandboxed` (`crates/capo-runtime/src/lib.rs`) compose the `depth`
+DP7 `SandboxTier` + `SandboxProfile` + `SandboxRefusal` + `SandboxEnforcement`
+(reused, not re-authored) with the remote worktree root as the confined cwd. The
+enforcement claim is decided by a REMOTE-OS probe over the channel
+(`RemoteChannel::sandbox_probe` -> `RemoteSandboxProbe { os_family, tier_enforceable }`),
+NOT `SandboxTier::is_enforced_here()` (the controller host): `RemoteOsFamily::enforces`
+is the remote analogue of DP7's `is_enforced_here`.
+
+ENFORCEMENT IS APPLIED, NOT JUST CLAIMED (review finding 1 + 3): when the plan is
+`Enforced`, `plan_remote_sandbox` REWRITES the request to launch the original
+program under the remote OS sandbox launcher (`bwrap` on a linux remote,
+`/usr/bin/sandbox-exec -f <policy>` on a macOS remote) via the reused
+`OsSandbox::wrap_command_for_remote` argv-builder, and carries that wrapped argv on
+`RemoteSandboxPlan::wrapped_request`. `start_process_sandboxed` launches the WRAPPED
+request, so the transport actually receives the `bwrap`/`sandbox-exec` command — the
+additional enforcement layer over the path-prefix confinement, not merely an event
+label. `remote_sandbox_is_enforced_when_the_remote_os_supports_the_tier` asserts
+`wrapped_request.program == "bwrap"`, that the original `/bin/sh` is an argv token
+under it, that a network-forbidding profile injects `--unshare-net`, and that
+`transport_last_launched_request().program == "bwrap"` (the enforcement reached the
+transport). No assertion rests on self-attestation of the event label.
+
+LOOPBACK HONESTY (review finding 2 + 7): a loopback / fake channel never crossed a
+machine boundary, so `plan_remote_sandbox` short-circuits an `is_loopback()`
+transport to `SandboxEnforcement::Unenforced` (`reason` names the loopback) even
+when the channel scripts an enforcing remote OS — Capo never claims a
+`bwrap`/`sandbox-exec` confinement it could not apply over a boundary it did not
+cross. The default `FakeRemoteChannel` is therefore HONESTLY unenforceable
+(`sandbox_unenforceable: true`, `cross_machine: false`); a test that exercises the
+ENFORCED wrapping path opts in explicitly with
+`with_cross_machine_boundary().with_enforceable_remote_sandbox()` (modelling a real
+SSH remote; the live cross-machine proof is RR8).
+`remote_sandbox_loopback_channel_is_never_enforced_even_with_enforcing_remote_os`
+pins this.
+
+An un-granted critical scope (network egress under a forbidding profile, or a cwd
+outside the confined remote worktree root) is REFUSED before any spawn
+(`SandboxEnforcement::Refused` + `sandbox.launch_refused`, `transport_spawn_count()==0`);
+an unsupported remote OS (or a matching family that lacks the mechanism, or a
+loopback channel) is `SandboxEnforcement::Unenforced` + `sandbox.unenforced` (Capo
+does NOT claim sandboxing); a cross-machine remote whose OS enforces the tier is
+`SandboxEnforcement::Enforced` + `sandbox.enforced`. The three sandbox events are
+promoted to typed `EventKind`s in `crates/capo-state` (`SandboxEnforced` /
+`SandboxUnenforced` / `SandboxLaunchRefused`), each round-tripping through the codec
+(`rr1_rr2_remote_runtime_event_kinds_round_trip` extended) — consistent with the
+RR1-RR4 event-kind pattern (review finding 6). A successful confined run carries the
+reversible checkpoint (`checkpoint_ref`, the RR3 git-materialized commit ref) so the
+sandbox is additive to rollback. `RuntimeRunnerContract` now includes `start_process`
+so the spawn-path shape is compile-time parity-checked across both runners; the
+divergent `stream_output`/`write_stdin` surfaces are documented on the trait rather
+than forced into a false parity (review finding 5). The `FakeRemoteChannel` scripts
+the remote OS + boundary deterministically (`with_remote_os` /
+`with_unenforceable_remote_sandbox` / `with_enforceable_remote_sandbox` /
+`with_cross_machine_boundary`, NO network). Deterministic tests (NO network):
+`remote_sandbox_refuses_ungranted_network_egress_before_launch`,
+`remote_sandbox_refuses_cwd_outside_confined_remote_root_before_launch`,
+`remote_sandbox_is_enforced_when_the_remote_os_supports_the_tier` (asserts the
+`bwrap` wrapping reached the transport),
+`remote_sandbox_loopback_channel_is_never_enforced_even_with_enforcing_remote_os`,
+`remote_sandbox_is_unenforced_and_recorded_when_remote_os_cannot_enforce`,
+`remote_sandbox_unenforced_when_remote_lacks_the_mechanism_even_on_matching_family`,
+`remote_sandbox_enforcement_reads_the_remote_os_not_the_controller_host`,
+`remote_sandbox_plan_is_replay_stable`. The platform-gated REMOTE refusal-mode
+smoke (the bwrap/sandbox-exec launcher ACTUALLY refusing an out-of-root write on a
+real remote host) stays deferred to RR8: the deterministic suite proves the wrapped
+command is composed + handed to the transport, but a real launcher refusing a real
+escape requires a real remote OS and is behind the opt-in gate.
 
 Scope: Run the remote process inside the `depth` OS sandbox tier and the git
 worktree on the REMOTE host, and claim enforcement only where the remote OS

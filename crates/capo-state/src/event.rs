@@ -206,6 +206,21 @@ pub enum EventKind {
     RuntimeRemoteOutputDelta,
     RuntimeRemoteStdinWritten,
     RuntimeRemoteStreamFinalized,
+    // RR5 (remote-runtime): composition of the `depth` DP7 OS sandbox tier +
+    // worktree isolation ON the remote host, with an HONEST enforcement claim
+    // evaluated against the REMOTE OS (probed over the channel), never the
+    // controller's build target. `SandboxEnforced` records that the remote OS
+    // actually enforced the tier (the launch was wrapped under `bwrap` /
+    // `sandbox-exec`); `SandboxUnenforced` records a platform limitation (Capo does
+    // NOT claim sandboxing on a remote it cannot enforce — including a loopback /
+    // fake channel that never crossed a machine boundary); `SandboxLaunchRefused`
+    // records an un-granted critical scope (network egress under a forbidding
+    // profile, or a cwd outside the confined remote worktree root) refused BEFORE
+    // any remote spawn. Details carry fingerprints / os family / tier labels only,
+    // never a secret. These mirror the local DP7 sandbox event vocabulary.
+    SandboxEnforced,
+    SandboxUnenforced,
+    SandboxLaunchRefused,
 }
 
 /// The terminal outcome a projected turn-ending event carries, in the
@@ -337,6 +352,9 @@ impl EventKind {
             Self::RuntimeRemoteOutputDelta => "runtime.remote_output_delta",
             Self::RuntimeRemoteStdinWritten => "runtime.remote_stdin_written",
             Self::RuntimeRemoteStreamFinalized => "runtime.remote_stream_finalized",
+            Self::SandboxEnforced => "sandbox.enforced",
+            Self::SandboxUnenforced => "sandbox.unenforced",
+            Self::SandboxLaunchRefused => "sandbox.launch_refused",
         }
     }
 
@@ -456,6 +474,9 @@ impl EventKind {
             EventKind::RuntimeRemoteOutputDelta,
             EventKind::RuntimeRemoteStdinWritten,
             EventKind::RuntimeRemoteStreamFinalized,
+            EventKind::SandboxEnforced,
+            EventKind::SandboxUnenforced,
+            EventKind::SandboxLaunchRefused,
         ];
         ALL.iter()
             .copied()

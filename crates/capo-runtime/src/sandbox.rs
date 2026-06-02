@@ -146,7 +146,11 @@ impl SandboxProfile {
     }
 
     /// Whether `path` is inside one of the confined writable roots.
-    fn write_allowed(&self, path: &Path) -> RuntimeResult<bool> {
+    ///
+    /// Public so the remote runner (RR5) can run the SAME pre-launch
+    /// write-confinement gate against the remote worktree root before composing
+    /// the remote OS sandbox — the refusal rule is shared, not re-authored.
+    pub fn write_allowed(&self, path: &Path) -> RuntimeResult<bool> {
         let path = normalize_path(path)?;
         for root in self.normalized_roots()? {
             if path.starts_with(&root) {
@@ -181,7 +185,10 @@ impl SandboxRefusal {
         }
     }
 
-    fn reason_code(&self) -> &'static str {
+    /// The stable refusal token recorded as the `sandbox.launch_refused` event
+    /// status. Public so the remote runner (RR5) records the SAME refusal codes as
+    /// the local DP7 path rather than inventing a parallel vocabulary.
+    pub fn reason_code(&self) -> &'static str {
         match self {
             Self::WriteOutsideConfinedRoot { .. } => "write-outside-confined-root",
             Self::NetworkEgressForbidden => "network-egress-forbidden",
@@ -464,6 +471,97 @@ impl OsSandbox {
             seatbelt_policy: None,
             request: Some(wrapped),
         })
+    }
+
+    /// RR5: build the seatbelt `.sbpl` policy text for this profile WITHOUT
+    /// materializing it locally. The remote runner uses this to wrap a command for
+    /// a macOS remote: the policy travels with the wrapped argv (the real transport
+    /// writes it on the REMOTE, never on the controller host), so no local file is
+    /// created for a remote launch.
+    pub fn remote_seatbelt_policy(&self) -> RuntimeResult<String> {
+        self.seatbelt_policy()
+    }
+
+    /// RR5: wrap `request` in the OS sandbox launcher for a REMOTE host that
+    /// enforces `remote_tier`, returning the rewritten `LocalProcessRequest` (the
+    /// ORIGINAL program launched under `bwrap` / `sandbox-exec`) plus, for seatbelt,
+    /// the generated policy text.
+    ///
+    /// This reuses the EXACT argv-building used by the local
+    /// [`Self::plan_seatbelt`] / [`Self::plan_landlock_bwrap`], but is driven by the
+    /// REMOTE OS family (probed over the channel) rather than the controller's
+    /// `is_enforced_here()` build target, and performs NO local filesystem writes
+    /// (the seatbelt policy is materialized on the remote by the transport). The
+    /// remote worktree path the policy references is the confined root in `profile`.
+    pub fn wrap_command_for_remote(
+        &self,
+        request: LocalProcessRequest,
+        remote_tier: SandboxTier,
+    ) -> RuntimeResult<(LocalProcessRequest, Option<String>)> {
+        match remote_tier {
+            SandboxTier::MacosSeatbelt => {
+                let policy = self.seatbelt_policy()?;
+                // The remote-side policy path lives inside the first confined root
+                // (the remote worktree root). The transport writes the policy there
+                // on the REMOTE; the controller never writes it locally.
+                let policy_dir = self
+                    .profile
+                    .normalized_roots()?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        RuntimeError::Io(std::io::Error::other(
+                            "seatbelt profile has no confined writable root for the policy file",
+                        ))
+                    })?;
+                let policy_path = policy_dir.join(format!(
+                    "capo-seatbelt-{}.sb",
+                    sanitize(request.run_id.as_str())
+                ));
+                let mut argv = vec![
+                    "-f".to_string(),
+                    policy_path.to_string_lossy().into_owned(),
+                    request.program.clone(),
+                ];
+                argv.extend(request.argv.iter().cloned());
+                let wrapped = LocalProcessRequest {
+                    program: "/usr/bin/sandbox-exec".to_string(),
+                    argv,
+                    ..request
+                };
+                Ok((wrapped, Some(policy)))
+            }
+            SandboxTier::LinuxLandlockBwrap => {
+                let mut argv: Vec<String> = vec![
+                    "--die-with-parent".to_string(),
+                    "--ro-bind".to_string(),
+                    "/".to_string(),
+                    "/".to_string(),
+                    "--dev".to_string(),
+                    "/dev".to_string(),
+                    "--proc".to_string(),
+                    "/proc".to_string(),
+                ];
+                for root in self.profile.normalized_roots()? {
+                    let root = root.to_string_lossy().into_owned();
+                    argv.push("--bind".to_string());
+                    argv.push(root.clone());
+                    argv.push(root);
+                }
+                if !self.profile.allow_network_egress {
+                    argv.push("--unshare-net".to_string());
+                }
+                argv.push(request.program.clone());
+                argv.extend(request.argv.iter().cloned());
+                let wrapped = LocalProcessRequest {
+                    program: "bwrap".to_string(),
+                    argv,
+                    ..request
+                };
+                Ok((wrapped, None))
+            }
+            SandboxTier::None => Ok((request, None)),
+        }
     }
 
     /// Plan + run `request` through `runner`, composing the sandbox with the

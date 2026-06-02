@@ -1077,6 +1077,10 @@ fn rr1_rr2_remote_runtime_event_kinds_round_trip() {
             EventKind::RuntimeRemoteStreamFinalized,
             "runtime.remote_stream_finalized",
         ),
+        // RR5: remote OS sandbox + worktree composition with honest enforcement.
+        (EventKind::SandboxEnforced, "sandbox.enforced"),
+        (EventKind::SandboxUnenforced, "sandbox.unenforced"),
+        (EventKind::SandboxLaunchRefused, "sandbox.launch_refused"),
     ] {
         assert_eq!(kind.as_str(), wire);
         assert_eq!(EventKind::from_wire(wire), Some(kind));
