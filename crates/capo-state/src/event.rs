@@ -172,6 +172,21 @@ pub enum EventKind {
     RuntimeRemoteRunOrphaned,
     RuntimeRemoteRunExited,
     RuntimeRemoteRecoveryPending,
+    // RR3 (remote-runtime): git-based remote workspace materialization. Before a
+    // remote launch the target commit is materialized on the remote by git
+    // (push/fetch + `git worktree add`), confined to a dedicated remote worktree
+    // root; results are mapped back by git as a named ref. These record the
+    // content-addressed materialization (source SHA + remote HEAD + remote
+    // worktree path, with the git transport URL redacted so no embedded
+    // credential is persisted), the fetched-back reconcile point, the teardown of
+    // the remote worktree (never silently abandoned), and a TYPED materialization
+    // failure (a failed remote `git worktree add`/push/fetch is surfaced as a
+    // failed-materialization event, never a silent fall-through to running in the
+    // wrong directory).
+    RuntimeRemoteWorkspaceMaterialized,
+    RuntimeRemoteWorkspaceReconciled,
+    RuntimeRemoteWorkspaceTornDown,
+    RuntimeRemoteWorkspaceMaterializationFailed,
 }
 
 /// The terminal outcome a projected turn-ending event carries, in the
@@ -294,6 +309,12 @@ impl EventKind {
             Self::RuntimeRemoteRunOrphaned => "runtime.remote_run_orphaned",
             Self::RuntimeRemoteRunExited => "runtime.remote_run_exited",
             Self::RuntimeRemoteRecoveryPending => "runtime.remote_recovery_pending",
+            Self::RuntimeRemoteWorkspaceMaterialized => "runtime.remote_workspace_materialized",
+            Self::RuntimeRemoteWorkspaceReconciled => "runtime.remote_workspace_reconciled",
+            Self::RuntimeRemoteWorkspaceTornDown => "runtime.remote_workspace_torn_down",
+            Self::RuntimeRemoteWorkspaceMaterializationFailed => {
+                "runtime.remote_workspace_materialization_failed"
+            }
         }
     }
 
@@ -406,6 +427,10 @@ impl EventKind {
             EventKind::RuntimeRemoteRunOrphaned,
             EventKind::RuntimeRemoteRunExited,
             EventKind::RuntimeRemoteRecoveryPending,
+            EventKind::RuntimeRemoteWorkspaceMaterialized,
+            EventKind::RuntimeRemoteWorkspaceReconciled,
+            EventKind::RuntimeRemoteWorkspaceTornDown,
+            EventKind::RuntimeRemoteWorkspaceMaterializationFailed,
         ];
         ALL.iter()
             .copied()

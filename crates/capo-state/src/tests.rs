@@ -1046,6 +1046,24 @@ fn rr1_rr2_remote_runtime_event_kinds_round_trip() {
             EventKind::RuntimeRemoteRecoveryPending,
             "runtime.remote_recovery_pending",
         ),
+        // RR3: git-based remote workspace materialization + map-back + teardown +
+        // typed failure.
+        (
+            EventKind::RuntimeRemoteWorkspaceMaterialized,
+            "runtime.remote_workspace_materialized",
+        ),
+        (
+            EventKind::RuntimeRemoteWorkspaceReconciled,
+            "runtime.remote_workspace_reconciled",
+        ),
+        (
+            EventKind::RuntimeRemoteWorkspaceTornDown,
+            "runtime.remote_workspace_torn_down",
+        ),
+        (
+            EventKind::RuntimeRemoteWorkspaceMaterializationFailed,
+            "runtime.remote_workspace_materialization_failed",
+        ),
     ] {
         assert_eq!(kind.as_str(), wire);
         assert_eq!(EventKind::from_wire(wire), Some(kind));
