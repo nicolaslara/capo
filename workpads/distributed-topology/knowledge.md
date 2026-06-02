@@ -221,6 +221,47 @@ a runner buffered while offline is DT4b (spool + idempotent replay, per DT-D2). 
 server's log is the single source of continuity; neither client nor runner holds
 authoritative state to lose.
 
+### DT4a (Resolved): The Three-Role Resume Contract
+
+The resume contract for the three-role case (server/controller, remote runner,
+client), as implemented and tested in DT4a:
+
+- **Single source of continuity.** The server's durable event log
+  (`SqliteStateStore`, the single authoritative writer) is the ONLY source of
+  stream continuity. Both the client leg and the runner leg are non-authoritative
+  observers; neither holds state that can be lost on a drop. A drop on EITHER leg
+  is recovered identically by re-reading the log from a cursor -- there is no
+  per-leg replication and no parallel event path.
+- **Watermark cursor.** Each subscriber tracks the highest sequence it has
+  delivered via `EventStream::delivered_through()` (the in-process seam) /
+  `SubscriptionBacklog::next_sequence` (the TCP seam). On reconnect it re-issues
+  `Subscribe { from_sequence = delivered_through }`. The runner leg uses the SAME
+  mechanism (DT-D1: "a runner is a special client that owns processes"), typically
+  session-scoped to the session whose process it owns; the client leg is usually
+  unscoped.
+- **`from_sequence` semantics (the half-open seam).** The backlog re-delivers
+  every committed event STRICTLY AFTER `from_sequence` and NONE at or below it, so
+  the union of (pre-drop delivered) + (post-resume backlog) is contiguous,
+  strictly increasing, and duplicate-free -- "no gap, no dupe". A STALE cursor
+  (well behind the head) is served the full backlog after that point.
+- **Ahead-of-log rejection boundary.** A `from_sequence` STRICTLY AHEAD of the
+  committed head has no servable continuation and is rejected with the typed
+  `ServerError::SubscribeFromSequenceAheadOfLog { from_sequence, latest_sequence }`
+  (wire kind `subscribe_from_sequence_ahead_of_log`), rather than masking a client
+  cursor bug as an empty backlog. `from_sequence == head` is VALID (an empty
+  backlog, resuming exactly at the tail); `head + 1` and beyond are rejected. On an
+  empty log the head is 0: cursor 0 is valid, any positive cursor is rejected. This
+  validation runs in ONE shared seam (`read_subscription_backlog_validated`) used
+  by BOTH the in-process `subscribe()` path and the in-process
+  `ServerCommand::Subscribe` handler arm, and is enforced over the wire on the TCP
+  `subscribe_tcp` path (returned as `TransportError::Remote { kind: ... }`).
+- **Restart durability.** The guarantee survives a server restart: after the
+  server reopens and rebuilds read models from the durable log, a resume from the
+  same `from_sequence` yields the byte-identical continuation (ST11 restart-resume).
+- **Scope boundary.** DT4a covers resume of events ALREADY COMMITTED to the
+  server's log. Events a runner BUFFERED while disconnected are out of scope here
+  and are reconciled by DT4b (spool + idempotent replay, per DT-D2).
+
 ## Redaction Is Placed Precisely (Don't Claim A Property The Architecture Can't Enforce)
 
 The draft claimed "a secret never crosses the tunnel in the clear" via
@@ -319,6 +360,16 @@ evidence.
   as prerequisite tasks inside this one? It is owned here by default so the plan is
   self-contained; promote it to its own workpad if the connectivity track is
   formally scheduled in `TASKS.md`.
+- DT-OQ7 (recorded for DT6, not blocking DT4a): the DT4a ahead-of-log validation
+  added a `latest_sequence()` read (`SELECT COALESCE(MAX(sequence), 0) FROM
+  events`) to EVERY `server.subscribe()` call, including the all-local single-box
+  path (e.g. capo-web). The query is functionally correct and follows the existing
+  per-query connection pattern, but it is a NEW DB round-trip on the default path.
+  DT6 (byte-for-byte single-box regression) must account for it: either confirm it
+  is not a hot path for single-box deploys, or cache the latest sequence in the
+  broadcast hub on commit so the resume-cursor validation does not open a fresh
+  SQLite connection per subscribe. Recorded here before DT6 so the cost is not
+  discovered as a surprise during the regression.
 
 (NOTE: the draft's DT-OQ1 and DT-OQ2 are NO LONGER open questions -- they were
 load-bearing mechanism decisions for DT1-DT4 and are promoted to the resolved

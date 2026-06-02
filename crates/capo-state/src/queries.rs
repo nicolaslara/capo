@@ -1963,6 +1963,26 @@ impl SqliteStateStore {
             .map_err(StateError::from)
     }
 
+    /// The highest committed sequence in the log, or `0` when the log is empty
+    /// (DT4a).
+    ///
+    /// The append-only log assigns strictly-increasing positive sequences, so
+    /// `0` is below every committed event and is the natural "before the log"
+    /// watermark a fresh subscriber starts from. A `Subscribe` that names a
+    /// `from_sequence` ABOVE this value is asking to resume past the end of the
+    /// durable log -- it cannot be served correctly (no such continuation exists),
+    /// so the subscribe seam rejects it as invalid rather than silently returning
+    /// an empty backlog that would mask a client bug.
+    pub fn latest_sequence(&self) -> StateResult<i64> {
+        let connection = Connection::open(&self.db_path)?;
+        let sequence = connection
+            .query_row("SELECT COALESCE(MAX(sequence), 0) FROM events", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(StateError::from)?;
+        Ok(sequence)
+    }
+
     /// Events strictly after `since_sequence` for one session, in ascending
     /// sequence order (ST4, session-scoped tail).
     ///

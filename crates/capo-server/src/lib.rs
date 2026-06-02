@@ -1491,8 +1491,13 @@ impl CapoServer {
                 // through the persistent connection (the broadcast subscription
                 // is obtained via `CapoServer::subscribe`). `Subscribe` is
                 // read-only: it reads the log and registers a subscriber, never
-                // appending an event.
-                let backlog = self.read_subscription_backlog(session_id, from_sequence)?;
+                // appending an event. DT4a (finding 4): both the TCP `subscribe`
+                // path and this in-process `handle` path run the SAME ahead-of-log
+                // validation, so an in-process caller that presents a cursor ahead
+                // of the head gets the typed `SubscribeFromSequenceAheadOfLog`
+                // error rather than a silently-empty backlog.
+                let backlog =
+                    self.read_subscription_backlog_validated(session_id, from_sequence)?;
                 self.response(
                     request_id,
                     origin,
@@ -1642,11 +1647,44 @@ impl CapoServer {
     ) -> ServerResult<(SubscriptionBacklog, EventStream)> {
         // Subscribe first, then snapshot the backlog: any event committed after
         // this point is captured live, and the seam watermark below drops the
-        // overlap.
+        // overlap. The ahead-of-log validation runs inside
+        // `read_subscription_backlog_validated` so BOTH the TCP and in-process
+        // paths reject a cursor ahead of the head identically (finding 4).
         let subscription = self.controller.state().event_broadcaster().subscribe();
-        let backlog = self.read_subscription_backlog(session_id.clone(), from_sequence)?;
+        let backlog =
+            self.read_subscription_backlog_validated(session_id.clone(), from_sequence)?;
         let stream = EventStream::new(subscription, backlog.next_sequence, session_id);
         Ok((backlog, stream))
+    }
+
+    /// Read the catch-up backlog after validating the resume cursor against the
+    /// durable log head. DT4a: a resume cursor STRICTLY AHEAD of the head cannot
+    /// be served correctly (no such continuation exists), so it is rejected as
+    /// invalid rather than masking a client cursor bug with an empty backlog. A
+    /// STALE cursor (at or below the head) is served correctly by the backlog
+    /// read: `events_after` re-delivers the backlog strictly after it. The head
+    /// is read BEFORE the backlog so the check reflects the committed log.
+    ///
+    /// This is the single validation seam shared by `subscribe` (TCP tail) and
+    /// the in-process `ServerCommand::Subscribe` handler arm, so neither path can
+    /// silently diverge on the ahead-of-log boundary.
+    fn read_subscription_backlog_validated(
+        &self,
+        session_id: Option<String>,
+        from_sequence: i64,
+    ) -> ServerResult<SubscriptionBacklog> {
+        let latest_sequence = self
+            .controller
+            .state()
+            .latest_sequence()
+            .map_err(ServerError::State)?;
+        if from_sequence > latest_sequence {
+            return Err(ServerError::SubscribeFromSequenceAheadOfLog {
+                from_sequence,
+                latest_sequence,
+            });
+        }
+        self.read_subscription_backlog(session_id, from_sequence)
     }
 
     /// Read the catch-up backlog for a subscription: every committed event

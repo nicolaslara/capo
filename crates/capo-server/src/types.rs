@@ -88,6 +88,16 @@ pub enum ServerError {
         value: String,
         expected: &'static str,
     },
+    /// DT4a: a `Subscribe { from_sequence }` named a watermark ABOVE the highest
+    /// committed sequence in the durable log. There is no continuation past the
+    /// end of the log to serve, so the resume is rejected as invalid rather than
+    /// silently returning an empty backlog that would mask a client cursor bug.
+    /// A STALE `from_sequence` (at or below the head) is served correctly -- it is
+    /// only a watermark strictly ahead of the head that is refused.
+    SubscribeFromSequenceAheadOfLog {
+        from_sequence: i64,
+        latest_sequence: i64,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

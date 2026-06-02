@@ -322,6 +322,9 @@ fn schema_enumerations_cover_every_wire_variant() {
             ServerError::IllegalGoalStatusTransition { .. } => "illegal_goal_status_transition",
             ServerError::UnclassifiableReportSource { .. } => "unclassifiable_report_source",
             ServerError::InvalidRuntimeTargetField { .. } => "invalid_runtime_target_field",
+            ServerError::SubscribeFromSequenceAheadOfLog { .. } => {
+                "subscribe_from_sequence_ahead_of_log"
+            }
         }
     }
 

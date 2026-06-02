@@ -146,6 +146,7 @@
                     "illegal_goal_status_transition",
                     "unclassifiable_report_source",
                     "invalid_runtime_target_field",
+                    "subscribe_from_sequence_ahead_of_log",
                     "remote",
                     "cancelled",
                     "interrupted"

@@ -1,0 +1,1 @@
+{"error":{"code":-32603,"data":{"kind":"subscribe_from_sequence_ahead_of_log"},"message":"subscribe from_sequence 99 is ahead of the log head 44; a resume cursor must be at or below the latest committed sequence"},"id":"req-subscribe-1","jsonrpc":"2.0"}

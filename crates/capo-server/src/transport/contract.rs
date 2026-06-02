@@ -40,8 +40,8 @@ use super::jsonrpc::{
 };
 use super::{EVENT_TAIL_METHOD, EventNotification, TransportError};
 use crate::{
-    AgentSummary, ServerClientOrigin, ServerCommand, ServerEvent, ServerInputOrigin, ServerRequest,
-    ServerResponse, ServerResponsePayload, SubscriptionBacklog,
+    AgentSummary, ServerClientOrigin, ServerCommand, ServerError, ServerEvent, ServerInputOrigin,
+    ServerRequest, ServerResponse, ServerResponsePayload, SubscriptionBacklog,
 };
 
 /// The SSE `event:` type a browser bridge labels each event-tail frame with. It
@@ -237,6 +237,18 @@ pub fn wire_samples() -> Vec<WireSample> {
         },
     );
 
+    // DT4a (finding 5): the ahead-of-log rejection is a typed error too, so it
+    // gets a canonical wire snapshot pinning `error.data.kind` +
+    // `subscribe_from_sequence_ahead_of_log` exactly as a client must branch on
+    // it. A resume cursor strictly ahead of the committed head is invalid.
+    let subscribe_ahead_error = encode_error_response(
+        Some("req-subscribe-1"),
+        &TransportError::Server(ServerError::SubscribeFromSequenceAheadOfLog {
+            from_sequence: 99,
+            latest_sequence: 44,
+        }),
+    );
+
     // --- Server-initiated notification (server -> client): the live event tail.
     let event_notification = EventNotification::for_event(&sample_event());
 
@@ -281,6 +293,11 @@ pub fn wire_samples() -> Vec<WireSample> {
             name: "response-error-cancelled",
             description: "JSON-RPC error response: a cancelled in-flight request (error.data.kind=cancelled).",
             frame: cancelled_error,
+        },
+        WireSample {
+            name: "response-error-subscribe-ahead-of-log",
+            description: "JSON-RPC error response: a Subscribe from_sequence ahead of the log head (error.data.kind=subscribe_from_sequence_ahead_of_log).",
+            frame: subscribe_ahead_error,
         },
         WireSample {
             name: "notification-event-tail",
@@ -576,6 +593,7 @@ fn error_kinds() -> Vec<&'static str> {
         "illegal_goal_status_transition",
         "unclassifiable_report_source",
         "invalid_runtime_target_field",
+        "subscribe_from_sequence_ahead_of_log",
         "remote",
         "cancelled",
         "interrupted",

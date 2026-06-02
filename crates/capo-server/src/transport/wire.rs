@@ -228,5 +228,15 @@ fn server_error_wire(error: &ServerError) -> (&'static str, String) {
             "invalid_runtime_target_field",
             format!("invalid runtime target {field} `{value}`; expected {expected}"),
         ),
+        ServerError::SubscribeFromSequenceAheadOfLog {
+            from_sequence,
+            latest_sequence,
+        } => (
+            "subscribe_from_sequence_ahead_of_log",
+            format!(
+                "subscribe from_sequence {from_sequence} is ahead of the log head {latest_sequence}; \
+                 a resume cursor must be at or below the latest committed sequence"
+            ),
+        ),
     }
 }
