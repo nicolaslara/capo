@@ -422,7 +422,27 @@ Dependencies: CT0, CT1, CT2, CT3.
 
 ## CT5 - Tunnel Health: Heartbeat Loop (Injectable Clock), last_heartbeat_at, And Reconnect Events
 
-Status: pending.
+Status: done. Tunnel health is event-sourced: `last_heartbeat_at` was added to
+`ConnectivityExposureProjection` (payload_json + nullable column + back-fill
+migration + codec/apply/queries, round-trip + restart-replay stable). The heartbeat
+loop lives in the NAMED owning module `capo-runtime::connectivity_health`
+(`crates/capo-runtime/src/connectivity_health.rs`), a leaf module depending ONLY on
+the `ConnectivityTunnel` surface + the injectable `ConnectivityClock` (a manual
+logical-ms clock for tests, a real monotonic clock for the live path) — no
+controller/run/turn state, no state store, no `RuntimeRunner`. `HeartbeatMonitor::beat()`
+is a pure function of (tunnel, clock, config) returning a `HeartbeatOutcome` whose
+`HealthTransition` (`Initial`/`Steady`/`Lost`/`Reconnected`/`Stalled`) the CLI maps
+to a `connectivity.health_changed` event; a `reconnected` recovery reuses
+`health_changed` with a `reconnected` detail (no new kind). The stall-past-deadline
+case is a transition (not a hang), proven by ADVANCING the fake clock. Cadence +
+stall deadline are bounded config (`HeartbeatConfig`, default 15s/45s) clamped away
+from zero, with per-endpoint `--step-ms`/`--stall-deadline-ms`. The CLI command
+`connectivity exposure-heartbeat` drives the timeline (deterministic `--fake-timeline`
+seam), emits the ordered events, stamps `last_heartbeat_at`, and `exposure-status` /
+`exposure-evidence` surface it. Tests: `capo-runtime` `connectivity_health::tests::ct5_*`
+(clock, reachable->unreachable->reconnected, stall-past-deadline, tunnel-surface-only);
+`capo-state` `ct5_connectivity_health_timeline_round_trips_and_replays`; `capo-cli`
+`ct5_exposure_heartbeat_*`.
 
 Scope:
 

@@ -2769,6 +2769,7 @@ fn connectivity_exposure_requires_grant_and_projects_revocation_and_health() {
                     identity_ref: None,
                     identity_fingerprint: None,
                     expires_at: None,
+                    last_heartbeat_at: None,
                     updated_sequence: 0,
                 },
             )],
@@ -2857,6 +2858,7 @@ fn connectivity_exposure_requires_grant_and_projects_revocation_and_health() {
                     identity_ref: None,
                     identity_fingerprint: None,
                     expires_at: None,
+                    last_heartbeat_at: None,
                     updated_sequence: 0,
                 },
             )],
@@ -2909,6 +2911,7 @@ fn connectivity_exposure_requires_grant_and_projects_revocation_and_health() {
                     identity_ref: None,
                     identity_fingerprint: None,
                     expires_at: None,
+                    last_heartbeat_at: None,
                     updated_sequence: 0,
                 },
             )],
@@ -2962,6 +2965,7 @@ fn ct2_connectivity_handle_schema_round_trips_and_replays() {
         identity_ref: Some("tailscale:device:n7Qk2cFf".to_string()),
         identity_fingerprint: Some("sha256:9f86d081884c7d65".to_string()),
         expires_at: Some("2026-06-02T12:00:00Z".to_string()),
+        last_heartbeat_at: None,
         updated_sequence: 0,
     };
 
@@ -3032,6 +3036,120 @@ fn ct2_connectivity_handle_schema_round_trips_and_replays() {
         },
         exposure,
         "CT2 handle/derived fields must rebuild identically after restart"
+    );
+}
+
+/// CT5 heartbeat timeline round-trip + replay: a connectivity exposure driven
+/// through a reachable -> unreachable -> reconnected health timeline records
+/// `connectivity.health_changed` events and a `last_heartbeat_at` projection field,
+/// and a RESTART rebuilds the final health/heartbeat state IDENTICALLY from the
+/// event log alone. The heartbeat instant is a bare logical label
+/// (`heartbeat-ms:<ms>`), never a credential.
+#[test]
+fn ct5_connectivity_health_timeline_round_trips_and_replays() {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("capo-state-ct5-health-{nanos}"));
+    let project_id = ProjectId::new("project-capo");
+    let exposure_id = "connectivity-exposure-ct5";
+
+    // The ordered health timeline the heartbeat loop would produce: an initial
+    // reachable beat, a loss, then a reconnect — each a distinct heartbeat instant.
+    let timeline = [
+        ("available", true, "heartbeat-ms:0", "initial"),
+        ("unreachable", false, "heartbeat-ms:15000", "lost"),
+        ("available", true, "heartbeat-ms:30000", "reconnected"),
+    ];
+
+    {
+        let store = SqliteStateStore::open(&root).expect("open state store");
+        for (idx, (status, reachable, heartbeat, transition)) in timeline.iter().enumerate() {
+            let exposure = ConnectivityExposureProjection {
+                exposure_id: exposure_id.to_string(),
+                project_id: project_id.clone(),
+                connectivity_endpoint_id: "endpoint-tailnet-1".to_string(),
+                owner_kind: "capo_server".to_string(),
+                owner_id: "capo-server-1".to_string(),
+                channel_kind: "control".to_string(),
+                exposure: "private".to_string(),
+                permission_scope: "network:connect:private_tunnel".to_string(),
+                status: "active".to_string(),
+                capability_grant_id: Some("grant-ct5".to_string()),
+                health_status: status.to_string(),
+                reachable: *reachable,
+                revoked_at: None,
+                auth_ref: None,
+                identity_ref: None,
+                identity_fingerprint: Some("tsnode:sha256:abc123".to_string()),
+                expires_at: None,
+                last_heartbeat_at: Some(heartbeat.to_string()),
+                updated_sequence: 0,
+            };
+            let mut event = NewEvent::new(
+                format!("event-connectivity-health-ct5-{idx}"),
+                EventKind::ConnectivityHealthChanged,
+                "test",
+            );
+            event.project_id = Some(project_id.clone());
+            event.item_id = Some(exposure_id.to_string());
+            event.payload_json = format!(
+                "{{\"exposure_id\":\"{exposure_id}\",\"transition\":\"{transition}\",\"last_heartbeat_at\":\"{heartbeat}\"}}"
+            );
+            store
+                .append_event(event, &[ProjectionRecord::ConnectivityExposure(exposure)])
+                .expect("append ct5 health event");
+        }
+
+        let stored = store
+            .connectivity_exposures(&project_id)
+            .expect("exposures")
+            .pop()
+            .expect("exposure row");
+        // The projection reflects the LAST (reconnected) beat.
+        assert_eq!(stored.health_status, "available");
+        assert!(stored.reachable);
+        assert_eq!(
+            stored.last_heartbeat_at.as_deref(),
+            Some("heartbeat-ms:30000")
+        );
+
+        // The full ordered health timeline is in the event log.
+        let events = store
+            .events_after(0, 1000)
+            .expect("events")
+            .into_iter()
+            .filter(|event| event.kind == EventKind::ConnectivityHealthChanged.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 3, "one health_changed event per beat");
+        assert!(
+            events[0]
+                .payload_json
+                .contains("\"transition\":\"initial\"")
+        );
+        assert!(events[1].payload_json.contains("\"transition\":\"lost\""));
+        assert!(
+            events[2]
+                .payload_json
+                .contains("\"transition\":\"reconnected\"")
+        );
+    }
+
+    // Restart: rebuild from the log alone and confirm the heartbeat field is stable.
+    let reopened = SqliteStateStore::open(&root).expect("reopen state store");
+    reopened.rebuild_projections().expect("rebuild projections");
+    let rebuilt = reopened
+        .connectivity_exposures(&project_id)
+        .expect("rebuilt exposures")
+        .pop()
+        .expect("rebuilt exposure row");
+    assert_eq!(rebuilt.health_status, "available");
+    assert!(rebuilt.reachable);
+    assert_eq!(
+        rebuilt.last_heartbeat_at.as_deref(),
+        Some("heartbeat-ms:30000"),
+        "CT5 last_heartbeat_at must rebuild identically after restart"
     );
 }
 

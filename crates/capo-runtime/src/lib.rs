@@ -17,8 +17,18 @@ use capo_core::{BoundaryBinding, BoundaryKind, RunId};
 use std::os::unix::process::CommandExt;
 
 mod async_runner;
+/// CT5: tunnel health — the heartbeat loop, `last_heartbeat_at`, and reconnect
+/// events, driven by an injectable clock. A separate boundary from controller/turn
+/// state and from `RuntimeRunner` (it depends only on the `ConnectivityTunnel`
+/// surface).
+pub mod connectivity_health;
 mod sandbox;
 mod worktree;
+
+pub use connectivity_health::{
+    ConnectivityClock, HealthTransition, HeartbeatConfig, HeartbeatHandle, HeartbeatMonitor,
+    HeartbeatOutcome,
+};
 
 pub use async_runner::{
     AsyncLocalProcessRunner, AsyncRunningProcess, StreamSource, StreamingOutcome,

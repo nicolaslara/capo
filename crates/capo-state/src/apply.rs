@@ -256,8 +256,8 @@ pub(crate) fn apply_projection_record(
                 exposure_id, project_id, connectivity_endpoint_id, owner_kind, owner_id,
                 channel_kind, exposure, permission_scope, status, capability_grant_id,
                 health_status, reachable, revoked_at, auth_ref, identity_ref,
-                identity_fingerprint, expires_at, updated_sequence
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                identity_fingerprint, expires_at, last_heartbeat_at, updated_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
              ON CONFLICT(exposure_id) DO UPDATE SET
                 project_id = excluded.project_id,
                 connectivity_endpoint_id = excluded.connectivity_endpoint_id,
@@ -275,6 +275,7 @@ pub(crate) fn apply_projection_record(
                 identity_ref = excluded.identity_ref,
                 identity_fingerprint = excluded.identity_fingerprint,
                 expires_at = excluded.expires_at,
+                last_heartbeat_at = excluded.last_heartbeat_at,
                 updated_sequence = excluded.updated_sequence",
             params![
                 exposure.exposure_id,
@@ -294,6 +295,7 @@ pub(crate) fn apply_projection_record(
                 exposure.identity_ref,
                 exposure.identity_fingerprint,
                 exposure.expires_at,
+                exposure.last_heartbeat_at,
                 sequence,
             ],
         )?,

@@ -80,6 +80,7 @@ Usage:
   capo connectivity revoke-exposure --exposure EXPOSURE_ID [--reason REASON] [--state PATH]
   capo connectivity exposure-status --exposure EXPOSURE_ID [--state PATH]
   capo connectivity exposure-status --latest [--owner-kind runtime_target|capo_server] [--owner-id OWNER_ID] [--channel control|stdio|logs|dashboard|artifact] [--state PATH]
+  capo connectivity exposure-heartbeat --exposure EXPOSURE_ID --fake-timeline true,false,true [--start-ms MS] [--step-ms MS] [--stall-deadline-ms MS] [--state PATH]
   capo connectivity exposure-evidence --exposure EXPOSURE_ID --out DIR [--state PATH]
   capo connectivity exposure-evidence --latest [--owner-kind runtime_target|capo_server] [--owner-id OWNER_ID] [--channel control|stdio|logs|dashboard|artifact] --out DIR [--state PATH]
   capo project memory index --root PATH [--state PATH]

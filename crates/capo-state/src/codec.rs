@@ -278,6 +278,8 @@ pub(crate) fn projection_record_from_row(
                     identity_ref: payload_optional_string(&payload, "identity_ref"),
                     identity_fingerprint: payload_optional_string(&payload, "identity_fingerprint"),
                     expires_at: payload_optional_string(&payload, "expires_at"),
+                    // CT5: heartbeat instant rebuilt from the payload (replay-stable).
+                    last_heartbeat_at: payload_optional_string(&payload, "last_heartbeat_at"),
                     updated_sequence: 0,
                 },
             ))

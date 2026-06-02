@@ -159,6 +159,9 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
                 "identity_ref": exposure.identity_ref,
                 "identity_fingerprint": exposure.identity_fingerprint,
                 "expires_at": exposure.expires_at,
+                // CT5: the heartbeat instant label rides the payload too (lettered
+                // columns exhausted). Replay-stable when the clock timeline repeats.
+                "last_heartbeat_at": exposure.last_heartbeat_at,
             })
             .to_string(),
         },

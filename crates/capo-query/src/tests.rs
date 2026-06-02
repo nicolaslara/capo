@@ -1486,6 +1486,7 @@ fn append_connectivity_exposure_with_reachability(
                     identity_ref: None,
                     identity_fingerprint: None,
                     expires_at: None,
+                    last_heartbeat_at: None,
                     updated_sequence: 0,
                 },
             )],

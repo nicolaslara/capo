@@ -49,8 +49,8 @@ use agent_session::{
 };
 use cli_surface::{HELP, ParsedArgs};
 use connectivity::{
-    activate_connectivity_exposure, connectivity_exposure_status, expose_connectivity_stub,
-    request_connectivity_exposure_approval, revoke_connectivity_exposure,
+    activate_connectivity_exposure, connectivity_exposure_heartbeat, connectivity_exposure_status,
+    expose_connectivity_stub, request_connectivity_exposure_approval, revoke_connectivity_exposure,
 };
 use connectivity_evidence::connectivity_exposure_evidence;
 use dashboard::dashboard;
@@ -337,6 +337,9 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         }
         [area, command, rest @ ..] if area == "connectivity" && command == "exposure-status" => {
             connectivity_exposure_status(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "connectivity" && command == "exposure-heartbeat" => {
+            connectivity_exposure_heartbeat(&parsed, rest)
         }
         [area, command, rest @ ..] if area == "connectivity" && command == "exposure-evidence" => {
             connectivity_exposure_evidence(&parsed, rest)

@@ -162,6 +162,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             identity_ref TEXT,
             identity_fingerprint TEXT,
             expires_at TEXT,
+            last_heartbeat_at TEXT,
             updated_sequence INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS runtime_targets (
@@ -724,6 +725,14 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
         "TEXT",
     )?;
     add_missing_column(connection, "connectivity_exposures", "expires_at", "TEXT")?;
+    // CT5: nullable heartbeat instant so exposures recorded before CT5 back-fill as
+    // NULL (no heartbeat observed yet). A bare logical instant, never a credential.
+    add_missing_column(
+        connection,
+        "connectivity_exposures",
+        "last_heartbeat_at",
+        "TEXT",
+    )?;
     Ok(())
 }
 

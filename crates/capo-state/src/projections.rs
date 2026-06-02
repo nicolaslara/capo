@@ -409,6 +409,10 @@ pub struct ConnectivityExposureProjection {
     pub identity_ref: Option<String>,
     pub identity_fingerprint: Option<String>,
     pub expires_at: Option<String>,
+    /// CT5: the logical heartbeat timestamp LABEL from the last health probe
+    /// (`heartbeat-ms:<logical-ms>`), driven by the injectable clock. A bare logical
+    /// instant, never a credential; `None` before the first heartbeat. Replay-stable.
+    pub last_heartbeat_at: Option<String>,
     pub updated_sequence: i64,
 }
 

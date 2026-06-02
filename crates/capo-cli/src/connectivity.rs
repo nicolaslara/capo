@@ -2,8 +2,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use capo_query::{ProjectDashboardQuery, project_dashboard};
 use capo_runtime::{
-    ChannelKind, ConnectivityEndpointConfig, ConnectivityError, ConnectivityTunnel, EndpointOwner,
-    ExposurePolicy, ExposureScope, FakeTunnelScript,
+    ChannelKind, ConnectivityClock, ConnectivityEndpointConfig, ConnectivityError,
+    ConnectivityTunnel, EndpointOwner, ExposurePolicy, ExposureScope, FakeTunnelScript,
+    HealthTransition, HeartbeatConfig, HeartbeatMonitor,
 };
 use capo_state::{
     CapabilityGrantProjection, ConnectivityExposureProjection, EventKind, NewEvent,
@@ -184,6 +185,9 @@ pub(crate) fn expose_connectivity_stub(
         identity_ref: identity_ref.clone(),
         identity_fingerprint: resolved.identity_fingerprint.clone(),
         expires_at: resolved.expires_at.clone(),
+        // CT5: no heartbeat has run yet at plan time; the heartbeat monitor stamps
+        // this on the first beat (the `exposure-heartbeat` command).
+        last_heartbeat_at: None,
         updated_sequence: 0,
     };
     let sequence = if record {
@@ -335,6 +339,7 @@ fn record_blocked_identity_mismatch(
         identity_ref: None,
         identity_fingerprint: Some(observed.clone()),
         expires_at: None,
+        last_heartbeat_at: None,
         updated_sequence: 0,
     };
     ensure_runtime_target_owner_exists(parsed, &exposure)?;
@@ -588,6 +593,208 @@ pub(crate) fn activate_connectivity_exposure(
     ))
 }
 
+/// CT5: drive the tunnel-health heartbeat loop against a recorded exposure.
+///
+/// The heartbeat is computed from the [`ConnectivityTunnel`] surface ONLY (the CT5
+/// boundary rule: it never reads or mutates controller/run/turn state). A
+/// DETERMINISTIC seam (`--fake-timeline`) routes the beats through a scripted
+/// `FakeTunnel` health timeline driven by an INJECTABLE clock
+/// ([`ConnectivityClock::manual`]) advanced by `--step-ms` per beat — so the
+/// stall-past-deadline case is proven by advancing the clock, NEVER by a wall-clock
+/// sleep. Each non-`Steady` transition updates the projection's
+/// `health_status`/`reachable`/`last_heartbeat_at` and emits a
+/// `connectivity.health_changed` event carrying the transition detail (`lost` /
+/// `reconnected` / `stalled` / `initial`) with NO secret in the payload.
+pub(crate) fn connectivity_exposure_heartbeat(
+    parsed: &ParsedArgs,
+    args: &[String],
+) -> Result<String, String> {
+    let exposure_id = required_arg(args, "--exposure")?;
+    // Deterministic seam: a comma-separated reachable timeline (e.g. `true,false,true`).
+    let timeline_raw = required_arg(args, "--fake-timeline")?;
+    let start_ms: u64 = optional_arg(args, "--start-ms")
+        .map(|value| value.parse())
+        .transpose()
+        .map_err(|error| format!("invalid --start-ms: {error}"))?
+        .unwrap_or(0);
+    let step_ms: u64 = optional_arg(args, "--step-ms")
+        .map(|value| value.parse())
+        .transpose()
+        .map_err(|error| format!("invalid --step-ms: {error}"))?
+        .unwrap_or(HeartbeatConfig::DEFAULT_CADENCE_MS);
+    let stall_ms: u64 = optional_arg(args, "--stall-deadline-ms")
+        .map(|value| value.parse())
+        .transpose()
+        .map_err(|error| format!("invalid --stall-deadline-ms: {error}"))?
+        .unwrap_or(HeartbeatConfig::DEFAULT_STALL_DEADLINE_MS);
+    if let Some(unknown) = args.iter().find(|arg| {
+        arg.starts_with("--")
+            && !matches!(
+                arg.as_str(),
+                "--exposure"
+                    | "--fake-timeline"
+                    | "--start-ms"
+                    | "--step-ms"
+                    | "--stall-deadline-ms"
+            )
+    }) {
+        return Err(format!(
+            "unknown connectivity exposure-heartbeat option: {unknown}"
+        ));
+    }
+    let timeline: Vec<bool> = timeline_raw
+        .split(',')
+        .map(|token| match token.trim() {
+            "true" | "1" | "up" => Ok(true),
+            "false" | "0" | "down" => Ok(false),
+            other => Err(format!("invalid --fake-timeline token: {other}")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if timeline.is_empty() {
+        return Err("--fake-timeline must list at least one reachable flag".to_string());
+    }
+
+    let state = state(parsed)?;
+    let exposure = connectivity_exposure(&state, &exposure_id)?;
+    if exposure.status == "revoked" {
+        return Err(format!(
+            "connectivity exposure is revoked; no heartbeat: {exposure_id}"
+        ));
+    }
+
+    // The heartbeat probes the tunnel surface only. The scripted FakeTunnel carries
+    // the SAME surface the live Tailscale adapter does (CT4 parity).
+    let tunnel = ConnectivityTunnel::fake_scripted(
+        FakeTunnelScript::private_matching(
+            exposure.connectivity_endpoint_id.clone(),
+            "ct5-heartbeat",
+        )
+        .with_health_timeline(timeline.clone()),
+    );
+    let clock = ConnectivityClock::manual(start_ms);
+    let mut monitor = HeartbeatMonitor::new(
+        tunnel,
+        clock.clone(),
+        HeartbeatConfig::new(step_ms, stall_ms),
+    );
+
+    let mut current = exposure.clone();
+    let mut transitions: Vec<String> = Vec::new();
+    let mut last_sequence: Option<i64> = None;
+    // The latest probe instant, including Steady beats. Reported as `last_probe_at`,
+    // distinct from the PERSISTED `last_heartbeat_at` below.
+    let mut last_probe_at = current.last_heartbeat_at.clone();
+    for beat_index in 0..timeline.len() {
+        if beat_index > 0 {
+            clock.advance(step_ms);
+        }
+        let outcome = monitor.beat();
+        last_probe_at = Some(outcome.last_heartbeat_at.clone());
+        // A transition (Initial / Lost / Reconnected / Stalled) emits a single
+        // `connectivity.health_changed` event that persists the updated projection
+        // (including `last_heartbeat_at`). A `Steady` beat emits NO event — no
+        // spurious health_changed on an unchanged tunnel — and, crucially, does NOT
+        // mutate the in-memory `current` projection either, so the value this command
+        // reports for `last_heartbeat_at` is exactly the PERSISTED value that
+        // `exposure-status`/`exposure-evidence` read back (both surfaces agree on the
+        // last TRANSITION beat). Per knowledge.md, `last_heartbeat_at` is the
+        // event-sourced last-transition instant; `last_probe_at` (below) carries the
+        // latest probe including Steady beats for liveness without breaking
+        // replay-stability (a projection-only Steady write would have no backing
+        // event and would not rebuild on replay).
+        // (The first beat is always `Initial`, so the projection always carries a
+        // heartbeat instant after the loop.)
+        if outcome.transition.is_event() {
+            current = ConnectivityExposureProjection {
+                health_status: outcome.health.status.clone(),
+                reachable: outcome.reachable,
+                last_heartbeat_at: Some(outcome.last_heartbeat_at.clone()),
+                updated_sequence: 0,
+                ..current.clone()
+            };
+            let sequence = append_health_changed(&state, &current, &outcome)?;
+            last_sequence = Some(sequence);
+            transitions.push(format!(
+                "{}@{}",
+                outcome.transition.detail(),
+                outcome.last_heartbeat_at
+            ));
+        }
+    }
+
+    Ok(format!(
+        "connectivity_exposure_heartbeat=true\nexposure={}\nendpoint={}\nbeats={}\nhealth={}\nreachable={}\nlast_heartbeat_at={}\nlast_probe_at={}\ntransitions={}\nlast_sequence={}\n",
+        current.exposure_id,
+        current.connectivity_endpoint_id,
+        timeline.len(),
+        current.health_status,
+        current.reachable,
+        current.last_heartbeat_at.as_deref().unwrap_or("none"),
+        last_probe_at.as_deref().unwrap_or("none"),
+        if transitions.is_empty() {
+            "none".to_string()
+        } else {
+            transitions.join(",")
+        },
+        last_sequence
+            .map(|sequence| sequence.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    ))
+}
+
+/// CT5: append a `connectivity.health_changed` event for a single health
+/// TRANSITION and write the updated exposure projection. The payload carries the
+/// endpoint/exposure/health/transition-detail and the heartbeat instant — NO secret
+/// — and is scanned by the CT2 emitted-surface guard before persistence.
+fn append_health_changed(
+    state: &SqliteStateStore,
+    exposure: &ConnectivityExposureProjection,
+    outcome: &capo_runtime::HeartbeatOutcome,
+) -> Result<i64, String> {
+    let mut event = NewEvent::new(
+        format!(
+            "event-connectivity-health-{}-{}",
+            stable_cli_hash(&exposure.exposure_id),
+            stable_cli_hash(&outcome.last_heartbeat_at)
+        ),
+        EventKind::ConnectivityHealthChanged,
+        "capo-cli",
+    );
+    event.project_id = Some(exposure.project_id.clone());
+    event.item_id = Some(exposure.exposure_id.clone());
+    event.payload_json = format!(
+        "{{\"exposure_id\":\"{}\",\"endpoint_id\":\"{}\",\"exposure\":\"{}\",\"health_status\":\"{}\",\"reachable\":{},\"transition\":\"{}\",\"reconnected\":{},\"last_heartbeat_at\":\"{}\"}}",
+        escape_json(&exposure.exposure_id),
+        escape_json(&exposure.connectivity_endpoint_id),
+        escape_json(&exposure.exposure),
+        escape_json(&outcome.health.status),
+        outcome.reachable,
+        outcome.transition.detail(),
+        matches!(outcome.transition, HealthTransition::Reconnected),
+        escape_json(&outcome.last_heartbeat_at),
+    );
+    // Idempotency keyed by exposure + heartbeat instant + transition so replaying
+    // the same clock timeline rebuilds an identical event/projection timeline.
+    event.idempotency_key = Some(format!(
+        "connectivity-health-changed:{}:{}:{}",
+        exposure.exposure_id,
+        outcome.last_heartbeat_at,
+        outcome.transition.detail()
+    ));
+    if let Err(pattern) = capo_state::assert_connectivity_event_safe(&event.payload_json) {
+        return Err(format!(
+            "connectivity health event payload marked Safe but leaked a `{pattern}` credential pattern; refusing to persist"
+        ));
+    }
+    event.redaction_state = RedactionState::Safe;
+    state
+        .append_event(
+            event,
+            &[ProjectionRecord::ConnectivityExposure(exposure.clone())],
+        )
+        .map_err(debug_error)
+}
+
 pub(crate) fn revoke_connectivity_exposure(
     parsed: &ParsedArgs,
     args: &[String],
@@ -745,7 +952,7 @@ pub(crate) fn connectivity_exposure_status(
 
 fn render_connectivity_exposure_status(exposure: &ConnectivityExposureProjection) -> String {
     format!(
-        "connectivity_exposure_status=true\nexposure={}\nendpoint={}\nowner={}:{}\nchannel={}\nexposure_scope={}\npermission_scope={}\nstatus={}\ngrant={}\nhealth={}\nreachable={}\nrevoked_at={}\nupdated_sequence={}\n",
+        "connectivity_exposure_status=true\nexposure={}\nendpoint={}\nowner={}:{}\nchannel={}\nexposure_scope={}\npermission_scope={}\nstatus={}\ngrant={}\nhealth={}\nreachable={}\nlast_heartbeat_at={}\nrevoked_at={}\nupdated_sequence={}\n",
         exposure.exposure_id,
         exposure.connectivity_endpoint_id,
         exposure.owner_kind,
@@ -757,6 +964,7 @@ fn render_connectivity_exposure_status(exposure: &ConnectivityExposureProjection
         exposure.capability_grant_id.as_deref().unwrap_or("none"),
         exposure.health_status,
         exposure.reachable,
+        exposure.last_heartbeat_at.as_deref().unwrap_or("none"),
         exposure.revoked_at.as_deref().unwrap_or("none"),
         exposure.updated_sequence
     )

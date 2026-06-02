@@ -4179,6 +4179,7 @@ fn dashboard_renders_connectivity_exposure_state() {
                     identity_ref: None,
                     identity_fingerprint: None,
                     expires_at: None,
+                    last_heartbeat_at: None,
                     updated_sequence: 0,
                 },
             )],
@@ -5659,6 +5660,271 @@ fn connectivity_exposure_approval_activates_only_with_matching_grant() {
     assert!(dashboard.contains("project_evidence=2"));
     assert!(dashboard.contains("kind=runtime_target_readiness_evidence"));
     assert!(dashboard.contains("kind=connectivity_exposure_evidence"));
+}
+
+/// CT5: the `exposure-heartbeat` command drives the health timeline through the
+/// tunnel surface with an INJECTABLE clock (advanced by `--step-ms` per beat, never
+/// a wall-clock sleep), emits ordered `connectivity.health_changed` transitions,
+/// stamps `last_heartbeat_at`, and surfaces it on `exposure-status`. Reachable ->
+/// unreachable -> reconnected.
+#[test]
+fn ct5_exposure_heartbeat_emits_ordered_transitions_and_stamps_last_heartbeat() {
+    let state_root = temp_root("cli-ct5-heartbeat");
+    run_cli(vec![
+        "runtime".to_string(),
+        "target".to_string(),
+        "register".to_string(),
+        "--target".to_string(),
+        "remote-target-ct5".to_string(),
+        "--name".to_string(),
+        "remote target ct5".to_string(),
+        "--runner".to_string(),
+        "remote-process".to_string(),
+        "--workspace".to_string(),
+        "/tmp/capo-ct5-workspace".to_string(),
+        "--artifacts".to_string(),
+        "/tmp/capo-ct5-artifacts".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct5-1".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("register runtime target");
+
+    let planned = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct5-1".to_string(),
+        "--owner-kind".to_string(),
+        "runtime_target".to_string(),
+        "--owner-id".to_string(),
+        "remote-target-ct5".to_string(),
+        "--channel".to_string(),
+        "control".to_string(),
+        "--exposure".to_string(),
+        "private".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("record private exposure");
+    let exposure_id = output_value(&planned, "exposure");
+
+    // CT5 health is computed from the tunnel surface only and does NOT require the
+    // exposure to be active; drive the heartbeat directly on the recorded exposure.
+    let heartbeat = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-heartbeat".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--fake-timeline".to_string(),
+        "true,false,true".to_string(),
+        "--start-ms".to_string(),
+        "0".to_string(),
+        "--step-ms".to_string(),
+        "15000".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("run heartbeat");
+    assert!(heartbeat.contains("connectivity_exposure_heartbeat=true"));
+    assert!(heartbeat.contains("beats=3"));
+    // Ordered transitions: initial (reachable) -> lost -> reconnected, each stamped
+    // with the injectable-clock heartbeat instant.
+    assert!(
+        heartbeat.contains(
+            "transitions=initial@heartbeat-ms:0,lost@heartbeat-ms:15000,reconnected@heartbeat-ms:30000"
+        ),
+        "heartbeat output: {heartbeat}"
+    );
+    // The final beat is reachable (reconnected) at the last instant.
+    assert!(heartbeat.contains("health=available"));
+    assert!(heartbeat.contains("reachable=true"));
+    assert!(heartbeat.contains("last_heartbeat_at=heartbeat-ms:30000"));
+
+    // exposure-status surfaces the persisted heartbeat instant.
+    let status = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-status".to_string(),
+        "--exposure".to_string(),
+        exposure_id,
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("exposure status");
+    assert!(status.contains("last_heartbeat_at=heartbeat-ms:30000"));
+}
+
+/// CT5: a stalled heartbeat past its deadline is a HEALTH TRANSITION to
+/// unreachable, proven by ADVANCING the injectable clock past the deadline — never a
+/// wall-clock hang. A reachable probe still counts as stalled when the gap since the
+/// last good beat exceeds the deadline.
+#[test]
+fn ct5_exposure_heartbeat_stall_past_deadline_is_a_transition() {
+    let state_root = temp_root("cli-ct5-stall");
+    run_cli(vec![
+        "runtime".to_string(),
+        "target".to_string(),
+        "register".to_string(),
+        "--target".to_string(),
+        "remote-target-stall".to_string(),
+        "--name".to_string(),
+        "remote target stall".to_string(),
+        "--runner".to_string(),
+        "remote-process".to_string(),
+        "--workspace".to_string(),
+        "/tmp/capo-stall-workspace".to_string(),
+        "--artifacts".to_string(),
+        "/tmp/capo-stall-artifacts".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-stall-1".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("register runtime target");
+    let planned = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-stall-1".to_string(),
+        "--owner-kind".to_string(),
+        "runtime_target".to_string(),
+        "--owner-id".to_string(),
+        "remote-target-stall".to_string(),
+        "--channel".to_string(),
+        "control".to_string(),
+        "--exposure".to_string(),
+        "private".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("record private exposure");
+    let exposure_id = output_value(&planned, "exposure");
+
+    // Two ALWAYS-reachable beats, but the clock jumps 60s between them past a 30s
+    // stall deadline: the second beat is a `stalled` transition to unreachable.
+    let heartbeat = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-heartbeat".to_string(),
+        "--exposure".to_string(),
+        exposure_id,
+        "--fake-timeline".to_string(),
+        "true,true".to_string(),
+        "--step-ms".to_string(),
+        "60000".to_string(),
+        "--stall-deadline-ms".to_string(),
+        "30000".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("run stalling heartbeat");
+    assert!(heartbeat.contains("beats=2"));
+    assert!(
+        heartbeat.contains("stalled@heartbeat-ms:60000"),
+        "{heartbeat}"
+    );
+    assert!(heartbeat.contains("health=unreachable"));
+    assert!(heartbeat.contains("reachable=false"));
+}
+
+/// CT5 (review fix #4): with a Steady tail, the `last_heartbeat_at` the
+/// heartbeat command reports MUST equal the value `exposure-status` reads back.
+/// Steady beats emit no event and do not mutate the in-memory projection, so both
+/// surfaces agree on the last TRANSITION instant; the latest probe instant is
+/// reported separately as `last_probe_at` (liveness without breaking replay).
+#[test]
+fn ct5_exposure_heartbeat_steady_tail_agrees_with_exposure_status() {
+    let state_root = temp_root("cli-ct5-steady");
+    run_cli(vec![
+        "runtime".to_string(),
+        "target".to_string(),
+        "register".to_string(),
+        "--target".to_string(),
+        "remote-target-steady".to_string(),
+        "--name".to_string(),
+        "remote target steady".to_string(),
+        "--runner".to_string(),
+        "remote-process".to_string(),
+        "--workspace".to_string(),
+        "/tmp/capo-steady-workspace".to_string(),
+        "--artifacts".to_string(),
+        "/tmp/capo-steady-artifacts".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-steady-1".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("register runtime target");
+    let planned = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-steady-1".to_string(),
+        "--owner-kind".to_string(),
+        "runtime_target".to_string(),
+        "--owner-id".to_string(),
+        "remote-target-steady".to_string(),
+        "--channel".to_string(),
+        "control".to_string(),
+        "--exposure".to_string(),
+        "private".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("record private exposure");
+    let exposure_id = output_value(&planned, "exposure");
+
+    // true,true,true -> Initial (heartbeat-ms:0) then Steady, Steady (no events).
+    let heartbeat = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-heartbeat".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--fake-timeline".to_string(),
+        "true,true,true".to_string(),
+        "--start-ms".to_string(),
+        "0".to_string(),
+        "--step-ms".to_string(),
+        "15000".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("run heartbeat");
+    assert!(heartbeat.contains("beats=3"));
+    // Only the Initial transition emitted; last_heartbeat_at is the PERSISTED
+    // transition instant (heartbeat-ms:0), while last_probe_at tracks the latest
+    // beat (heartbeat-ms:30000).
+    assert!(
+        heartbeat.contains("transitions=initial@heartbeat-ms:0"),
+        "{heartbeat}"
+    );
+    assert!(
+        heartbeat.contains("last_heartbeat_at=heartbeat-ms:0"),
+        "{heartbeat}"
+    );
+    assert!(
+        heartbeat.contains("last_probe_at=heartbeat-ms:30000"),
+        "{heartbeat}"
+    );
+
+    // exposure-status reads the persisted value — it MUST equal the command's
+    // reported last_heartbeat_at (both the last TRANSITION instant).
+    let status = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-status".to_string(),
+        "--exposure".to_string(),
+        exposure_id,
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("exposure status");
+    assert!(
+        status.contains("last_heartbeat_at=heartbeat-ms:0"),
+        "exposure-status must agree with the heartbeat command: {status}"
+    );
 }
 
 #[test]

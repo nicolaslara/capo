@@ -587,7 +587,7 @@ impl SqliteStateStore {
             "SELECT exposure_id, project_id, connectivity_endpoint_id, owner_kind, owner_id,
                     channel_kind, exposure, permission_scope, status, capability_grant_id,
                     health_status, reachable, revoked_at, auth_ref, identity_ref,
-                    identity_fingerprint, expires_at, updated_sequence
+                    identity_fingerprint, expires_at, last_heartbeat_at, updated_sequence
              FROM connectivity_exposures
              WHERE project_id = ?1
              ORDER BY updated_sequence ASC, exposure_id ASC",
@@ -611,7 +611,8 @@ impl SqliteStateStore {
                 identity_ref: row.get(14)?,
                 identity_fingerprint: row.get(15)?,
                 expires_at: row.get(16)?,
-                updated_sequence: row.get(17)?,
+                last_heartbeat_at: row.get(17)?,
+                updated_sequence: row.get(18)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()

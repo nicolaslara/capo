@@ -261,6 +261,32 @@ implement it coherently so the enum stays exhaustive.
   wall-clock sleep. The owning crate/module is NAMED in CT5 (the same lifecycle
   home as the anti-sleep inhibitor), not left as an open question — CT5 is not
   testable otherwise.
+- RESOLVED (CT5): the owning module is `capo-runtime::connectivity_health`
+  (`crates/capo-runtime/src/connectivity_health.rs`) — a LEAF module that depends
+  ONLY on the `ConnectivityTunnel` surface (`check_reachability`) and the injectable
+  clock. It deliberately does NOT depend on the controller, any run/session/turn
+  read model, a state store, or `RuntimeRunner`, so connectivity health stays a
+  separate boundary. The CT6 anti-sleep inhibitor will share this lifecycle home.
+  The injectable clock is `ConnectivityClock` (a manual logical-ms clock for tests,
+  a real monotonic clock for the live path); `HeartbeatMonitor::beat()` is a pure
+  function of (tunnel, clock, config) returning a `HeartbeatOutcome` whose
+  `HealthTransition` (`Initial`/`Steady`/`Lost`/`Reconnected`/`Stalled`) the
+  CLI/state layer maps to a `connectivity.health_changed` event. Event emission +
+  projection writes stay in the CLI/state layer (`connectivity_exposure_heartbeat`);
+  the monitor emits/persists nothing.
+- RESOLVED (CT5): a RECONNECT reuses `connectivity.health_changed` with a
+  `reconnected` detail (a `transition` field in the payload), NOT a dedicated event
+  kind — audit/replay needs only the detail. A stall past the deadline is a
+  `stalled` transition (also `health_changed`), surfaced by advancing the clock.
+- RESOLVED (CT5): heartbeat cadence + stall deadline are bounded config
+  (`HeartbeatConfig`, default cadence 15s / stall deadline 45s = 3 missed beats),
+  both clamped away from zero so the cadence cannot busy-loop and the deadline
+  cannot trip every beat. Per-endpoint configurability is exposed via the
+  `exposure-heartbeat --step-ms/--stall-deadline-ms` flags.
+- `last_heartbeat_at` is a bare LOGICAL instant LABEL (`heartbeat-ms:<logical-ms>`)
+  derived from the injectable clock, added to `ConnectivityExposureProjection`
+  (carried in the projection `payload_json`, nullable column + back-fill migration),
+  round-trip + restart-replay stable. It is never a credential.
 - Health is computed from the tunnel surface ONLY; it must never read or mutate
   controller/run/turn state — separation of boundaries is a first-class acceptance
   criterion.
@@ -347,13 +373,12 @@ evidence.
   CLI first for portability, LocalAPI if the CLI proves too coarse for
   device-identity verification.) Resolved enough to build the SCRIPTED source now;
   the live choice is pinned at CT3/CT10.
-- Should `connectivity.reconnected` be a dedicated event kind, or is a
-  `connectivity.health_changed` transition with a `reconnected` detail sufficient
-  for replay/audit? (Lean: reuse `health_changed` unless audit needs a distinct
-  kind.)
-- What is the right heartbeat cadence + stall deadline for a tailnet endpoint, and
-  should it be per-endpoint configurable? (Cadence is configurable + bounded per
-  CT5; exact defaults pinned at CT5.)
+- RESOLVED (CT5): `connectivity.reconnected` is NOT a dedicated event kind — a
+  `connectivity.health_changed` transition with a `reconnected` detail is sufficient
+  for replay/audit.
+- RESOLVED (CT5): heartbeat cadence default 15s, stall deadline default 45s (3
+  missed beats), both bounded away from zero; per-endpoint configurable via the
+  `exposure-heartbeat --step-ms`/`--stall-deadline-ms` flags.
 - What is the maximum allowed `expires_at` ceiling for a (gated) short-lived public
   exposure? (Mechanism is RESOLVED — the CT5 heartbeat/clock tick is the sweep; only
   the numeric ceiling remains, pinned at CT8.)
