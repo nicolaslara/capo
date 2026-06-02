@@ -33,6 +33,11 @@ pub mod connectivity_health;
 /// `connectivity_health` heartbeat into the two-plane policy and is gated so the
 /// all-local default constructs neither plane.
 pub mod keep_alive;
+/// DT3: remote runner attach over the tunnel — the DT1/DT3 seam that resolves the
+/// runner's runtime endpoint through a `ConnectivityTunnel` and binds the opened
+/// reachability channel to a `RemoteProcessRunner`, so the server drives a remote
+/// process group through the existing `RuntimeRunner` boundary (no loop change).
+pub mod remote_attach;
 mod sandbox;
 mod worktree;
 
@@ -45,6 +50,7 @@ pub use keep_alive::{
     ClientServerPlane, HealthPlanes, HealthState, KeepAliveConfig, LegEndpoint, RunnerBeat,
     RunnerHealthEvent, RunnerServerPlane, runner_health_event_is_clean,
 };
+pub use remote_attach::RemoteRunnerAttach;
 
 pub use async_runner::{
     AsyncLocalProcessRunner, AsyncRunningProcess, StreamSource, StreamingOutcome,
@@ -12487,4 +12493,171 @@ mod tests {
     /// RR8: serialize the tests that read/mutate the RR8 gate env vars so they do
     /// not race under `--include-ignored` parallel execution.
     static RR8_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // ---------------------------------------------------------------------------
+    // DT3: remote runner attach over the tunnel.
+    //
+    // The DT1/DT3 seam: a `RemoteRunnerAttach` resolves the runner runtime endpoint
+    // through a `ConnectivityTunnel` and binds the opened reachability channel to a
+    // `RemoteProcessRunner`, so the server drives a remote process group through the
+    // EXISTING `RuntimeRunner` boundary. Deterministic: `FakeTunnel` resolves at
+    // loopback exposure (no grant needed) and the transport is a `FakeRemoteChannel`
+    // (NO network). The runner-side redaction-before-transit pass is exercised here
+    // (the leg Capo controls); the server-side egress backstop is asserted from the
+    // `capo-server` DT3 tests (a distinct seam).
+    // ---------------------------------------------------------------------------
+
+    /// DT3 helper: build a `RemoteRunnerAttach` over a fake tunnel, binding a
+    /// `FakeRemoteChannel` transport (optionally scripted) keyed to the opened
+    /// channel's identity. No network, no real SSH.
+    fn dt3_attach_with_boot(
+        name: &str,
+        script: impl FnOnce(FakeRemoteChannel) -> FakeRemoteChannel,
+    ) -> (RemoteRunnerAttach, PathBuf, String) {
+        let root = temp_root(name);
+        let workspace = root.join("workspace");
+        let artifacts = root.join("artifacts");
+        fs::create_dir_all(&workspace).unwrap();
+        let tunnel = ConnectivityTunnel::fake();
+        let owner = EndpointOwner::runtime_target(format!("runner-{name}"));
+        let recorded_boot = std::cell::RefCell::new(String::new());
+        let attach = RemoteRunnerAttach::resolve(&tunnel, owner, ChannelKind::Stdio, |channel| {
+            // The transport is bound to the channel the TUNNEL opened — identity is
+            // the channel handle, never a raw address/credential.
+            let base = FakeRemoteChannel::from_open_channel(channel, workspace.clone(), artifacts);
+            *recorded_boot.borrow_mut() = base.remote_boot_id();
+            RemoteChannel::Fake(script(base))
+        })
+        .expect("fake tunnel resolves a loopback attach without a grant");
+        (attach, workspace, recorded_boot.into_inner())
+    }
+
+    fn dt3_attach(
+        name: &str,
+        script: impl FnOnce(FakeRemoteChannel) -> FakeRemoteChannel,
+    ) -> (RemoteRunnerAttach, PathBuf) {
+        let (attach, workspace, _boot) = dt3_attach_with_boot(name, script);
+        (attach, workspace)
+    }
+
+    #[test]
+    fn dt3_server_drives_remote_process_through_tunnel_resolved_runner() {
+        // A turn dispatched to the remote runner records the append-first start
+        // sequence (`start_requested` -> `remote_process_started`), streams output
+        // back, and finalizes — proving the server drives a remote process through
+        // the existing loop with no loop change. The runner is built by RESOLVING the
+        // endpoint over the tunnel (the DT1/DT3 seam), not a direct config.
+        let (attach, workspace) = dt3_attach("dt3-drive", |c| {
+            c.with_streamed_output(b"hello remote".to_vec())
+        });
+        assert!(
+            attach.is_loopback(),
+            "the deterministic attach must be honest about riding a loopback transport"
+        );
+        let outcome = attach
+            .runner()
+            .start_process(remote_request("dt3-drive", workspace, "printf hello"))
+            .expect("remote start over the tunnel-resolved runner");
+
+        let kinds: Vec<&str> = outcome.events.iter().map(|e| e.kind.as_str()).collect();
+        let req_idx = kinds
+            .iter()
+            .position(|k| *k == "runtime.remote_start_requested")
+            .expect("start_requested present");
+        let started_idx = kinds
+            .iter()
+            .position(|k| *k == "runtime.remote_process_started")
+            .expect("remote_process_started present");
+        assert!(
+            req_idx < started_idx,
+            "append-first: start_requested must precede remote_process_started: {kinds:?}"
+        );
+
+        // Stream output back through the existing runner surface and finalize.
+        let stream = attach.runner().stream_output(&outcome.process, 0);
+        assert_eq!(stream.final_reason, RemoteStreamFinalReason::Eof);
+        let streamed: String = stream.deltas.iter().map(|d| d.text.clone()).collect();
+        assert_eq!(streamed, "hello remote");
+        assert!(
+            stream
+                .events
+                .iter()
+                .any(|e| e.kind == "runtime.remote_stream_finalized"),
+            "the stream must finalize with a recorded terminal event"
+        );
+    }
+
+    #[test]
+    fn dt3_remote_start_unattachable_recovers_as_orphan_not_duplicate_run() {
+        // A remote start whose launch leaves an alive-but-unattachable process (the
+        // controller has no clean attach record, e.g. a `process_started` append
+        // never committed) is RECOVERED as `run.orphaned` — never silently relaunched
+        // into a duplicate run.
+        let (attach, workspace, recorded_boot) =
+            dt3_attach_with_boot("dt3-orphan", |c| c.recover_alive_unattachable());
+        let outcome = attach
+            .runner()
+            .start_process(remote_request("dt3-orphan", workspace, "printf ok"))
+            .expect("remote start");
+        let running = LocalRuntimeProcessRef {
+            status: "running".to_string(),
+            ..outcome.process
+        };
+
+        let recovery = attach.runner().recover_run(&running, &recorded_boot);
+        assert_eq!(
+            recovery.classification,
+            RemoteRecoveryClassification::Orphaned
+        );
+        let kinds: Vec<&str> = recovery.events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "runtime.remote_recovery_attempted",
+                "runtime.remote_run_orphaned"
+            ],
+            "an unattachable remote recovers as a single orphan, not a relaunch: {kinds:?}"
+        );
+        assert!(
+            !recovery
+                .events
+                .iter()
+                .any(|e| e.kind == "runtime.remote_process_started"),
+            "orphan recovery must NOT spawn a duplicate remote process"
+        );
+    }
+
+    #[test]
+    fn dt3_runner_side_redaction_scrubs_secret_before_it_crosses_the_tunnel() {
+        // The leg Capo controls: a seeded secret in remote output is scrubbed by the
+        // RUNNER-SIDE redaction pass BEFORE the delta becomes an event/artifact that
+        // crosses the (fake) tunnel. The server-side egress backstop (the SECOND,
+        // distinct seam) is asserted from the `capo-server` DT3 test.
+        let secret = "AKIAIOSFODNN7EXAMPLE";
+        let raw = format!("starting run\nleaked={secret}\ndone");
+        let (attach, workspace) = dt3_attach("dt3-redact", move |c| {
+            c.with_streamed_output(raw.into_bytes())
+        });
+        let outcome = attach
+            .runner()
+            .start_process(remote_request("dt3-redact", workspace, "printf x"))
+            .expect("remote start");
+
+        let stream = attach.runner().stream_output(&outcome.process, 0);
+        let forwarded: String = stream.deltas.iter().map(|d| d.text.clone()).collect();
+        assert!(
+            !forwarded.contains(secret),
+            "the runner-side pass must scrub the secret before transit: {forwarded:?}"
+        );
+        assert!(
+            forwarded.contains(CREDENTIAL_REDACTION_PLACEHOLDER),
+            "the redacted delta records that a credential-shaped token was scrubbed"
+        );
+        assert_eq!(
+            stream.redaction_state, "redacted",
+            "the stream outcome must record that redaction occurred on the runner leg"
+        );
+        // The non-secret content survives — redaction is surgical, not a blanket drop.
+        assert!(forwarded.contains("starting run") && forwarded.contains("done"));
+    }
 }

@@ -358,9 +358,13 @@ pub(crate) fn server_recover(parsed: &ParsedArgs, args: &[String]) -> Result<Str
 /// over the existing JSON-RPC command transport and return the server's typed
 /// response. The runner is "a special client that owns processes": it reuses
 /// `send_tcp` (no second bridge), and the SERVER -- the single writer -- appends
-/// `runtime.target_registered`. `connect_addr` is the resolved (loopback or
-/// DT5-granted-tunnel) control address; it is loopback-validated here exactly
-/// like every other client dial.
+/// `runtime.target_registered`. `connect_addr` is the resolved control address.
+/// For DT3, ONLY loopback is permitted here: `require_loopback_address` rejects
+/// any non-loopback address unconditionally, exactly like every other client
+/// dial. This is an INTENTIONAL DT3 limitation, NOT a promise that a tunnel
+/// address would pass here -- when DT5 grants a non-loopback tunnel, this check
+/// MUST be relaxed to allow the tunnel-local termination address (and only then).
+/// Do not cargo-cult this as "loopback-or-tunnel": today it is loopback-only.
 ///
 /// The announce REQUIRES a live server over the real transport. There is NO
 /// in-process fallback (review finding 1): the DT-D1 semantic is "the runner

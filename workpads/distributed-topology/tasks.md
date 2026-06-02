@@ -611,7 +611,37 @@ sequence, `last_heartbeat_at`), `streaming-transport` (subscription liveness).
 
 ## DT3 - Remote Runner Attach Over The Tunnel (runner on a different device)
 
-Status: pending.
+Status: done. The DT1/DT3 seam landed as `RemoteRunnerAttach`
+(`crates/capo-runtime/src/remote_attach.rs`): it resolves the runner's runtime
+endpoint via `ConnectivityTunnel::resolve_endpoint` + `open_channel` and binds the
+opened reachability channel to a `RemoteProcessRunner`, so the server drives a
+remote process group through the EXISTING `RuntimeRunner` boundary -- no loop
+change, no new transport protocol. The transport is INJECTED (deterministic suite
+binds `FakeRemoteChannel`; the live DT7 path binds RR8's `SshRemoteChannel`), so
+reachability resolution (connectivity boundary) stays separate from execution
+(runner owns the process group), closing the gap that RR8 used a DIRECT
+`SshRemoteConfig` rather than a tunnel-resolved channel. A resolution that requires
+permission propagates the tunnel's typed error, so a non-loopback attach is
+`blocked_pending_permission` until the DT5 grant (never a silent open). The
+append-first start sequence (`runtime.remote_start_requested` ->
+`runtime.remote_process_started`), orphan-on-unattachable recovery
+(`runtime.remote_run_orphaned`, never a relaunch), interrupt/terminate reaping, and
+identity-by-handle proof are the in-tree RR8 surfaces, reused unchanged. The
+runner-side redaction-before-transit pass is the existing
+`RemoteProcessRunner::stream_output` (it redacts each delta BEFORE it becomes an
+event/artifact, on the leg Capo controls); the server-side egress backstop
+(`ServerEvent::from_record` -> `redacted_for_egress`) is a DISTINCT second seam for
+the client tail; runner->server wire confidentiality is documented as a TRANSPORT
+property (SSH/Tailscale encryption), not a Capo redaction property. Tests:
+`crates/capo-runtime/src/lib.rs` `dt3_server_drives_remote_process_through_tunnel_resolved_runner`,
+`dt3_remote_start_unattachable_recovers_as_orphan_not_duplicate_run`, and
+`dt3_runner_side_redaction_scrubs_secret_before_it_crosses_the_tunnel`; plus
+`crates/capo-server/src/tests/dt3.rs`
+`server_drives_remote_process_through_tunnel_resolved_runner` and
+`dt3_two_redaction_seams_both_hold_runner_side_and_server_egress` (the two distinct
+seams asserted separately from the server crate). All deterministic over
+`FakeTunnel` + `FakeRemoteChannel`, no network. Residual: the actual non-loopback
+dial riding the DT5-granted tunnel (DT5); the buffered-event runner spool (DT4b).
 
 Prerequisite: DT-pre-B (`SshRemoteProcessRunner` real transport + runner-side
 spawn) + DT1.

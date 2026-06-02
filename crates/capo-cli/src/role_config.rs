@@ -527,7 +527,18 @@ fn announce_address(args: &[String], server: &ResolvedRolePeer) -> Result<String
         )),
         (Some(addr), _) => Ok(addr),
         (None, true) => Ok(server.endpoint_ref.clone()),
-        (None, false) => Ok(default_loopback_addr()),
+        // A non-loopback peer has no dialable loopback default: the resolved URI is
+        // a tunnel handle, not a socket address. Silently falling back to
+        // `127.0.0.1:7878` (review finding 5) would make the runner dial the WRONG
+        // address (or be hard-refused by the loopback-only `require_loopback_address`
+        // guard with a confusing error). Refuse loudly: `--connect <tunnel-local-dial>`
+        // is REQUIRED for a non-loopback tunnel dial. (In DT3 this arm is also guarded
+        // upstream by the `blocked_pending_permission` reachability check, but the
+        // refusal is asserted here so the seam cannot regress when DT5 relaxes that.)
+        (None, false) => Err(format!(
+            "runner: server endpoint {} is a non-loopback tunnel (exposure={}); --connect <tunnel-local-dial> is required for a non-loopback dial (there is no loopback default to fall back to)",
+            server.endpoint_ref, server.exposure
+        )),
     }
 }
 
@@ -771,6 +782,61 @@ mod tests {
             .expect("a non-loopback runner leg builds a keep-alive config");
         assert_eq!(config.runner_leg, capo_runtime::LegEndpoint::NonLoopback);
         assert_eq!(config.client_leg, capo_runtime::LegEndpoint::Loopback);
+    }
+
+    #[test]
+    fn announce_address_for_loopback_peer_defaults_to_resolved_address() {
+        // A loopback peer with no --connect dials its resolved address.
+        let peer = resolve_for(
+            &PeerEndpoint::Loopback("127.0.0.1:7878".to_string()),
+            ExposureScope::Loopback,
+            EndpointOwner::capo_server("server"),
+            ChannelKind::Control,
+        )
+        .expect("resolve loopback");
+        let addr = announce_address(&[], &peer).expect("loopback announce address");
+        assert_eq!(addr, "127.0.0.1:7878");
+    }
+
+    #[test]
+    fn announce_address_for_non_loopback_peer_without_connect_is_rejected() {
+        // Review finding 5: a non-loopback (private/public) peer has no dialable
+        // loopback default. Without --connect the config must be REFUSED loudly,
+        // never silently defaulting to 127.0.0.1:7878 (which would dial the wrong
+        // address or be hard-refused by the loopback-only announce guard).
+        let peer = resolve_for(
+            &PeerEndpoint::Endpoint("ep-private".to_string()),
+            ExposureScope::Private,
+            EndpointOwner::capo_server("server"),
+            ChannelKind::Control,
+        )
+        .expect("resolve private");
+        let error = announce_address(&[], &peer)
+            .expect_err("a non-loopback peer without --connect must be refused");
+        assert!(
+            error.contains("--connect") && error.contains("non-loopback"),
+            "the refusal must name --connect as required for a non-loopback dial: {error}"
+        );
+        assert!(
+            !error.contains("127.0.0.1:7878"),
+            "the refusal must NOT have silently produced the loopback default: {error}"
+        );
+    }
+
+    #[test]
+    fn announce_address_for_non_loopback_peer_with_connect_uses_the_tunnel_dial() {
+        // With --connect supplied, a non-loopback peer dials the tunnel-local
+        // termination address (the DT5 seam) rather than being refused.
+        let peer = resolve_for(
+            &PeerEndpoint::Endpoint("ep-private".to_string()),
+            ExposureScope::Private,
+            EndpointOwner::capo_server("server"),
+            ChannelKind::Control,
+        )
+        .expect("resolve private");
+        let addr = announce_address(&flags(&["--connect", "127.0.0.1:9999"]), &peer)
+            .expect("a --connect tunnel-local dial is accepted for a non-loopback peer");
+        assert_eq!(addr, "127.0.0.1:9999");
     }
 
     #[test]

@@ -22,6 +22,7 @@ mod contract;
 mod controller_routing;
 mod crash_recovery;
 mod dispatch;
+mod dt3;
 mod e2e_gate;
 mod event_tail;
 mod foundation;

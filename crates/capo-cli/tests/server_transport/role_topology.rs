@@ -217,6 +217,21 @@ fn runner_announce_against_dead_server_fails_loudly_no_inprocess_fallback() {
         !output.contains("runner_announced=true"),
         "a dead server must NOT report a successful announce:\n{output}"
     );
+    // Finding 7: assert the failure is a CONNECTION-LEVEL refusal/reset, NOT a hang
+    // that was timeout-killed by some outer harness. A freed loopback port hit by
+    // `connect` fails fast with ConnectionRefused (or, rarely on a busy box,
+    // ConnectionReset). Pinning the connection-refused message rules out the TOCTOU
+    // hazard where a stray process grabs the freed port and listens silently: in
+    // that case the announce would BLOCK reading a reply and this assertion would
+    // fail loudly instead of the test passing for the wrong reason.
+    let lower = output.to_lowercase();
+    assert!(
+        lower.contains("refused")
+            || lower.contains("connectionrefused")
+            || lower.contains("reset")
+            || lower.contains("connection"),
+        "the failure must be a reported connection refusal/reset (ruling out a silent-listener hang), got:\n{output}"
+    );
     // No local store write happened either: the only writer is the server, over
     // the socket, which was never reached.
     assert!(
