@@ -1147,7 +1147,7 @@ fn live_turn_wall_clock_timeout_kills_the_process_group_and_aborts_the_run() {
     // REAL local process (a `/bin/sh` codex stub -- NOT Codex, no live-provider env
     // gates) that sleeps far longer than a sub-second wall-clock ceiling through
     // the live dispatch arm (`run_dispatch_turn` -> `RunLiveProviderLocal` ->
-    // `live_provider::execute_codex_live_provider` -> `wait_running_with_timeout`).
+    // `live_provider::execute_live_provider` -> `wait_running_with_timeout`).
     //
     // It asserts BOTH halves of the abort: (1) the process GROUP was hard-killed at
     // the deadline -- proved deterministically because a background descendant that

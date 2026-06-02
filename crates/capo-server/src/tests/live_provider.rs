@@ -662,11 +662,18 @@ fn server_live_provider_run_exit_audit_distinguishes_mock_and_real_metadata() {
     }));
 }
 
+/// CS5 (a): the dispatch executor allow-list now ADMITS `claude_code`. A Claude
+/// dispatch reaches `live_execution_blockers` carrying `adapter_kind ==
+/// "claude_code"` (stamped by the preflight via `adapter_label`) and is no longer
+/// hard-blocked; its mock `stream-json` output ingests into the run's read models
+/// through `parse_adapter_events("claude_code", ..)`. This short-circuits at
+/// `ingest_mock_live_provider_output` BEFORE the spawn arm, so it proves only the
+/// allow-list widening + Claude ingestion, not the spawn arm (see CS5 (b)).
 #[test]
-fn server_live_provider_local_run_blocks_claude_in_first_live_slice() {
+fn server_live_provider_local_run_admits_claude_and_ingests_mock_stream_json() {
     let root = temp_root();
     let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
-    let goal = "Attempt Claude live provider through server";
+    let goal = "Run Claude live provider through server";
     handle(
         &server,
         ServerCommand::RegisterAgent {
@@ -707,16 +714,24 @@ fn server_live_provider_local_run_blocks_claude_in_first_live_slice() {
     let ServerResponsePayload::LiveProviderPreflighted(preflight) = preflight.payload else {
         panic!("expected live provider preflight response");
     };
+    // The plan carries `claude_code`, proving the allow-list is exercised on a
+    // real Claude plan, not a tolerated string.
+    let (plan, _prompt) = server
+        .dispatch_plan_with_prompt(&preflight.dispatch_plan_id)
+        .expect("dispatch plan");
+    assert_eq!(plan.adapter_kind, "claude_code");
+
     let run = handle(
         &server,
         ServerCommand::RunLiveProviderLocal {
             dispatch_plan_id: preflight.dispatch_plan_id,
             goal: goal.to_string(),
-            live_execution_opt_in: true,
+            live_execution_opt_in: false,
             mock_runtime_opt_in: true,
-            mock_provider_output_name: Some("codex-exec.jsonl".to_string()),
+            mock_provider_output_name: Some("claude-code-stream.jsonl".to_string()),
             mock_provider_output_jsonl: Some(
-                include_str!("../../../capo-adapters/fixtures/codex-exec.jsonl").to_string(),
+                include_str!("../../../capo-adapters/fixtures/claude-code-stream.jsonl")
+                    .to_string(),
             ),
             timeout_seconds: 1,
             codex_program_override: None,
@@ -726,11 +741,235 @@ fn server_live_provider_local_run_blocks_claude_in_first_live_slice() {
     let ServerResponsePayload::DispatchRun(run) = run.payload else {
         panic!("expected live run response");
     };
-    assert!(!run.provider_cli_executed);
-    assert_eq!(run.status, "blocked_by_live_provider_execution_gate");
+    // No longer blocked by the first-live-slice allow-list; the Claude
+    // `stream-json` ingested.
     assert!(
+        !run.reason_codes
+            .contains("provider_not_enabled_for_first_live_slice"),
+        "claude_code must be admitted by the live executor allow-list, got: {}",
         run.reason_codes
-            .contains("provider_not_enabled_for_first_live_slice")
+    );
+    assert!(!run.provider_cli_executed);
+    assert_eq!(run.status, "mocked_live_provider_output_ingested");
+    assert!(
+        run.input_event_count >= 1,
+        "Claude stream-json must ingest normalized events"
+    );
+
+    let dashboard = server.dashboard_snapshot().expect("dashboard");
+    let session = dashboard.agents[0].session.as_ref().expect("session");
+    assert_eq!(
+        session.dispatch_execution_status.as_deref(),
+        Some("mocked_live_provider_output_ingested")
+    );
+    assert_eq!(session.run_status.as_deref(), Some("exited"));
+}
+
+/// CS5 (b): the unblocked SPAWN ARM, driven through an absolute-path Claude stub
+/// via the new `claude_program_override`/`CAPO_CLAUDE_BIN` seam. This is the test
+/// that actually proves the executor unblock through the spawn arm (the mock path
+/// short-circuits before it). With the caller opt-in + a `LiveWrite` write mode,
+/// the run builds `ClaudeCodeAdapter::local_workspace_write_launch_plan`, swaps in
+/// the stub program, confines + checkpoints, spawns, scans, and ingests the
+/// stub's `stream-json` through `apply_normalized_adapter_events_with_turn`.
+#[cfg(unix)]
+#[test]
+fn server_live_provider_claude_spawn_arm_ingests_stub_stream_json_through_override() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use crate::live_provider::LiveProviderLocalRunRequest;
+    use crate::safety_floor::WriteMode;
+
+    let root = temp_root();
+    let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
+    let goal = "Apply a confined Claude workspace-write edit live".to_string();
+
+    let workspace = root.join("workspace");
+    let artifacts = root.join("artifacts");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("seed.txt"), b"seed\n").expect("seed");
+    let workspace_str = workspace.to_string_lossy().to_string();
+    let artifacts_str = artifacts.to_string_lossy().to_string();
+
+    handle(
+        &server,
+        ServerCommand::RegisterAgent {
+            name: "claude-local".to_string(),
+            adapter: "fake".to_string(),
+        },
+    );
+    handle(
+        &server,
+        ServerCommand::StartSession {
+            agent_name: "claude-local".to_string(),
+            goal: goal.clone(),
+            adapter: "claude".to_string(),
+            session_id: Some("session-claude-spawn".to_string()),
+            run_id: Some("run-claude-spawn".to_string()),
+        },
+    );
+    let preflight = handle(
+        &server,
+        ServerCommand::PreflightLiveProvider {
+            agent_name: "claude-local".to_string(),
+            adapter: "claude".to_string(),
+            goal: goal.clone(),
+            workspace: workspace_str.clone(),
+            artifacts: artifacts_str.clone(),
+            session_id: "session-claude-spawn".to_string(),
+            run_id: "run-claude-spawn".to_string(),
+            turn_id: "turn-claude-spawn".to_string(),
+            capability_profile: "trusted-local".to_string(),
+            runtime_scope: "local_process_loopback".to_string(),
+            credential_scan_policy: "metadata_only_no_secret_read".to_string(),
+            raw_prompt_policy: "not_rendered".to_string(),
+            raw_output_policy: "artifacts_scanned_redacted".to_string(),
+            tool_wrapper_policy: "capo_wrapped_required".to_string(),
+            live_provider_opt_in: true,
+        },
+    );
+    let ServerResponsePayload::LiveProviderPreflighted(preflight) = preflight.payload else {
+        panic!("expected preflight response");
+    };
+
+    // An executable Claude stub that ignores argv, applies an edit in the confined
+    // workspace, and emits the Claude `stream-json` fixture on stdout. Uses only
+    // POSIX shell builtins because the runtime spawns with `env_clear()` (no PATH).
+    let stub = root.join("claude-stub.sh");
+    let fixture_path = root.join("claude-stream-fixture.jsonl");
+    std::fs::write(
+        &fixture_path,
+        include_str!("../../../capo-adapters/fixtures/claude-code-stream.jsonl"),
+    )
+    .expect("write fixture");
+    let script = format!(
+        "#!/bin/sh\nprintf 'edited by claude\\n' > \"$PWD/NOTES.md\"\nwhile IFS= read -r line; do printf '%s\\n' \"$line\"; done < {fixture}\n",
+        fixture = fixture_path.display(),
+    );
+    std::fs::write(&stub, script).expect("write stub");
+    let mut perms = std::fs::metadata(&stub).expect("stub meta").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&stub, perms).expect("chmod stub");
+
+    let origin = ServerClientOrigin {
+        client_id: "test-client".to_string(),
+        actor_id: "test-actor".to_string(),
+        input_origin: ServerInputOrigin::System,
+    };
+    let selected_argv = std::cell::RefCell::new(Vec::new());
+    let run = server
+        .run_live_provider_local(
+            &origin,
+            LiveProviderLocalRunRequest {
+                dispatch_plan_id: &preflight.dispatch_plan_id,
+                goal: &goal,
+                live_execution_opt_in: true,
+                mock_runtime_opt_in: false,
+                mock_provider_output_name: None,
+                mock_provider_output_jsonl: None,
+                timeout_seconds: 10,
+                codex_program_override: None,
+                // The Claude DISPATCH override pins the stub program; the Codex
+                // override is irrelevant for a `claude_code` plan and must be
+                // ignored.
+                claude_program_override: Some(stub.to_string_lossy().as_ref()),
+                write_mode: WriteMode::LiveWrite,
+                record_selected_argv: Some(&selected_argv),
+            },
+        )
+        .expect("claude spawn-arm run");
+
+    // The spawn arm selected the Claude workspace-write profile (acceptEdits +
+    // --add-dir), not a Codex profile.
+    let argv = selected_argv.borrow();
+    assert!(
+        argv.windows(2)
+            .any(|pair| pair == ["--permission-mode", "acceptEdits"]),
+        "LiveWrite claude_code must select the workspace-write profile, got argv: {argv:?}"
+    );
+    assert!(
+        argv.iter().any(|arg| arg == "--add-dir"),
+        "claude workspace-write profile must carry --add-dir, got argv: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|arg| arg == "--sandbox"),
+        "claude profile must not carry a Codex --sandbox flag, got argv: {argv:?}"
+    );
+    drop(argv);
+
+    // The stub spawned and the Claude `stream-json` ingested through the SAME
+    // ingestion route Codex uses.
+    assert!(
+        run.provider_cli_executed,
+        "the spawn arm must spawn the (stub) provider"
+    );
+    assert_eq!(run.status, "exited");
+    assert!(run.input_event_count >= 1);
+
+    // The confined live write landed and a pre-write checkpoint was recorded.
+    assert!(
+        workspace.join("NOTES.md").exists(),
+        "the confined live write must land in the workspace"
+    );
+    let state = SqliteStateStore::open(&root).expect("state");
+    let events = state
+        .recent_events_for_session(&SessionId::new("session-claude-spawn"), 64)
+        .expect("events");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == "checkpoint.created"),
+        "a pre-write checkpoint must be recorded for a live Claude write"
+    );
+}
+
+/// CS5: the unblock is PROVIDER-SCOPED, not blanket. An unsupported adapter
+/// (`acp`) cannot even reach the live executor: the live-provider preflight
+/// rejects it up front, so no `claude_code`/`codex_exec`-style plan is ever
+/// minted for it.
+#[test]
+fn server_live_provider_preflight_rejects_unsupported_acp_adapter() {
+    let root = temp_root();
+    let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
+    let goal = "Attempt acp live provider".to_string();
+    handle(
+        &server,
+        ServerCommand::RegisterAgent {
+            name: "acp-local".to_string(),
+            adapter: "fake".to_string(),
+        },
+    );
+    handle(
+        &server,
+        ServerCommand::StartSession {
+            agent_name: "acp-local".to_string(),
+            goal: goal.clone(),
+            adapter: "acp".to_string(),
+            session_id: Some("session-acp-live".to_string()),
+            run_id: Some("run-acp-live".to_string()),
+        },
+    );
+    let response = server.handle(ServerRequest::cli(ServerCommand::PreflightLiveProvider {
+        agent_name: "acp-local".to_string(),
+        adapter: "acp".to_string(),
+        goal: goal.clone(),
+        workspace: "/tmp/capo-workspace".to_string(),
+        artifacts: "/tmp/capo-artifacts".to_string(),
+        session_id: "session-acp-live".to_string(),
+        run_id: "run-acp-live".to_string(),
+        turn_id: "turn-acp-live".to_string(),
+        capability_profile: "trusted-local".to_string(),
+        runtime_scope: "local_process_loopback".to_string(),
+        credential_scan_policy: "metadata_only_no_secret_read".to_string(),
+        raw_prompt_policy: "not_rendered".to_string(),
+        raw_output_policy: "artifacts_scanned_redacted".to_string(),
+        tool_wrapper_policy: "capo_wrapped_required".to_string(),
+        live_provider_opt_in: true,
+    }));
+    let error = response.expect_err("acp live preflight must be rejected");
+    assert!(
+        format!("{error:?}").contains("acp"),
+        "acp must be rejected from the live provider preflight, got: {error:?}"
     );
 }
 

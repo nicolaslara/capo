@@ -390,7 +390,22 @@ Dependencies: CS0, CS3. Intra-workpad: feeds CS5.
 
 ## CS5 - Unblock To Parity: CLI Chat Seam + Dispatch Executor (Spawn Arm + Override + Allow-List)
 
-Status: pending.
+Status: LANDED. All three unblock gaps closed behind the shared preflight + the
+existing provider-agnostic `safety_floor.rs` write-mode gate, deterministic-only
+(no live `claude`): (1) `require_chat_adapter_arg` accepts `claude`
+(`crates/capo-cli/src/server_client.rs`, made `pub(crate)`); (2)
+`live_execution_blockers` admits the `{codex_exec, claude_code}` allow-list
+(`crates/capo-server/src/live_provider.rs`); (3) the `run_live_provider_local`
+spawn arm is branched on `(adapter_kind, write_mode)` to build the Claude launch
+plans, with a new `claude_program_override` field + `CAPO_CLAUDE_BIN` dispatch
+threading; `execute_codex_live_provider` renamed `execute_live_provider`. The
+write gate is UNCHANGED (rides `CAPO_SERVER_RUN_CODEX_LIVE`). Tests:
+`require_chat_adapter_arg_accepts_claude_and_rejects_unknown` (capo-cli),
+`server_live_provider_local_run_admits_claude_and_ingests_mock_stream_json` (CS5 a,
+replaced the obsolete blocked-Claude test),
+`server_live_provider_claude_spawn_arm_ingests_stub_stream_json_through_override`
+(CS5 b), and `server_live_provider_preflight_rejects_unsupported_acp_adapter`
+(provider-scoped). See `knowledge.md` "CS5 Status (Landed)".
 
 Prerequisite: `real-turn-loop` + `tools-aci`; CS1-CS4. (The `safety-gates`
 confinement/permission floor is the live-execution precondition the executor

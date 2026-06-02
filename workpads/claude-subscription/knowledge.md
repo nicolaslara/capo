@@ -379,6 +379,71 @@ so it proves only `parse_adapter_events("claude_code", ..)` + ingestion. Proving
 spawn-arm unblock requires the stub-binary path via the new override. CS5 keeps
 these two tests separate so neither claim is overstated.
 
+## CS5 Status (Landed)
+
+CS5 closed all THREE unblock gaps, behind the shared preflight + the existing
+provider-agnostic `safety_floor.rs` write-mode gate, fail-closed when off. No live
+`claude` is used; deterministic mock-output + stub-binary + dry-run paths only.
+
+1. CLI chat seam: `crates/capo-cli/src/server_client.rs::require_chat_adapter_arg`
+   now accepts `claude` (alongside the `fake` default and `codex`) and rejects
+   anything else; its doc-comment and error message name `claude`. Made
+   `pub(crate)` so the deterministic test
+   `crates/capo-cli/src/tests.rs::require_chat_adapter_arg_accepts_claude_and_rejects_unknown`
+   asserts `--adapter claude` resolves to `"claude"`, `fake`/`codex` are unchanged,
+   and an unknown value (`gemini`) still errors with a message naming `claude`.
+2. Dispatch blocker allow-list:
+   `crates/capo-server/src/live_provider.rs::live_execution_blockers` replaced the
+   hard `plan.adapter_kind != "codex_exec"` block with an enabled-providers
+   allow-list `matches!(.., "codex_exec" | "claude_code")`. An un-enabled adapter
+   still pushes `provider_not_enabled_for_first_live_slice`. The preflight already
+   stamps `claude_code` via `adapter_label` (only `acp` is rejected up front), so
+   the widening is exercised on a real Claude plan.
+3. Dispatch spawn arm: `run_live_provider_local`'s plan builder is branched on
+   `(plan.adapter_kind, write_mode)` -- a `claude_code` dispatch builds
+   `ClaudeCodeAdapter::local_workspace_write_launch_plan` (LiveWrite) /
+   `local_launch_plan` (DryRun), a Codex dispatch keeps the Codex plans. A NEW
+   `claude_program_override` field on `LiveProviderLocalRunRequest` + a
+   `CAPO_CLAUDE_BIN` fallback threaded at the `RunLiveProviderLocal` handler pins an
+   absolute Claude stub; the program-override selection is keyed to the dispatch
+   adapter so a Claude dispatch only honors the Claude override. This DISPATCH
+   `CAPO_CLAUDE_BIN` is DISTINCT from the chat-side `CAPO_CLAUDE_BIN` in
+   `claude_live.rs` (two separate seams, two separate code paths, same env name).
+   The provider-agnostic `confine_and_checkpoint_for_write` floor +
+   `scan_artifacts_for_sensitive_markers` + `assert_subscription_safe()` +
+   `apply_normalized_adapter_events_with_turn` ingestion are UNCHANGED and run for a
+   `claude_code` `LiveWrite` exactly as for Codex. The former Codex-named
+   `execute_codex_live_provider` is renamed `execute_live_provider` to reflect that
+   it is provider-agnostic (it already ingested via
+   `parse_adapter_events(&plan.adapter_kind, ..)`).
+
+The dispatch live-write gate is UNCHANGED: `safety_floor.rs::resolve_write_mode`
+(`LIVE_WRITE_OPT_IN_ENV = "CAPO_SERVER_RUN_CODEX_LIVE"` + caller opt-in + attended).
+A `claude_code` `LiveWrite` requires all three; missing any falls back to dry-run.
+CS5 did NOT add a per-provider dispatch RUN env and did NOT change
+`resolve_write_mode` (Non-Goal); the Claude dispatch write rides the existing
+provider-agnostic `CAPO_SERVER_RUN_CODEX_LIVE` write-mode gate.
+
+The load-bearing CS5 tests:
+
+- `crates/capo-cli/src/tests.rs::require_chat_adapter_arg_accepts_claude_and_rejects_unknown`
+  (CLI chat seam).
+- `crates/capo-server/src/tests/live_provider.rs::server_live_provider_local_run_admits_claude_and_ingests_mock_stream_json`
+  (CS5 (a): the allow-list admits `claude_code`; the plan carries
+  `adapter_kind == "claude_code"`; a Claude `stream-json` fixture ingests via the
+  mock-output path, which short-circuits BEFORE the spawn arm). This REPLACED the
+  obsolete `server_live_provider_local_run_blocks_claude_in_first_live_slice` test,
+  whose blocked-Claude assertion CS5 deliberately inverts.
+- `crates/capo-server/src/tests/live_provider.rs::server_live_provider_claude_spawn_arm_ingests_stub_stream_json_through_override`
+  (CS5 (b): the unblocked SPAWN ARM via the new `claude_program_override`. Asserts
+  the selected argv is the Claude workspace-write profile -- `--permission-mode
+  acceptEdits` + `--add-dir`, NO Codex `--sandbox` -- the stub spawned
+  (`provider_cli_executed`), the confined write landed, a pre-write
+  `checkpoint.created` was recorded, and the stub's `stream-json` ingested).
+- `crates/capo-server/src/tests/live_provider.rs::server_live_provider_preflight_rejects_unsupported_acp_adapter`
+  (the unblock is provider-scoped: `acp` cannot even reach the executor -- the
+  live-provider preflight rejects it up front, so no plan is ever minted for it).
+
 ## Verification Discipline
 
 Deterministic-tests-before-live holds across every task: env-scrub, `try_send_turn`

@@ -329,6 +329,7 @@ fn live_write_uses_workspace_write_profile_and_checkpoints_before_spawn() {
                 mock_provider_output_jsonl: None,
                 timeout_seconds: 10,
                 codex_program_override: Some(stub.to_string_lossy().as_ref()),
+                claude_program_override: None,
                 write_mode: WriteMode::LiveWrite,
                 record_selected_argv: Some(&selected_argv),
             },
@@ -443,6 +444,7 @@ fn default_run_stays_read_only_and_takes_no_checkpoint() {
                 mock_provider_output_jsonl: None,
                 timeout_seconds: 10,
                 codex_program_override: Some(stub.to_string_lossy().as_ref()),
+                claude_program_override: None,
                 // The DRY-RUN default: no live write, even with the caller opt-in,
                 // because the env gate / attended conditions did not resolve to a
                 // live write upstream.

@@ -3,7 +3,8 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use capo_adapters::{
-    CodexExecAdapter, LocalAdapterLaunchPlan, scan_artifacts_for_sensitive_markers,
+    ClaudeCodeAdapter, CodexExecAdapter, LocalAdapterLaunchPlan,
+    scan_artifacts_for_sensitive_markers,
 };
 use capo_core::{CommandIntent, CommandTarget, RunId, SessionId};
 use capo_runtime::LocalProcessRunner;
@@ -54,6 +55,14 @@ pub(crate) struct LiveProviderLocalRunRequest<'a> {
     /// resolving `codex` from PATH. Ops set it from `CAPO_CODEX_BIN`; tests pass
     /// a stub so the spawn path is deterministic. `None` keeps `codex`.
     pub(crate) codex_program_override: Option<&'a str>,
+    /// CS5: absolute path to a `claude` binary to run on the spawn path instead
+    /// of resolving `claude` from PATH, for a `claude_code` dispatch. Ops set it
+    /// from `CAPO_CLAUDE_BIN`; tests pass a stub so the spawn path is
+    /// deterministic. `None` keeps `claude`. This DISPATCH override is a separate
+    /// seam from the chat-side `CAPO_CLAUDE_BIN` consumed by
+    /// `claude_live.rs`; the two are distinct code paths that happen to share the
+    /// env-var name. The `env_clear()` spawn honors only absolute paths.
+    pub(crate) claude_program_override: Option<&'a str>,
     /// RTL9: the resolved write mode for this turn. `DryRun` (the default) runs
     /// Codex with the read-only profile and touches nothing; `LiveWrite` runs the
     /// workspace-write profile inside the confined, pre-write-checkpointed
@@ -454,38 +463,60 @@ impl CapoServer {
             );
         }
 
-        // RTL9: choose the Codex profile from the resolved write mode. The
-        // default (`DryRun`) keeps the read-only one-shot profile and touches
-        // nothing; a `LiveWrite` (caller opt-in AND `CAPO_SERVER_RUN_CODEX_LIVE`
-        // AND attended -- all resolved by the RTL6 gate before this runs) uses
-        // the workspace-write profile so Codex can apply edits inside the
-        // confined workspace. The provider never spawns without passing the
-        // preflight/execution gate above regardless of profile.
-        let mut launch_plan = match request.write_mode {
-            WriteMode::DryRun => CodexExecAdapter::local_launch_plan(
+        // RTL9/CS5: choose the launch profile from the resolved write mode AND
+        // the dispatch adapter. The default (`DryRun`) keeps the read-only/plan
+        // one-shot profile and touches nothing; a `LiveWrite` (caller opt-in AND
+        // `CAPO_SERVER_RUN_CODEX_LIVE` AND attended -- all resolved by the RTL6
+        // gate before this runs) uses the workspace-write profile so the provider
+        // can apply edits inside the confined workspace. CS5 branches the plan
+        // builder on `adapter_kind` so a `claude_code` dispatch builds the Claude
+        // launch plans (`ClaudeCodeAdapter::local_workspace_write_launch_plan` for
+        // a write, `local_launch_plan` -- the read-bounded plan-mode profile --
+        // for a dry run) instead of the Codex plans. The provider never spawns
+        // without passing the preflight/execution gate above regardless of
+        // profile or provider. The blocker allow-list guarantees `adapter_kind`
+        // is one of the enabled providers here.
+        let mut launch_plan = match (plan.adapter_kind.as_str(), request.write_mode) {
+            ("claude_code", WriteMode::DryRun) => ClaudeCodeAdapter::local_launch_plan(
                 workspace.clone(),
                 artifacts.clone(),
                 request.goal.to_string(),
             ),
-            WriteMode::LiveWrite => CodexExecAdapter::local_workspace_write_launch_plan(
+            ("claude_code", WriteMode::LiveWrite) => {
+                ClaudeCodeAdapter::local_workspace_write_launch_plan(
+                    workspace.clone(),
+                    artifacts.clone(),
+                    request.goal.to_string(),
+                )
+            }
+            (_, WriteMode::DryRun) => CodexExecAdapter::local_launch_plan(
+                workspace.clone(),
+                artifacts.clone(),
+                request.goal.to_string(),
+            ),
+            (_, WriteMode::LiveWrite) => CodexExecAdapter::local_workspace_write_launch_plan(
                 workspace.clone(),
                 artifacts.clone(),
                 request.goal.to_string(),
             ),
         };
-        // Test/operations seam: when an absolute codex-binary override is supplied
-        // (ops set it via `CAPO_CODEX_BIN`, threaded in at the command handler;
-        // tests pass it directly), run THAT binary instead of resolving `codex`
-        // from PATH. The runtime spawns with `env_clear()`, so only an absolute
-        // path is honored. This is not a gate bypass: preflight, the execution
-        // gate, credential scanning, and the per-turn artifact keying are
-        // unchanged regardless of which binary runs -- it only swaps the program
-        // so the spawn path can be driven deterministically against a stub.
-        if let Some(codex_bin) = request
-            .codex_program_override
-            .filter(|path| Path::new(path).is_absolute())
-        {
-            launch_plan.program = codex_bin.to_string();
+        // Test/operations seam: when an absolute provider-binary override is
+        // supplied (ops set it via `CAPO_CODEX_BIN`/`CAPO_CLAUDE_BIN`, threaded in
+        // at the command handler; tests pass it directly), run THAT binary instead
+        // of resolving the program from PATH. The override is keyed to the dispatch
+        // adapter so a Claude dispatch only honors the Claude override. The runtime
+        // spawns with `env_clear()`, so only an absolute path is honored. This is
+        // not a gate bypass: preflight, the execution gate, credential scanning,
+        // and the per-turn artifact keying are unchanged regardless of which binary
+        // runs -- it only swaps the program so the spawn path can be driven
+        // deterministically against a stub.
+        let program_override = if plan.adapter_kind == "claude_code" {
+            request.claude_program_override
+        } else {
+            request.codex_program_override
+        };
+        if let Some(provider_bin) = program_override.filter(|path| Path::new(path).is_absolute()) {
+            launch_plan.program = provider_bin.to_string();
         }
         // Test-only seam: surface the argv of the plan we actually selected so a
         // test can assert the write-mode->profile link (e.g. `LiveWrite` selects
@@ -500,12 +531,12 @@ impl CapoServer {
         // single pre-write checkpoint BEFORE the provider spawns -- through the
         // one shared `confine_and_checkpoint_for_write` method, so the live arm
         // and the floor cannot drift. A dry run touches nothing (read-only
-        // `--cd` confines it and `execute_codex_live_provider` creates the
+        // `--cd` confines it and `execute_live_provider` creates the
         // workspace just-in-time), so it skips this entirely.
         if request.write_mode == WriteMode::LiveWrite {
             // The confined workspace must exist before it can be confined and
             // snapshotted; creating it here (rather than only in
-            // `execute_codex_live_provider`) keeps confinement+checkpoint
+            // `execute_live_provider`) keeps confinement+checkpoint
             // strictly before any spawn.
             fs::create_dir_all(&launch_plan.workspace_root).map_err(|error| {
                 ServerError::AdapterFixture(format!(
@@ -536,7 +567,7 @@ impl CapoServer {
             execution_request: &execution_request,
             turn_id: &target_turn_id,
         };
-        self.execute_codex_live_provider(origin, context, launch_plan, request.timeout_seconds)
+        self.execute_live_provider(origin, context, launch_plan, request.timeout_seconds)
     }
 
     fn live_execution_blockers(
@@ -548,7 +579,14 @@ impl CapoServer {
         request: &LiveProviderLocalRunRequest<'_>,
     ) -> Vec<String> {
         let mut blockers = Vec::new();
-        if plan.adapter_kind != "codex_exec" {
+        // CS5: the live executor admits an ALLOW-LIST of enabled live providers
+        // ({codex_exec, claude_code}) rather than the single hard-coded
+        // `codex_exec`. The preflight stamps `adapter_kind` via `adapter_label`
+        // (only `acp` is rejected there), so a Claude dispatch reaches here
+        // carrying `claude_code` and is now admitted, while any un-enabled adapter
+        // (e.g. `acp`) still pushes `provider_not_enabled_for_first_live_slice`.
+        // This keeps the unblock provider-scoped, not blanket.
+        if !matches!(plan.adapter_kind.as_str(), "codex_exec" | "claude_code") {
             blockers.push("provider_not_enabled_for_first_live_slice".to_string());
         }
         if plan.status != "live_provider_preflighted" {
@@ -641,7 +679,7 @@ impl CapoServer {
         ))
     }
 
-    fn execute_codex_live_provider(
+    fn execute_live_provider(
         &self,
         origin: &ServerClientOrigin,
         context: LiveExecutionContext<'_>,

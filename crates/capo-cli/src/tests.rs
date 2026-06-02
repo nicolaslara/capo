@@ -6903,3 +6903,41 @@ fn output_value(output: &str, key: &str) -> String {
         .unwrap_or_else(|| panic!("missing output key: {key}"))
         .to_string()
 }
+
+/// CS5: the CLI chat-adapter register seam accepts `claude` (alongside the `fake`
+/// default and `codex`) so `capo server agent register --adapter claude` reaches
+/// the server's already-wired Claude chat binding, and still rejects unknown
+/// values.
+#[test]
+fn require_chat_adapter_arg_accepts_claude_and_rejects_unknown() {
+    use crate::server_client::require_chat_adapter_arg;
+
+    // Default (omitted) stays `fake`.
+    assert_eq!(
+        require_chat_adapter_arg(&[], "--adapter").expect("default"),
+        "fake"
+    );
+    // Explicit `fake`/`codex` unchanged.
+    for (value, expected) in [("fake", "fake"), ("codex", "codex")] {
+        let args = vec!["--adapter".to_string(), value.to_string()];
+        assert_eq!(
+            require_chat_adapter_arg(&args, "--adapter").expect("known adapter"),
+            expected
+        );
+    }
+    // CS5: `claude` now resolves.
+    let claude_args = vec!["--adapter".to_string(), "claude".to_string()];
+    assert_eq!(
+        require_chat_adapter_arg(&claude_args, "--adapter").expect("claude adapter"),
+        "claude"
+    );
+    // An unknown value still errors, and the message names the supported set.
+    let unknown_args = vec!["--adapter".to_string(), "gemini".to_string()];
+    let error = require_chat_adapter_arg(&unknown_args, "--adapter")
+        .expect_err("unknown adapter must error");
+    assert!(error.contains("claude"), "error must name claude: {error}");
+    assert!(
+        error.contains("gemini"),
+        "error must echo the bad value: {error}"
+    );
+}

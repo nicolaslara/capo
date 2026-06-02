@@ -421,6 +421,7 @@ fn deterministic_workspace_write_smoke_matches_the_paired_shape() {
                 mock_provider_output_jsonl: None,
                 timeout_seconds: 10,
                 codex_program_override: Some(stub.as_str()),
+                claude_program_override: None,
                 write_mode: WriteMode::LiveWrite,
                 record_selected_argv: None,
             },

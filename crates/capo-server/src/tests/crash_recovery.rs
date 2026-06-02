@@ -185,6 +185,7 @@ fn live_path_persists_the_in_flight_start_marker_before_completion() {
                 mock_provider_output_jsonl: None,
                 timeout_seconds: 10,
                 codex_program_override: Some(stub.to_string_lossy().as_ref()),
+                claude_program_override: None,
                 write_mode: WriteMode::DryRun,
                 record_selected_argv: None,
             },

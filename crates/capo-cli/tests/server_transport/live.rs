@@ -327,8 +327,9 @@ fn cli_registers_codex_agent_and_gets_real_stub_chat_through_running_server() {
     assert!(server.wait().expect("server wait").success());
 }
 
-/// AI2: a `--adapter` value other than `fake`/`codex` is rejected by the CLI
-/// before it ever reaches the server.
+/// AI2/CS5: a `--adapter` value other than `fake`/`codex`/`claude` is rejected by
+/// the CLI before it ever reaches the server. (CS5 added `claude` to the accepted
+/// chat-adapter set, so an unsupported value is now e.g. `gemini`.)
 #[test]
 fn cli_rejects_unsupported_chat_adapter_on_register() {
     let state_root = temp_root("transport-codex-bad-adapter-state");
@@ -346,7 +347,7 @@ fn cli_rejects_unsupported_chat_adapter_on_register() {
             "--name",
             "bad-adapter",
             "--adapter",
-            "claude",
+            "gemini",
             "--connect",
             &address,
             "--state",
@@ -360,7 +361,7 @@ fn cli_rejects_unsupported_chat_adapter_on_register() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("supports `fake` (default) or `codex`"),
+        stderr.contains("supports `fake` (default), `codex`, or `claude`"),
         "expected the chat-adapter rejection message, got: {stderr}"
     );
 
