@@ -334,7 +334,15 @@ Dependencies: CS0, CS2. Intra-workpad: feeds CS5.
 
 ## CS4 - Tool-Result Round-Trip (Observed-Only, Mirroring Codex)
 
-Status: pending.
+Status: LANDED. Claude `tool_use`/`tool_result` map to observed-only tool results
+(new `claude_tool_result_content` helper handling string- and array-shaped
+`tool_result.content` in `crates/capo-adapters/src/provider_parsers.rs`), proven
+by the deterministic fixture test
+`claude_tool_use_result_pair_projects_observed_only_distinct_from_agent_message`
+and the no-injection negative
+`claude_one_shot_writes_no_capo_authored_tool_result_and_has_no_result_channel`
+(`crates/capo-adapters/src/tests.rs`, fixture
+`crates/capo-adapters/fixtures/claude-code-tool-result.jsonl`). No live provider.
 
 Prerequisite: `real-turn-loop` + `tools-aci`; CS3.
 

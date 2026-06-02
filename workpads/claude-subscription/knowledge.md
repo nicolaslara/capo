@@ -227,6 +227,50 @@ assistant text -- the connector retention policy (raw `stream-json` is
 content-hashed/redacted before retention, never rendered). This is identical to
 the Codex projection shape; Claude introduces no new ingestion vocabulary.
 
+## CS4 Status (Landed)
+
+CS4 decided and IMPLEMENTED the Claude tool-result contract: Capo emits Claude
+`tool_use`/`tool_result` records as OBSERVED-ONLY, exactly like the Codex
+`file_change`/`apply_patch` observed results that project with
+`instrumentation_level = "observed_only"`, and Capo injects NO Capo-authored tool
+result back over the one-shot. No live provider.
+
+- The parser (`crates/capo-adapters/src/provider_parsers.rs`) maps a Claude
+  `tool_use` -> `adapter.tool_call_started` and the matching `tool_result` ->
+  `adapter.tool_call_completed` carrying the OBSERVED tool-returned content. A new
+  `claude_tool_result_content` helper reduces a `tool_result.content` that is
+  EITHER a plain string OR a content-block array
+  (`[{"type":"text","text":...}]`) to one observed-result string (the Claude
+  analogue of `codex_tool_result_content`), so the observed result is captured
+  distinct from the agent's `assistant` message. Both project through the existing
+  `NormalizedAdapterEvent::tool_observation()` with `instrumentation_level =
+  "observed_only"`; Claude introduces no new ingestion vocabulary.
+- The load-bearing CS4 tests live in `crates/capo-adapters/src/tests.rs` (fixture
+  `crates/capo-adapters/fixtures/claude-code-tool-result.jsonl`):
+  - `claude_tool_use_result_pair_projects_observed_only_distinct_from_agent_message`:
+    a `tool_use` + `tool_result` pair projects observed-only tool observations
+    (`source_adapter = claude_code`, `external_tool_ref = toolu_cs4`) -- the
+    `tool_use` start carries the tool NAME (`Edit`); Claude's `tool_result` record
+    itself carries no name, so the named observation comes from the start event --
+    whose observed result content (`Applied edit to NOTES.md ...`) is DISTINCT from
+    the agent's reported `assistant` message (`I will edit NOTES.md ...`).
+  - `claude_one_shot_writes_no_capo_authored_tool_result_and_has_no_result_channel`:
+    the VERIFIABLE negative. (1) The workspace-write launch argv carries no
+    result-injection flag (`--input`/`--input-format`/`--tool-result`/`--stdin`/
+    `-i`). (2) The `LocalProcessRequest` the adapter builds is purely program +
+    argv + cwd + env -- it has NO stdin/result payload field, and the one-shot
+    spawn path (`LocalProcessRunner::spawn_process`) redirects stdout/stderr to
+    artifact files and never pipes stdin, so there is structurally no channel to
+    inject a result over. (3) The `claude_live.rs` source contains neither
+    `write_stdin` nor `spawn_piped_process` (the only stdin-capable runtime APIs),
+    so the one-shot opens no bidirectional/result-injection pipe.
+- OBSERVATION (Open Question, NOT a load-bearing acceptance bullet): the observed
+  `claude -p` one-shot CLI did not surface a result-injection channel. Capo cannot
+  deterministically test that external-CLI claim; it only asserts Capo injects
+  nothing (the negative above). Native result delivery is revisited only if such a
+  channel appears (e.g. an ACP/stream-input mode), and that revisit routes through
+  the `depth` ACP adapter, not a Claude-specific channel.
+
 ## Two Claude Launch Profiles (Precise Facts)
 
 There are TWO distinct Claude launch plans in

@@ -308,7 +308,14 @@ fn parse_claude_record(raw: &Value) -> Vec<NormalizedAdapterEvent> {
             };
             event.tool_name = string_at(raw, &["name"]);
             event.status = Some(operation.to_string());
-            event.content = string_at(raw, &["content"]);
+            // OBSERVED-ONLY (CS4): a `tool_result` carries the result Claude itself
+            // observed from the tool, NOT a Capo-authored result. The parser only
+            // OBSERVES it into `content` (the projection records a
+            // `tool.observation_recorded` with `instrumentation_level =
+            // "observed_only"` via `tool_observation()`); Capo injects nothing back
+            // over the one-shot. Mirrors the Codex `apply_patch`/`exec_command`
+            // observed tool-result shape.
+            event.content = claude_tool_result_content(raw);
         }
         "result" => {
             event.kind = "adapter.turn_completed".to_string();
@@ -321,6 +328,20 @@ fn parse_claude_record(raw: &Value) -> Vec<NormalizedAdapterEvent> {
     }
 
     vec![event]
+}
+
+/// Extract the OBSERVED result of a Claude `tool_result` record into a single
+/// string.
+///
+/// Claude `stream-json` reports a tool result's `content` either as a plain
+/// string or as a content-block array (`[{"type":"text","text":...}]`); both
+/// shapes are reduced to one observed-result string so the projection records a
+/// `tool.observation_recorded` carrying what the tool actually returned,
+/// distinct from the agent's own `assistant` message text. This is the Claude
+/// analogue of [`codex_tool_result_content`]. Observed-only: Capo never authors
+/// or injects a tool result back.
+fn claude_tool_result_content(raw: &Value) -> Option<String> {
+    text_from_content_array(raw.get("content")).or_else(|| string_at(raw, &["content"]))
 }
 
 fn parse_acp_record(raw: &Value) -> Vec<NormalizedAdapterEvent> {

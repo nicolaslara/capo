@@ -312,6 +312,147 @@ fn adapter_tool_observations_are_observed_only() {
 }
 
 #[test]
+fn claude_tool_use_result_pair_projects_observed_only_distinct_from_agent_message() {
+    // CS4: a Claude `tool_use` + matching `tool_result` pair must project into a
+    // tool OBSERVATION (`instrumentation_level = "observed_only"`) that is DISTINCT
+    // from the agent's own reported `assistant` message -- exactly the Codex
+    // `apply_patch`/`exec_command` observed tool-result contract. This proves Capo
+    // OBSERVES the tool result rather than treating it as the agent's claim.
+    let parsed = ClaudeCodeAdapter::parse_stream_json(include_str!(
+        "../fixtures/claude-code-tool-result.jsonl"
+    ))
+    .unwrap();
+
+    // The agent's reported claim is the `assistant` message, NOT the tool result.
+    let claim = parsed
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == "adapter.item_completed" && event.role.as_deref() == Some("assistant")
+        })
+        .expect("agent message claim");
+    let claim_text = claim.content.as_deref().unwrap_or_default();
+    assert!(
+        claim_text.contains("I will edit NOTES.md"),
+        "agent claim should be the assistant message, got: {claim_text}"
+    );
+
+    // The `tool_use` projects an observed tool-call start.
+    let started = parsed
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == "adapter.tool_call_started"
+                && event.external_item_ref.as_deref() == Some("toolu_cs4")
+        })
+        .expect("observed tool_use start");
+    assert_eq!(started.tool_name.as_deref(), Some("Edit"));
+
+    // The matching `tool_result` projects an observed tool-call completion whose
+    // OBSERVED content is the tool's returned result -- distinct from the agent's
+    // claim above.
+    let observed = parsed
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == "adapter.tool_call_completed"
+                && event.external_item_ref.as_deref() == Some("toolu_cs4")
+        })
+        .expect("observed tool_result completion");
+    let observed_content = observed
+        .content
+        .as_deref()
+        .expect("observed result content");
+    assert!(
+        observed_content.contains("Applied edit to NOTES.md"),
+        "the observed result must carry the tool-returned content, got: {observed_content}"
+    );
+    assert_ne!(
+        observed_content, claim_text,
+        "the observed tool result must be distinct from the agent's reported message"
+    );
+
+    // The `tool_use` start observation carries the tool NAME (`Edit`); Claude's
+    // `tool_result` record itself carries no name, so the named observation comes
+    // from the start event. Both are observed-only, both anchored to the same tool
+    // ref so begin/end dedup to one observation.
+    let started_observation = started
+        .tool_observation()
+        .expect("tool observation for the observed tool_use start");
+    assert_eq!(started_observation.source_adapter, "claude_code");
+    assert_eq!(started_observation.tool_name, "Edit");
+    assert_eq!(started_observation.instrumentation_level, "observed_only");
+    assert_eq!(
+        started_observation.external_tool_ref.as_deref(),
+        Some("toolu_cs4")
+    );
+
+    // The `tool_result` completion projects into an observed-only tool observation
+    // carrying the observed result, anchored to the same tool ref.
+    let observation = observed
+        .tool_observation()
+        .expect("tool observation for the observed tool_result");
+    assert_eq!(observation.source_adapter, "claude_code");
+    assert_eq!(observation.observed_status, "completed");
+    assert_eq!(observation.instrumentation_level, "observed_only");
+    assert_eq!(observation.external_tool_ref.as_deref(), Some("toolu_cs4"));
+}
+
+#[test]
+fn claude_one_shot_writes_no_capo_authored_tool_result_and_has_no_result_channel() {
+    // CS4 verifiable negative: "observed-only is explicit, not an accident." The
+    // Claude one-shot adapter must NOT write any Capo-authored tool result back to
+    // the process, and must carry no result-injection channel.
+    //
+    // 1. The launch argv carries no result-injection flag (no stdin/result/input
+    //    channel), only the read/observe-shaped workspace-write profile.
+    let plan = ClaudeCodeAdapter::local_workspace_write_launch_plan(
+        PathBuf::from("/tmp/capo-cs4-ws"),
+        PathBuf::from("/tmp/capo-cs4-art"),
+        "edit the file",
+    );
+    let forbidden = [
+        "--input",
+        "--input-format",
+        "--tool-result",
+        "--stdin",
+        "-i",
+    ];
+    for flag in forbidden {
+        assert!(
+            !plan.argv.iter().any(|arg| arg == flag),
+            "the Claude one-shot argv must carry no result-injection channel, found {flag}"
+        );
+    }
+
+    // 2. The runtime request the adapter builds is purely program + argv + cwd +
+    //    env: `LocalProcessRequest` has NO stdin / result payload field, and the
+    //    one-shot spawn path (`LocalProcessRunner::spawn_process`) never pipes
+    //    stdin. So there is structurally no channel to inject a result over.
+    let request = plan.runtime_request_for_turn(RunId::new("cs4-no-injection"), "turn-cs4");
+    assert!(
+        request.env.is_empty(),
+        "the one-shot request must inject no env-borne result payload"
+    );
+    assert_eq!(request.program, "claude");
+    assert_eq!(request.argv, plan.argv);
+
+    // 3. The adapter source carries no stdin write path: the only stdin-capable
+    //    runtime API is the bidirectional `spawn_piped_process` / `write_stdin`,
+    //    which the Claude chat one-shot never calls (it uses the file-redirected
+    //    `spawn_process` + `wait_running_with_timeout`).
+    let source = include_str!("claude_live.rs");
+    assert!(
+        !source.contains("write_stdin"),
+        "the Claude one-shot must not write to the process stdin"
+    );
+    assert!(
+        !source.contains("spawn_piped_process"),
+        "the Claude one-shot must not open a bidirectional (result-injection) pipe"
+    );
+}
+
+#[test]
 fn acp_session_setup_uses_tool_capability_plan() {
     let wrappers =
         capo_tools::RuntimeToolWrappers::new(capo_tools::RuntimeToolConfig::local_workspace(
