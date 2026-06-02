@@ -83,10 +83,11 @@ contract:
   `git diff --check`.
 - Dashboard static smoke: `node web/dashboard/scripts/verify.mjs`.
 
-CI uses `TMPDIR=/tmp` so path-sensitive worktree/checkpoint tests do not inherit
-long platform temp roots. Live provider smokes, subscription-backed runs, and
-other explicit opt-in gates stay out of unattended CI unless a later workpad
-adds a dedicated, secret-safe job.
+CI installs `ripgrep` explicitly because the runtime search-wrapper tests shell
+out to `rg`. It also uses `TMPDIR=/tmp` so path-sensitive worktree/checkpoint
+tests do not inherit long platform temp roots. Live provider smokes,
+subscription-backed runs, and other explicit opt-in gates stay out of unattended
+CI unless a later workpad adds a dedicated, secret-safe job.
 
 ## Workpad Gates
 

@@ -1196,19 +1196,9 @@ impl LocalProcessRunner {
         #[cfg(unix)]
         {
             if let Some(pid) = process.process.external_pid {
-                let _ = Command::new("/bin/kill")
-                    .arg("-TERM")
-                    .arg(format!("-{pid}"))
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+                kill_process_group(pid, "-TERM");
                 thread::sleep(Duration::from_millis(100));
-                let _ = Command::new("/bin/kill")
-                    .arg("-KILL")
-                    .arg(format!("-{pid}"))
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+                kill_process_group(pid, "-KILL");
             }
         }
     }
@@ -2242,6 +2232,7 @@ pub(crate) fn process_group_is_alive(pid: u32) -> bool {
     // must reap.
     Command::new("/bin/kill")
         .arg("-0")
+        .arg("--")
         .arg(format!("-{pid}"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2260,6 +2251,7 @@ pub(crate) fn kill_process_group(pid: u32, signal: &str) {
     }
     let _ = Command::new("/bin/kill")
         .arg(signal)
+        .arg("--")
         .arg(format!("-{pid}"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
