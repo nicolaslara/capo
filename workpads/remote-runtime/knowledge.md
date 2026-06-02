@@ -230,6 +230,39 @@ self-attestation.
   refused by the remote OS) stays deferred to RR8 behind the opt-in env gate; RR5
   ships the platform-independent pre-launch refusal + honest-claim matrix.
 
+## RR6 Decisions (implemented)
+
+- Crash-safe cleanup is a SEPARATE method that reaps real things. `cleanup_run(&ref,
+  CleanupPolicy)` reaps the remote process group AND removes the remote git worktree
+  over the channel (`transport.cleanup_workspace`), distinct from the RR1
+  `cleanup(&ref)` (which stays for contract parity). It is idempotent + replay-stable:
+  the fake channel holds the materialized worktree key in shared (`Arc`) state, a
+  `ReapAll` removes it EXACTLY once (`worktree_reaped == true` then `false` on a
+  re-run), and a DANGLING worktree (pre-seeded by `with_dangling_worktree` to model a
+  crash) is reaped — emitting `runtime.remote_workspace_torn_down` — never silently
+  abandoned. `CleanupPolicy::PreserveWorktree` keeps the worktree for inspection of an
+  orphaned run (process group reaped, no torn-down event).
+- Rollback composes WITH git, it does not replace it. `rollback_to_checkpoint(&ref,
+  checkpoint_ref)` restores the remote worktree to the RR3 git-materialized commit over
+  the channel and records `runtime.remote_rollback_performed`. The materialized commit
+  IS the pre-write checkpoint (the injected git-sync decision), so a channel-drop-
+  interrupted run is cleanly failable and its workspace recoverable from git.
+- The remote runner is a REVOCABLE remote-control capability. A SHARED (`Arc<Mutex<…>>`)
+  grant gates execution: `revoke_control(reason)` flips it once (idempotent, reason is
+  redaction-safe), after which `start_process` / `write_stdin` / `rollback_to_checkpoint`
+  refuse with the new typed `RuntimeError::RemoteControlRevoked` and the runner cannot
+  re-establish execution without a FRESH grant (a new runner over a new channel). The
+  grant is shared so a CLONE of the runner observes the same revocation — a revoke
+  cannot be sidestepped by holding a clone. `runtime.remote_control_revoked` is the
+  audit event. Streaming (read-only observation) is deliberately NOT gated; the
+  stop-the-run guarantee rests on refusing the execution-mutating paths.
+- The crash matrix reuses the RR2/RR4 classifications rather than re-deriving them:
+  controller-restart-with-live-remote -> `Recovered` (in place, no relaunch);
+  remote-reboot (boot-id mismatch) -> `Exited` (never silently recovered);
+  channel-drop-mid-stream -> the RR4 `RemoteStreamFinalReason::ChannelDropped` finalize
+  with a recorded reason (never a silent truncation). RR6 adds only the two new facts a
+  revocable capability + git-checkpoint rollback require.
+
 ## Non-Goals
 
 - The channel itself (endpoint resolution, SSH/Tailscale/reverse transport,

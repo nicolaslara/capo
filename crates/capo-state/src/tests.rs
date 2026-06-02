@@ -1081,6 +1081,16 @@ fn rr1_rr2_remote_runtime_event_kinds_round_trip() {
         (EventKind::SandboxEnforced, "sandbox.enforced"),
         (EventKind::SandboxUnenforced, "sandbox.unenforced"),
         (EventKind::SandboxLaunchRefused, "sandbox.launch_refused"),
+        // RR6: crash-safe remote runs — revoked remote-control capability + the
+        // git-checkpoint rollback fact.
+        (
+            EventKind::RuntimeRemoteControlRevoked,
+            "runtime.remote_control_revoked",
+        ),
+        (
+            EventKind::RuntimeRemoteRollbackPerformed,
+            "runtime.remote_rollback_performed",
+        ),
     ] {
         assert_eq!(kind.as_str(), wire);
         assert_eq!(EventKind::from_wire(wire), Some(kind));

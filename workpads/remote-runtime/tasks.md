@@ -32,7 +32,10 @@ In progress. RR0 complete. RR1 complete. RR2 complete (deterministic
 fake-channel recovery suite). RR3 event-kinds landed. RR4 complete
 (deterministic fake-channel output-delta + stdin streaming suite). RR5 complete
 (remote OS sandbox + worktree composition with honest remote-OS-probed
-enforcement claims; deterministic fake-channel suite). RR6-RR8 pending.
+enforcement claims; deterministic fake-channel suite). RR6 complete (crash-safe
+remote runs: idempotent worktree-reaping cleanup, git-checkpoint rollback,
+revocable remote-control grant; deterministic fake-channel crash-matrix suite +
+`-p capo-server` gate). RR7-RR8 pending.
 
 ## Feature Set
 
@@ -523,7 +526,42 @@ Dependencies: RR3, `depth` DP7 + DP8, `safety-gates` (capability scopes + grants
 
 ## RR6 - Crash-Safe Remote Runs + Recovery Events
 
-Status: pending.
+Status: complete.
+
+Evidence: `crates/capo-runtime/src/lib.rs` adds the crash-safe surfaces on
+`RemoteProcessRunner`: `cleanup_run(&ref, CleanupPolicy)` reaps the remote
+process group AND removes the remote git worktree over the channel
+(`transport.cleanup_workspace`), emitting `runtime.remote_cleanup_completed` and —
+when a worktree was present (a DANGLING worktree a crash left) —
+`runtime.remote_workspace_torn_down`, idempotent + replay-stable (a re-run finds
+nothing to reap). `rollback_to_checkpoint(&ref, checkpoint_ref)` restores the
+remote worktree to the RR3 git-materialized commit over the channel and records
+`runtime.remote_rollback_performed` (the run is ADDITIVE to git-backed rollback).
+`revoke_control(reason)` revokes a SHARED (`Arc`) remote-control grant: after it,
+`start_process` / `write_stdin` / `rollback_to_checkpoint` are refused with the new
+typed `RuntimeError::RemoteControlRevoked` and the runner CANNOT re-establish
+execution without a fresh grant (a clone observes the SAME revocation — no
+sidestep), recorded as `runtime.remote_control_revoked`. The remote-reboot,
+controller-restart-with-live-remote, channel-drop-mid-stream classifications reuse
+the RR2/RR4 matrix. Two new round-trippable `EventKind`s in `crates/capo-state`
+(`runtime.remote_control_revoked` / `runtime.remote_rollback_performed`). The
+`FakeRemoteChannel` models the crash matrix deterministically
+(`with_dangling_worktree` / `has_remote_worktree` / `rolled_back_to` /
+`cleanup_workspace` / `rollback_worktree`, NO network). Deterministic
+fake-channel crash-matrix tests (`capo-runtime`):
+`remote_crash_controller_restart_with_live_remote_recovers_in_place`,
+`remote_crash_remote_reboot_is_exited_never_silently_recovered`,
+`remote_crash_channel_drop_finalizes_stream_with_recorded_reason`,
+`remote_crash_dangling_worktree_is_reaped_on_cleanup`,
+`remote_cleanup_is_idempotent_after_a_partial_failure`,
+`remote_cleanup_preserve_policy_keeps_the_worktree_for_inspection`,
+`remote_rollback_restores_the_worktree_to_the_git_checkpoint`,
+`remote_revoked_grant_stops_the_run_and_forbids_re_establishment`,
+`remote_revocation_is_observed_by_a_cloned_runner`,
+`remote_crash_matrix_recovery_is_replay_stable`. Exercised from the `-p capo-server`
+gate in `crates/capo-server/src/tests/remote_crash_safety.rs`
+(restart-recovers-in-place, reboot-exited, dangling-worktree-reaped + idempotent,
+revoked-grant-forbids-re-establishment, rollback-to-checkpoint).
 
 Scope: Make a remote run crash-safe end to end: the controller can crash, the
 remote can crash, or the channel can drop, and Capo recovers to a truthful,

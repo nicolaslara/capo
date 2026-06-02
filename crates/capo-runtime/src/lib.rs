@@ -84,6 +84,15 @@ pub enum RuntimeError {
         events: Vec<RuntimeEvent>,
         source: Box<RuntimeError>,
     },
+    /// RR6: a remote-control operation (start / stream / stdin) was attempted on a
+    /// runner whose remote-control grant has been REVOKED (the channel was revoked
+    /// or the grant lifecycle ended). A revoked capability stops the run and the
+    /// runner MUST NOT re-establish execution without a FRESH grant. The `reason`
+    /// is redaction-safe (never a credential). This is NEVER retryable under the
+    /// same grant — re-establishment requires a new grant, not a retry.
+    RemoteControlRevoked {
+        reason: String,
+    },
 }
 
 impl From<std::io::Error> for RuntimeError {
@@ -1639,6 +1648,50 @@ impl CleanupOutcome {
     }
 }
 
+/// RR6: how much of a remote run a `cleanup_run` reaps. Mirrors the local
+/// cleanup's preserve-vs-discard intent but for the remote process group + the
+/// remote git worktree reached over the channel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CleanupPolicy {
+    /// Reap the remote process group AND remove the remote git worktree. This is
+    /// the full crash-safe teardown: a dangling remote worktree left by a crash is
+    /// reaped, never silently abandoned.
+    ReapAll,
+    /// Reap the remote process group but PRESERVE the remote worktree for
+    /// inspection (e.g. an orphaned run whose logs/worktree an operator wants to
+    /// examine). The worktree is recorded as preserved, not torn down.
+    PreserveWorktree,
+}
+
+impl CleanupPolicy {
+    /// The stable token recorded in the cleanup event detail.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReapAll => "reap_all",
+            Self::PreserveWorktree => "preserve_worktree",
+        }
+    }
+
+    /// Whether this policy removes the remote worktree (vs. preserving it).
+    pub const fn reaps_worktree(self) -> bool {
+        matches!(self, Self::ReapAll)
+    }
+}
+
+/// RR6: what a remote `cleanup_workspace` actually reaped over the channel. The
+/// transport reports whether a remote worktree was PRESENT and removed, so a
+/// dangling worktree (left by a crash) is torn down EXACTLY once and a re-run is
+/// an idempotent no-op (nothing left to reap).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceReapOutcome {
+    /// `true` when a remote worktree was present and removed by THIS call. A
+    /// re-run after a successful reap finds nothing and reports `false` (idempotent).
+    pub worktree_reaped: bool,
+    /// The remote worktree key/path that was reaped (or would have been), recorded
+    /// for audit. Never a secret.
+    pub worktree_key: String,
+}
+
 /// The shared execution + control contract both [`LocalProcessRunner`] and
 /// [`RemoteProcessRunner`] satisfy, so the controller drives them with the SAME
 /// method shapes (review finding 4 + 5). Defining it as a trait gives a
@@ -1704,7 +1757,15 @@ impl RuntimeRunnerContract for RemoteProcessRunner {
         RemoteProcessRunner::health(self, process)
     }
     fn cleanup(&self, process: &LocalRuntimeProcessRef) -> RuntimeResult<CleanupOutcome> {
-        RemoteProcessRunner::cleanup(self, process).map(CleanupOutcome::Remote)
+        // RR6 (review finding 6): the CONTRACT cleanup surface must carry the
+        // crash-safe semantics, not the thin non-policy variant. A controller that
+        // drives both runners uniformly through `RuntimeRunnerContract::cleanup`
+        // must get the dangling-worktree reap + `runtime.remote_workspace_torn_down`
+        // on the remote path too, so this delegates to the full `cleanup_run`
+        // under `ReapAll` rather than the bare `cleanup` (which only signals the
+        // process group and never tears the worktree down).
+        RemoteProcessRunner::cleanup_run(self, process, CleanupPolicy::ReapAll)
+            .map(CleanupOutcome::Remote)
     }
 }
 
@@ -1980,6 +2041,27 @@ impl RemoteChannel {
             Self::Fake(channel) => channel.last_launched_request(),
         }
     }
+
+    /// RR6: reap the remote process group + (under [`CleanupPolicy::ReapAll`])
+    /// remove the remote git worktree over the channel. Idempotent: a worktree
+    /// already gone reports `worktree_reaped == false`.
+    fn cleanup_workspace(
+        &self,
+        probe: &RemoteProbe,
+        policy: CleanupPolicy,
+    ) -> RuntimeResult<WorkspaceReapOutcome> {
+        match self {
+            Self::Fake(channel) => channel.cleanup_workspace(probe, policy),
+        }
+    }
+
+    /// RR6: roll the remote git worktree back to `checkpoint_ref` (the RR3
+    /// git-materialized commit) over the channel.
+    fn rollback_worktree(&self, probe: &RemoteProbe, checkpoint_ref: &str) -> RuntimeResult<()> {
+        match self {
+            Self::Fake(channel) => channel.rollback_worktree(probe, checkpoint_ref),
+        }
+    }
 }
 
 /// RR4: the RAW frames the channel forwarded for one stream read: the offset the
@@ -2196,13 +2278,44 @@ pub struct FakeRemoteChannel {
     /// `sandbox-exec`-wrapped command rather than the bare original. Shared (`Arc`)
     /// so a cloned channel observes the same launches.
     last_launched: std::sync::Arc<std::sync::Mutex<Option<LocalProcessRequest>>>,
+    /// RR6: the remote git worktree key currently materialized on the remote, if
+    /// any. A launch materializes one (RR3 semantics, modelled deterministically);
+    /// a `cleanup_workspace(ReapAll)` reaps it EXACTLY once (a re-run finds `None`
+    /// and is an idempotent no-op). A test can pre-seed a DANGLING worktree (a crash
+    /// left it without a clean teardown) via [`Self::with_dangling_worktree`] to
+    /// prove cleanup reaps it. Shared (`Arc`) so a cloned channel observes the same
+    /// reap, and last-write-wins between clones cannot resurrect a reaped worktree.
+    remote_worktree: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// RR6: the last checkpoint ref a `rollback_worktree` restored the remote
+    /// worktree to. A test reads it to prove the rollback reached the transport.
+    rolled_back_to: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// RR6: the escalation labels (`interrupt`/`terminate`/`kill`) the runner
+    /// actually sent over the channel, in send order. Shared (`Arc`) so a cloned
+    /// channel observes the same signals; a test reads it to prove that
+    /// `revoke_control` (and the teardown escalations) ACTUALLY signalled the
+    /// remote run rather than merely flipping a local flag.
+    signals_sent: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     loopback: LocalProcessRunner,
 }
 
 impl PartialEq for FakeRemoteChannel {
     fn eq(&self, other: &Self) -> bool {
-        // The spawn counter is runtime observability, not identity; everything
-        // else defines the channel.
+        // Equality is over the channel's SCRIPTED IDENTITY (what it was
+        // constructed to model), not over its accumulated runtime side effects.
+        // The following fields are INTENTIONALLY excluded because they are
+        // post-construction observability, not identity, and including them would
+        // make two channels scripted identically compare unequal merely because
+        // one has been driven through a run:
+        //   - `spawn_count`     (how many times `launch` actually ran),
+        //   - `stdin_written`   (bytes the runner forwarded to stdin),
+        //   - `last_launched`   (the last request handed to the transport),
+        //   - `signals_sent`    (escalations the runner sent over the channel),
+        //   - `remote_worktree` (the live worktree state, mutated by cleanup),
+        //   - `rolled_back_to`  (the last checkpoint a rollback restored to).
+        // `remote_worktree` and `rolled_back_to` in particular are mutable run
+        // state: a dangling worktree is a runtime condition, not a different
+        // channel identity, so two channels that differ only in whether a
+        // worktree is currently materialized are still the SAME channel here.
         self.fingerprint == other.fingerprint
             && self.remote_host_id == other.remote_host_id
             && self.remote_boot_id == other.remote_boot_id
@@ -2261,11 +2374,96 @@ impl FakeRemoteChannel {
             sandbox_unenforceable: true,
             cross_machine: false,
             last_launched: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            remote_worktree: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            rolled_back_to: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            signals_sent: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             loopback: LocalProcessRunner::new(LocalProcessConfig::for_test(
                 workspace_root,
                 artifact_root,
             )),
         }
+    }
+
+    /// RR6: pre-seed a DANGLING remote git worktree (a crash left it materialized
+    /// without a clean teardown), so a `cleanup_run(ReapAll)` proves the dangling
+    /// worktree is reaped (`runtime.remote_workspace_torn_down`) rather than
+    /// silently abandoned. NO network — the worktree is a deterministic key.
+    pub fn with_dangling_worktree(self, worktree_key: impl Into<String>) -> Self {
+        *self
+            .remote_worktree
+            .lock()
+            .expect("fake remote worktree ledger poisoned") = Some(worktree_key.into());
+        self
+    }
+
+    /// RR6: the checkpoint ref the LAST `rollback_worktree` restored to. A test
+    /// reads this to prove the rollback reached the transport.
+    pub fn rolled_back_to(&self) -> Option<String> {
+        self.rolled_back_to
+            .lock()
+            .expect("fake remote rollback ledger poisoned")
+            .clone()
+    }
+
+    /// RR6: the escalation labels (`interrupt`/`terminate`/`kill`) the runner sent
+    /// over this channel, in send order. A test reads it to prove a stop signal
+    /// actually reached the transport (e.g. after `revoke_control`).
+    pub fn signals_sent(&self) -> Vec<String> {
+        self.signals_sent
+            .lock()
+            .expect("fake remote signal ledger poisoned")
+            .clone()
+    }
+
+    /// RR6: whether a remote git worktree is currently materialized on this fake
+    /// remote. A test reads it to prove `cleanup_run(ReapAll)` actually reaped it.
+    pub fn has_remote_worktree(&self) -> bool {
+        self.remote_worktree
+            .lock()
+            .expect("fake remote worktree ledger poisoned")
+            .is_some()
+    }
+
+    /// RR6: reap the remote process group + (under [`CleanupPolicy::ReapAll`])
+    /// remove the remote git worktree. Idempotent: the worktree is removed at most
+    /// once; a re-run finds `None` and reports `worktree_reaped == false`.
+    fn cleanup_workspace(
+        &self,
+        _probe: &RemoteProbe,
+        policy: CleanupPolicy,
+    ) -> RuntimeResult<WorkspaceReapOutcome> {
+        let mut worktree = self
+            .remote_worktree
+            .lock()
+            .expect("fake remote worktree ledger poisoned");
+        let key = worktree.clone().unwrap_or_default();
+        let worktree_reaped = if policy.reaps_worktree() {
+            worktree.take().is_some()
+        } else {
+            // Preserve: the worktree stays for inspection; nothing reaped.
+            false
+        };
+        Ok(WorkspaceReapOutcome {
+            worktree_reaped,
+            worktree_key: key,
+        })
+    }
+
+    /// RR6: restore the remote worktree to `checkpoint_ref` (the RR3 git-materialized
+    /// commit). Records the checkpoint so a test proves the rollback reached the
+    /// transport; re-materializes the worktree key (a rollback leaves a worktree at
+    /// the checkpoint commit).
+    fn rollback_worktree(&self, _probe: &RemoteProbe, checkpoint_ref: &str) -> RuntimeResult<()> {
+        *self
+            .rolled_back_to
+            .lock()
+            .expect("fake remote rollback ledger poisoned") = Some(checkpoint_ref.to_string());
+        *self
+            .remote_worktree
+            .lock()
+            .expect("fake remote worktree ledger poisoned") =
+            Some(format!("worktree@{checkpoint_ref}"));
+        Ok(())
     }
 
     /// RR5: model a REAL cross-machine boundary (`is_loopback() == false`) so the
@@ -2451,6 +2649,22 @@ impl FakeRemoteChannel {
         let spawn_index = self
             .spawn_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // RR6: a launch materializes a remote git worktree (RR3 semantics, modelled
+        // deterministically by a key) so a later `cleanup_run(ReapAll)` has a
+        // worktree to reap. Only set it if a crash hasn't pre-seeded one.
+        {
+            let mut worktree = self
+                .remote_worktree
+                .lock()
+                .expect("fake remote worktree ledger poisoned");
+            if worktree.is_none() {
+                *worktree = Some(format!(
+                    "{}/run-{}",
+                    self.remote_host_id,
+                    self.next_remote_pid + spawn_index as u32
+                ));
+            }
+        }
         Ok(RemoteLaunch {
             remote_pid: self.next_remote_pid + spawn_index as u32,
             remote_boot_id: self.remote_boot_id.clone(),
@@ -2501,7 +2715,14 @@ impl FakeRemoteChannel {
         self.streamed_output.clone().unwrap_or_default()
     }
 
-    fn signal(&self, _probe: &RemoteProbe, _escalation: &str) -> RuntimeResult<()> {
+    fn signal(&self, _probe: &RemoteProbe, escalation: &str) -> RuntimeResult<()> {
+        // Record the escalation so a test can prove the stop signal ACTUALLY
+        // reached the channel (e.g. that `revoke_control` signalled the in-flight
+        // run, not merely flipped the local grant flag).
+        self.signals_sent
+            .lock()
+            .expect("fake remote signal ledger poisoned")
+            .push(escalation.to_string());
         Ok(())
     }
 
@@ -2776,6 +2997,28 @@ pub struct RemoteProcessRunner {
     /// idempotency key can never spawn a second remote process. Shared (`Arc`) so a
     /// cloned runner enforces the same invariant; excluded from identity equality.
     launched: std::sync::Arc<std::sync::Mutex<HashMap<String, LocalProcessOutcome>>>,
+    /// RR6 remote-control grant state. A remote runner is a remote-control
+    /// CAPABILITY, so it must be auditable + revocable: when this is revoked, every
+    /// execution path (`start_process` / `stream_output` / `write_stdin` /
+    /// control) is refused with [`RuntimeError::RemoteControlRevoked`], and the
+    /// runner CANNOT re-establish execution without a fresh grant (a new runner /
+    /// channel). Shared (`Arc`) so a cloned runner observes the SAME revocation —
+    /// a revoke cannot be sidestepped by holding a clone. Excluded from identity
+    /// equality (it is revocation STATE, not identity).
+    grant: std::sync::Arc<std::sync::Mutex<RemoteControlGrant>>,
+}
+
+/// RR6: the revocable remote-control grant a [`RemoteProcessRunner`] executes
+/// under. The runner owns a remote-control capability; revoking the grant (the
+/// channel was revoked, or the `safety-gates` remote-control grant ended) STOPS
+/// the run and forbids the runner from re-establishing execution without a fresh
+/// grant. Once revoked, it stays revoked for this runner — re-establishment is a
+/// new runner over a new channel, never a flag flip back.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RemoteControlGrant {
+    /// `None` while the grant is active; `Some(reason)` once revoked. The reason is
+    /// redaction-safe (never a credential).
+    revoked_reason: Option<String>,
 }
 
 impl PartialEq for RemoteProcessRunner {
@@ -2792,6 +3035,9 @@ impl RemoteProcessRunner {
         Self {
             config,
             launched: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            grant: std::sync::Arc::new(std::sync::Mutex::new(RemoteControlGrant {
+                revoked_reason: None,
+            })),
         }
     }
 
@@ -2853,6 +3099,10 @@ impl RemoteProcessRunner {
         &self,
         request: LocalProcessRequest,
     ) -> RuntimeResult<LocalProcessOutcome> {
+        // RR6 safety boundary: a revoked remote-control grant forbids any new
+        // execution. The runner cannot re-establish a launch without a fresh grant.
+        self.ensure_control_granted()?;
+
         let run_id = request.run_id.clone();
         let idempotency_key = run_id.to_string();
 
@@ -2963,6 +3213,16 @@ impl RemoteProcessRunner {
         Ok(outcome)
     }
 
+    /// Send an interrupt over the channel.
+    ///
+    /// RR6 policy: the escalation signals (`interrupt` / `terminate` / `kill`) are
+    /// INTENTIONALLY permitted after `revoke_control` and are NOT guarded by the
+    /// grant. The safety boundary forbids STARTING or STEERING new execution under
+    /// a revoked grant; STOPPING a run is the opposite of re-establishing one, so a
+    /// teardown signal must stay available (`revoke_control` itself relies on this
+    /// to send a best-effort `kill`). These methods send a signal to an EXISTING
+    /// remote pid; they cannot spawn or resume a run, so allowing them after
+    /// revocation does not re-establish execution.
     pub fn interrupt(
         &self,
         process: &LocalRuntimeProcessRef,
@@ -3004,8 +3264,18 @@ impl RemoteProcessRunner {
         )
     }
 
-    /// Idempotent remote cleanup over the channel; emits
+    /// Thin idempotent remote cleanup over the channel; emits only
     /// `runtime.remote_cleanup_completed`.
+    ///
+    /// TWO-TIER DESIGN (review finding 6): this is the LOW tier — it delegates to
+    /// `transport.cleanup` (signal the process group) and DOES NOT tear down the
+    /// remote git worktree, so it never emits `runtime.remote_workspace_torn_down`.
+    /// For crash-safe teardown that also reaps a dangling worktree, use
+    /// [`Self::cleanup_run`] with a [`CleanupPolicy`]. The `RuntimeRunnerContract`
+    /// surface deliberately routes to `cleanup_run(ReapAll)`, NOT this method, so a
+    /// caller driving the contract uniformly still gets the worktree reap; this
+    /// thin variant remains for callers that only want the process-group signal
+    /// (e.g. a `PreserveWorktree`-style teardown handled out of band).
     pub fn cleanup(&self, process: &LocalRuntimeProcessRef) -> RuntimeResult<RuntimeControlResult> {
         let probe = self.probe_from_ref(process);
         self.config.transport.cleanup(&probe)?;
@@ -3019,6 +3289,199 @@ impl RemoteProcessRunner {
                 detail: process.runtime_process_ref.clone(),
             }],
         })
+    }
+
+    /// RR6: idempotent + auditable remote cleanup under a [`CleanupPolicy`]. This
+    /// is the crash-safe teardown the RR6 acceptance criterion names: it reaps the
+    /// remote process group AND removes the remote git worktree over the channel,
+    /// emitting `runtime.remote_cleanup_completed` and — when a remote worktree was
+    /// actually present (e.g. a DANGLING worktree left by a crash) —
+    /// `runtime.remote_workspace_torn_down` so the worktree is never silently
+    /// abandoned. It is safe to re-run after a partial failure: a second call over
+    /// the same ref reaps nothing new (the worktree is already gone) and still
+    /// records the completion, so a crash mid-cleanup is recoverable by re-running.
+    ///
+    /// Mirrors `LocalProcessRunner::cleanup`'s idempotency, but the reaped things
+    /// are remote (a process group + a git worktree over the channel) rather than a
+    /// local artifact dir + marker.
+    pub fn cleanup_run(
+        &self,
+        process: &LocalRuntimeProcessRef,
+        policy: CleanupPolicy,
+    ) -> RuntimeResult<RuntimeControlResult> {
+        let probe = self.probe_from_ref(process);
+        // Reap the remote process group + remove the remote worktree over the
+        // channel. The transport reports whether a worktree was ACTUALLY present so
+        // a dangling worktree (left by a crash) is reaped exactly once; a re-run
+        // finds nothing to reap and is a no-op teardown (still idempotently
+        // completing). NO secret crosses: only the ref + worktree key are recorded.
+        let reaped = self.config.transport.cleanup_workspace(&probe, policy)?;
+        let mut events = Vec::new();
+        if reaped.worktree_reaped {
+            events.push(RuntimeEvent {
+                kind: EventKind::RuntimeRemoteWorkspaceTornDown
+                    .as_str()
+                    .to_string(),
+                status: "torn_down".to_string(),
+                detail: format!(
+                    "ref={} worktree={} policy={}",
+                    process.runtime_process_ref,
+                    reaped.worktree_key,
+                    policy.as_str()
+                ),
+            });
+        }
+        events.push(RuntimeEvent {
+            kind: EventKind::RuntimeRemoteCleanupCompleted
+                .as_str()
+                .to_string(),
+            status: "cleaned".to_string(),
+            detail: format!(
+                "ref={} policy={} worktree_reaped={}",
+                process.runtime_process_ref,
+                policy.as_str(),
+                reaped.worktree_reaped
+            ),
+        });
+        Ok(RuntimeControlResult {
+            process: process.clone(),
+            events,
+        })
+    }
+
+    /// RR6: roll a remote run back to its pre-write checkpoint — the RR3
+    /// git-materialized commit ref — restoring the remote worktree to that
+    /// checkpoint over the channel and recording `runtime.remote_rollback_performed`.
+    /// This composes the remote run WITH git-backed rollback (the sandbox/run is
+    /// ADDITIVE to rollback, never a replacement): a run interrupted by a channel
+    /// drop can be cleanly failed and its workspace recovered from git to the
+    /// materialized commit. A revoked grant refuses the rollback (no execution
+    /// without a fresh grant).
+    pub fn rollback_to_checkpoint(
+        &self,
+        process: &LocalRuntimeProcessRef,
+        checkpoint_ref: &str,
+    ) -> RuntimeResult<RuntimeControlResult> {
+        self.ensure_control_granted()?;
+        let probe = self.probe_from_ref(process);
+        self.config
+            .transport
+            .rollback_worktree(&probe, checkpoint_ref)?;
+        Ok(RuntimeControlResult {
+            process: process.clone(),
+            events: vec![RuntimeEvent {
+                kind: EventKind::RuntimeRemoteRollbackPerformed
+                    .as_str()
+                    .to_string(),
+                status: "rolled_back".to_string(),
+                detail: format!(
+                    "ref={} checkpoint={checkpoint_ref}",
+                    process.runtime_process_ref
+                ),
+            }],
+        })
+    }
+
+    /// RR6: revoke this runner's remote-control grant AND stop the in-flight run.
+    /// A remote runner is a remote-control capability, so it MUST be revocable.
+    ///
+    /// Two distinct guarantees, and the docstring is honest about the line between
+    /// them:
+    ///
+    /// 1. NO NEW EXECUTION. After revocation the runner CANNOT re-establish a run
+    ///    or steer one without a fresh grant: `start_process`, `write_stdin`, and
+    ///    `rollback_to_checkpoint` are refused with
+    ///    [`RuntimeError::RemoteControlRevoked`]. A clone observes the SAME
+    ///    revocation (the grant is shared), so revocation cannot be sidestepped.
+    /// 2. STOP THE CURRENT RUN. When an in-flight `process` ref is supplied, this
+    ///    BEST-EFFORT sends a `kill` over the channel (`transport.signal`) so the
+    ///    running remote process is actually terminated — satisfying the RR6
+    ///    "a revoked grant must STOP the remote run" criterion rather than only
+    ///    forbidding the next one. A transport error is tolerated: the grant is
+    ///    revoked regardless, so no further execution is admitted even if the stop
+    ///    signal did not land, and the event records `signalled=<bool>` honestly.
+    ///
+    /// Teardown that STOPS a run is permitted post-revocation by design (`interrupt`
+    /// / `terminate` / `kill` and the read-only `stream_output` drain stay open so
+    /// an operator can stop and observe the dying run); only paths that START or
+    /// STEER new execution are refused. `stream_output` is therefore intentionally
+    /// NOT guarded (see its own note).
+    ///
+    /// When `process` is `None` (revoked before any run started, or with no
+    /// in-flight ref to hand), no signal is sent and a synthetic `revoked` ref is
+    /// returned. When `Some`, the SUPPLIED ref is returned so the audit trail links
+    /// the revoke event to the specific run being stopped. Returns the append-first
+    /// `runtime.remote_control_revoked` audit event. Idempotent: re-revoking keeps
+    /// the first reason (the grant stays revoked); a re-revoke with a ref still
+    /// re-sends a best-effort stop (terminating a process twice is harmless).
+    pub fn revoke_control(
+        &self,
+        reason: &str,
+        process: Option<&LocalRuntimeProcessRef>,
+    ) -> RuntimeControlResult {
+        {
+            let mut grant = self.grant.lock().expect("remote control grant poisoned");
+            if grant.revoked_reason.is_none() {
+                grant.revoked_reason = Some(reason.to_string());
+            }
+        }
+        let fingerprint = self.config.transport.target_fingerprint();
+        // Best-effort: stop the in-flight run over the channel (a revoked capability
+        // STOPS the run, it does not merely forbid the next one). A transport error
+        // is tolerated — `signalled` records honestly whether the stop landed.
+        let (result_ref, signalled) = match process {
+            Some(process) => {
+                let probe = self.probe_from_ref(process);
+                let signalled = self.config.transport.signal(&probe, "kill").is_ok();
+                (
+                    LocalRuntimeProcessRef {
+                        status: "revoked".to_string(),
+                        ..process.clone()
+                    },
+                    signalled,
+                )
+            }
+            None => (
+                LocalRuntimeProcessRef {
+                    run_id: RunId::new("revoked"),
+                    runtime_process_ref: String::new(),
+                    external_pid: None,
+                    boot_id: None,
+                    status: "revoked".to_string(),
+                    redaction_state: "clean".to_string(),
+                },
+                false,
+            ),
+        };
+        RuntimeControlResult {
+            process: result_ref,
+            events: vec![RuntimeEvent {
+                kind: EventKind::RuntimeRemoteControlRevoked.as_str().to_string(),
+                status: "revoked".to_string(),
+                detail: format!("fingerprint={fingerprint} signalled={signalled} reason={reason}"),
+            }],
+        }
+    }
+
+    /// RR6: whether this runner's remote-control grant has been revoked. A revoked
+    /// runner admits no execution.
+    pub fn is_control_revoked(&self) -> bool {
+        self.grant
+            .lock()
+            .expect("remote control grant poisoned")
+            .revoked_reason
+            .is_some()
+    }
+
+    /// RR6: refuse any execution path when the remote-control grant is revoked.
+    fn ensure_control_granted(&self) -> RuntimeResult<()> {
+        let grant = self.grant.lock().expect("remote control grant poisoned");
+        match &grant.revoked_reason {
+            Some(reason) => Err(RuntimeError::RemoteControlRevoked {
+                reason: reason.clone(),
+            }),
+            None => Ok(()),
+        }
     }
 
     /// Liveness derived from an ACTUAL remote probe over the channel (remote pid /
@@ -3051,6 +3514,13 @@ impl RemoteProcessRunner {
     ///     `ChannelDropped` + a recorded reason, never a silent truncation.
     ///
     /// `output_limit_bytes` for the remote boundary mirrors the local runner cap.
+    ///
+    /// RR6 NOTE: `stream_output` is INTENTIONALLY NOT guarded by the remote-control
+    /// grant. Draining a remote run's output is a READ-ONLY observation, not new
+    /// execution, so it stays available after `revoke_control` so an operator can
+    /// observe a revoked/dying run finish flushing. Revocation forbids paths that
+    /// START or STEER execution (`start_process` / `write_stdin` /
+    /// `rollback_to_checkpoint`), not read-only observation.
     pub fn stream_output(
         &self,
         process: &LocalRuntimeProcessRef,
@@ -3144,6 +3614,8 @@ impl RemoteProcessRunner {
         process: &LocalRuntimeProcessRef,
         bytes: &[u8],
     ) -> RuntimeResult<RuntimeControlResult> {
+        // RR6: steering a remote process is execution — a revoked grant refuses it.
+        self.ensure_control_granted()?;
         let probe = self.probe_from_ref(process);
         self.config.transport.write_stdin(&probe, bytes)?;
         Ok(RuntimeControlResult {
@@ -8757,6 +9229,395 @@ mod tests {
         assert_eq!(
             a, b,
             "repeated reads at the same offset must rebuild identically"
+        );
+    }
+
+    // ----- RR6: crash-safe remote runs + recovery events -----
+
+    /// Build a remote runner over a fake channel scripted by `script`, run one
+    /// process so a REAL stored `remote_process_ref` exists, and return the runner,
+    /// the stored ref (flipped to the in-flight `running` state a crash interrupts),
+    /// the recorded remote boot id, and a clone of the scripted channel so a test
+    /// can read the fake remote's worktree/rollback state directly. NO network.
+    fn crash_safe_runner(
+        name: &str,
+        script: impl FnOnce(FakeRemoteChannel) -> FakeRemoteChannel,
+    ) -> (
+        RemoteProcessRunner,
+        LocalRuntimeProcessRef,
+        String,
+        FakeRemoteChannel,
+    ) {
+        let workspace = temp_root(&format!("workspace-{name}"));
+        let artifacts = temp_root(&format!("artifacts-{name}"));
+        fs::create_dir_all(&workspace).unwrap();
+        let channel = OpenChannel::for_test(
+            format!("chan-{name}"),
+            format!("endpoint-{name}"),
+            format!("fp-{name}"),
+        );
+        let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts);
+        let recorded_boot = base.remote_boot_id();
+        let scripted = script(base);
+        let transport = RemoteChannel::Fake(scripted.clone());
+        let runner =
+            RemoteProcessRunner::new(RemoteProcessConfig::with_transport(channel, transport));
+        let outcome = runner
+            .start_process(remote_request(
+                &format!("run-{name}"),
+                workspace,
+                "printf ok",
+            ))
+            .expect("remote start for crash-safe fixture");
+        let running = LocalRuntimeProcessRef {
+            status: "running".to_string(),
+            ..outcome.process
+        };
+        (runner, running, recorded_boot, scripted)
+    }
+
+    #[test]
+    fn remote_crash_controller_restart_with_live_remote_recovers_in_place() {
+        // Failure mode: the remote process SURVIVES a controller restart. Recovery
+        // re-probes the stored ref over the re-resolved channel and recovers in
+        // place (no relaunch).
+        let (runner, running, recorded_boot, _chan) =
+            crash_safe_runner("rr6-restart", |c| c.recover_alive_reattachable());
+        let recovery = runner.recover_run(&running, &recorded_boot);
+        assert_eq!(
+            recovery.classification,
+            RemoteRecoveryClassification::Recovered
+        );
+        assert!(
+            !recovery
+                .events
+                .iter()
+                .any(|e| e.kind == "runtime.remote_process_started"),
+            "an in-place reattach must NOT relaunch the remote process"
+        );
+    }
+
+    #[test]
+    fn remote_crash_remote_reboot_is_exited_never_silently_recovered() {
+        // Failure mode: the remote HOST rebooted (boot-id mismatch). The recorded
+        // pid is meaningless, so the run is classified Exited, never recovered.
+        let (runner, running, recorded_boot, _chan) =
+            crash_safe_runner("rr6-reboot", |c| c.recover_rebooted());
+        let recovery = runner.recover_run(&running, &recorded_boot);
+        assert_eq!(
+            recovery.classification,
+            RemoteRecoveryClassification::Exited,
+            "a remote reboot must be Exited, never silently Recovered"
+        );
+        assert_eq!(
+            recovery.events.last().unwrap().kind,
+            "runtime.remote_run_exited"
+        );
+    }
+
+    #[test]
+    fn remote_crash_channel_drop_finalizes_stream_with_recorded_reason() {
+        // Failure mode: the channel drops mid-run. The stream finalizes with a
+        // recorded ChannelDropped reason (NOT a silent truncation), so the run can
+        // be cleanly failed and the operator learns the stream was cut.
+        let payload = b"first-half-second-half";
+        let (runner, running, _chan) = streaming_runner("rr6-drop", |c| {
+            c.with_streamed_output(payload.to_vec())
+                .with_stream_drop_after(11)
+        });
+        let outcome = runner.stream_output(&running, 0);
+        assert_eq!(
+            outcome.final_reason,
+            RemoteStreamFinalReason::ChannelDropped
+        );
+        assert!(
+            outcome
+                .events
+                .iter()
+                .any(|e| e.kind == "runtime.remote_stream_finalized"
+                    && e.status == "channel_dropped"),
+            "a mid-stream channel drop must finalize with a recorded reason, never a silent truncation"
+        );
+    }
+
+    #[test]
+    fn remote_crash_dangling_worktree_is_reaped_on_cleanup() {
+        // Failure mode: a crash left a remote git worktree DANGLING. A
+        // cleanup_run(ReapAll) reaps it (runtime.remote_workspace_torn_down) and
+        // records cleanup completion — never silently abandoned.
+        let (runner, running, _boot, chan) = crash_safe_runner("rr6-dangling", |c| {
+            c.with_dangling_worktree("remote-host/dangling-run")
+        });
+        assert!(chan.has_remote_worktree(), "fixture has a worktree to reap");
+
+        let result = runner
+            .cleanup_run(&running, CleanupPolicy::ReapAll)
+            .expect("cleanup reaps the dangling worktree");
+        let kinds: Vec<&str> = result.events.iter().map(|e| e.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&"runtime.remote_workspace_torn_down"),
+            "a dangling worktree must be torn down, not silently abandoned"
+        );
+        assert!(kinds.contains(&"runtime.remote_cleanup_completed"));
+        assert!(
+            !chan.has_remote_worktree(),
+            "the worktree must be gone after a ReapAll cleanup"
+        );
+    }
+
+    #[test]
+    fn remote_cleanup_is_idempotent_after_a_partial_failure() {
+        // Cleanup must be safe to re-run: a second cleanup over the same ref reaps
+        // nothing new (the worktree is already gone) and still records completion.
+        let (runner, running, _boot, _chan) = crash_safe_runner("rr6-idem", |c| c);
+        let first = runner
+            .cleanup_run(&running, CleanupPolicy::ReapAll)
+            .expect("first cleanup");
+        let second = runner
+            .cleanup_run(&running, CleanupPolicy::ReapAll)
+            .expect("idempotent re-run");
+        assert!(
+            first
+                .events
+                .iter()
+                .any(|e| e.kind == "runtime.remote_workspace_torn_down"),
+            "first cleanup reaps the launched worktree"
+        );
+        assert!(
+            !second
+                .events
+                .iter()
+                .any(|e| e.kind == "runtime.remote_workspace_torn_down"),
+            "a re-run finds nothing to reap — no second teardown"
+        );
+        // Both record completion (idempotent + auditable).
+        assert!(
+            first
+                .events
+                .iter()
+                .any(|e| e.kind == "runtime.remote_cleanup_completed")
+        );
+        assert!(
+            second
+                .events
+                .iter()
+                .any(|e| e.kind == "runtime.remote_cleanup_completed")
+        );
+    }
+
+    #[test]
+    fn remote_cleanup_preserve_policy_keeps_the_worktree_for_inspection() {
+        // An orphaned run's worktree can be PRESERVED for inspection: cleanup reaps
+        // the process group but leaves the worktree (no torn_down event).
+        let (runner, running, _boot, chan) = crash_safe_runner("rr6-preserve", |c| c);
+        let result = runner
+            .cleanup_run(&running, CleanupPolicy::PreserveWorktree)
+            .expect("preserve cleanup");
+        assert!(
+            !result
+                .events
+                .iter()
+                .any(|e| e.kind == "runtime.remote_workspace_torn_down"),
+            "PreserveWorktree must NOT tear the worktree down"
+        );
+        assert!(
+            chan.has_remote_worktree(),
+            "the worktree must remain for inspection under PreserveWorktree"
+        );
+    }
+
+    #[test]
+    fn remote_rollback_restores_the_worktree_to_the_git_checkpoint() {
+        // Compose with safety-gates checkpoint/rollback: a run can be rolled back to
+        // its pre-write checkpoint (the RR3 git-materialized commit), restoring the
+        // remote worktree to that checkpoint and recording the rollback.
+        let (runner, running, _boot, chan) = crash_safe_runner("rr6-rollback", |c| c);
+        let checkpoint = "refs/capo/materialized/deadbeef";
+        let result = runner
+            .rollback_to_checkpoint(&running, checkpoint)
+            .expect("rollback to checkpoint");
+        assert_eq!(
+            result.events[0].kind, "runtime.remote_rollback_performed",
+            "rollback must record the git-checkpoint restore"
+        );
+        assert!(
+            result.events[0].detail.contains(checkpoint),
+            "the rollback event records the checkpoint ref"
+        );
+        assert_eq!(
+            chan.rolled_back_to().as_deref(),
+            Some(checkpoint),
+            "the rollback must reach the transport (restore the remote worktree)"
+        );
+    }
+
+    #[test]
+    fn remote_revoked_grant_stops_the_run_and_forbids_re_establishment() {
+        // Safety boundary: a revoked remote-control grant stops the run and the
+        // runner CANNOT re-establish execution without a fresh grant.
+        let (runner, running, _boot, chan) = crash_safe_runner("rr6-revoke", |c| c);
+
+        // Revoke WITH the in-flight ref: the grant flips revoked AND the run is
+        // actually STOPPED over the channel (a `kill` signal reaches the transport),
+        // not merely forbidden for the next launch.
+        let revoke = runner.revoke_control("channel revoked by operator", Some(&running));
+        assert_eq!(
+            revoke.events[0].kind, "runtime.remote_control_revoked",
+            "revocation must be an audit event"
+        );
+        assert!(runner.is_control_revoked());
+        // No raw credential in the revoke detail (redaction-safe reason only).
+        assert!(!revoke.events[0].detail.contains("token"));
+        // The revoke ACTUALLY signalled a stop over the channel (finding 1).
+        assert!(
+            revoke.events[0].detail.contains("signalled=true"),
+            "the revoke must record that the stop signal landed"
+        );
+        assert_eq!(
+            chan.signals_sent(),
+            vec!["kill".to_string()],
+            "revoke_control must send a kill over the channel to stop the in-flight run"
+        );
+        // The returned ref is the SPECIFIC run being revoked, not a phantom
+        // (finding 4): the audit trail correlates to the real ref.
+        assert_eq!(
+            revoke.process.runtime_process_ref, running.runtime_process_ref,
+            "the revoke result must carry the in-flight ref it stopped"
+        );
+
+        // A NEW start under the revoked grant is refused — no re-establishment.
+        let workspace = temp_root("workspace-rr6-revoke-2");
+        fs::create_dir_all(&workspace).unwrap();
+        let err = runner
+            .start_process(remote_request("run-rr6-revoke-2", workspace, "printf ok"))
+            .expect_err("a revoked grant must refuse a new launch");
+        assert!(
+            matches!(err, RuntimeError::RemoteControlRevoked { .. }),
+            "re-establishment requires a FRESH grant, not a retry under the revoked one"
+        );
+
+        // Steering (stdin) is also refused under the revoked grant.
+        let stdin_err = runner
+            .write_stdin(&running, b"input")
+            .expect_err("a revoked grant must refuse stdin");
+        assert!(matches!(
+            stdin_err,
+            RuntimeError::RemoteControlRevoked { .. }
+        ));
+
+        // Rollback (re-establishing a workspace state) is also refused.
+        let rollback_err = runner
+            .rollback_to_checkpoint(&running, "refs/capo/materialized/abc")
+            .expect_err("a revoked grant must refuse rollback");
+        assert!(matches!(
+            rollback_err,
+            RuntimeError::RemoteControlRevoked { .. }
+        ));
+    }
+
+    #[test]
+    fn remote_revocation_permits_teardown_and_readonly_drain_but_not_new_execution() {
+        // RR6 policy (findings 2 + 3): after revocation the runner refuses paths
+        // that START or STEER execution, but the teardown escalations
+        // (interrupt/terminate/kill) and the READ-ONLY output drain stay open so an
+        // operator can stop and observe a dying run. The docstrings now promise
+        // exactly this — this test pins the behaviour so the docs stay honest.
+        let (runner, running, _boot, chan) =
+            crash_safe_runner("rr6-revoke-teardown", |c| c.with_streamed_output(b"done\n"));
+
+        // Revoke WITHOUT an in-flight ref: no stop signal is sent, a synthetic ref
+        // is returned (finding 4 fallback path), and `signalled=false` is honest.
+        let revoke = runner.revoke_control("operator revoke, teardown out of band", None);
+        assert!(
+            revoke.events[0].detail.contains("signalled=false"),
+            "revoke with no ref sends no signal and says so"
+        );
+        assert!(chan.signals_sent().is_empty(), "no ref => no stop signal");
+
+        // Teardown escalations are PERMITTED post-revocation (they stop, never
+        // start): interrupt/terminate/kill each reach the channel.
+        runner.interrupt(&running, "drain");
+        runner.terminate(&running, "drain");
+        runner.kill(&running, "drain");
+        assert_eq!(
+            chan.signals_sent(),
+            vec![
+                "interrupt".to_string(),
+                "terminate".to_string(),
+                "kill".to_string()
+            ],
+            "teardown escalations must remain available after revocation"
+        );
+
+        // The read-only output drain is also permitted (observability, not
+        // execution): stream_output succeeds and forwards the remote bytes.
+        let outcome = runner.stream_output(&running, 0);
+        assert!(
+            outcome.deltas.iter().any(|d| d.text.contains("done")),
+            "stream_output must remain available after revocation (read-only drain)"
+        );
+
+        // But STARTING new execution is still refused.
+        let workspace = temp_root("workspace-rr6-revoke-teardown-2");
+        fs::create_dir_all(&workspace).unwrap();
+        assert!(matches!(
+            runner
+                .start_process(remote_request("run-rr6-teardown-2", workspace, "printf ok"))
+                .expect_err("a revoked grant must refuse a new launch"),
+            RuntimeError::RemoteControlRevoked { .. }
+        ));
+    }
+
+    #[test]
+    fn remote_revocation_is_observed_by_a_cloned_runner() {
+        // A revoke cannot be sidestepped by holding a clone of the runner: the
+        // grant state is shared, so a cloned runner is ALSO revoked.
+        let (runner, _running, _boot, _chan) = crash_safe_runner("rr6-revoke-clone", |c| c);
+        let clone = runner.clone();
+        runner.revoke_control("revoked", None);
+        assert!(
+            clone.is_control_revoked(),
+            "a cloned runner must observe the SAME revocation (no sidestep via a clone)"
+        );
+        let workspace = temp_root("workspace-rr6-clone");
+        fs::create_dir_all(&workspace).unwrap();
+        let err = clone
+            .start_process(remote_request("run-rr6-clone", workspace, "printf ok"))
+            .expect_err("the clone is revoked too");
+        assert!(matches!(err, RuntimeError::RemoteControlRevoked { .. }));
+    }
+
+    #[test]
+    fn remote_crash_matrix_recovery_is_replay_stable() {
+        // The full crash matrix must rebuild identically across repeated restarts:
+        // recovered, exited (reboot), and cleanup are deterministic + replay-stable.
+        let (runner, running, boot, _chan) =
+            crash_safe_runner("rr6-replay", |c| c.recover_alive_reattachable());
+        let first = runner.recover_run(&running, &boot);
+        let second = runner.recover_run(&running, &boot);
+        assert_eq!(
+            first, second,
+            "remote crash recovery must rebuild identically across repeated restarts"
+        );
+
+        let clean_a = runner
+            .cleanup_run(&running, CleanupPolicy::ReapAll)
+            .expect("cleanup a");
+        let clean_b = runner
+            .cleanup_run(&running, CleanupPolicy::ReapAll)
+            .expect("cleanup b");
+        // The SECOND cleanup is the stable steady state (worktree already reaped):
+        // re-running it again is identical.
+        let clean_c = runner
+            .cleanup_run(&running, CleanupPolicy::ReapAll)
+            .expect("cleanup c");
+        assert_eq!(
+            clean_b, clean_c,
+            "idempotent cleanup must be replay-stable once the worktree is reaped"
+        );
+        assert_ne!(
+            clean_a, clean_b,
+            "the first cleanup reaped a worktree; later runs are no-op teardowns"
         );
     }
 

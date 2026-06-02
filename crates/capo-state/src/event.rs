@@ -221,6 +221,23 @@ pub enum EventKind {
     SandboxEnforced,
     SandboxUnenforced,
     SandboxLaunchRefused,
+    // RR6 (remote-runtime): crash-safe remote runs + recovery events. The
+    // recovery classifications (recovered/orphaned/exited/recovery_pending),
+    // the cleanup-completed, the workspace-torn-down, and the stream-finalized
+    // events above already cover most of the crash matrix; RR6 adds two facts a
+    // remote-control capability MUST record to stay auditable + revocable:
+    //   - `RuntimeRemoteControlRevoked`: a revoked channel / revoked
+    //     remote-control grant STOPPED the remote run, and the runner cannot
+    //     re-establish execution without a FRESH grant (no orphaned remote
+    //     capability). Detail carries the fingerprint + a redaction-safe reason,
+    //     never a credential.
+    //   - `RuntimeRemoteRollbackPerformed`: a remote run was rolled back to its
+    //     pre-write checkpoint — the RR3 git-materialized commit ref — restoring
+    //     the remote worktree to that checkpoint (the sandbox/run is additive to
+    //     git-backed rollback, never a replacement). Detail carries the
+    //     checkpoint ref + the remote worktree key, never a secret.
+    RuntimeRemoteControlRevoked,
+    RuntimeRemoteRollbackPerformed,
 }
 
 /// The terminal outcome a projected turn-ending event carries, in the
@@ -349,6 +366,8 @@ impl EventKind {
             Self::RuntimeRemoteWorkspaceMaterializationFailed => {
                 "runtime.remote_workspace_materialization_failed"
             }
+            Self::RuntimeRemoteControlRevoked => "runtime.remote_control_revoked",
+            Self::RuntimeRemoteRollbackPerformed => "runtime.remote_rollback_performed",
             Self::RuntimeRemoteOutputDelta => "runtime.remote_output_delta",
             Self::RuntimeRemoteStdinWritten => "runtime.remote_stdin_written",
             Self::RuntimeRemoteStreamFinalized => "runtime.remote_stream_finalized",
@@ -477,6 +496,8 @@ impl EventKind {
             EventKind::SandboxEnforced,
             EventKind::SandboxUnenforced,
             EventKind::SandboxLaunchRefused,
+            EventKind::RuntimeRemoteControlRevoked,
+            EventKind::RuntimeRemoteRollbackPerformed,
         ];
         ALL.iter()
             .copied()
