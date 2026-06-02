@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use capo_query::{ProjectDashboardQuery, project_dashboard};
 use capo_runtime::{
     ChannelKind, ConnectivityEndpointConfig, ConnectivityError, ConnectivityTunnel, EndpointOwner,
-    ExposurePolicy, ExposureScope,
+    ExposurePolicy, ExposureScope, FakeTunnelScript,
 };
 use capo_state::{
     CapabilityGrantProjection, ConnectivityExposureProjection, EventKind, NewEvent,
@@ -29,6 +29,15 @@ pub(crate) fn expose_connectivity_stub(
     let auth_ref = optional_arg(args, "--auth-ref").filter(|value| !value.is_empty());
     let identity_ref = optional_arg(args, "--identity-ref").filter(|value| !value.is_empty());
     let record = has_flag(args, "--record");
+    // CT4: a DETERMINISTIC test/seam flag. When present on a `private` exposure it
+    // routes resolution through a scripted `FakeTunnel` whose OBSERVED device id is
+    // this value, exercising the SAME identity-verification path the live
+    // `TailscaleTunnel` uses (the fake carries parity at the enum surface). With no
+    // `--identity-ref` the observed device is trusted by ACL; with one, a mismatch
+    // yields a typed `IdentityMismatch` that is recorded as a BLOCKED exposure event
+    // (never a silent connect). It has NO effect on loopback/public scopes.
+    let fake_observed_device =
+        optional_arg(args, "--fake-observed-device").filter(|value| !value.is_empty());
     if let Some(unknown) = args.iter().find(|arg| {
         arg.starts_with("--")
             && !matches!(
@@ -42,6 +51,7 @@ pub(crate) fn expose_connectivity_stub(
                     | "--auth-ref"
                     | "--identity-ref"
                     | "--record"
+                    | "--fake-observed-device"
             )
     }) {
         return Err(format!(
@@ -60,20 +70,57 @@ pub(crate) fn expose_connectivity_stub(
     .map_err(|error| format!("connectivity handle redaction guard failed closed: {error}"))?;
 
     let owner = endpoint_owner(&owner_kind, &owner_id)?;
-    let tunnel = match exposure {
-        ExposureScope::Loopback => ConnectivityTunnel::local_loopback(),
-        ExposureScope::Private => ConnectivityTunnel::endpoint_stub(
+    let tunnel = match (exposure, fake_observed_device.as_deref()) {
+        (ExposureScope::Loopback, _) => ConnectivityTunnel::local_loopback(),
+        // CT4 deterministic seam: a `private` exposure with `--fake-observed-device`
+        // resolves through a scripted FakeTunnel carrying the SAME identity-check
+        // surface as the live Tailscale adapter, so the CLI exercises the
+        // identity-match / identity-mismatch paths with no live tailnet.
+        (ExposureScope::Private, Some(observed)) => {
+            let script = FakeTunnelScript::private_matching(endpoint_id.clone(), observed)
+                .with_expected_identity_ref(identity_ref.clone());
+            ConnectivityTunnel::fake_scripted(script)
+        }
+        (ExposureScope::Private, None) => ConnectivityTunnel::endpoint_stub(
             ConnectivityEndpointConfig::stub_private(endpoint_id.clone(), address_ref)
                 .with_handles(auth_ref.clone(), identity_ref.clone()),
         ),
-        ExposureScope::Public => ConnectivityTunnel::endpoint_stub(
+        (ExposureScope::Public, _) => ConnectivityTunnel::endpoint_stub(
             ConnectivityEndpointConfig::stub_public(endpoint_id.clone(), address_ref)
                 .with_handles(auth_ref.clone(), identity_ref.clone()),
         ),
     };
-    let resolved = tunnel
-        .resolve_endpoint(owner, channel)
-        .map_err(|error| format!("connectivity endpoint resolution failed: {error:?}"))?;
+    let resolved = match tunnel.resolve_endpoint(owner.clone(), channel) {
+        Ok(resolved) => resolved,
+        // CT4: an identity mismatch is NOT a silent failure. It is an AUDITABLE
+        // blocked exposure: when `--record`, append a `ConnectivityExposureRequested`
+        // event (status `blocked_pending_permission`) carrying the FINGERPRINTS only
+        // (never a raw credential), then surface the typed refusal to the caller.
+        Err(error @ ConnectivityError::IdentityMismatch { .. }) => {
+            let recorded_sequence = if record {
+                Some(record_blocked_identity_mismatch(
+                    parsed,
+                    &endpoint_id,
+                    &owner,
+                    channel,
+                    &error,
+                )?)
+            } else {
+                None
+            };
+            return Err(format!(
+                "connectivity endpoint resolution failed: {error}\nstatus=blocked_pending_permission\nrecorded={record}\nrecorded_sequence={}",
+                recorded_sequence
+                    .map(|sequence| sequence.to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "connectivity endpoint resolution failed: {error:?}"
+            ));
+        }
+    };
     // CT1: route the exposure through the explicit `ExposurePolicy`. With no
     // opt-in promotion and no `auth_ref` handle (CT2 adds the handle), the
     // default loopback-only policy authorizes loopback (no permission required)
@@ -231,6 +278,110 @@ pub(crate) fn expose_connectivity_stub(
             .map(|sequence| sequence.to_string())
             .unwrap_or_else(|| "none".to_string())
     ))
+}
+
+/// CT4: record an identity-mismatch refusal as an AUDITABLE blocked exposure.
+///
+/// A `TailscaleTunnel`/scripted `FakeTunnel` `IdentityMismatch` must never be a
+/// SILENT failure (invisible in the audit log). When `--record` is set, this
+/// appends a `ConnectivityExposureRequested` event with `status =
+/// blocked_pending_permission` and a payload carrying the EXPECTED/OBSERVED device
+/// FINGERPRINTS only (the CT2 `tsnode:` contract — never a raw credential), so an
+/// operator can reconstruct WHY the exposure was blocked. The payload is scanned by
+/// the CT2 emitted-surface guard before persistence.
+fn record_blocked_identity_mismatch(
+    parsed: &ParsedArgs,
+    endpoint_id: &str,
+    owner: &EndpointOwner,
+    channel: ChannelKind,
+    error: &ConnectivityError,
+) -> Result<i64, String> {
+    let ConnectivityError::IdentityMismatch {
+        expected, observed, ..
+    } = error
+    else {
+        return Err(
+            "record_blocked_identity_mismatch called with a non-mismatch error".to_string(),
+        );
+    };
+    // The mismatch is a `private` tunnel refusal: scope + permission-scope are the
+    // private-tunnel ones; the exposure stays blocked pending permission.
+    let exposure_scope = ExposureScope::Private;
+    let permission_scope = exposure_scope.permission_scope().to_string();
+    let exposure = ConnectivityExposureProjection {
+        exposure_id: format!(
+            "connectivity-exposure-{}",
+            stable_cli_hash(&format!(
+                "{}:{}",
+                endpoint_id,
+                exposure_scope_str(exposure_scope)
+            ))
+        ),
+        project_id: project_id(),
+        connectivity_endpoint_id: endpoint_id.to_string(),
+        owner_kind: owner.owner_kind.clone(),
+        owner_id: owner.owner_id.clone(),
+        channel_kind: channel_kind_str(channel).to_string(),
+        exposure: exposure_scope_str(exposure_scope).to_string(),
+        permission_scope: permission_scope.clone(),
+        status: "blocked_pending_permission".to_string(),
+        capability_grant_id: None,
+        health_status: "unreachable".to_string(),
+        reachable: false,
+        revoked_at: None,
+        // CT2/CT4: NO raw credential. The identity_fingerprint records the OBSERVED
+        // device fingerprint so the audit trail shows which device was refused.
+        auth_ref: None,
+        identity_ref: None,
+        identity_fingerprint: Some(observed.clone()),
+        expires_at: None,
+        updated_sequence: 0,
+    };
+    ensure_runtime_target_owner_exists(parsed, &exposure)?;
+    let mut event = NewEvent::new(
+        format!(
+            "event-connectivity-exposure-{}",
+            stable_cli_hash(&exposure.exposure_id)
+        ),
+        EventKind::ConnectivityExposureRequested,
+        "capo-cli",
+    );
+    event.project_id = Some(exposure.project_id.clone());
+    event.item_id = Some(exposure.exposure_id.clone());
+    event.payload_json = format!(
+        "{{\"exposure_id\":\"{}\",\"endpoint_id\":\"{}\",\"owner_kind\":\"{}\",\"owner_id\":\"{}\",\"channel\":\"{}\",\"exposure\":\"{}\",\"permission_scope\":\"{}\",\"status\":\"blocked_pending_permission\",\"block_reason\":\"identity_mismatch\",\"expected_identity_fingerprint\":\"{}\",\"observed_identity_fingerprint\":\"{}\"}}",
+        escape_json(&exposure.exposure_id),
+        escape_json(&exposure.connectivity_endpoint_id),
+        escape_json(&exposure.owner_kind),
+        escape_json(&exposure.owner_id),
+        escape_json(&exposure.channel_kind),
+        escape_json(&exposure.exposure),
+        escape_json(&exposure.permission_scope),
+        escape_json(expected),
+        escape_json(observed),
+    );
+    event.idempotency_key = Some(format!(
+        "connectivity-exposure-identity-mismatch:{}:{}:{}:{}:{}",
+        exposure.project_id,
+        exposure.connectivity_endpoint_id,
+        exposure.owner_kind,
+        exposure.owner_id,
+        exposure.channel_kind
+    ));
+    // CT2 emitted-surface guard: the payload carries fingerprints only, but make the
+    // `Safe` marker MEAN something by scanning for any leaked credential pattern.
+    if let Err(pattern) = capo_state::assert_connectivity_event_safe(&event.payload_json) {
+        return Err(format!(
+            "connectivity event payload marked Safe but leaked a `{pattern}` credential pattern; refusing to persist"
+        ));
+    }
+    event.redaction_state = RedactionState::Safe;
+    state(parsed)?
+        .append_event(
+            event,
+            &[ProjectionRecord::ConnectivityExposure(exposure.clone())],
+        )
+        .map_err(debug_error)
 }
 
 fn ensure_runtime_target_owner_exists(

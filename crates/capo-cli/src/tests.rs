@@ -5015,6 +5015,152 @@ fn ct2_opaque_handle_round_trips_and_no_secret_on_any_surface() {
 }
 
 #[test]
+fn ct4_expose_stub_identity_mismatch_records_a_blocked_exposure_event() {
+    // CT4 (acceptance criterion 1, through the CLI): a `private` exposure whose
+    // OBSERVED tailnet device (via the deterministic `--fake-observed-device` seam)
+    // does NOT match the EXPECTED `--identity-ref` handle must yield a typed
+    // IdentityMismatch AND an AUDITABLE blocked exposure event — never a silent
+    // connect and never a failure that is invisible in the audit log.
+    let state_root = temp_root("cli-ct4-identity-mismatch");
+    let refused = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct4-mismatch".to_string(),
+        "--owner-kind".to_string(),
+        "capo_server".to_string(),
+        "--owner-id".to_string(),
+        "server-ct4".to_string(),
+        "--channel".to_string(),
+        "control".to_string(),
+        "--exposure".to_string(),
+        "private".to_string(),
+        // Expected device "trusted-node" vs OBSERVED "impostor-node": a mismatch.
+        "--identity-ref".to_string(),
+        "tailscale:device:trusted-node".to_string(),
+        "--fake-observed-device".to_string(),
+        "impostor-node".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect_err("an unexpected device must be refused through the CLI");
+    // (a) the typed error surfaces and the exposure is blocked, not silently connected.
+    assert!(
+        refused.contains("IdentityMismatch") || refused.contains("identity"),
+        "expected a typed identity-mismatch refusal, got: {refused}"
+    );
+    assert!(refused.contains("status=blocked_pending_permission"));
+    assert!(refused.contains("recorded=true"));
+    // The refusal carries fingerprints only — never a raw credential.
+    assert!(!refused.contains("tskey-auth"));
+
+    // (b) a blocked exposure event is present in the store with the correct shape.
+    let state = SqliteStateStore::open(&state_root).expect("reopen state");
+    let events = state.events_after(0, 1024).expect("read events");
+    let blocked = events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::ConnectivityExposureRequested.as_str()
+                && event
+                    .payload_json
+                    .contains("\"block_reason\":\"identity_mismatch\"")
+        })
+        .expect("a blocked identity-mismatch exposure event must be persisted");
+    assert!(
+        blocked
+            .payload_json
+            .contains("\"status\":\"blocked_pending_permission\""),
+        "blocked event must carry blocked status: {}",
+        blocked.payload_json
+    );
+    assert!(
+        blocked
+            .payload_json
+            .contains("\"permission_scope\":\"network:connect:private_tunnel\""),
+        "blocked event must carry the private-tunnel permission scope: {}",
+        blocked.payload_json
+    );
+    // The payload records the OBSERVED + EXPECTED fingerprints (tsnode:sha256 only).
+    assert!(
+        blocked
+            .payload_json
+            .contains("\"observed_identity_fingerprint\":\"tsnode:sha256:")
+    );
+    assert!(
+        blocked
+            .payload_json
+            .contains("\"expected_identity_fingerprint\":\"tsnode:sha256:")
+    );
+    // (c) the event payload passes the CT2 emitted-surface guard (no leaked secret).
+    assert_eq!(
+        capo_state::scan_emitted_surface(&blocked.payload_json),
+        None,
+        "the blocked-exposure payload must carry no credential pattern"
+    );
+}
+
+#[test]
+fn ct4_expose_stub_identity_match_records_the_observed_fingerprint() {
+    // CT4 parity through the CLI: a MATCHING observed device verifies and the
+    // recorded exposure carries the OBSERVED device fingerprint on the projection
+    // (the matched-path audit shape), demonstrating parity at the command path.
+    let state_root = temp_root("cli-ct4-identity-match");
+    let planned = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct4-match".to_string(),
+        "--owner-kind".to_string(),
+        "capo_server".to_string(),
+        "--owner-id".to_string(),
+        "server-ct4-match".to_string(),
+        "--channel".to_string(),
+        "control".to_string(),
+        "--exposure".to_string(),
+        "private".to_string(),
+        "--identity-ref".to_string(),
+        "tailscale:device:trusted-node".to_string(),
+        "--fake-observed-device".to_string(),
+        "trusted-node".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("a matching device resolves through the CLI");
+    assert!(planned.contains("connectivity_exposure_planned=true"));
+    assert!(planned.contains("recorded=true"));
+    // The matched private exposure stays blocked_pending_permission (the grant still
+    // gates activation), but it RESOLVED — no identity refusal.
+    assert!(planned.contains("status=blocked_pending_permission"));
+    assert!(!planned.contains("IdentityMismatch"));
+    let exposure_id = output_value(&planned, "exposure");
+
+    // The persisted exposure event records the OBSERVED device fingerprint.
+    let state = SqliteStateStore::open(&state_root).expect("reopen state");
+    let events = state.events_after(0, 1024).expect("read events");
+    let recorded = events
+        .iter()
+        .find(|event| {
+            event.kind == EventKind::ConnectivityExposureRequested.as_str()
+                && event.item_id.as_deref() == Some(exposure_id.as_str())
+        })
+        .expect("a recorded exposure event must be present for the matched device");
+    assert!(
+        recorded
+            .payload_json
+            .contains("\"identity_fingerprint\":\"tsnode:sha256:"),
+        "matched exposure must record the observed device fingerprint: {}",
+        recorded.payload_json
+    );
+    assert!(!recorded.payload_json.contains("tskey-auth"));
+    assert_eq!(
+        capo_state::scan_emitted_surface(&recorded.payload_json),
+        None
+    );
+}
+
+#[test]
 fn connectivity_exposure_approval_activates_only_with_matching_grant() {
     let state_root = temp_root("cli-connectivity-exposure-approval");
     run_cli(vec![

@@ -216,9 +216,21 @@ codec and the exposure projection and must be replay-stable. Because they touch 
   `ScriptedAcpTransport`/`PipedProcessTransport` pattern from `depth`.
 - Device identity is verified against an expected `identity_ref` before resolving;
   an unexpected/unverified device is an audited refusal
-  (`ConnectivityError::IdentityMismatch`), not a silent connect. The observed
-  fingerprint is recorded onto `ResolvedEndpoint.identity_fingerprint`. Tailnet
-  ACLs are deployment posture that must be reviewed before the live path.
+  (`ConnectivityError::IdentityMismatch`), not a silent connect. Through the CLI the
+  refusal is RECORDED as a blocked exposure (`connectivity.exposure_requested`,
+  `status = blocked_pending_permission`, `block_reason = identity_mismatch`,
+  carrying the expected/observed FINGERPRINTS only) so the mismatch is auditable,
+  never invisible in the log. The observed fingerprint is recorded onto
+  `ResolvedEndpoint.identity_fingerprint`.
+- Identity FINGERPRINT algorithm: `identity_fingerprint_of` derives a
+  `tsnode:sha256:<hex>` label using SHA-256 with a `capo:tsnode:` domain separator
+  (NOT the non-cryptographic FNV-1a `content_hash` used for artifact content
+  addressing). The `==` comparison in the identity-mismatch gate is therefore
+  collision-resistant; the `sha256:` prefix names the algorithm so the audit label
+  is self-describing. The PRIMARY security gate remains the TAILNET ACL (device
+  identity + ACL posture); the fingerprint is the auditable identity LABEL layered
+  on top. Tailnet ACLs are deployment posture that MUST be reviewed before the live
+  (CT10) path.
 - The adapter never owns a process handle and never couples to `RuntimeRunner` — it
   resolves reachability/endpoints and opens/closes reachability channels only.
 

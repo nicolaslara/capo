@@ -1785,7 +1785,14 @@ pub enum ConnectivityTunnel {
 
 impl ConnectivityTunnel {
     pub fn fake() -> Self {
-        Self::Fake(FakeTunnel)
+        Self::Fake(FakeTunnel::default())
+    }
+
+    /// CT4: a scripted fake tunnel carrying the full Tailscale-parity surface
+    /// (identity verification, health/reconnect timeline, channel open/close) for
+    /// deterministic CT5/CT7/CT9 controller and CLI tests with no live tailnet.
+    pub fn fake_scripted(script: FakeTunnelScript) -> Self {
+        Self::Fake(FakeTunnel::with_script(script))
     }
 
     pub fn local_loopback() -> Self {
@@ -1869,10 +1876,125 @@ impl ConnectivityTunnel {
     }
 }
 
+/// CT4: a deterministic SCRIPT for [`FakeTunnel`], giving the fake the SAME surface
+/// as `TailscaleTunnel` (identity, health, reconnect, channel open/close) with NO
+/// live tailnet and NO real network. CT5/CT7/CT9 controller and CLI tests drive the
+/// identity-mismatch, degraded-health, reconnect, channel-close, and revoke paths
+/// through this script.
+///
+/// It carries NO secret: identity is expressed as the same opaque
+/// `identity_ref`/observed-device-id HANDLES the Tailscale adapter uses, compared as
+/// derived `tsnode:` fingerprints (the CT2 contract).
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FakeTunnel;
+pub struct FakeTunnelScript {
+    /// The endpoint id the fake resolves at (so audit/projection ids are stable).
+    pub endpoint_id: String,
+    /// The exposure scope the fake resolves at (defaults to `Private` so the fake
+    /// mirrors the Tailscale adapter's private resolution for CT5/CT7/CT9).
+    pub exposure: ExposureScope,
+    /// The resolved tailnet-style address the fake hands back.
+    pub resolved_uri: String,
+    /// The OBSERVED device id the fake reports (fingerprinted for the audit field).
+    pub observed_device_id: String,
+    /// The EXPECTED `identity_ref` HANDLE to verify against (CT4). `None` skips the
+    /// identity check (device trusted as pre-authenticated), mirroring the adapter.
+    pub expected_identity_ref: Option<String>,
+    /// A scripted health TIMELINE of reachability flags. Successive
+    /// [`FakeTunnel::check_reachability`] calls walk it (clamping at the last entry)
+    /// so CT5 can drive reachable -> unreachable -> reconnected deterministically
+    /// with NO wall-clock. Empty timeline = always reachable.
+    pub health_timeline: Vec<bool>,
+}
+
+impl FakeTunnelScript {
+    /// A scripted private endpoint whose observed device matches the given expected
+    /// `identity_ref` (so identity verification SUCCEEDS), reachable by default.
+    pub fn private_matching(
+        endpoint_id: impl Into<String>,
+        observed_device_id: impl Into<String>,
+    ) -> Self {
+        let observed_device_id = observed_device_id.into();
+        let expected = format!("tailscale:device:{observed_device_id}");
+        Self {
+            endpoint_id: endpoint_id.into(),
+            exposure: ExposureScope::Private,
+            resolved_uri: "https://fake-peer.tailnet-fake.ts.net".to_string(),
+            observed_device_id,
+            expected_identity_ref: Some(expected),
+            health_timeline: Vec::new(),
+        }
+    }
+
+    /// Override the expected `identity_ref` HANDLE (e.g. to drive an identity
+    /// MISMATCH: an expected handle whose device id differs from the observed one).
+    pub fn with_expected_identity_ref(mut self, identity_ref: Option<String>) -> Self {
+        self.expected_identity_ref = identity_ref.filter(|value| !value.is_empty());
+        self
+    }
+
+    /// Override the scripted health timeline (CT5 reconnect / stall driving).
+    pub fn with_health_timeline(mut self, timeline: Vec<bool>) -> Self {
+        self.health_timeline = timeline;
+        self
+    }
+
+    fn reachable_at(&self, step: usize) -> bool {
+        if self.health_timeline.is_empty() {
+            return true;
+        }
+        let idx = step.min(self.health_timeline.len() - 1);
+        self.health_timeline[idx]
+    }
+}
+
+/// CT3/CT4: the deterministic fake tunnel. By default (`FakeTunnel::default()` /
+/// [`ConnectivityTunnel::fake`]) it is the loopback-style always-reachable fake the
+/// pre-CT4 tests use. With a [`FakeTunnelScript`] (CT4) it carries the SAME surface
+/// as `TailscaleTunnel` — scripted identity verification, a health/reconnect
+/// timeline, and channel open/close — so CT5/CT7/CT9 can drive every connectivity
+/// path with no live tailnet.
+///
+/// The scripted-step cursor is interior mutable so `check_reachability(&self)` can
+/// walk the health timeline; it is DELIBERATELY excluded from equality (two fakes
+/// with the same script are equal regardless of how many times they were probed) so
+/// the enclosing `ConnectivityTunnel` stays `Eq`.
+#[derive(Clone, Debug, Default)]
+pub struct FakeTunnel {
+    script: Option<FakeTunnelScript>,
+    step: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl PartialEq for FakeTunnel {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare the SCRIPT only; the probe cursor is not part of identity.
+        self.script == other.script
+    }
+}
+impl Eq for FakeTunnel {}
 
 impl FakeTunnel {
+    /// CT4: a scripted fake carrying the full Tailscale-parity surface.
+    pub fn with_script(script: FakeTunnelScript) -> Self {
+        Self {
+            script: Some(script),
+            step: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn endpoint_id(&self) -> &str {
+        self.script
+            .as_ref()
+            .map(|s| s.endpoint_id.as_str())
+            .unwrap_or("fake-endpoint")
+    }
+
+    fn exposure(&self) -> ExposureScope {
+        self.script
+            .as_ref()
+            .map(|s| s.exposure)
+            .unwrap_or(ExposureScope::Loopback)
+    }
+
     pub fn binding(&self) -> BoundaryBinding {
         BoundaryBinding::fake(BoundaryKind::ConnectivityTunnel, "fake-tunnel")
     }
@@ -1882,23 +2004,75 @@ impl FakeTunnel {
         owner: EndpointOwner,
         channel_kind: ChannelKind,
     ) -> ConnectivityResult<ResolvedEndpoint> {
+        let Some(script) = self.script.as_ref() else {
+            return Ok(ResolvedEndpoint::new(
+                "fake-endpoint",
+                owner,
+                channel_kind,
+                "fake://endpoint",
+                ExposureScope::Loopback,
+                false,
+            ));
+        };
+
+        // CT4: verify the OBSERVED device identity against the expected
+        // `identity_ref` HANDLE, identically to `TailscaleTunnel` (the parity
+        // requirement) — a pure derived-fingerprint comparison, no raw credential.
+        let observed_fingerprint = identity_fingerprint_of(&script.observed_device_id);
+        if let Some(identity_ref) = script
+            .expected_identity_ref
+            .as_deref()
+            .filter(|handle| !handle.is_empty())
+        {
+            let expected = expected_identity_fingerprint(identity_ref);
+            if expected != observed_fingerprint {
+                return Err(ConnectivityError::IdentityMismatch {
+                    endpoint_id: script.endpoint_id.clone(),
+                    expected,
+                    observed: observed_fingerprint,
+                });
+            }
+        }
+
         Ok(ResolvedEndpoint::new(
-            "fake-endpoint",
+            script.endpoint_id.clone(),
             owner,
             channel_kind,
-            "fake://endpoint",
-            ExposureScope::Loopback,
-            false,
-        ))
+            script.resolved_uri.clone(),
+            script.exposure,
+            script.exposure.requires_permission(),
+        )
+        .with_identity_fingerprint(Some(observed_fingerprint)))
     }
 
     pub fn check_reachability(&self) -> ConnectivityHealth {
+        let Some(script) = self.script.as_ref() else {
+            return ConnectivityHealth {
+                endpoint_id: "fake-endpoint".to_string(),
+                status: "available".to_string(),
+                reachable: true,
+                exposure: ExposureScope::Loopback,
+                detail: "fake tunnel is always reachable in tests".to_string(),
+            };
+        };
+        // CT5: walk the scripted health timeline by one step per probe (clamped).
+        let step = self.step.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let reachable = script.reachable_at(step);
         ConnectivityHealth {
-            endpoint_id: "fake-endpoint".to_string(),
-            status: "available".to_string(),
-            reachable: true,
-            exposure: ExposureScope::Loopback,
-            detail: "fake tunnel is always reachable in tests".to_string(),
+            endpoint_id: script.endpoint_id.clone(),
+            status: if reachable {
+                "available"
+            } else {
+                "unreachable"
+            }
+            .to_string(),
+            reachable,
+            exposure: script.exposure,
+            detail: if reachable {
+                "scripted fake peer reachable".to_string()
+            } else {
+                "scripted fake peer not reachable".to_string()
+            },
         }
     }
 
@@ -1914,7 +2088,7 @@ impl FakeTunnel {
     }
 
     pub fn exposure_report(&self) -> ExposureReport {
-        ExposureReport::for_exposure("fake-endpoint", ExposureScope::Loopback)
+        ExposureReport::for_exposure(self.endpoint_id(), self.exposure())
     }
 }
 
@@ -2120,18 +2294,9 @@ impl TailscaleStatusSource {
     /// A scripted source that always FAILS resolution with a redacted reason
     /// (e.g. to drive the "not logged in / no reachable peer" path deterministically).
     pub fn scripted_unreachable(reason: impl Into<String>) -> Self {
-        Self::new(ScriptedTailscaleStatusSource {
-            status: TailscalePeerStatus {
-                tailnet_address: String::new(),
-                observed_device_id: String::new(),
-                reachable: false,
-            },
+        Self::new(FailingTailscaleStatusSource {
+            reason: reason.into(),
         })
-        .with_fail(reason.into())
-    }
-
-    fn with_fail(self, reason: String) -> Self {
-        Self::new(FailingTailscaleStatusSource { reason })
     }
 
     fn peer_status(&self, endpoint_id: &str) -> ConnectivityResult<TailscalePeerStatus> {
@@ -2258,8 +2423,45 @@ fn is_tailnet_address(address: &str) -> bool {
 /// The observed device id is itself a public stable identifier, but we record a
 /// derived fingerprint (matching the CT2 `identity_fingerprint` contract) so the
 /// audit field shape is uniform and never carries a raw credential.
+///
+/// CT4 security note: this fingerprint is the comparison surface for the
+/// identity-mismatch gate (`expected_fingerprint == observed_fingerprint`), so it
+/// uses SHA-256 — a collision-resistant hash — rather than the non-cryptographic
+/// FNV-1a `content_hash` used for artifact content addressing. A `tsnode:sha256:`
+/// prefix names the algorithm so the audit label is self-describing and a future
+/// algorithm change is detectable. The domain separator (`capo:tsnode:`) keeps the
+/// fingerprint distinct from any other SHA-256 use. The tailnet ACL remains the
+/// PRIMARY deployment security gate (see `knowledge.md`); this fingerprint is the
+/// auditable, collision-resistant identity label layered on top of it.
 fn identity_fingerprint_of(observed_device_id: &str) -> String {
-    format!("tsnode:{}", content_hash(observed_device_id.as_bytes()))
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"capo:tsnode:");
+    hasher.update(observed_device_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    format!("tsnode:sha256:{hex}")
+}
+
+/// CT4: the EXPECTED device-identity fingerprint encoded by an `identity_ref`
+/// HANDLE on the endpoint config.
+///
+/// The handle is an opaque pointer to the expected tunnel/device identity, e.g.
+/// `tailscale:device:<stable-id>` or a bare node-key fingerprint. We treat the
+/// segment AFTER the last `:` as the stable device id and derive the same
+/// `tsnode:` fingerprint the adapter records for the OBSERVED device, so a match
+/// is a pure fingerprint comparison with NO raw credential on either side. A
+/// handle that is itself already a `tsnode:` fingerprint is compared verbatim.
+fn expected_identity_fingerprint(identity_ref: &str) -> String {
+    if identity_ref.starts_with("tsnode:") {
+        return identity_ref.to_string();
+    }
+    let stable_id = identity_ref.rsplit(':').next().unwrap_or(identity_ref);
+    identity_fingerprint_of(stable_id)
 }
 
 /// CT3: the real Tailscale tunnel adapter behind the `ConnectivityTunnel` enum.
@@ -2351,9 +2553,33 @@ impl TailscaleTunnel {
             });
         }
 
-        // Record the OBSERVED device identity as a derived fingerprint only (CT2);
-        // CT4 adds the expected-identity CHECK before this point.
-        let fingerprint = identity_fingerprint_of(&peer.observed_device_id);
+        // CT4: VERIFY the observed device identity against the expected
+        // `identity_ref` HANDLE before resolving. An unexpected/unverified device is
+        // a typed `IdentityMismatch` refusal (auditable as a blocked exposure),
+        // never a silent connect. When no `identity_ref` is configured the device is
+        // trusted as pre-authenticated on the tailnet (the tailnet ACL is the
+        // deployment-posture gate — `knowledge.md` records ACLs must be reviewed
+        // before the live path). The comparison is a pure FINGERPRINT comparison; no
+        // raw node key or credential is on either side.
+        let observed_fingerprint = identity_fingerprint_of(&peer.observed_device_id);
+        if let Some(identity_ref) = self
+            .config
+            .identity_ref
+            .as_deref()
+            .filter(|handle| !handle.is_empty())
+        {
+            let expected = expected_identity_fingerprint(identity_ref);
+            if expected != observed_fingerprint {
+                return Err(ConnectivityError::IdentityMismatch {
+                    endpoint_id: self.config.endpoint_id.clone(),
+                    expected,
+                    observed: observed_fingerprint,
+                });
+            }
+        }
+
+        // Record the OBSERVED device identity as a derived fingerprint only (CT2).
+        let fingerprint = observed_fingerprint;
         let resolved = ResolvedEndpoint::new(
             self.config.endpoint_id.clone(),
             owner,
@@ -2454,6 +2680,17 @@ pub enum ConnectivityError {
     /// resolved address is not a tailnet address). The `reason` is a redacted,
     /// secret-free label — never a raw `tailscale status` blob or an authkey.
     TailscaleResolution { endpoint_id: String, reason: String },
+    /// CT4: the OBSERVED tailnet device identity did not match the EXPECTED
+    /// `identity_ref` handle on the endpoint config. An unexpected or unverified
+    /// device is refused here BEFORE any channel is opened — never a silent
+    /// connect. Both `expected` and `observed` are derived FINGERPRINTS (the CT2
+    /// `tsnode:` contract), not raw node keys or credentials, so the refusal is
+    /// auditable as a blocked exposure without leaking a secret.
+    IdentityMismatch {
+        endpoint_id: String,
+        expected: String,
+        observed: String,
+    },
 }
 
 impl std::fmt::Display for ConnectivityError {
@@ -2494,6 +2731,14 @@ impl std::fmt::Display for ConnectivityError {
             } => write!(
                 f,
                 "tailscale endpoint {endpoint_id} could not be resolved: {reason}"
+            ),
+            Self::IdentityMismatch {
+                endpoint_id,
+                expected,
+                observed,
+            } => write!(
+                f,
+                "tailnet device identity mismatch for endpoint {endpoint_id}: expected {expected}, observed {observed}"
             ),
         }
     }
@@ -3524,7 +3769,13 @@ mod tests {
     fn reachable_tailnet_source() -> TailscaleStatusSource {
         TailscaleStatusSource::scripted(TailscalePeerStatus {
             tailnet_address: "capo-worker.tailnet-1234.ts.net".to_string(),
-            observed_device_id: "nodekey:abc123stabledeviceid".to_string(),
+            // The OBSERVED stable device id matches the `tailscale:device:n7Qk2cFf`
+            // identity_ref handle the CT3/CT4 resolve tests configure, so the CT4
+            // device-identity verification SUCCEEDS for the happy path (the handle's
+            // last `:`-segment derives the same `tsnode:` fingerprint as the observed
+            // device). Identity-MISMATCH paths are exercised explicitly with their
+            // own scripted observed ids / handles below.
+            observed_device_id: "n7Qk2cFf".to_string(),
             reachable: true,
         })
     }
@@ -3559,7 +3810,7 @@ mod tests {
             .identity_fingerprint
             .as_deref()
             .expect("observed identity fingerprint recorded");
-        assert!(fingerprint.starts_with("tsnode:fnv1a64:"));
+        assert!(fingerprint.starts_with("tsnode:sha256:"));
     }
 
     #[test]
@@ -3808,7 +4059,10 @@ mod tests {
             // exposure_report + open_channel + close_channel.
             let resolved = tunnel
                 .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
-                .expect("every variant resolves the private control channel");
+                .expect(
+                    "every variant resolves its canonical control channel \
+                     (loopback for LocalLoopback; private for Tailscale/EndpointStub/FakeTunnel)",
+                );
             let _ = tunnel.check_reachability();
             let _ = tunnel.exposure_report();
             let channel = tunnel
@@ -3853,6 +4107,218 @@ mod tests {
         .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
         .expect_err("unreachable");
         assert!(!format!("{err}").contains("tskey-auth"));
+    }
+
+    // ---- CT4: host/device identity checks + FakeTunnel parity ----
+
+    #[test]
+    fn ct4_tailscale_refuses_an_unexpected_device_with_a_typed_identity_mismatch() {
+        // The endpoint config expects a specific tailnet device (identity_ref handle)
+        // but the OBSERVED peer is a DIFFERENT device. Resolution must be a typed
+        // IdentityMismatch refusal — never a silent connect to the wrong host.
+        let config = ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker")
+            .with_handles(
+                Some("keychain:capo/tailnet-authkey".to_string()),
+                // Expected device: stable id "trusted-node".
+                Some("tailscale:device:trusted-node".to_string()),
+            );
+        // Observed device is "impostor-node" — a different stable id.
+        let tunnel = ConnectivityTunnel::tailscale(
+            config,
+            TailscaleStatusSource::scripted(TailscalePeerStatus {
+                tailnet_address: "capo-worker.tailnet-1234.ts.net".to_string(),
+                observed_device_id: "impostor-node".to_string(),
+                reachable: true,
+            }),
+        );
+
+        let err = tunnel
+            .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+            .expect_err("an unexpected device must be refused");
+
+        let expected_fp = expected_identity_fingerprint("tailscale:device:trusted-node");
+        let observed_fp = identity_fingerprint_of("impostor-node");
+        assert_eq!(
+            err,
+            ConnectivityError::IdentityMismatch {
+                endpoint_id: "ts-endpoint-1".to_string(),
+                expected: expected_fp.clone(),
+                observed: observed_fp.clone(),
+            }
+        );
+        // Both sides are derived `tsnode:` FINGERPRINTS — never a raw node key.
+        assert!(expected_fp.starts_with("tsnode:sha256:"));
+        assert!(observed_fp.starts_with("tsnode:sha256:"));
+        assert_ne!(expected_fp, observed_fp);
+        // The refusal text carries no secret material.
+        let rendered = format!("{err}");
+        assert!(!rendered.contains("tskey-auth"));
+        assert!(!rendered.contains("authkey"));
+    }
+
+    #[test]
+    fn ct4_tailscale_records_the_observed_identity_fingerprint_on_a_verified_resolve() {
+        // A matching identity_ref verifies, and the resolved endpoint records the
+        // OBSERVED device identity as a derived fingerprint only (CT2 contract).
+        let config = ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker")
+            .with_handles(None, Some("tailscale:device:trusted-node".to_string()));
+        let tunnel = ConnectivityTunnel::tailscale(
+            config,
+            TailscaleStatusSource::scripted(TailscalePeerStatus {
+                tailnet_address: "capo-worker.tailnet-1234.ts.net".to_string(),
+                observed_device_id: "trusted-node".to_string(),
+                reachable: true,
+            }),
+        );
+        let resolved = tunnel
+            .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+            .expect("a verified device resolves");
+        assert_eq!(
+            resolved.identity_fingerprint.as_deref(),
+            Some(identity_fingerprint_of("trusted-node").as_str())
+        );
+        assert!(
+            resolved
+                .identity_fingerprint
+                .as_deref()
+                .unwrap()
+                .starts_with("tsnode:sha256:")
+        );
+    }
+
+    #[test]
+    fn ct4_no_identity_ref_trusts_the_tailnet_acl_and_still_records_the_fingerprint() {
+        // No identity_ref configured -> device trusted as pre-authenticated on the
+        // tailnet (ACL is the deployment posture). Resolution still records the
+        // observed fingerprint for audit, and never claims a verification it skipped.
+        let tunnel = ConnectivityTunnel::tailscale(
+            ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker"),
+            TailscaleStatusSource::scripted(TailscalePeerStatus {
+                tailnet_address: "capo-worker.tailnet-1234.ts.net".to_string(),
+                observed_device_id: "any-device-the-acl-allows".to_string(),
+                reachable: true,
+            }),
+        );
+        let resolved = tunnel
+            .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+            .expect("no identity_ref -> trusted by ACL, resolves");
+        assert_eq!(
+            resolved.identity_fingerprint.as_deref(),
+            Some(identity_fingerprint_of("any-device-the-acl-allows").as_str())
+        );
+    }
+
+    #[test]
+    fn ct4_expected_fingerprint_accepts_a_verbatim_tsnode_handle() {
+        // A handle that is ALREADY a `tsnode:` fingerprint is compared verbatim,
+        // so an operator can pin the exact fingerprint without re-deriving it.
+        let observed = "stable-node-id";
+        let verbatim = identity_fingerprint_of(observed);
+        assert_eq!(expected_identity_fingerprint(&verbatim), verbatim);
+        // And a `device:`-style handle derives the same fingerprint as the observed.
+        assert_eq!(
+            expected_identity_fingerprint(&format!("tailscale:device:{observed}")),
+            identity_fingerprint_of(observed)
+        );
+    }
+
+    #[test]
+    fn ct4_fake_tunnel_carries_the_same_identity_surface_deterministically() {
+        // FakeTunnel parity: a matching script verifies and records the observed
+        // fingerprint exactly as the Tailscale adapter does.
+        let matching = ConnectivityTunnel::fake_scripted(FakeTunnelScript::private_matching(
+            "fake-ts-1",
+            "trusted-node",
+        ));
+        let resolved = matching
+            .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+            .expect("matching fake script verifies");
+        assert_eq!(resolved.exposure, ExposureScope::Private);
+        assert_eq!(
+            resolved.identity_fingerprint.as_deref(),
+            Some(identity_fingerprint_of("trusted-node").as_str())
+        );
+
+        // A MISMATCH script yields the SAME typed IdentityMismatch as the adapter.
+        let mismatch = ConnectivityTunnel::fake_scripted(
+            FakeTunnelScript::private_matching("fake-ts-1", "impostor-node")
+                .with_expected_identity_ref(Some("tailscale:device:trusted-node".to_string())),
+        );
+        let err = mismatch
+            .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+            .expect_err("mismatched fake script refuses");
+        assert_eq!(
+            err,
+            ConnectivityError::IdentityMismatch {
+                endpoint_id: "fake-ts-1".to_string(),
+                expected: expected_identity_fingerprint("tailscale:device:trusted-node"),
+                observed: identity_fingerprint_of("impostor-node"),
+            }
+        );
+    }
+
+    #[test]
+    fn ct4_fake_tunnel_walks_a_scripted_health_and_reconnect_timeline() {
+        // Health/reconnect parity: the fake walks a scripted reachable timeline by
+        // one step per probe (clamped) with NO wall-clock, so CT5 reconnect tests
+        // are fully deterministic.
+        let tunnel = ConnectivityTunnel::fake_scripted(
+            FakeTunnelScript::private_matching("fake-ts-1", "trusted-node")
+                // reachable -> unreachable -> reconnected, then clamps at reachable.
+                .with_health_timeline(vec![true, false, true]),
+        );
+        assert!(tunnel.check_reachability().reachable); // step 0
+        let degraded = tunnel.check_reachability(); // step 1
+        assert!(!degraded.reachable);
+        assert_eq!(degraded.status, "unreachable");
+        assert!(tunnel.check_reachability().reachable); // step 2 (reconnected)
+        assert!(tunnel.check_reachability().reachable); // step 3 clamps at last
+    }
+
+    #[test]
+    fn ct4_fake_tunnel_channel_open_close_round_trips_with_the_parity_surface() {
+        // Channel open/close parity so CT7 teardown tests can drive the fake.
+        let tunnel = ConnectivityTunnel::fake_scripted(FakeTunnelScript::private_matching(
+            "fake-ts-1",
+            "trusted-node",
+        ));
+        let resolved = tunnel
+            .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+            .expect("resolve");
+        let channel = tunnel.open_channel(&resolved).expect("open");
+        assert_eq!(channel.variant, "fake-tunnel");
+        assert_eq!(channel.channel_kind, ChannelKind::Control);
+        // The channel carries the same derived fingerprint as the resolution.
+        assert_eq!(channel.identity_fingerprint, resolved.identity_fingerprint);
+        tunnel.close_channel(channel).expect("close");
+    }
+
+    #[test]
+    fn ct4_identity_mismatch_carries_no_secret_and_renders_fingerprints_only() {
+        // Defense-in-depth: a planted authkey is never present in the typed error
+        // nor in its Display/Debug renderings.
+        let planted = "tskey-auth-DEADBEEFdeadbeef0123456789";
+        let config = ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker")
+            .with_handles(
+                Some("keychain:capo/tailnet-authkey".to_string()),
+                Some("tailscale:device:trusted-node".to_string()),
+            );
+        let tunnel = ConnectivityTunnel::tailscale(
+            config,
+            TailscaleStatusSource::scripted(TailscalePeerStatus {
+                tailnet_address: "capo-worker.tailnet-1234.ts.net".to_string(),
+                observed_device_id: "impostor-node".to_string(),
+                reachable: true,
+            }),
+        );
+        let err = tunnel
+            .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+            .expect_err("mismatch");
+        for rendered in [format!("{err}"), format!("{err:?}")] {
+            assert!(!rendered.contains(planted));
+            assert!(!rendered.contains("tskey-auth"));
+            assert!(rendered.contains("tsnode:sha256:"));
+        }
     }
 
     #[test]
