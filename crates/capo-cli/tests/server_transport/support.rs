@@ -60,6 +60,35 @@ pub(crate) fn write_codex_stub(dir: &Path, fixture_jsonl: &str) -> String {
     stub.to_string_lossy().to_string()
 }
 
+/// Write an executable absolute-path `claude` stub that streams a Claude
+/// `stream-json` turn (a `system` start, an `assistant` message carrying
+/// `assistant_text`, a terminal `result`) to stdout using only POSIX builtins (the
+/// runtime spawns with `env_clear()`). Returns the absolute stub path. Mirrors
+/// `write_codex_stub` for the Claude chat seam (CS6 blocker-2 CLI E2E).
+#[cfg(unix)]
+pub(crate) fn write_claude_chat_stub(dir: &Path, assistant_text: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::create_dir_all(dir).expect("stub dir");
+    let fixture = dir.join("claude-output.jsonl");
+    let fixture_jsonl = format!(
+        "{{\"type\":\"system\",\"session_id\":\"cli-claude-sess\"}}\n\
+{{\"type\":\"assistant\",\"session_id\":\"cli-claude-sess\",\"message\":{{\"id\":\"msg-1\",\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{assistant_text}\"}}]}}}}\n\
+{{\"type\":\"result\",\"session_id\":\"cli-claude-sess\",\"subtype\":\"success\"}}\n"
+    );
+    std::fs::write(&fixture, fixture_jsonl).expect("write fixture");
+    let stub = dir.join("claude-stub.sh");
+    let script = format!(
+        "#!/bin/sh\nwhile IFS= read -r line; do printf '%s\\n' \"$line\"; done < '{}'\n",
+        fixture.display()
+    );
+    std::fs::write(&stub, &script).expect("write stub");
+    let mut perms = std::fs::metadata(&stub).expect("stub meta").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&stub, perms).expect("chmod stub");
+    stub.to_string_lossy().to_string()
+}
+
 pub(crate) fn read_server_address(reader: &mut BufReader<std::process::ChildStdout>) -> String {
     let mut first = String::new();
     reader.read_line(&mut first).expect("read listening line");

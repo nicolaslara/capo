@@ -327,6 +327,96 @@ fn cli_registers_codex_agent_and_gets_real_stub_chat_through_running_server() {
     assert!(server.wait().expect("server wait").success());
 }
 
+/// CS6 (blocker 2): the always-on E2E gate EXTENDED to route registration through
+/// the now-unblocked CLI chat seam (`require_chat_adapter_arg("claude")`, CS5). A
+/// user can `capo server agent register --adapter claude` against a RUNNING server
+/// and `capo server task send` to get REAL (stub) Claude `stream-json` output back
+/// -- a deterministic absolute-path stub pinned via `CAPO_CLAUDE_BIN`, the live
+/// gate opened in the SERVER process.
+///
+/// This is the "extension via the CLI seam" the CS6 AC (a) requires: unlike the
+/// server-level `claude_chat.rs` test (which calls `ServerCommand::RegisterAgent`
+/// directly) and the preflight test (which registers with `--adapter fake`), this
+/// drives a FULL stub chat turn through `--adapter claude` + `task send` and
+/// asserts the returned summary is the stub's parsed assistant text, NOT a fake
+/// summary -- proving the CLI chat-adapter seam reaches the server's Claude binding.
+#[cfg(unix)]
+#[test]
+fn cli_registers_claude_agent_and_gets_real_stub_chat_through_running_server() {
+    let state_root = temp_root("transport-claude-chat-e2e-state");
+    let stub = write_claude_chat_stub(&state_root.join("stub"), "CLI_CLAUDE_STUB_CHAT");
+
+    // The server reads CAPO_CLAUDE_BIN at open time and the Claude live gate at chat
+    // time, so both are set in the SERVER process (the gate is a server concern).
+    let mut server = spawn_server_with_env(
+        &state_root,
+        3,
+        &[
+            ("CAPO_CLAUDE_BIN", stub.as_str()),
+            ("CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT", "1"),
+            ("CAPO_SERVER_RUN_CLAUDE_LIVE", "1"),
+        ],
+    );
+    let stdout = server.stdout.take().expect("server stdout");
+    let mut reader = BufReader::new(stdout);
+    let address = read_server_address(&mut reader);
+    let state = state_root.display().to_string();
+
+    // CS5: `--adapter claude` is now ACCEPTED by the CLI chat seam and binds the
+    // agent's chat adapter to the server's Claude binding.
+    let register = capo([
+        "server",
+        "agent",
+        "register",
+        "--name",
+        "claude-chat",
+        "--adapter",
+        "claude",
+        "--connect",
+        &address,
+        "--state",
+        &state,
+    ]);
+    assert!(register.contains("server_agent_registered=true"));
+
+    let send = capo([
+        "server",
+        "task",
+        "send",
+        "--agent",
+        "claude-chat",
+        "--goal",
+        "Edit the workspace through real Claude",
+        "--connect",
+        &address,
+        "--state",
+        &state,
+    ]);
+    assert!(send.contains("server_task_sent=true"));
+
+    let status = capo([
+        "server",
+        "agent",
+        "status",
+        "--agent",
+        "claude-chat",
+        "--connect",
+        &address,
+        "--state",
+        &state,
+    ]);
+    // The rendered session summary is the STUB's parsed Claude assistant text,
+    // proving REAL (stub) chat output flowed back through the CLI claude seam --
+    // not a fake summary.
+    assert!(
+        status.contains("latest_summary=CLI_CLAUDE_STUB_CHAT"),
+        "expected real claude stub summary in status output:\n{status}"
+    );
+    assert!(!status.contains("Fake adapter processed goal"));
+
+    assert!(server.wait().expect("server wait").success());
+}
+
 /// AI2/CS5: a `--adapter` value other than `fake`/`codex`/`claude` is rejected by
 /// the CLI before it ever reaches the server. (CS5 added `claude` to the accepted
 /// chat-adapter set, so an unsupported value is now e.g. `gemini`.)

@@ -444,6 +444,50 @@ The load-bearing CS5 tests:
   (the unblock is provider-scoped: `acp` cannot even reach the executor -- the
   live-provider preflight rejects it up front, so no plan is ever minted for it).
 
+## CS6 Status (Landed) + Architecture-Fit Review
+
+CS6 consolidated the deterministic Claude suite and added the paired live smokes:
+
+- The always-on E2E gate is EXTENDED through the CLI chat seam: a new CLI process
+  test `cli_registers_claude_agent_and_gets_real_stub_chat_through_running_server`
+  (`crates/capo-cli/tests/server_transport/live.rs`) runs `capo server agent
+  register --adapter claude` + `task send` against a running server with a
+  `CAPO_CLAUDE_BIN` stub, and asserts the rendered `latest_summary` is the stub's
+  parsed Claude assistant text — proving `require_chat_adapter_arg("claude")` (CS5)
+  reaches the server's Claude binding end-to-end, not just at the unit level.
+- The live CHAT smoke (`claude_chat.rs::claude_live_chat_smoke`) was strengthened
+  (see the chat-smoke section above): real-summary liveness check + smoke-level
+  secret scan; the vacuous `assert_ne!` was removed.
+- The live WRITE smoke (`live_smoke.rs::live_claude_workspace_write_smoke`, NEW)
+  drives the dispatch `run_live_provider_local` executor against the real `claude`
+  workspace-write one-shot, gated on the chat gates AND
+  `CAPO_SERVER_RUN_CODEX_LIVE=1`, paired with the always-on CS5 (b) stub-binary
+  dispatch test. Asserts the edit landed, the pre-write checkpoint, ingested
+  events, and a secrets scan over the artifact tree.
+- Process-global env safety: the gate-toggling chat tests use a `LiveGateEnvGuard`
+  Drop guard that snapshots and restores `CAPO_CLAUDE_BIN` + both live gates on
+  EVERY exit path including a panicking assertion (the `CLAUDE_CHAT_ENV_LOCK` mutex
+  serializes but does not restore on unwind). The adapter-level scrub test
+  (`claude_spawned_stub_does_not_inherit_anthropic_connector_env`) now uses a
+  `ScrubTestEnvGuard` (Drop guard behind `SCRUB_TEST_ENV_LOCK`) for the same reason,
+  and drives the LIVE one-shot runtime path (`spawn_process` +
+  `wait_running_with_timeout`) rather than `start_process`, so it exercises the
+  exact env_clear branch a live Claude spawn goes through.
+
+Architecture fit: Claude rides the SAME `AgentAdapter` trait, the SAME chat route
+(`chat_controller` → `ClaudeCodeLiveAdapter`), and the SAME dispatch executor
+(`run_live_provider_local`, branched on `adapter_kind`) as Codex. It introduces NO
+new ingestion vocabulary — `stream-json` normalizes through
+`apply_normalized_adapter_events_with_turn` into the identical read-model row shape
+Codex produces. The connector stays scrub-only (env allowlist + runtime
+`env_clear()`, `assert_subscription_safe()` before every spawn). The dispatch write
+gate stays provider-agnostic (`CAPO_SERVER_RUN_CODEX_LIVE`). No Claude-specific
+parity gap remains open: both real surfaces (chat one-shot, workspace-write
+dispatch) are reachable, deterministically tested, and live-smoke-paired. Remaining
+items are tracked as Open Questions (config-driven provider allow-list; a
+plan-mode-vs-write-mode chat profile split; an eventual provider-keyed dispatch
+write gate), all explicitly deferred to other workpads.
+
 ## Verification Discipline
 
 Deterministic-tests-before-live holds across every task: env-scrub, `try_send_turn`
@@ -455,20 +499,46 @@ be paired with a deterministic assertion of the identical shape, stays `#[ignore
 behind its documented gates, and skips cleanly when the gate is off or `claude` is
 absent. Secrets are stripped from all evidence.
 
-Caveat on the already-landed chat smoke (verified, not yet remediated): the
-DP4-landed `claude_live_chat_smoke` (`claude_chat.rs:289`) currently asserts only
-`run_refs.external_session_ref == "claude-live-session-claude-live"` (a STATIC
-string `open_session()` returns unconditionally as
-`format!("claude-live-session-{}", request.agent_name)`, proving only registration
-succeeded) and `!summary.is_empty()` (passes for a single character). This is
-effectively a liveness ping, NOT the paired deterministic SHAPE assertion the
-invariant requires: there is no `TurnOutput`-shape check (status/`tool_name`/
-confidence) and no smoke-level `scan_artifacts_for_sensitive_markers` call (the scan
-runs inside `run_one_shot`, which is correct, but the smoke cannot confirm it ran).
-So the paired-assertion invariant does NOT yet hold for the landed chat smoke. CS6
-MUST strengthen `claude_live_chat_smoke` to assert the SAME `TurnOutput` shape its
-always-on stub test pins (and a smoke-level secret scan) so the pairing is real.
-Until CS6 lands, treat the landed smoke as a liveness probe only.
+Chat smoke strengthening (CS6 — RESOLVED). The DP4-landed `claude_live_chat_smoke`
+(`claude_chat.rs`) was a liveness ping only: it asserted the STATIC
+`run_refs.external_session_ref == "claude-live-session-claude-live"` (which
+`open_session()` returns unconditionally, proving only registration succeeded) and
+`!summary.is_empty()`. CS6 strengthened it so the paired-assertion invariant
+actually holds:
+
+- It still asserts the session-ref equals the Claude binding ref, but the comment
+  now states plainly this is a BINDING check (the ref is constructed by
+  `open_session()` independent of whether `send_turn` ran), NOT liveness. The
+  vacuous `assert_ne!` against the fake-adapter ref was REMOVED (the two refs are
+  structurally distinct strings at construction, so it could never fail).
+- The load-bearing liveness proof is now the summary: it must be present, non-empty,
+  NOT the fake-adapter fallback (`"Fake adapter processed goal ..."`), and NOT a
+  blocked/fail-closed marker — so only real provider output passes.
+- It runs a smoke-level `scan_artifacts_for_sensitive_markers` over the server's
+  persisted text tree (the in-`run_one_shot` scan is also correct, but the smoke now
+  independently confirms the retained evidence is secrets-clean).
+
+Intentionally NOT asserted by the live chat smoke: the exact `TurnOutput`
+status/`tool_name`/confidence triple. Those are pinned by the always-on
+server-level stub test
+(`claude_bound_chat_flows_real_stub_output_end_to_end_through_the_running_server`,
+which checks the parsed assistant summary) and the adapter-level
+`claude_try_send_turn_stub_matches_codex_turn_output_reduction` (which pins the full
+`TurnOutput` shape against the Codex reduction). The live model's status/tool/
+confidence vary per run, so the live smoke asserts the run-shape (non-empty real
+summary, ingested events, secrets-clean) rather than re-pinning fields the
+deterministic tests already lock.
+
+Both `#[ignore]` smokes are gate-paired with always-on deterministic assertions:
+the live CHAT smoke pairs with the stub server-level test above; the live WRITE
+smoke (`live_smoke.rs::live_claude_workspace_write_smoke`, gated on
+`CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1` + `CAPO_SERVER_RUN_CLAUDE_LIVE=1` +
+`CAPO_SERVER_RUN_CODEX_LIVE=1`) pairs with the always-on stub-binary dispatch test
+`server_live_provider_claude_spawn_arm_ingests_stub_stream_json_through_override`
+(CS5 b), which exercises the IDENTICAL `run_live_provider_local` spawn arm with a
+`/bin/sh` claude stub. The write smoke rides the provider-agnostic
+`CAPO_SERVER_RUN_CODEX_LIVE` dispatch write-mode gate, NOT a Claude-specific
+dispatch RUN env.
 
 ## Non-Goals
 
