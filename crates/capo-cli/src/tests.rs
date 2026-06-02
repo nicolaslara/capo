@@ -4713,6 +4713,118 @@ fn connectivity_expose_stub_records_blocked_private_exposure_without_runtime_exe
 }
 
 #[test]
+fn ct1_private_expose_stub_without_satisfied_policy_stays_blocked_through_activate() {
+    // CT1: with no ExposurePolicy promotion and no auth_ref handle, the default
+    // loopback-only policy fails closed for a `private` exposure. The expose-stub
+    // therefore stays `blocked_pending_permission` and `activate-exposure` cannot
+    // promote it to `active` without a grant — the policy gate and the grant gate
+    // are two independent, both-required checks.
+    let state_root = temp_root("cli-ct1-private-blocked");
+    run_cli(vec![
+        "runtime".to_string(),
+        "target".to_string(),
+        "register".to_string(),
+        "--target".to_string(),
+        "remote-target-ct1".to_string(),
+        "--name".to_string(),
+        "ct1 remote target".to_string(),
+        "--runner".to_string(),
+        "remote-process".to_string(),
+        "--workspace".to_string(),
+        "/tmp/capo-ct1-workspace".to_string(),
+        "--artifacts".to_string(),
+        "/tmp/capo-ct1-artifacts".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct1-private".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("register runtime target");
+
+    let planned = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct1-private".to_string(),
+        "--owner-kind".to_string(),
+        "runtime_target".to_string(),
+        "--owner-id".to_string(),
+        "remote-target-ct1".to_string(),
+        "--channel".to_string(),
+        "control".to_string(),
+        "--exposure".to_string(),
+        "private".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("record private exposure");
+    // The policy routed this to blocked-pending-permission (fail closed, no auth).
+    assert!(planned.contains("permission_required=true"));
+    assert!(planned.contains("status=blocked_pending_permission"));
+    assert!(planned.contains("permission_scope=network:connect:private_tunnel"));
+    // CRITICAL (CT1, not self-attesting): the block is driven by the POLICY gate,
+    // not merely the downstream grant gate. The surfaced reason carries the typed
+    // ExposurePolicy refusal (AuthRequired: a non-loopback exposure with no
+    // auth_ref handle), which the pre-CT1 code path could not have produced — it
+    // had no ExposurePolicy. This proves the policy kind controls the status.
+    assert!(
+        planned.contains("policy_block_reason=AuthRequired:"),
+        "expected the typed ExposurePolicy refusal to drive the block, got: {planned}"
+    );
+    assert!(planned.contains("requires an auth_ref handle"));
+    let exposure_id = output_value(&planned, "exposure");
+
+    // Without a grant, activation cannot lift the policy-blocked exposure to active.
+    let blocked = run_cli(vec![
+        "connectivity".to_string(),
+        "activate-exposure".to_string(),
+        "--exposure".to_string(),
+        exposure_id,
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .unwrap_err();
+    assert!(blocked.contains("missing allow grant for connectivity exposure"));
+}
+
+#[test]
+fn ct1_loopback_expose_stub_is_active_with_no_policy_block_reason() {
+    // CT1 contrast case proving the POLICY KIND controls the status, not just that
+    // "private happens to be blocked": the same code path with an exposure scope
+    // the default policy ALLOWS (loopback) resolves to `active` with NO policy
+    // block reason and `permission_required=false`. The only difference from the
+    // blocked-private case above is the scope the ExposurePolicy authorizes, so
+    // the policy gate — not the grant gate — is demonstrably what flips the status.
+    // (No --record: this is a pure policy-decision assertion on the same code
+    // path, so it does not depend on a registered-endpoint match.)
+    let state_root = temp_root("cli-ct1-loopback-active");
+    let planned = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct1-loopback".to_string(),
+        "--owner-kind".to_string(),
+        "runtime_target".to_string(),
+        "--owner-id".to_string(),
+        "remote-target-ct1-loopback".to_string(),
+        "--channel".to_string(),
+        "control".to_string(),
+        "--exposure".to_string(),
+        "loopback".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("plan loopback exposure");
+    assert!(planned.contains("permission_required=false"));
+    assert!(planned.contains("status=active"));
+    assert!(
+        planned.contains("policy_block_reason=none"),
+        "loopback must carry no policy block reason, got: {planned}"
+    );
+}
+
+#[test]
 fn connectivity_exposure_approval_activates_only_with_matching_grant() {
     let state_root = temp_root("cli-connectivity-exposure-approval");
     run_cli(vec![

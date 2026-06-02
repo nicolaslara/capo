@@ -989,6 +989,20 @@ fn ga1_goal_lifecycle_event_kinds_round_trip() {
     }
 }
 
+// CT1 (connectivity-tunnel): the new policy-change audit kind round-trips, so a
+// `connectivity.policy_changed` event replays back to the typed kind identically.
+#[test]
+fn ct1_connectivity_policy_changed_event_kind_round_trips() {
+    assert_eq!(
+        EventKind::ConnectivityPolicyChanged.as_str(),
+        "connectivity.policy_changed"
+    );
+    assert_eq!(
+        EventKind::from_wire("connectivity.policy_changed"),
+        Some(EventKind::ConnectivityPolicyChanged)
+    );
+}
+
 #[test]
 fn tool_observations_are_persisted_and_rebuilt() {
     let store = temp_store("tool-observations");

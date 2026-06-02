@@ -23,6 +23,19 @@ pub enum EventKind {
     ConnectivityExposureChanged,
     ConnectivityExposureRevoked,
     ConnectivityHealthChanged,
+    // CT1 (connectivity-tunnel): promotion of the effective `ExposurePolicy`
+    // ceiling (Loopback -> Private/Public) is itself an audited fact, separate
+    // from the per-exposure `connectivity.exposure_requested` trail: it records
+    // WHY a private/public exposure became possible (old/new ceiling, the opt-in
+    // source, a timestamp), carries no secret, and is replay-stable.
+    //
+    // FORWARD-COMPATIBLE STUB (CT1): the codec round-trips this kind, but CT1 has
+    // NO live emitter — nothing in the live bind/connect/expose-stub path emits
+    // `connectivity.policy_changed` yet (the only policy constructed live is the
+    // default loopback-only one, which is never a promotion). The opt-in promotion
+    // CLI path that emits this event lands in CT3/CT5. A future reader must not
+    // assume a populated policy-change audit history exists before then.
+    ConnectivityPolicyChanged,
     RuntimeTargetRegistered,
     RuntimeTargetStatusChanged,
     AdapterReadinessChecked,
@@ -162,6 +175,7 @@ impl EventKind {
             Self::ConnectivityExposureChanged => "connectivity.exposure_changed",
             Self::ConnectivityExposureRevoked => "connectivity.exposure_revoked",
             Self::ConnectivityHealthChanged => "connectivity.health_changed",
+            Self::ConnectivityPolicyChanged => "connectivity.policy_changed",
             Self::RuntimeTargetRegistered => "runtime.target_registered",
             Self::RuntimeTargetStatusChanged => "runtime.target_status_changed",
             Self::AdapterReadinessChecked => "adapter.readiness_checked",
@@ -260,6 +274,7 @@ impl EventKind {
             EventKind::ConnectivityExposureChanged,
             EventKind::ConnectivityExposureRevoked,
             EventKind::ConnectivityHealthChanged,
+            EventKind::ConnectivityPolicyChanged,
             EventKind::RuntimeTargetRegistered,
             EventKind::RuntimeTargetStatusChanged,
             EventKind::AdapterReadinessChecked,

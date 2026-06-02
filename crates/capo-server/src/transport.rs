@@ -84,6 +84,7 @@ use std::thread;
 use std::time::Duration;
 
 use capo_core::ProjectId;
+use capo_runtime::ExposurePolicy;
 use serde_json::Value;
 
 mod codec;
@@ -560,11 +561,20 @@ pub(crate) fn serve_tcp_with_handler<H: RequestHandler>(
     config: ServeConfig,
 ) -> TransportResult<usize> {
     let bound_address = listener.local_addr().map_err(TransportError::Io)?;
-    if !bound_address.ip().is_loopback() {
-        return Err(TransportError::Protocol(format!(
-            "server listener must be loopback, got {bound_address}"
-        )));
-    }
+    // CT1: the bind side consults `ExposurePolicy` rather than a hand-rolled
+    // loopback check. The default (zero-config) policy is loopback-only with no
+    // auth handle, so loopback still passes byte-for-byte and a non-loopback bind
+    // fails closed exactly as before — but now the listener and connect sides
+    // share one policy so loosening one side can never open an asymmetric hole.
+    // Promoting to a non-loopback bind requires an explicitly promoted policy AND
+    // an auth_ref handle (CT2); the server build path will thread those in.
+    ExposurePolicy::loopback_default()
+        .authorize_socket(bound_address.ip().is_loopback(), None)
+        .map_err(|error| {
+            TransportError::Protocol(format!(
+                "server listener must be loopback, got {bound_address}: {error}"
+            ))
+        })?;
     // One process-wide write lock shared by every connection: it makes the
     // handler the real single-writer serialization point the module doc claims.
     let write_serializer = WriteSerializer::default();
@@ -655,11 +665,21 @@ fn connect_loopback(address: impl ToSocketAddrs) -> TransportResult<TcpStream> {
             "server address resolved to no endpoints".to_string(),
         ));
     }
-    if !resolved.iter().all(|address| address.ip().is_loopback()) {
-        return Err(TransportError::Protocol(format!(
-            "server connect address must resolve only to loopback addresses, got {resolved:?}"
-        )));
-    }
+    // CT1: the connect side consults the SAME `ExposurePolicy` as the listener
+    // guard (symmetric: loosening only one side is an asymmetric hole). Under the
+    // default loopback-only policy every resolved address must be loopback; a
+    // non-loopback connect fails closed with the same fail-closed semantics. A
+    // non-loopback connect requires an explicitly promoted policy + auth_ref
+    // handle (CT2), threaded by the client build path.
+    let policy = ExposurePolicy::loopback_default();
+    let all_loopback = resolved.iter().all(|address| address.ip().is_loopback());
+    policy
+        .authorize_socket(all_loopback, None)
+        .map_err(|error| {
+            TransportError::Protocol(format!(
+                "server connect address must resolve only to loopback addresses, got {resolved:?}: {error}"
+            ))
+        })?;
     TcpStream::connect(resolved.as_slice()).map_err(TransportError::Io)
 }
 

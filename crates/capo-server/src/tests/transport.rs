@@ -80,6 +80,78 @@ fn tcp_transport_rejects_non_loopback_connect_at_server_boundary() {
 }
 
 #[test]
+fn ct1_default_exposure_policy_keeps_loopback_bind_and_connect_unchanged() {
+    // CT1: with NO ExposurePolicy config, the loopback bind AND loopback connect
+    // behave exactly as before. A full round-trip over 127.0.0.1 proves both the
+    // listener guard and the connect-side guard pass loopback under the default
+    // (loopback-only) policy, so the safe default is genuinely identical and
+    // existing callers of serve_tcp_with_handler (e.g. capo-web at 127.0.0.1) are
+    // unaffected.
+    let root = temp_root();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server_root = root.clone();
+    let server_thread = thread::spawn(move || {
+        serve_tcp(
+            listener,
+            ProjectId::new("project-capo"),
+            server_root,
+            Some(1),
+        )
+        .expect("serve tcp")
+    });
+
+    let response = send_tcp(
+        address,
+        &ServerRequest::local_cli("ct1-loopback", ServerCommand::ListAgents),
+    )
+    .expect("loopback connect succeeds under the default policy");
+    assert!(matches!(response.payload, ServerResponsePayload::Agents(_)));
+    assert_eq!(server_thread.join().expect("server thread"), 1);
+}
+
+#[test]
+fn ct1_non_loopback_refusal_carries_the_exposure_policy_reason() {
+    // The bind-side refusal now flows through ExposurePolicy and surfaces the
+    // typed policy reason (an auth_ref handle is required for a non-loopback
+    // bind), not just a bare "loopback" string — proving the guard is the policy.
+    let root = temp_root();
+    let listener = TcpListener::bind("0.0.0.0:0").expect("listener");
+    let error = serve_tcp(listener, ProjectId::new("project-capo"), &root, Some(1))
+        .expect_err("non-loopback bind fails closed under the default policy");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("loopback"),
+        "unexpected error: {rendered}"
+    );
+    assert!(
+        rendered.contains("auth_ref"),
+        "expected the ExposurePolicy auth-required reason, got: {rendered}"
+    );
+}
+
+#[test]
+fn ct1_non_loopback_connect_refusal_carries_the_exposure_policy_reason() {
+    // The connect-side guard now flows through the SAME ExposurePolicy as the
+    // listener guard, so a non-loopback connect surfaces the typed policy reason
+    // (an auth_ref handle is required), not just the legacy "loopback" string.
+    // This proves ExposurePolicy is driving the connect-side check too, closing
+    // the asymmetric-hole gap the bind-side test alone leaves open.
+    let request = ServerRequest::local_cli("ct1-connect-public", ServerCommand::ListAgents);
+    let error = send_tcp("0.0.0.0:1", &request)
+        .expect_err("non-loopback connect fails closed under the default policy");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("loopback"),
+        "unexpected error: {rendered}"
+    );
+    assert!(
+        rendered.contains("auth_ref"),
+        "expected the ExposurePolicy auth-required reason on the connect side, got: {rendered}"
+    );
+}
+
+#[test]
 fn tcp_transport_round_trips_server_requests_and_recovers_state() {
     let root = temp_root();
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");

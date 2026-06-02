@@ -1943,7 +1943,49 @@ pub enum ConnectivityError {
         endpoint_id: String,
         channel_kind: ChannelKind,
     },
+    /// CT1: a non-loopback (`Private`/`Public`) bind/connect/resolution was
+    /// requested with no `auth_ref` HANDLE attached. The bind/connect side and
+    /// the exposure-stub side both fail closed with this rather than silently
+    /// allowing an unauthenticated non-loopback exposure. Carries no secret.
+    AuthRequired { scope: ExposureScope },
+    /// CT1: the requested `ExposureScope` exceeds the effective policy ceiling,
+    /// which defaults to `Loopback` and is only promoted by explicit opt-in
+    /// (config/flag/grant). A non-loopback request under an unpromoted (default)
+    /// policy fails closed here — the loopback default is never implicitly
+    /// widened.
+    ScopeExceedsCeiling {
+        requested: ExposureScope,
+        ceiling: ExposureScope,
+    },
 }
+
+impl std::fmt::Display for ConnectivityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ChannelNotAllowed {
+                endpoint_id,
+                channel_kind,
+            } => write!(
+                f,
+                "channel {} is not allowed for endpoint {endpoint_id}",
+                channel_kind.as_str()
+            ),
+            Self::AuthRequired { scope } => write!(
+                f,
+                "non-loopback exposure ({}) requires an auth_ref handle",
+                scope.as_str()
+            ),
+            Self::ScopeExceedsCeiling { requested, ceiling } => write!(
+                f,
+                "requested exposure scope {} exceeds the effective policy ceiling {}",
+                requested.as_str(),
+                ceiling.as_str()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConnectivityError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExposureScope {
@@ -1963,6 +2005,232 @@ impl ExposureScope {
 
     pub fn requires_permission(self) -> bool {
         !matches!(self, Self::Loopback)
+    }
+
+    /// Stable wire label for the scope, used by the `connectivity.policy_changed`
+    /// audit payload and the typed error `Display`. Mirrors the CLI's
+    /// `exposure_scope_str` so the policy and the exposure trail share one
+    /// vocabulary.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Loopback => "loopback",
+            Self::Private => "private",
+            Self::Public => "public",
+        }
+    }
+
+    /// Rank scopes so the policy can compare a requested scope against the
+    /// effective ceiling: `Loopback < Private < Public`. A request is permitted
+    /// by the ceiling only when `request.rank() <= ceiling.rank()`.
+    fn rank(self) -> u8 {
+        match self {
+            Self::Loopback => 0,
+            Self::Private => 1,
+            Self::Public => 2,
+        }
+    }
+}
+
+/// CT1: the explicit gate the server bind, the client connect, and tunnel
+/// resolution consult before any non-loopback exposure.
+///
+/// The DEFAULT ceiling is [`ExposureScope::Loopback`] — loopback passes with
+/// zero config and is byte-for-byte the prior behavior. Promotion to `Private`
+/// or `Public` is an EXPLICIT opt-in (config/flag/grant), never an implicit
+/// default, and is itself an audited fact (`connectivity.policy_changed`, built
+/// via [`ExposurePolicy::promote`]). A non-loopback request fails closed unless
+/// the ceiling was promoted AND an `auth_ref` handle is present.
+///
+/// This is the connectivity boundary's policy only; the `safety-gates` grant
+/// engine still independently gates ACTIVATION via the permission scope. The two
+/// checks are separate and both required for a live private/public exposure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExposurePolicy {
+    ceiling: ExposureScope,
+    opt_in_source: Option<String>,
+}
+
+impl Default for ExposurePolicy {
+    fn default() -> Self {
+        // Loopback default with no opt-in source: the safe zero-config policy.
+        Self {
+            ceiling: ExposureScope::Loopback,
+            opt_in_source: None,
+        }
+    }
+}
+
+/// The replay-stable audit fact emitted when the effective exposure ceiling is
+/// promoted (Loopback -> Private/Public). It records the old/new ceiling, the
+/// opt-in SOURCE (config/flag/grant), and a caller-supplied timestamp so an
+/// operator can reconstruct WHY a private/public exposure became possible. It
+/// carries NO secret — the opt-in source is a provenance label, never a handle
+/// or credential value.
+///
+/// FORWARD-COMPATIBLE STUB (CT1): `promote()` and this event type, together with
+/// the `EventKind::ConnectivityPolicyChanged` codec, are wired and round-trip
+/// tested, but CT1 has NO live emitter — `promote()` is exercised only in tests.
+/// The opt-in promotion CLI path (a `--promote`/grant-driven flag that actually
+/// emits `connectivity.policy_changed` into the state store) lands in CT3/CT5.
+/// Until then the default loopback-only policy is the only one the live bind /
+/// connect / expose-stub paths construct, so the audit trail for promotions is
+/// deliberately not yet live. Do not assume a populated `policy_changed` history
+/// exists in the store before that path is wired.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PolicyChangeEvent {
+    pub previous_ceiling: ExposureScope,
+    pub new_ceiling: ExposureScope,
+    pub opt_in_source: String,
+    pub changed_at: String,
+}
+
+impl PolicyChangeEvent {
+    /// The `connectivity.policy_changed` payload as a stable, secret-free JSON
+    /// object. Replay-stable: the same inputs always produce the same bytes.
+    pub fn payload_json(&self) -> String {
+        format!(
+            "{{\"previous_ceiling\":\"{}\",\"new_ceiling\":\"{}\",\"opt_in_source\":\"{}\",\"changed_at\":\"{}\"}}",
+            self.previous_ceiling.as_str(),
+            self.new_ceiling.as_str(),
+            escape_policy_json(&self.opt_in_source),
+            escape_policy_json(&self.changed_at),
+        )
+    }
+}
+
+/// Minimal JSON string escaping for the policy-change provenance labels. The
+/// opt-in source / timestamp are operator-facing provenance, never secrets, but
+/// they still must not break the payload framing.
+fn escape_policy_json(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+impl ExposurePolicy {
+    /// The default loopback-only policy: loopback passes with no auth and no
+    /// opt-in; any non-loopback request fails closed.
+    pub fn loopback_default() -> Self {
+        Self::default()
+    }
+
+    pub fn ceiling(&self) -> ExposureScope {
+        self.ceiling
+    }
+
+    pub fn opt_in_source(&self) -> Option<&str> {
+        self.opt_in_source.as_deref()
+    }
+
+    /// Promote the effective ceiling to `new_ceiling` via an EXPLICIT opt-in
+    /// `source` (config/flag/grant), returning the promoted policy together with
+    /// the replay-stable [`PolicyChangeEvent`] the caller must emit. Promotion to
+    /// `Loopback` (or to the same/lower ceiling) is not a widening and returns no
+    /// event.
+    ///
+    /// `source` is a PROVENANCE TOKEN — a short label naming WHERE the opt-in came
+    /// from (e.g. `config`, `flag:--expose-private`, `grant:<grant-id>`), never a
+    /// credential. It is serialized verbatim into the secret-free
+    /// [`PolicyChangeEvent::payload_json`] audit payload, so the CT3/CT5 caller
+    /// that wires the live promotion path MUST pass a provenance label here and
+    /// resolve any real credential through the `auth_ref` HANDLE confined to the
+    /// adapter (CT2), not through this string. CT2's redaction guard scans handle
+    /// fields, not this free-text provenance label; when the live promotion path
+    /// lands (CT3/CT5) it must add a defense-in-depth test asserting
+    /// `payload_json()` contains no known credential pattern, mirroring the CT2
+    /// planted-pattern net.
+    pub fn promote(
+        &self,
+        new_ceiling: ExposureScope,
+        source: impl Into<String>,
+        changed_at: impl Into<String>,
+    ) -> (Self, Option<PolicyChangeEvent>) {
+        let source = source.into();
+        if new_ceiling.rank() <= self.ceiling.rank() {
+            // Not a widening: keep the current (or stricter) ceiling, no audit.
+            return (self.clone(), None);
+        }
+        let event = PolicyChangeEvent {
+            previous_ceiling: self.ceiling,
+            new_ceiling,
+            opt_in_source: source.clone(),
+            changed_at: changed_at.into(),
+        };
+        (
+            Self {
+                ceiling: new_ceiling,
+                opt_in_source: Some(source),
+            },
+            Some(event),
+        )
+    }
+
+    /// Authorize a requested `scope` against this policy.
+    ///
+    /// - `Loopback` always passes (no auth, no opt-in needed).
+    /// - A non-loopback scope FAILS CLOSED with [`ConnectivityError::AuthRequired`]
+    ///   when no `auth_ref` handle is attached.
+    /// - A non-loopback scope above the effective ceiling FAILS CLOSED with
+    ///   [`ConnectivityError::ScopeExceedsCeiling`].
+    ///
+    /// On success it returns `Ok(permission_required)` — `false` only for
+    /// loopback; `true` for an authorized private/public scope (the grant engine
+    /// still gates activation).
+    pub fn authorize(
+        &self,
+        scope: ExposureScope,
+        auth_ref: Option<&str>,
+    ) -> ConnectivityResult<bool> {
+        if matches!(scope, ExposureScope::Loopback) {
+            return Ok(false);
+        }
+        if auth_ref.is_none_or(str::is_empty) {
+            return Err(ConnectivityError::AuthRequired { scope });
+        }
+        if scope.rank() > self.ceiling.rank() {
+            return Err(ConnectivityError::ScopeExceedsCeiling {
+                requested: scope,
+                ceiling: self.ceiling,
+            });
+        }
+        Ok(true)
+    }
+
+    /// CT1 bind/connect guard: decide whether a socket address may be served or
+    /// connected under this policy. Loopback addresses always pass (the
+    /// zero-config default). A non-loopback address requires the policy to have
+    /// been promoted to at least `Private` AND an `auth_ref` handle present,
+    /// otherwise it fails closed — symmetric on both the listener and connect
+    /// sides so loosening one side cannot open an asymmetric hole.
+    ///
+    /// SCOPE NOTE (by design): this is a TRANSPORT-LEVEL guard, so it treats ANY
+    /// non-loopback socket as [`ExposureScope::Private`] regardless of whether the
+    /// bind is to a tailnet-private or a public interface — the transport does not
+    /// know the difference, and must not. The Private-vs-Public distinction is an
+    /// EXPOSURE-level concern enforced upstream at the [`ExposurePolicy::authorize`]
+    /// call in the tunnel-resolution path (CT3+), where the requested
+    /// [`ExposureScope`] is known and checked against the ceiling. Consequently a
+    /// `Public`-scope bind validated here passes as long as the ceiling is at least
+    /// `Private`; a future implementer wiring a public-interface bind must NOT rely
+    /// on this method to reject public exposure — that gate lives in `authorize`.
+    pub fn authorize_socket(
+        &self,
+        is_loopback: bool,
+        auth_ref: Option<&str>,
+    ) -> ConnectivityResult<()> {
+        if is_loopback {
+            return Ok(());
+        }
+        self.authorize(ExposureScope::Private, auth_ref).map(|_| ())
     }
 }
 
@@ -2433,6 +2701,142 @@ mod tests {
             tunnel.resolve_endpoint(EndpointOwner::runtime_target("target"), ChannelKind::Stdio),
             Err(ConnectivityError::ChannelNotAllowed { .. })
         ));
+    }
+
+    // ---- CT1: ExposurePolicy (loopback default, explicit opt-in, auth-required) ----
+
+    #[test]
+    fn ct1_exposure_policy_default_is_loopback_only_with_no_auth_or_opt_in() {
+        let policy = ExposurePolicy::loopback_default();
+        assert_eq!(policy.ceiling(), ExposureScope::Loopback);
+        assert_eq!(policy.opt_in_source(), None);
+
+        // Loopback authorizes with no auth and no opt-in; it never requires
+        // permission.
+        assert_eq!(policy.authorize(ExposureScope::Loopback, None), Ok(false));
+        // Even with a handle present, loopback stays permission-free.
+        assert_eq!(
+            policy.authorize(ExposureScope::Loopback, Some("keychain:capo/x")),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn ct1_non_loopback_without_auth_ref_is_a_typed_auth_required_refusal() {
+        let policy = ExposurePolicy::loopback_default();
+        assert_eq!(
+            policy.authorize(ExposureScope::Private, None),
+            Err(ConnectivityError::AuthRequired {
+                scope: ExposureScope::Private
+            })
+        );
+        assert_eq!(
+            policy.authorize(ExposureScope::Public, None),
+            Err(ConnectivityError::AuthRequired {
+                scope: ExposureScope::Public
+            })
+        );
+        // An empty handle is treated as no handle (fail closed).
+        assert_eq!(
+            policy.authorize(ExposureScope::Private, Some("")),
+            Err(ConnectivityError::AuthRequired {
+                scope: ExposureScope::Private
+            })
+        );
+    }
+
+    #[test]
+    fn ct1_non_loopback_above_ceiling_fails_closed_even_with_a_handle() {
+        // A handle is present but the default ceiling is still Loopback: the
+        // request must fail closed against the ceiling, never implicitly widen.
+        let policy = ExposurePolicy::loopback_default();
+        assert_eq!(
+            policy.authorize(ExposureScope::Private, Some("keychain:capo/authkey")),
+            Err(ConnectivityError::ScopeExceedsCeiling {
+                requested: ExposureScope::Private,
+                ceiling: ExposureScope::Loopback,
+            })
+        );
+    }
+
+    #[test]
+    fn ct1_promoted_policy_permits_resolution_but_still_requires_permission() {
+        let (policy, event) = ExposurePolicy::loopback_default().promote(
+            ExposureScope::Private,
+            "config",
+            "unix:1700000000",
+        );
+        assert_eq!(policy.ceiling(), ExposureScope::Private);
+        assert_eq!(policy.opt_in_source(), Some("config"));
+
+        // Promotion emitted a replay-stable policy_changed event with old/new
+        // ceiling and the opt-in source and NO secret.
+        let event = event.expect("promotion emits a policy_changed event");
+        assert_eq!(event.previous_ceiling, ExposureScope::Loopback);
+        assert_eq!(event.new_ceiling, ExposureScope::Private);
+        assert_eq!(event.opt_in_source, "config");
+        let payload = event.payload_json();
+        assert_eq!(
+            payload,
+            "{\"previous_ceiling\":\"loopback\",\"new_ceiling\":\"private\",\"opt_in_source\":\"config\",\"changed_at\":\"unix:1700000000\"}"
+        );
+        // Replay-stable: same inputs, identical bytes.
+        let (_again, replay) = ExposurePolicy::loopback_default().promote(
+            ExposureScope::Private,
+            "config",
+            "unix:1700000000",
+        );
+        assert_eq!(replay.expect("event").payload_json(), payload);
+
+        // With opt-in + handle, private is permitted BUT still permission_required
+        // (the grant engine independently gates activation).
+        assert_eq!(
+            policy.authorize(ExposureScope::Private, Some("keychain:capo/authkey")),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn ct1_promotion_to_same_or_lower_ceiling_is_not_a_widening_and_emits_no_event() {
+        let (promoted, _) =
+            ExposurePolicy::loopback_default().promote(ExposureScope::Public, "grant", "unix:1");
+        // Re-promoting to a lower ceiling does not widen and emits no audit event.
+        let (still, event) = promoted.promote(ExposureScope::Private, "config", "unix:2");
+        assert_eq!(still.ceiling(), ExposureScope::Public);
+        assert!(event.is_none());
+
+        // Loopback default -> Loopback is not a promotion.
+        let (_same, event) =
+            ExposurePolicy::loopback_default().promote(ExposureScope::Loopback, "config", "unix:3");
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn ct1_authorize_socket_is_symmetric_and_fails_closed_for_non_loopback_by_default() {
+        let policy = ExposurePolicy::loopback_default();
+        // Loopback socket passes with no handle (the zero-config default).
+        assert_eq!(policy.authorize_socket(true, None), Ok(()));
+        // Non-loopback fails closed (no handle) under the default policy.
+        assert_eq!(
+            policy.authorize_socket(false, None),
+            Err(ConnectivityError::AuthRequired {
+                scope: ExposureScope::Private
+            })
+        );
+        // Non-loopback with a handle but unpromoted ceiling still fails closed.
+        assert_eq!(
+            policy.authorize_socket(false, Some("keychain:capo/authkey")),
+            Err(ConnectivityError::ScopeExceedsCeiling {
+                requested: ExposureScope::Private,
+                ceiling: ExposureScope::Loopback,
+            })
+        );
+        // Promoted + handle: non-loopback socket is authorized.
+        let (promoted, _) = policy.promote(ExposureScope::Private, "flag", "unix:1700000001");
+        assert_eq!(
+            promoted.authorize_socket(false, Some("keychain:capo/authkey")),
+            Ok(())
+        );
     }
 
     #[test]

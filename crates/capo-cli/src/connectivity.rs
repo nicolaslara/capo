@@ -2,7 +2,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use capo_query::{ProjectDashboardQuery, project_dashboard};
 use capo_runtime::{
-    ChannelKind, ConnectivityEndpointConfig, ConnectivityTunnel, EndpointOwner, ExposureScope,
+    ChannelKind, ConnectivityEndpointConfig, ConnectivityError, ConnectivityTunnel, EndpointOwner,
+    ExposurePolicy, ExposureScope,
 };
 use capo_state::{
     CapabilityGrantProjection, ConnectivityExposureProjection, EventKind, NewEvent,
@@ -55,12 +56,40 @@ pub(crate) fn expose_connectivity_stub(
     let resolved = tunnel
         .resolve_endpoint(owner, channel)
         .map_err(|error| format!("connectivity endpoint resolution failed: {error:?}"))?;
-    let health = tunnel.check_reachability();
-    let status = if resolved.permission_required {
+    // CT1: route the exposure through the explicit `ExposurePolicy`. With no
+    // opt-in promotion and no `auth_ref` handle (CT2 adds the handle), the
+    // default loopback-only policy authorizes loopback (no permission required)
+    // and fails CLOSED for `private`/`public` with a typed `AuthRequired`
+    // refusal. That refusal is representable as a blocked exposure, not a silent
+    // allow: a `private`/`public` stub therefore stays
+    // `blocked_pending_permission` and cannot reach `active` until a grant is
+    // present (the grant still gates activation independently). The policy gate
+    // and the grant gate are two separate, both-required checks.
+    let policy = ExposurePolicy::loopback_default();
+    // A typed refusal (no auth handle / above ceiling) maps to "permission
+    // required" so the exposure stays blocked-pending-permission rather than a
+    // silent allow; loopback maps to false. Capture the TYPED reason so the
+    // surfaced status is provably the POLICY gate (AuthRequired/ScopeExceedsCeiling)
+    // and not merely the downstream grant gate — this is what distinguishes the
+    // CT1 policy block from the pre-CT1 grant block.
+    let policy_decision = policy.authorize(resolved.exposure, None);
+    let (permission_required, policy_block_reason) = match &policy_decision {
+        Ok(required) => (*required, None),
+        Err(error @ ConnectivityError::AuthRequired { .. }) => {
+            (true, Some(format!("AuthRequired: {error}")))
+        }
+        Err(error @ ConnectivityError::ScopeExceedsCeiling { .. }) => {
+            (true, Some(format!("ScopeExceedsCeiling: {error}")))
+        }
+        // Any other typed refusal still fails closed to permission-required.
+        Err(error) => (true, Some(format!("{error}"))),
+    };
+    let status = if permission_required {
         "blocked_pending_permission"
     } else {
         "active"
     };
+    let health = tunnel.check_reachability();
     let exposure = ConnectivityExposureProjection {
         exposure_id: format!(
             "connectivity-exposure-{}",
@@ -86,7 +115,7 @@ pub(crate) fn expose_connectivity_stub(
     };
     let sequence = if record {
         ensure_runtime_target_owner_exists(parsed, &exposure)?;
-        let event_kind = if resolved.permission_required {
+        let event_kind = if permission_required {
             EventKind::ConnectivityExposureRequested
         } else {
             EventKind::ConnectivityExposureChanged
@@ -136,7 +165,7 @@ pub(crate) fn expose_connectivity_stub(
     };
 
     Ok(format!(
-        "connectivity_exposure_planned=true\nexposure={}\nendpoint={}\nresolved_endpoint={}\nowner={}:{}\nchannel={}\nexposure_scope={}\npermission_required={}\npermission_scope={}\nstatus={}\nhealth={}\nreachable={}\nrecorded={}\nrecorded_sequence={}\n",
+        "connectivity_exposure_planned=true\nexposure={}\nendpoint={}\nresolved_endpoint={}\nowner={}:{}\nchannel={}\nexposure_scope={}\npermission_required={}\npermission_scope={}\nstatus={}\npolicy_block_reason={}\nhealth={}\nreachable={}\nrecorded={}\nrecorded_sequence={}\n",
         exposure.exposure_id,
         exposure.connectivity_endpoint_id,
         resolved.resolved_endpoint_id,
@@ -144,9 +173,10 @@ pub(crate) fn expose_connectivity_stub(
         exposure.owner_id,
         exposure.channel_kind,
         exposure.exposure,
-        resolved.permission_required,
+        permission_required,
         exposure.permission_scope,
         exposure.status,
+        policy_block_reason.as_deref().unwrap_or("none"),
         exposure.health_status,
         exposure.reachable,
         record,
