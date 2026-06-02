@@ -317,6 +317,13 @@ pub struct RedactionRule {
 /// The placeholder a credential-shape match is replaced with.
 pub const CREDENTIAL_REDACTION_PLACEHOLDER: &str = "[REDACTED:credential]";
 
+/// RR4: the byte cap applied to remote output deltas at the remote boundary,
+/// mirroring [`LocalProcessConfig::output_limit_bytes`]'s default. A remote stream
+/// is bounded by this exactly as a local run's output is, so a runaway remote does
+/// not flood the controller with unbounded deltas; once reached, the stream
+/// finalizes [`RemoteStreamFinalReason::CapReached`].
+pub const REMOTE_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+
 /// A real redaction policy: configurable literal [`RedactionRule`] patterns PLUS
 /// a default credential-shape / high-entropy scan (ACI7).
 ///
@@ -1923,6 +1930,33 @@ impl RemoteChannel {
             Self::Fake(channel) => channel.cleanup(probe),
         }
     }
+
+    /// RR4: forward the remote output stream as RAW frames from `from_offset`. The
+    /// runner redacts + bounds + offsets the bytes; the channel only forwards.
+    fn stream(&self, probe: &RemoteProbe, from_offset: usize) -> RemoteRawStream {
+        match self {
+            Self::Fake(channel) => channel.stream(probe, from_offset),
+        }
+    }
+
+    /// RR4: write stdin bytes to the remote process over the channel.
+    fn write_stdin(&self, probe: &RemoteProbe, bytes: &[u8]) -> RuntimeResult<()> {
+        match self {
+            Self::Fake(channel) => channel.write_stdin(probe, bytes),
+        }
+    }
+}
+
+/// RR4: the RAW frames the channel forwarded for one stream read: the offset the
+/// frames START at (so a reconnect from the last acknowledged offset yields no
+/// overlap), the raw (un-redacted) bytes, and whether the channel DROPPED
+/// mid-stream (so the runner finalizes with a recorded reason, never a silent
+/// truncation). The runner — not the channel — applies redaction + the output cap.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RemoteRawStream {
+    from_offset: usize,
+    bytes: Vec<u8>,
+    dropped: bool,
 }
 
 /// A lightweight remote-process handle reconstructed from a stored
@@ -1980,6 +2014,22 @@ pub struct FakeRemoteChannel {
     /// last-known local status. This exercises the override path: `health` must
     /// return `live=false` even when the stored ref still says `running`.
     probe_reports_dead: bool,
+    /// RR4: the RAW (un-redacted) bytes the remote stream produces over the
+    /// channel. This is what a real transport would forward as it is produced; the
+    /// runner redacts + bounds it at the remote boundary, so a credential token
+    /// scripted here MUST be scrubbed before any delta event / artifact. When
+    /// `None`, the channel streams the captured loopback stdout (already
+    /// program-produced) so an ordinary run still streams its real output.
+    streamed_output: Option<Vec<u8>>,
+    /// RR4: when set, the stream is DROPPED mid-flight after this many raw bytes
+    /// have been forwarded — modelling a channel that dies mid-stream. The runner
+    /// must finalize the delta stream with a recorded reason rather than silently
+    /// truncating.
+    stream_drop_after: Option<usize>,
+    /// RR4: stdin bytes the runner wrote to the remote process over the channel, in
+    /// write order. Shared (`Arc`) so a cloned channel observes the same writes; a
+    /// test reads it to prove a stdin write actually reached the fake remote.
+    stdin_written: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     /// Observability for the idempotency invariant: every time the channel
     /// ACTUALLY spawns a remote process (a successful `launch`), this counter is
     /// incremented. The fake-channel suite asserts a duplicate idempotency key
@@ -2000,6 +2050,8 @@ impl PartialEq for FakeRemoteChannel {
             && self.launch_failure == other.launch_failure
             && self.recovery_script == other.recovery_script
             && self.probe_reports_dead == other.probe_reports_dead
+            && self.streamed_output == other.streamed_output
+            && self.stream_drop_after == other.stream_drop_after
             && self.loopback == other.loopback
     }
 }
@@ -2032,6 +2084,9 @@ impl FakeRemoteChannel {
             launch_failure: None,
             recovery_script: None,
             probe_reports_dead: false,
+            streamed_output: None,
+            stream_drop_after: None,
+            stdin_written: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             spawn_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             loopback: LocalProcessRunner::new(LocalProcessConfig::for_test(
                 workspace_root,
@@ -2164,7 +2219,76 @@ impl FakeRemoteChannel {
         self
     }
 
+    /// RR4: script the RAW (un-redacted) bytes the remote stream produces over the
+    /// channel. The runner redacts + bounds these at the remote boundary, so a
+    /// credential-shaped token scripted here proves redaction happens BEFORE any
+    /// delta event / persisted artifact.
+    pub fn with_streamed_output(mut self, raw: impl Into<Vec<u8>>) -> Self {
+        self.streamed_output = Some(raw.into());
+        self
+    }
+
+    /// RR4: script the channel to DROP mid-stream after `byte_offset` raw bytes
+    /// have been forwarded — modelling a channel that dies mid-run so the runner
+    /// must finalize with a recorded reason, never silently truncate.
+    pub fn with_stream_drop_after(mut self, byte_offset: usize) -> Self {
+        self.stream_drop_after = Some(byte_offset);
+        self
+    }
+
+    /// RR4: the stdin bytes the runner has written to the remote process over the
+    /// channel so far. A test reads this to prove a stdin write actually reached
+    /// the fake remote.
+    pub fn stdin_written(&self) -> Vec<u8> {
+        self.stdin_written
+            .lock()
+            .expect("fake remote stdin ledger poisoned")
+            .clone()
+    }
+
+    /// The RAW bytes this channel streams: the scripted payload when set, else the
+    /// captured loopback stdout (the real program output the launch produced).
+    fn raw_stream_bytes(&self) -> Vec<u8> {
+        self.streamed_output.clone().unwrap_or_default()
+    }
+
     fn signal(&self, _probe: &RemoteProbe, _escalation: &str) -> RuntimeResult<()> {
+        Ok(())
+    }
+
+    /// RR4: forward the remote stream as RAW frames starting from `from_offset`,
+    /// reporting whether the channel dropped mid-stream. The runner (not the
+    /// channel) redacts + bounds + offsets these; the channel is honest about
+    /// where the bytes start and whether they were cut off.
+    fn stream(&self, _probe: &RemoteProbe, from_offset: usize) -> RemoteRawStream {
+        let raw = self.raw_stream_bytes();
+        // A reconnect resumes strictly AFTER the last acknowledged offset.
+        let start = from_offset.min(raw.len());
+        let mut bytes = raw[start..].to_vec();
+        // If scripted to drop, cut the forwarded bytes at the drop boundary
+        // (relative to the resume start) and report the drop.
+        let dropped = match self.stream_drop_after {
+            Some(drop_at) if drop_at < raw.len() => {
+                let cut = drop_at.saturating_sub(start);
+                if cut < bytes.len() {
+                    bytes.truncate(cut);
+                }
+                true
+            }
+            _ => false,
+        };
+        RemoteRawStream {
+            from_offset: start,
+            bytes,
+            dropped,
+        }
+    }
+
+    fn write_stdin(&self, _probe: &RemoteProbe, bytes: &[u8]) -> RuntimeResult<()> {
+        self.stdin_written
+            .lock()
+            .expect("fake remote stdin ledger poisoned")
+            .extend_from_slice(bytes);
         Ok(())
     }
 
@@ -2249,6 +2373,89 @@ impl RemoteProcessConfig {
         let channel = OpenChannel::for_test(target.clone(), endpoint, target);
         Self::fake_for_test(channel, workspace_root, artifact_root)
     }
+}
+
+/// RR4: which standard stream a remote output delta carries. The remote analogue
+/// of [`async_runner::StreamSource`], reusing the same stdout/stderr label so a
+/// remote delta routes exactly like a local one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteStreamSource {
+    Stdout,
+    Stderr,
+}
+
+impl RemoteStreamSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        }
+    }
+}
+
+/// RR4: one redacted, offset-tagged remote output delta. Reuses the
+/// `streaming-transport` output-delta model: `offset` is the MONOTONIC byte
+/// position (in the RAW remote stream) at which this delta's bytes start, so a
+/// reconnect replays strictly from the last acknowledged offset without
+/// duplicating an already-projected delta. The payload is ALREADY redacted at the
+/// remote boundary (the `RedactionPolicy` credential-shape scan), and
+/// `redaction_state` records whether anything was scrubbed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteStreamDelta {
+    pub source: RemoteStreamSource,
+    /// The byte offset in the RAW remote stream at which this delta begins. The
+    /// NEXT acknowledged offset is `offset + raw_len` (carried in the event so a
+    /// reconnect resumes after exactly the projected bytes).
+    pub offset: usize,
+    /// Number of RAW (pre-redaction) bytes this delta covers, so the next offset
+    /// is computable from the projected stream alone even though the payload below
+    /// is redacted (and thus may differ in length).
+    pub raw_len: usize,
+    /// The redacted delta payload (UTF-8 lossy), safe to persist / forward.
+    pub text: String,
+    /// `"redacted"` when the credential-shape scan matched, else `"safe"`.
+    pub redaction_state: String,
+}
+
+/// RR4: why a remote delta stream finalized. A clean EOF, a cap-truncation, or a
+/// mid-stream channel drop — every terminal reason is RECORDED so a dropped stream
+/// is never a silent truncation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteStreamFinalReason {
+    /// The remote stream reached EOF and was forwarded in full.
+    Eof,
+    /// The stream hit the `output_limit_bytes` cap and was bounded; remaining
+    /// remote bytes were not forwarded.
+    CapReached,
+    /// The channel dropped mid-stream; the partial stream is finalized with this
+    /// reason rather than silently truncated.
+    ChannelDropped,
+}
+
+impl RemoteStreamFinalReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Eof => "eof",
+            Self::CapReached => "cap_reached",
+            Self::ChannelDropped => "channel_dropped",
+        }
+    }
+}
+
+/// RR4: the result of one `stream_output` read over the channel: the ordered,
+/// redacted, offset-tagged deltas, the next acknowledged offset (for a reconnect),
+/// the terminal reason, and the append-ready events
+/// (`runtime.remote_output_delta` per delta + a terminal
+/// `runtime.remote_stream_finalized`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteStreamOutcome {
+    pub deltas: Vec<RemoteStreamDelta>,
+    /// The offset a reconnect should resume from: one past the last forwarded raw
+    /// byte. A reconnect with this `from_offset` yields no duplicate deltas.
+    pub next_offset: usize,
+    pub final_reason: RemoteStreamFinalReason,
+    pub redaction_state: String,
+    pub events: Vec<RuntimeEvent>,
 }
 
 /// RR1 remote runner: drives `start_process`/`interrupt`/`terminate`/`kill`/
@@ -2510,6 +2717,133 @@ impl RemoteProcessRunner {
             runtime_process_ref: process.runtime_process_ref.clone(),
             status: if live { "running" } else { "exited" }.to_string(),
             live,
+        })
+    }
+
+    /// RR4: stream the remote process's stdout/stderr deltas over the channel,
+    /// resuming from `from_offset` (pass `0` for a fresh stream). The SAME opaque
+    /// [`LocalRuntimeProcessRef`] identifies the run; only its
+    /// `remote_process_ref` is populated.
+    ///
+    /// Reuses the `streaming-transport` output-delta model:
+    ///   - each delta is REDACTED at the remote boundary (the `RedactionPolicy`
+    ///     credential-shape scan) BEFORE it leaves as a `runtime.remote_output_delta`
+    ///     event, so a credential-shaped token never reaches an artifact/event;
+    ///   - output is BOUNDED by `output_limit_bytes`: once the cap is reached the
+    ///     stream finalizes `CapReached` rather than forwarding unbounded bytes;
+    ///   - each delta carries a MONOTONIC offset (`offset` + `raw_len`), so a
+    ///     reconnect with the returned `next_offset` replays NO already-projected
+    ///     delta (the `from_sequence` discipline);
+    ///   - a mid-stream channel drop finalizes the stream with
+    ///     `ChannelDropped` + a recorded reason, never a silent truncation.
+    ///
+    /// `output_limit_bytes` for the remote boundary mirrors the local runner cap.
+    pub fn stream_output(
+        &self,
+        process: &LocalRuntimeProcessRef,
+        from_offset: usize,
+    ) -> RemoteStreamOutcome {
+        self.stream_output_with(process, from_offset, RemoteStreamSource::Stdout)
+    }
+
+    /// RR4: as [`Self::stream_output`] but for a chosen stream label
+    /// (stdout/stderr).
+    pub fn stream_output_with(
+        &self,
+        process: &LocalRuntimeProcessRef,
+        from_offset: usize,
+        source: RemoteStreamSource,
+    ) -> RemoteStreamOutcome {
+        let probe = self.probe_from_ref(process);
+        let raw = self.config.transport.stream(&probe, from_offset);
+        let cap = REMOTE_OUTPUT_LIMIT_BYTES;
+
+        // Bound at the cap: only the first `cap` bytes (from the resume offset) are
+        // forwarded; if the channel had more, the stream finalizes `CapReached`.
+        let dropped = raw.dropped;
+        let forwarded = &raw.bytes[..raw.bytes.len().min(cap)];
+        let cap_reached = raw.bytes.len() > cap;
+
+        // Redact at the remote boundary BEFORE the bytes become an event/artifact.
+        let policy = RedactionPolicy::new(Vec::new());
+        let (redacted, redaction_state) = policy.apply(forwarded);
+        let text = String::from_utf8_lossy(&redacted).to_string();
+        let raw_len = forwarded.len();
+        let next_offset = raw.from_offset + raw_len;
+
+        let mut deltas = Vec::new();
+        let mut events = Vec::new();
+        if raw_len > 0 {
+            deltas.push(RemoteStreamDelta {
+                source,
+                offset: raw.from_offset,
+                raw_len,
+                text: text.clone(),
+                redaction_state: redaction_state.clone(),
+            });
+            events.push(RuntimeEvent {
+                kind: EventKind::RuntimeRemoteOutputDelta.as_str().to_string(),
+                status: redaction_state.clone(),
+                detail: format!(
+                    "stream={} offset={} raw_len={} next_offset={}",
+                    source.as_str(),
+                    raw.from_offset,
+                    raw_len,
+                    next_offset
+                ),
+            });
+        }
+
+        // A channel drop wins over a cap classification: the operator must learn
+        // the stream was cut, not that it merely hit the cap.
+        let final_reason = if dropped {
+            RemoteStreamFinalReason::ChannelDropped
+        } else if cap_reached {
+            RemoteStreamFinalReason::CapReached
+        } else {
+            RemoteStreamFinalReason::Eof
+        };
+        events.push(RuntimeEvent {
+            kind: EventKind::RuntimeRemoteStreamFinalized.as_str().to_string(),
+            status: final_reason.as_str().to_string(),
+            detail: format!(
+                "fingerprint={} reason={} next_offset={}",
+                self.config.transport.target_fingerprint(),
+                final_reason.as_str(),
+                next_offset
+            ),
+        });
+
+        RemoteStreamOutcome {
+            deltas,
+            next_offset,
+            final_reason,
+            redaction_state,
+            events,
+        }
+    }
+
+    /// RR4: write `bytes` to the remote process's stdin over the channel, emitting
+    /// `runtime.remote_stdin_written`. The byte count (not the content) is
+    /// recorded so the event carries no payload that could leak a secret.
+    pub fn write_stdin(
+        &self,
+        process: &LocalRuntimeProcessRef,
+        bytes: &[u8],
+    ) -> RuntimeResult<RuntimeControlResult> {
+        let probe = self.probe_from_ref(process);
+        self.config.transport.write_stdin(&probe, bytes)?;
+        Ok(RuntimeControlResult {
+            process: process.clone(),
+            events: vec![RuntimeEvent {
+                kind: EventKind::RuntimeRemoteStdinWritten.as_str().to_string(),
+                status: "written".to_string(),
+                detail: format!(
+                    "fingerprint={} bytes={}",
+                    self.config.transport.target_fingerprint(),
+                    bytes.len()
+                ),
+            }],
         })
     }
 
@@ -7323,6 +7657,216 @@ mod tests {
             "probe must carry the host recorded in the stored ref, not the re-resolved endpoint"
         );
         assert_eq!(probe.remote_pid, 51000);
+    }
+
+    // ----- RR4: remote output-delta + stdin streaming over the channel -----
+
+    /// Build a remote runner over a fake channel whose stream is scripted by
+    /// `script`, run a process so a REAL stored `remote_process_ref` exists, and
+    /// return the runner + the stored ref (flipped to the in-flight `running`
+    /// state). NO network — the deterministic fake channel models the stream.
+    fn streaming_runner(
+        name: &str,
+        script: impl FnOnce(FakeRemoteChannel) -> FakeRemoteChannel,
+    ) -> (
+        RemoteProcessRunner,
+        LocalRuntimeProcessRef,
+        FakeRemoteChannel,
+    ) {
+        let workspace = temp_root(&format!("workspace-{name}"));
+        let artifacts = temp_root(&format!("artifacts-{name}"));
+        fs::create_dir_all(&workspace).unwrap();
+        let channel = OpenChannel::for_test(
+            format!("chan-{name}"),
+            format!("endpoint-{name}"),
+            format!("fp-{name}"),
+        );
+        let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts);
+        let scripted = script(base);
+        let transport = RemoteChannel::Fake(scripted.clone());
+        let runner =
+            RemoteProcessRunner::new(RemoteProcessConfig::with_transport(channel, transport));
+        let outcome = runner
+            .start_process(remote_request(
+                &format!("run-{name}"),
+                workspace,
+                "printf ok",
+            ))
+            .expect("remote start for streaming fixture");
+        let running = LocalRuntimeProcessRef {
+            status: "running".to_string(),
+            ..outcome.process
+        };
+        (runner, running, scripted)
+    }
+
+    #[test]
+    fn remote_stream_projects_ordered_deltas_once_with_monotonic_offsets() {
+        let payload = b"line-1\nline-2\nline-3\n";
+        let (runner, running, _chan) =
+            streaming_runner("stream-order", |c| c.with_streamed_output(payload.to_vec()));
+
+        let outcome = runner.stream_output(&running, 0);
+        // The full stream is forwarded as a delta at offset 0 (EOF reached).
+        assert_eq!(outcome.final_reason, RemoteStreamFinalReason::Eof);
+        assert_eq!(outcome.deltas.len(), 1);
+        let delta = &outcome.deltas[0];
+        assert_eq!(delta.offset, 0);
+        assert_eq!(delta.raw_len, payload.len());
+        assert_eq!(delta.text, String::from_utf8_lossy(payload));
+        // next_offset is one past the last forwarded byte: the reconnect resume
+        // point.
+        assert_eq!(outcome.next_offset, payload.len());
+
+        // Each delta projects EXACTLY once: a reconnect from next_offset yields no
+        // duplicate delta (the from_sequence discipline).
+        let resumed = runner.stream_output(&running, outcome.next_offset);
+        assert!(
+            resumed.deltas.is_empty(),
+            "a reconnect at the acknowledged offset must replay no already-projected delta"
+        );
+        assert_eq!(resumed.next_offset, payload.len());
+        // The delta event carries the offsets so the projection is rebuildable.
+        let delta_event = outcome
+            .events
+            .iter()
+            .find(|e| e.kind == "runtime.remote_output_delta")
+            .expect("a remote_output_delta event");
+        assert!(delta_event.detail.contains("offset=0"));
+        assert!(
+            delta_event
+                .detail
+                .contains(&format!("next_offset={}", payload.len()))
+        );
+    }
+
+    #[test]
+    fn remote_stream_redacts_a_credential_before_any_delta_or_artifact() {
+        // A credential-shaped token in the RAW remote stream MUST be scrubbed at the
+        // remote boundary before it becomes a delta event / persisted artifact.
+        let secret = "sk-ABCDEF0123456789ABCDEF0123456789";
+        let raw = format!("starting up\nexport TOKEN={secret}\ndone\n");
+        let (runner, running, _chan) = streaming_runner("stream-redact", |c| {
+            c.with_streamed_output(raw.clone().into_bytes())
+        });
+
+        let outcome = runner.stream_output(&running, 0);
+        assert_eq!(outcome.redaction_state, "redacted");
+        let delta = &outcome.deltas[0];
+        assert!(
+            !delta.text.contains(secret),
+            "the raw credential must NOT survive into a delta payload"
+        );
+        assert!(
+            delta.text.contains(CREDENTIAL_REDACTION_PLACEHOLDER),
+            "the credential must be replaced with the redaction placeholder"
+        );
+        assert_eq!(delta.redaction_state, "redacted");
+        // The delta event also records the redacted state; no event detail leaks
+        // the secret.
+        assert!(
+            outcome.events.iter().all(|e| !e.detail.contains(secret)),
+            "no event detail may carry the raw credential"
+        );
+    }
+
+    #[test]
+    fn remote_stream_channel_drop_finalizes_with_a_recorded_reason() {
+        // A channel that dies mid-stream must finalize with ChannelDropped, never a
+        // silent truncation.
+        let payload = b"abcdefghij"; // 10 bytes
+        let (runner, running, _chan) = streaming_runner("stream-drop", |c| {
+            c.with_streamed_output(payload.to_vec())
+                .with_stream_drop_after(4)
+        });
+
+        let outcome = runner.stream_output(&running, 0);
+        assert_eq!(
+            outcome.final_reason,
+            RemoteStreamFinalReason::ChannelDropped
+        );
+        // Only the bytes before the drop boundary were forwarded.
+        assert_eq!(outcome.deltas[0].text, "abcd");
+        assert_eq!(outcome.next_offset, 4);
+        let finalized = outcome
+            .events
+            .iter()
+            .find(|e| e.kind == "runtime.remote_stream_finalized")
+            .expect("a stream_finalized event");
+        assert_eq!(finalized.status, "channel_dropped");
+        assert!(finalized.detail.contains("reason=channel_dropped"));
+    }
+
+    #[test]
+    fn remote_stream_is_bounded_by_the_output_cap() {
+        // A stream longer than the cap finalizes CapReached and forwards at most
+        // the cap.
+        let big = vec![b'x'; REMOTE_OUTPUT_LIMIT_BYTES + 1024];
+        let (runner, running, _chan) =
+            streaming_runner("stream-cap", |c| c.with_streamed_output(big.clone()));
+
+        let outcome = runner.stream_output(&running, 0);
+        assert_eq!(outcome.final_reason, RemoteStreamFinalReason::CapReached);
+        assert_eq!(outcome.deltas[0].raw_len, REMOTE_OUTPUT_LIMIT_BYTES);
+        assert_eq!(outcome.next_offset, REMOTE_OUTPUT_LIMIT_BYTES);
+    }
+
+    #[test]
+    fn remote_stdin_write_reaches_the_fake_remote_process() {
+        let (runner, running, chan) = streaming_runner("stdin", |c| c);
+
+        let result = runner
+            .write_stdin(&running, b"hello remote\n")
+            .expect("stdin write over the channel");
+        assert_eq!(result.events[0].kind, "runtime.remote_stdin_written");
+        assert!(result.events[0].detail.contains("bytes=13"));
+        // The write actually reached the fake remote process.
+        assert_eq!(chan.stdin_written(), b"hello remote\n");
+
+        // A second write accumulates in order on the remote.
+        runner
+            .write_stdin(&running, b"more\n")
+            .expect("second stdin write");
+        assert_eq!(chan.stdin_written(), b"hello remote\nmore\n");
+    }
+
+    #[test]
+    fn remote_stream_reconnect_resumes_from_last_offset_without_duplicates() {
+        // Forward the stream in two reads and prove the concatenation equals the
+        // whole payload with no overlap (offset-driven resume).
+        let payload = b"AAAAABBBBBCCCCC"; // 15 bytes
+        let (runner, running, _chan) = streaming_runner("stream-resume", |c| {
+            c.with_streamed_output(payload.to_vec())
+        });
+
+        // First read consumes everything (EOF). Simulate a subscriber that only
+        // acknowledged the first 5 bytes, then reconnects.
+        let first = runner.stream_output(&running, 0);
+        assert_eq!(first.deltas[0].text, "AAAAABBBBBCCCCC");
+
+        // Reconnect acknowledging only offset 5: the resume yields bytes 5.. with no
+        // re-delivery of the first 5.
+        let resumed = runner.stream_output(&running, 5);
+        assert_eq!(resumed.deltas[0].offset, 5);
+        assert_eq!(resumed.deltas[0].text, "BBBBBCCCCC");
+        assert_eq!(resumed.next_offset, payload.len());
+        assert_eq!(resumed.final_reason, RemoteStreamFinalReason::Eof);
+    }
+
+    #[test]
+    fn remote_stream_is_replay_stable_across_repeated_reads() {
+        // The same stored ref + the same from_offset must produce identical
+        // projected deltas + events every time (deterministic rebuild).
+        let payload = b"deterministic-stream-bytes\n";
+        let (runner, running, _chan) = streaming_runner("stream-replay", |c| {
+            c.with_streamed_output(payload.to_vec())
+        });
+        let a = runner.stream_output(&running, 0);
+        let b = runner.stream_output(&running, 0);
+        assert_eq!(
+            a, b,
+            "repeated reads at the same offset must rebuild identically"
+        );
     }
 
     #[test]

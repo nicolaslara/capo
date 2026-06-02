@@ -187,6 +187,25 @@ pub enum EventKind {
     RuntimeRemoteWorkspaceReconciled,
     RuntimeRemoteWorkspaceTornDown,
     RuntimeRemoteWorkspaceMaterializationFailed,
+    // RR4 (remote-runtime): remote output-delta + stdin streaming over the
+    // channel, reusing the `streaming-transport` output-delta / stdin event model
+    // and the existing piped-process surface (not a parallel remote-only stream
+    // type). `RuntimeRemoteOutputDelta` is the remote analogue of the local
+    // `runtime.output_delta`: each delta carries a MONOTONIC byte offset (so a
+    // reconnect replays strictly from the last acknowledged offset without
+    // duplicating an already-projected delta, the `from_sequence` discipline) and
+    // is REDACTED + bounded BEFORE it leaves the remote / is persisted (the
+    // `RedactionPolicy` credential-shape scan + `output_limit_bytes` cap applied at
+    // the remote boundary, with `redaction_state` stamped on the event).
+    // `RuntimeRemoteStdinWritten` records a stdin write reaching the remote process
+    // over the channel. `RuntimeRemoteStreamFinalized` is the terminal frame: a
+    // clean EOF, a cap-truncation, or a mid-stream channel drop, each with a
+    // recorded reason so a dropped stream is NEVER a silent truncation. None
+    // carries a secret: delta payloads pass redaction and details are byte
+    // counts / offsets / a redaction-safe reason.
+    RuntimeRemoteOutputDelta,
+    RuntimeRemoteStdinWritten,
+    RuntimeRemoteStreamFinalized,
 }
 
 /// The terminal outcome a projected turn-ending event carries, in the
@@ -315,6 +334,9 @@ impl EventKind {
             Self::RuntimeRemoteWorkspaceMaterializationFailed => {
                 "runtime.remote_workspace_materialization_failed"
             }
+            Self::RuntimeRemoteOutputDelta => "runtime.remote_output_delta",
+            Self::RuntimeRemoteStdinWritten => "runtime.remote_stdin_written",
+            Self::RuntimeRemoteStreamFinalized => "runtime.remote_stream_finalized",
         }
     }
 
@@ -431,6 +453,9 @@ impl EventKind {
             EventKind::RuntimeRemoteWorkspaceReconciled,
             EventKind::RuntimeRemoteWorkspaceTornDown,
             EventKind::RuntimeRemoteWorkspaceMaterializationFailed,
+            EventKind::RuntimeRemoteOutputDelta,
+            EventKind::RuntimeRemoteStdinWritten,
+            EventKind::RuntimeRemoteStreamFinalized,
         ];
         ALL.iter()
             .copied()

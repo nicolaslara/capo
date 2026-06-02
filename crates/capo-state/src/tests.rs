@@ -1064,6 +1064,19 @@ fn rr1_rr2_remote_runtime_event_kinds_round_trip() {
             EventKind::RuntimeRemoteWorkspaceMaterializationFailed,
             "runtime.remote_workspace_materialization_failed",
         ),
+        // RR4: remote output-delta + stdin streaming + stream finalization.
+        (
+            EventKind::RuntimeRemoteOutputDelta,
+            "runtime.remote_output_delta",
+        ),
+        (
+            EventKind::RuntimeRemoteStdinWritten,
+            "runtime.remote_stdin_written",
+        ),
+        (
+            EventKind::RuntimeRemoteStreamFinalized,
+            "runtime.remote_stream_finalized",
+        ),
     ] {
         assert_eq!(kind.as_str(), wire);
         assert_eq!(EventKind::from_wire(wire), Some(kind));

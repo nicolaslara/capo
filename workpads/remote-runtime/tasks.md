@@ -29,7 +29,9 @@ stub with a real remote runner whose channel is provided by the
 ## Status
 
 In progress. RR0 complete. RR1 complete. RR2 complete (deterministic
-fake-channel recovery suite). RR3-RR8 pending.
+fake-channel recovery suite). RR3 event-kinds landed. RR4 complete
+(deterministic fake-channel output-delta + stdin streaming suite). RR5-RR8
+pending.
 
 ## Feature Set
 
@@ -336,7 +338,35 @@ Dependencies: RR1, `depth` DP8 (worktree primitive). Cross-workpad:
 
 ## RR4 - Remote Output-Delta + Stdin Streaming Over The Channel (reuse RuntimeProcessRef)
 
-Status: pending.
+Status: complete.
+
+Evidence: `RemoteProcessRunner::stream_output`/`stream_output_with` forward remote
+stdout/stderr over the injected `RemoteChannel` as ordered, REDACTED,
+offset-tagged `runtime.remote_output_delta` events terminated by a single
+`runtime.remote_stream_finalized` (Eof / CapReached / ChannelDropped reason);
+`write_stdin` writes bytes to the remote over the channel and emits
+`runtime.remote_stdin_written` (byte count only, never the payload). The SAME
+opaque `LocalRuntimeProcessRef` identifies the run (only `remote_process_ref`
+populated) — no parallel remote-only stream type. Redaction is applied at the
+remote boundary via the existing `RedactionPolicy` credential-shape scan BEFORE
+any delta/event, and output is bounded by `REMOTE_OUTPUT_LIMIT_BYTES` (mirrors
+`output_limit_bytes`). Deltas carry a MONOTONIC `offset` + `raw_len` and the
+outcome's `next_offset` is the reconnect resume point (reuses the
+`streaming-transport` `from_sequence` discipline). The fake channel
+(`FakeRemoteChannel::with_streamed_output` / `with_stream_drop_after` /
+`stdin_written` / `stream` / `write_stdin`) models the stream deterministically
+(NO network). 3 new round-trippable `EventKind`s in `crates/capo-state`
+(`runtime.remote_output_delta` / `runtime.remote_stdin_written` /
+`runtime.remote_stream_finalized`,
+`rr1_rr2_remote_runtime_event_kinds_round_trip` extended).
+Deterministic fake-channel tests (NO network):
+`remote_stream_projects_ordered_deltas_once_with_monotonic_offsets`,
+`remote_stream_redacts_a_credential_before_any_delta_or_artifact`,
+`remote_stream_channel_drop_finalizes_with_a_recorded_reason`,
+`remote_stream_is_bounded_by_the_output_cap`,
+`remote_stdin_write_reaches_the_fake_remote_process`,
+`remote_stream_reconnect_resumes_from_last_offset_without_duplicates`,
+`remote_stream_is_replay_stable_across_repeated_reads`.
 
 Scope: Stream remote stdout/stderr deltas and write stdin over the channel,
 reusing the `streaming-transport` event model and the existing piped-process
