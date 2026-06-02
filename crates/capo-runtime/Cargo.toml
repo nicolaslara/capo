@@ -8,6 +8,7 @@ version.workspace = true
 
 [dependencies]
 capo-core.workspace = true
+capo-state.workspace = true
 tokio = { workspace = true, features = [
     "rt",
     "process",

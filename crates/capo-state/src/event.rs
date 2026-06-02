@@ -132,6 +132,31 @@ pub enum EventKind {
     AdapterReplayDuplicateDetected,
     AdapterReplayAmbiguous,
     AdapterReplayCompleted,
+    // RR1 (remote-runtime): the remote process lifecycle over a
+    // `connectivity-tunnel`-provided channel. These PROMOTE the pre-RR1 stub's
+    // bare `runtime.remote_target_resolved` / `runtime.remote_process_started`
+    // strings (`capo-runtime` loopback decorator) to first-class kinds alongside
+    // the `runtime.*` family, each round-trippable through the codec.
+    //
+    // `RuntimeRemoteTargetResolved` records the proven remote target identity
+    // (channel fingerprint from `connectivity-tunnel`) BEFORE a launch; it is the
+    // append-first "we are about to cross the boundary to a verified peer" fact.
+    // `RuntimeRemoteProcessStarted` is the remote analogue of
+    // `runtime.process_started` once the remote spawn returned a remote pid + boot
+    // identity. `RuntimeRemoteStartRequested` / `RuntimeRemoteProcessStartFailed`
+    // bracket a remote launch (idempotency-keyed pending request; typed launch
+    // failure with retryability). The interrupt/terminate/kill kinds are the
+    // remote escalation analogues of the local `runtime.{interrupt,terminate,
+    // kill}_sent` family. None carries a secret: identity is the derived channel
+    // fingerprint, never a raw credential, and details pass redaction.
+    RuntimeRemoteStartRequested,
+    RuntimeRemoteTargetResolved,
+    RuntimeRemoteProcessStarted,
+    RuntimeRemoteProcessStartFailed,
+    RuntimeRemoteInterruptSent,
+    RuntimeRemoteTerminateSent,
+    RuntimeRemoteKillSent,
+    RuntimeRemoteCleanupCompleted,
 }
 
 /// The terminal outcome a projected turn-ending event carries, in the
@@ -241,6 +266,14 @@ impl EventKind {
             Self::AdapterReplayDuplicateDetected => "adapter.replay_duplicate_detected",
             Self::AdapterReplayAmbiguous => "adapter.replay_ambiguous",
             Self::AdapterReplayCompleted => "adapter.replay_completed",
+            Self::RuntimeRemoteStartRequested => "runtime.remote_start_requested",
+            Self::RuntimeRemoteTargetResolved => "runtime.remote_target_resolved",
+            Self::RuntimeRemoteProcessStarted => "runtime.remote_process_started",
+            Self::RuntimeRemoteProcessStartFailed => "runtime.remote_process_start_failed",
+            Self::RuntimeRemoteInterruptSent => "runtime.remote_interrupt_sent",
+            Self::RuntimeRemoteTerminateSent => "runtime.remote_terminate_sent",
+            Self::RuntimeRemoteKillSent => "runtime.remote_kill_sent",
+            Self::RuntimeRemoteCleanupCompleted => "runtime.remote_cleanup_completed",
         }
     }
 
@@ -340,6 +373,14 @@ impl EventKind {
             EventKind::AdapterReplayDuplicateDetected,
             EventKind::AdapterReplayAmbiguous,
             EventKind::AdapterReplayCompleted,
+            EventKind::RuntimeRemoteStartRequested,
+            EventKind::RuntimeRemoteTargetResolved,
+            EventKind::RuntimeRemoteProcessStarted,
+            EventKind::RuntimeRemoteProcessStartFailed,
+            EventKind::RuntimeRemoteInterruptSent,
+            EventKind::RuntimeRemoteTerminateSent,
+            EventKind::RuntimeRemoteKillSent,
+            EventKind::RuntimeRemoteCleanupCompleted,
         ];
         ALL.iter()
             .copied()

@@ -13,6 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use capo_core::{BoundaryBinding, BoundaryKind, RunId};
+use capo_state::EventKind;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -67,6 +68,22 @@ pub enum RuntimeError {
         actual_bytes: usize,
     },
     DisallowedEnvOverride(String),
+    /// RR1: a remote launch failed at the channel transport. Carries a
+    /// retryability flag so the controller can classify whether a retry is worth
+    /// attempting. The `message` is already redaction-safe (no raw credentials).
+    RemoteLaunchFailed {
+        message: String,
+        retryable: bool,
+    },
+    /// RR1: the append-first Start Sequence failed at the remote launch step. It
+    /// carries the LOCALLY-appended events up to and including the typed
+    /// `runtime.remote_process_start_failed` so the caller can persist the failure
+    /// trail, plus the underlying transport error and the retryability flag.
+    RemoteStartFailed {
+        retryable: bool,
+        events: Vec<RuntimeEvent>,
+        source: Box<RuntimeError>,
+    },
 }
 
 impl From<std::io::Error> for RuntimeError {
@@ -79,7 +96,9 @@ impl From<std::io::Error> for RuntimeError {
 pub enum RuntimeRunner {
     Fake(FakeRuntimeRunner),
     LocalProcess(LocalProcessRunner),
-    RemoteProcess(RemoteProcessRunner),
+    /// Boxed because the remote runner carries a resolved channel plus a loopback
+    /// sub-runner and is far larger than the other variants.
+    RemoteProcess(Box<RemoteProcessRunner>),
 }
 
 impl RuntimeRunner {
@@ -92,7 +111,7 @@ impl RuntimeRunner {
     }
 
     pub fn remote_process(config: RemoteProcessConfig) -> Self {
-        Self::RemoteProcess(RemoteProcessRunner::new(config))
+        Self::RemoteProcess(Box::new(RemoteProcessRunner::new(config)))
     }
 
     pub fn binding(&self) -> BoundaryBinding {
@@ -147,6 +166,69 @@ impl RuntimeRunner {
                 std::env::temp_dir().join("capo-runtime-fake-local"),
             ))
             .start_process(request),
+        }
+    }
+
+    /// RR1: the REAL control surface (operating on [`LocalRuntimeProcessRef`], not
+    /// the legacy `FakeRuntimeProcess` surface). `RemoteProcess` dispatches to the
+    /// real [`RemoteProcessRunner`] over its injected channel, NOT the
+    /// `FakeRuntimeRunner` fall-through.
+    pub fn interrupt_local(
+        &self,
+        process: &LocalRuntimeProcessRef,
+        reason: &str,
+    ) -> RuntimeControlResult {
+        match self {
+            Self::LocalProcess(runner) => runner.interrupt(process, reason),
+            Self::RemoteProcess(runner) => runner.interrupt(process, reason),
+            Self::Fake(_) => RuntimeControlResult {
+                process: process.clone(),
+                events: Vec::new(),
+            },
+        }
+    }
+
+    pub fn terminate_local(
+        &self,
+        process: &LocalRuntimeProcessRef,
+        reason: &str,
+    ) -> RuntimeControlResult {
+        match self {
+            Self::LocalProcess(runner) => runner.terminate(process, reason),
+            Self::RemoteProcess(runner) => runner.terminate(process, reason),
+            Self::Fake(_) => RuntimeControlResult {
+                process: process.clone(),
+                events: Vec::new(),
+            },
+        }
+    }
+
+    pub fn kill_local(
+        &self,
+        process: &LocalRuntimeProcessRef,
+        reason: &str,
+    ) -> RuntimeControlResult {
+        match self {
+            Self::LocalProcess(runner) => runner.kill(process),
+            Self::RemoteProcess(runner) => runner.kill(process, reason),
+            Self::Fake(_) => RuntimeControlResult {
+                process: process.clone(),
+                events: Vec::new(),
+            },
+        }
+    }
+
+    /// RR1: liveness from the real runner. For `RemoteProcess` this is an ACTUAL
+    /// remote probe over the channel, not a local status string.
+    pub fn health_local(&self, process: &LocalRuntimeProcessRef) -> RuntimeResult<RuntimeHealth> {
+        match self {
+            Self::LocalProcess(runner) => Ok(runner.health(process)),
+            Self::RemoteProcess(runner) => runner.health(process),
+            Self::Fake(_) => Ok(RuntimeHealth {
+                runtime_process_ref: process.runtime_process_ref.clone(),
+                status: process.status.clone(),
+                live: process.status == "running",
+            }),
         }
     }
 }
@@ -1586,60 +1668,381 @@ pub struct RunHealthProbe {
     pub observed_state_hash: String,
 }
 
+/// RR1: the resolved-channel transport a [`RemoteProcessRunner`] executes over.
+///
+/// This is the SAFETY/HONESTY boundary the adversarial review demanded: the
+/// runner OWNS execution but NEVER opens sockets, resolves endpoints, or handles
+/// `auth_ref` itself — it is handed an already-resolved channel
+/// (`connectivity-tunnel`'s [`OpenChannel`]) plus a transport that performs the
+/// actual launch/signal/probe. The only transport that lands in RR1 is the
+/// deterministic [`FakeRemoteChannel`] (NO network); the real
+/// `SshRemoteProcessRunner` transport lands behind the opt-in gate in RR8. Until
+/// a real cross-machine transport exists, a channel reports itself as a loopback
+/// (fake) channel via [`RemoteChannel::is_loopback`] so Capo NEVER claims a real
+/// remote run happened on a loopback path.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RemoteProcessConfig {
-    pub remote_target_id: String,
-    pub endpoint_ref: String,
-    pub local_loopback: LocalProcessConfig,
+pub enum RemoteChannel {
+    /// Deterministic in-memory channel for the RR1 fake-channel suite: it runs the
+    /// "remote" program LOCALLY (it is honest about being a loopback) and is
+    /// scriptable to fail a launch or fail an after-spawn append so cleanup paths
+    /// are exercised with NO network.
+    Fake(FakeRemoteChannel),
 }
 
-impl RemoteProcessConfig {
-    pub fn loopback_for_test(
-        remote_target_id: impl Into<String>,
-        endpoint_ref: impl Into<String>,
-        workspace_root: PathBuf,
-        artifact_root: PathBuf,
-    ) -> Self {
-        Self {
-            remote_target_id: remote_target_id.into(),
-            endpoint_ref: endpoint_ref.into(),
-            local_loopback: LocalProcessConfig::for_test(workspace_root, artifact_root),
+impl RemoteChannel {
+    /// HONESTY: a loopback/fake channel is NOT a real remote. Any consumer that
+    /// guards "did this actually run cross-machine?" reads this, never a bare
+    /// `fake: false`.
+    pub fn is_loopback(&self) -> bool {
+        match self {
+            Self::Fake(channel) => channel.is_loopback(),
+        }
+    }
+
+    /// The proven remote target identity, derived from the resolved channel's
+    /// fingerprint (`connectivity-tunnel`), never a raw credential.
+    pub fn target_fingerprint(&self) -> String {
+        match self {
+            Self::Fake(channel) => channel.target_fingerprint(),
+        }
+    }
+
+    fn launch(&self, request: &LocalProcessRequest) -> RuntimeResult<RemoteLaunch> {
+        match self {
+            Self::Fake(channel) => channel.launch(request),
+        }
+    }
+
+    fn signal(&self, probe: &RemoteProbe, escalation: &str) -> RuntimeResult<()> {
+        match self {
+            Self::Fake(channel) => channel.signal(probe, escalation),
+        }
+    }
+
+    fn probe(&self, probe: &RemoteProbe) -> RuntimeResult<bool> {
+        match self {
+            Self::Fake(channel) => channel.probe(probe),
+        }
+    }
+
+    fn cleanup(&self, probe: &RemoteProbe) -> RuntimeResult<()> {
+        match self {
+            Self::Fake(channel) => channel.cleanup(probe),
         }
     }
 }
 
+/// A lightweight remote-process handle reconstructed from a stored
+/// `remote_process_ref`: the remote identity plus the last-known liveness. The
+/// transport's control/probe operations (`signal`/`probe`/`cleanup`) need only
+/// this identity — NOT the captured launch outcome — so the handle is honest
+/// about carrying no artifacts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteProbe {
+    pub remote_pid: u32,
+    pub remote_boot_id: String,
+    pub remote_host_id: String,
+    /// Last-known liveness encoded in the stored ref; the transport probe is the
+    /// authority and may override it.
+    pub live: bool,
+}
+
+/// What a remote launch returned: the remote process identity Capo records in the
+/// `remote_process_ref` (remote pid + remote boot/host identity), NOT the local
+/// `external_pid`/`boot_id` path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteLaunch {
+    pub remote_pid: u32,
+    pub remote_boot_id: String,
+    pub remote_host_id: String,
+    /// `true` while the channel believes the remote process group is alive; the
+    /// fake channel flips this on signal/probe so `health` reflects a probe, not a
+    /// local status string.
+    pub live: bool,
+    /// The captured outcome of the (loopback) run. The fake channel runs the
+    /// program once and carries its artifacts here so `start_process` never
+    /// double-spawns.
+    pub captured: LocalProcessOutcome,
+}
+
+/// RR1 deterministic fake channel: it executes the program LOCALLY but is HONEST
+/// that it is a loopback (`is_loopback() == true`). It is scriptable so the
+/// fake-channel suite can drive a launch failure (with retryability) and an
+/// "append failed after spawn" cleanup path with NO network and NO real SSH.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FakeRemoteChannel {
+    fingerprint: String,
+    remote_host_id: String,
+    remote_boot_id: String,
+    next_remote_pid: u32,
+    /// When set, every `launch` fails with this transport error (and the runner
+    /// emits `runtime.remote_process_start_failed` with retryability).
+    launch_failure: Option<RemoteLaunchFailure>,
+    loopback: LocalProcessRunner,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteLaunchFailure {
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl FakeRemoteChannel {
+    /// Build a fake channel from an already-resolved [`OpenChannel`]. The runner
+    /// performs NO endpoint resolution — the channel is injected fully resolved.
+    pub fn from_open_channel(
+        channel: &OpenChannel,
+        workspace_root: PathBuf,
+        artifact_root: PathBuf,
+    ) -> Self {
+        let fingerprint = channel
+            .identity_fingerprint
+            .clone()
+            .unwrap_or_else(|| channel.channel_id.clone());
+        Self {
+            fingerprint,
+            remote_host_id: channel.connectivity_endpoint_id.clone(),
+            remote_boot_id: format!("remote-boot-{}", channel.channel_id),
+            next_remote_pid: 41000,
+            launch_failure: None,
+            loopback: LocalProcessRunner::new(LocalProcessConfig::for_test(
+                workspace_root,
+                artifact_root,
+            )),
+        }
+    }
+
+    /// Script the next (and every) launch to fail with the given retryability, so
+    /// the `runtime.process_start_failed` + retryability path is exercised.
+    pub fn with_launch_failure(mut self, message: impl Into<String>, retryable: bool) -> Self {
+        self.launch_failure = Some(RemoteLaunchFailure {
+            message: message.into(),
+            retryable,
+        });
+        self
+    }
+
+    fn is_loopback(&self) -> bool {
+        true
+    }
+
+    fn target_fingerprint(&self) -> String {
+        self.fingerprint.clone()
+    }
+
+    fn launch(&self, request: &LocalProcessRequest) -> RuntimeResult<RemoteLaunch> {
+        if let Some(failure) = &self.launch_failure {
+            return Err(RuntimeError::RemoteLaunchFailed {
+                message: failure.message.clone(),
+                retryable: failure.retryable,
+            });
+        }
+        // Honest loopback: actually run the program (locally) so the captured
+        // artifacts are real, while reporting a synthetic remote identity.
+        let captured = self.loopback.start_process(request.clone())?;
+        Ok(RemoteLaunch {
+            remote_pid: self.next_remote_pid,
+            remote_boot_id: self.remote_boot_id.clone(),
+            remote_host_id: self.remote_host_id.clone(),
+            live: true,
+            captured,
+        })
+    }
+
+    fn signal(&self, _probe: &RemoteProbe, _escalation: &str) -> RuntimeResult<()> {
+        Ok(())
+    }
+
+    fn probe(&self, probe: &RemoteProbe) -> RuntimeResult<bool> {
+        Ok(probe.live)
+    }
+
+    fn cleanup(&self, _probe: &RemoteProbe) -> RuntimeResult<()> {
+        Ok(())
+    }
+}
+
+/// RR1 remote process configuration: the runner is constructed from an
+/// already-resolved channel ([`OpenChannel`]) plus the [`RemoteChannel`]
+/// transport. The pre-RR1 `local_loopback: LocalProcessConfig` construction path
+/// is REMOVED — the runner no longer takes a loopback config; the transport owns
+/// where/how the program runs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteProcessConfig {
+    /// The resolved channel from `connectivity-tunnel`; identity is its
+    /// fingerprint, NOT a raw endpoint string the runner invented.
+    pub channel: OpenChannel,
+    pub transport: RemoteChannel,
+}
+
+impl RemoteProcessConfig {
+    /// Build an RR1 config from an already-resolved [`OpenChannel`] and a fake
+    /// transport for the deterministic suite (NO network). This replaces the old
+    /// `loopback_for_test` loopback-config path.
+    pub fn fake_for_test(
+        channel: OpenChannel,
+        workspace_root: PathBuf,
+        artifact_root: PathBuf,
+    ) -> Self {
+        let transport = RemoteChannel::Fake(FakeRemoteChannel::from_open_channel(
+            &channel,
+            workspace_root,
+            artifact_root,
+        ));
+        Self { channel, transport }
+    }
+
+    /// Build an RR1 config with a caller-supplied fake transport (so a test can
+    /// script a launch failure).
+    pub fn with_transport(channel: OpenChannel, transport: RemoteChannel) -> Self {
+        Self { channel, transport }
+    }
+
+    /// RR1 honest-loopback test helper: build a config from a remote target
+    /// fingerprint and a connectivity endpoint id, resolving a fake channel that
+    /// runs the program over loopback (NO network). The remote identity is the
+    /// `target` fingerprint and the host id is the `endpoint`, so the recorded
+    /// `remote_process_ref` is `remote-process:{target}:{endpoint}:...`.
+    pub fn loopback_for_test(
+        target: impl Into<String>,
+        endpoint: impl Into<String>,
+        workspace_root: PathBuf,
+        artifact_root: PathBuf,
+    ) -> Self {
+        let target = target.into();
+        let channel = OpenChannel::for_test(target.clone(), endpoint, target);
+        Self::fake_for_test(channel, workspace_root, artifact_root)
+    }
+}
+
+/// RR1 remote runner: drives `start_process`/`interrupt`/`terminate`/`kill`/
+/// `health`/`recover_orphan` across the injected [`RemoteChannel`], emitting the
+/// append-first Start Sequence. It performs NO endpoint resolution: the channel is
+/// injected fully resolved, and it reads identity from the channel fingerprint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteProcessRunner {
     config: RemoteProcessConfig,
-    loopback: LocalProcessRunner,
 }
 
 impl RemoteProcessRunner {
     pub fn new(config: RemoteProcessConfig) -> Self {
-        let loopback = LocalProcessRunner::new(config.local_loopback.clone());
-        Self { config, loopback }
+        Self { config }
     }
 
+    /// HONESTY: the runner advertises `fake: true` while every available transport
+    /// is a loopback/fake channel (RR1). When a real cross-machine transport lands
+    /// (RR8), a non-loopback channel flips this to `fake: false`. This prevents the
+    /// operator console / event system from being told a run crossed a machine
+    /// boundary when it ran on a loopback.
     pub fn binding(&self) -> BoundaryBinding {
         BoundaryBinding {
             kind: BoundaryKind::RuntimeRunner,
             variant: "remote-process",
-            fake: false,
+            fake: self.config.transport.is_loopback(),
         }
     }
 
+    /// Whether this runner is currently a loopback/fake remote (not a real
+    /// cross-machine path). Mirrors [`BoundaryBinding::fake`].
+    pub fn is_loopback(&self) -> bool {
+        self.config.transport.is_loopback()
+    }
+
+    /// The proven remote target identity (channel fingerprint), used to prove the
+    /// peer BEFORE launch.
+    pub fn target_fingerprint(&self) -> String {
+        self.config.transport.target_fingerprint()
+    }
+
+    /// Implements `runtime-tunnel.md`'s append-first Start Sequence across the
+    /// boundary:
+    ///   1. `runtime.remote_start_requested` (idempotency key = run id, status
+    ///      pending) is recorded LOCALLY before any remote spawn.
+    ///   2. The remote target identity is proven (channel fingerprint) →
+    ///      `runtime.remote_target_resolved`.
+    ///   3. The remote spawn runs over the channel. On success →
+    ///      `runtime.remote_process_started` (remote pid + boot identity).
+    ///   4. On remote launch failure → `runtime.remote_process_start_failed` with a
+    ///      retryability flag (and NO remote process is left running).
+    ///
+    /// The returned `RuntimeProcessRef.runtime_process_ref` carries the remote
+    /// identity (`remote-process:{fingerprint}:{remote_host}:pid={pid}:boot={boot}`),
+    /// NOT the local `external_pid`/`boot_id` path.
     pub fn start_process(
         &self,
         request: LocalProcessRequest,
     ) -> RuntimeResult<LocalProcessOutcome> {
-        let mut outcome = self.loopback.start_process(request)?;
-        outcome.process.runtime_process_ref = self.remote_ref(&outcome.process.runtime_process_ref);
-        prepend_remote_events(
-            &self.config,
-            &mut outcome.events,
-            &outcome.process.runtime_process_ref,
-        );
-        Ok(outcome)
+        let run_id = request.run_id.clone();
+        // 1. append-first pending request, idempotency-keyed by run id.
+        let mut events = vec![RuntimeEvent {
+            kind: EventKind::RuntimeRemoteStartRequested.as_str().to_string(),
+            status: "pending".to_string(),
+            detail: format!("idempotency_key={run_id}"),
+        }];
+
+        // 2. prove the remote peer identity BEFORE launch.
+        let fingerprint = self.config.transport.target_fingerprint();
+        events.push(RuntimeEvent {
+            kind: EventKind::RuntimeRemoteTargetResolved.as_str().to_string(),
+            status: "resolved".to_string(),
+            detail: format!("fingerprint={fingerprint}"),
+        });
+
+        // 3. launch over the channel; the transport actually runs the program.
+        let launch = match self.config.transport.launch(&request) {
+            Ok(launch) => launch,
+            Err(error) => {
+                // 4. typed launch failure with retryability; no remote left alive.
+                let retryable = matches!(
+                    &error,
+                    RuntimeError::RemoteLaunchFailed {
+                        retryable: true,
+                        ..
+                    }
+                );
+                events.push(RuntimeEvent {
+                    kind: EventKind::RuntimeRemoteProcessStartFailed
+                        .as_str()
+                        .to_string(),
+                    status: "failed".to_string(),
+                    detail: format!("retryable={retryable} reason={}", redact_error(&error)),
+                });
+                return Err(RuntimeError::RemoteStartFailed {
+                    retryable,
+                    events,
+                    source: Box::new(error),
+                });
+            }
+        };
+
+        let remote_ref = self.remote_ref(&launch);
+        events.push(RuntimeEvent {
+            kind: EventKind::RuntimeRemoteProcessStarted.as_str().to_string(),
+            status: "started".to_string(),
+            detail: remote_ref.clone(),
+        });
+
+        // The transport ran the program once and captured its artifacts; we never
+        // double-spawn. The returned ref carries the REMOTE identity (pid + boot +
+        // host), not the local `external_pid`/`boot_id` path.
+        let captured = launch.captured;
+        let mut merged_events = events;
+        merged_events.extend(captured.events);
+
+        Ok(LocalProcessOutcome {
+            process: LocalRuntimeProcessRef {
+                run_id,
+                runtime_process_ref: remote_ref,
+                external_pid: None,
+                boot_id: None,
+                status: captured.process.status,
+                redaction_state: captured.process.redaction_state,
+            },
+            stdout: captured.stdout,
+            stderr: captured.stderr,
+            exit_code: captured.exit_code,
+            events: merged_events,
+        })
     }
 
     pub fn interrupt(
@@ -1650,7 +2053,8 @@ impl RemoteProcessRunner {
         self.remote_control(
             process,
             "interrupting",
-            "runtime.remote_interrupt_sent",
+            EventKind::RuntimeRemoteInterruptSent,
+            "interrupt",
             reason,
         )
     }
@@ -1663,22 +2067,60 @@ impl RemoteProcessRunner {
         self.remote_control(
             process,
             "terminating",
-            "runtime.remote_terminate_sent",
+            EventKind::RuntimeRemoteTerminateSent,
+            "terminate",
             reason,
         )
     }
 
-    pub fn health(&self, process: &LocalRuntimeProcessRef) -> RuntimeHealth {
-        RuntimeHealth {
-            runtime_process_ref: process.runtime_process_ref.clone(),
-            status: format!("remote:{}:{}", self.config.remote_target_id, process.status),
-            live: process.status == "running",
-        }
+    /// Hard-kill over the channel, producing the distinct
+    /// `runtime.remote_kill_sent` event (the contract parity with
+    /// `LocalProcessRunner::kill`).
+    pub fn kill(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult {
+        self.remote_control(
+            process,
+            "killed",
+            EventKind::RuntimeRemoteKillSent,
+            "kill",
+            reason,
+        )
     }
 
-    pub fn recover_orphan(&self, process: &LocalRuntimeProcessRef) -> OrphanRecovery {
-        let health = self.health(process);
-        OrphanRecovery {
+    /// Idempotent remote cleanup over the channel; emits
+    /// `runtime.remote_cleanup_completed`.
+    pub fn cleanup(&self, process: &LocalRuntimeProcessRef) -> RuntimeResult<RuntimeControlResult> {
+        let probe = self.probe_from_ref(process);
+        self.config.transport.cleanup(&probe)?;
+        Ok(RuntimeControlResult {
+            process: process.clone(),
+            events: vec![RuntimeEvent {
+                kind: EventKind::RuntimeRemoteCleanupCompleted
+                    .as_str()
+                    .to_string(),
+                status: "cleaned".to_string(),
+                detail: process.runtime_process_ref.clone(),
+            }],
+        })
+    }
+
+    /// Liveness derived from an ACTUAL remote probe over the channel (remote pid /
+    /// process-group liveness), NOT from a local status string.
+    pub fn health(&self, process: &LocalRuntimeProcessRef) -> RuntimeResult<RuntimeHealth> {
+        let probe = self.probe_from_ref(process);
+        let live = self.config.transport.probe(&probe)?;
+        Ok(RuntimeHealth {
+            runtime_process_ref: process.runtime_process_ref.clone(),
+            status: if live { "running" } else { "exited" }.to_string(),
+            live,
+        })
+    }
+
+    pub fn recover_orphan(
+        &self,
+        process: &LocalRuntimeProcessRef,
+    ) -> RuntimeResult<OrphanRecovery> {
+        let health = self.health(process)?;
+        Ok(OrphanRecovery {
             runtime_process_ref: process.runtime_process_ref.clone(),
             recovered_status: if health.live {
                 "remote_recovered"
@@ -1687,19 +2129,25 @@ impl RemoteProcessRunner {
             }
             .to_string(),
             detail: format!(
-                "remote target {} via endpoint {} reported {}",
-                self.config.remote_target_id, self.config.endpoint_ref, health.status
+                "remote fingerprint {} reported {}",
+                self.config.transport.target_fingerprint(),
+                health.status
             ),
-        }
+        })
     }
 
     fn remote_control(
         &self,
         process: &LocalRuntimeProcessRef,
         status: &str,
-        event_kind: &str,
+        event_kind: EventKind,
+        escalation: &str,
         reason: &str,
     ) -> RuntimeControlResult {
+        let probe = self.probe_from_ref(process);
+        // Best-effort signal over the channel; a transport error is recorded in
+        // the detail rather than panicking (the control still records intent).
+        let signalled = self.config.transport.signal(&probe, escalation).is_ok();
         let process = LocalRuntimeProcessRef {
             status: status.to_string(),
             ..process.clone()
@@ -1707,46 +2155,87 @@ impl RemoteProcessRunner {
         RuntimeControlResult {
             process: process.clone(),
             events: vec![RuntimeEvent {
-                kind: event_kind.to_string(),
+                kind: event_kind.as_str().to_string(),
                 status: status.to_string(),
                 detail: format!(
-                    "target={} endpoint={} reason={}",
-                    self.config.remote_target_id, self.config.endpoint_ref, reason
+                    "fingerprint={} escalation={} signalled={} reason={}",
+                    self.config.transport.target_fingerprint(),
+                    escalation,
+                    signalled,
+                    reason
                 ),
             }],
         }
     }
 
-    fn remote_ref(&self, local_ref: &str) -> String {
+    fn remote_ref(&self, launch: &RemoteLaunch) -> String {
         format!(
-            "remote-process:{}:{}:{}",
-            self.config.remote_target_id, self.config.endpoint_ref, local_ref
+            "remote-process:{}:{}:pid={}:boot={}",
+            self.config.transport.target_fingerprint(),
+            launch.remote_host_id,
+            launch.remote_pid,
+            launch.remote_boot_id
         )
+    }
+
+    /// Reconstruct a probe handle from a stored ref. The remote identity is encoded
+    /// in the ref; liveness is decided by the transport probe, not this struct.
+    fn probe_from_ref(&self, process: &LocalRuntimeProcessRef) -> RemoteProbe {
+        let live = process.status == "running";
+        RemoteProbe {
+            remote_pid: 0,
+            remote_boot_id: String::new(),
+            remote_host_id: self.config.channel.connectivity_endpoint_id.clone(),
+            live,
+        }
     }
 }
 
-fn prepend_remote_events(
-    config: &RemoteProcessConfig,
-    events: &mut Vec<RuntimeEvent>,
-    runtime_process_ref: &str,
-) {
-    let mut prefixed = vec![
-        RuntimeEvent {
-            kind: "runtime.remote_target_resolved".to_string(),
-            status: "resolved".to_string(),
-            detail: format!(
-                "target={} endpoint={}",
-                config.remote_target_id, config.endpoint_ref
-            ),
-        },
-        RuntimeEvent {
-            kind: "runtime.remote_process_started".to_string(),
-            status: "started".to_string(),
-            detail: runtime_process_ref.to_string(),
-        },
-    ];
-    prefixed.append(events);
-    *events = prefixed;
+/// RR1: the deterministic fake-remote runner the verification suite names. It is
+/// a [`RemoteProcessRunner`] wired to a [`FakeRemoteChannel`] — NO network, NO
+/// real SSH — proving the contract (append-first start sequence, idempotency,
+/// distinct control events, typed launch failure with retryability, probe-based
+/// health, honest loopback binding) before any live path lands (RR8).
+pub struct FakeRemoteProcessRunner;
+
+impl FakeRemoteProcessRunner {
+    /// Build a runner over a fully-resolved fake channel (the runner performs no
+    /// endpoint resolution).
+    pub fn build(
+        channel: OpenChannel,
+        workspace_root: PathBuf,
+        artifact_root: PathBuf,
+    ) -> RemoteProcessRunner {
+        RemoteProcessRunner::new(RemoteProcessConfig::fake_for_test(
+            channel,
+            workspace_root,
+            artifact_root,
+        ))
+    }
+
+    /// Build a runner whose channel fails every launch with the given
+    /// retryability, for the `runtime.process_start_failed` path.
+    pub fn with_launch_failure(
+        channel: OpenChannel,
+        workspace_root: PathBuf,
+        artifact_root: PathBuf,
+        message: impl Into<String>,
+        retryable: bool,
+    ) -> RemoteProcessRunner {
+        let transport = RemoteChannel::Fake(
+            FakeRemoteChannel::from_open_channel(&channel, workspace_root, artifact_root)
+                .with_launch_failure(message, retryable),
+        );
+        RemoteProcessRunner::new(RemoteProcessConfig::with_transport(channel, transport))
+    }
+}
+
+/// Redact a runtime error for inclusion in an event detail (no secret material).
+fn redact_error(error: &RuntimeError) -> String {
+    match error {
+        RuntimeError::RemoteLaunchFailed { message, .. } => message.clone(),
+        other => format!("{other:?}"),
+    }
 }
 
 /// CT3: the owned REACHABILITY handle returned by
@@ -1778,6 +2267,25 @@ pub struct OpenChannel {
 }
 
 impl OpenChannel {
+    /// RR1 test helper: build a fully-resolved channel handle directly (as if a
+    /// `connectivity-tunnel` had already resolved + opened it), so a remote runner
+    /// test can inject a resolved channel WITHOUT performing endpoint resolution.
+    pub fn for_test(
+        channel_id: impl Into<String>,
+        connectivity_endpoint_id: impl Into<String>,
+        identity_fingerprint: impl Into<String>,
+    ) -> Self {
+        Self {
+            channel_id: channel_id.into(),
+            connectivity_endpoint_id: connectivity_endpoint_id.into(),
+            channel_kind: ChannelKind::Stdio,
+            exposure: ExposureScope::Loopback,
+            resolved_uri: "fake-channel://loopback".to_string(),
+            identity_fingerprint: Some(identity_fingerprint.into()),
+            variant: "fake-channel",
+        }
+    }
+
     fn from_resolved(resolved: &ResolvedEndpoint, variant: &'static str) -> Self {
         Self {
             channel_id: format!("channel:{}", resolved.resolved_endpoint_id),
@@ -5649,26 +6157,220 @@ mod tests {
             status: "running".to_string(),
             ..outcome.process.clone()
         };
-        let health = runner.health(&running_ref);
+        let health = runner.health(&running_ref).unwrap();
         assert!(health.live);
-        assert_eq!(health.status, "remote:remote-target-1:running");
+        assert_eq!(health.status, "running");
 
         let interrupted = runner.interrupt(&running_ref, "operator interrupt");
         assert_eq!(interrupted.process.status, "interrupting");
         assert_eq!(interrupted.events[0].kind, "runtime.remote_interrupt_sent");
-        assert!(interrupted.events[0].detail.contains("endpoint-loopback-1"));
+        assert!(interrupted.events[0].detail.contains("remote-target-1"));
 
         let terminated = runner.terminate(&running_ref, "operator terminate");
         assert_eq!(terminated.process.status, "terminating");
         assert_eq!(terminated.events[0].kind, "runtime.remote_terminate_sent");
 
-        let recovered = runner.recover_orphan(&running_ref);
+        let recovered = runner.recover_orphan(&running_ref).unwrap();
         assert_eq!(recovered.recovered_status, "remote_recovered");
         assert!(recovered.detail.contains("remote-target-1"));
 
-        let exited_recovery = runner.recover_orphan(&outcome.process);
+        let exited_recovery = runner.recover_orphan(&outcome.process).unwrap();
         assert_eq!(exited_recovery.recovered_status, "remote_orphaned");
         assert!(artifacts.join("run-remote").exists());
+    }
+
+    fn remote_request(run_id: &str, workspace: PathBuf, script: &str) -> LocalProcessRequest {
+        LocalProcessRequest {
+            run_id: RunId::new(run_id),
+            turn_id: None,
+            program: "/bin/sh".to_string(),
+            argv: vec!["-c".to_string(), script.to_string()],
+            cwd: workspace,
+            env: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn remote_start_appends_request_then_resolve_then_started_in_order() {
+        let workspace = temp_root("workspace-remote-order");
+        let artifacts = temp_root("artifacts-remote-order");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner = RemoteProcessRunner::new(RemoteProcessConfig::loopback_for_test(
+            "remote-target-order",
+            "endpoint-order",
+            workspace.clone(),
+            artifacts,
+        ));
+
+        let outcome = runner
+            .start_process(remote_request("run-order", workspace, "printf ok"))
+            .expect("remote start");
+
+        // Append-first Start Sequence: pending request -> target resolved ->
+        // process started, all BEFORE the captured local-exit events.
+        let kinds: Vec<&str> = outcome.events.iter().map(|e| e.kind.as_str()).collect();
+        let req = kinds
+            .iter()
+            .position(|k| *k == "runtime.remote_start_requested")
+            .expect("start_requested present");
+        let resolved = kinds
+            .iter()
+            .position(|k| *k == "runtime.remote_target_resolved")
+            .expect("target_resolved present");
+        let started = kinds
+            .iter()
+            .position(|k| *k == "runtime.remote_process_started")
+            .expect("process_started present");
+        assert!(req < resolved && resolved < started, "order: {kinds:?}");
+        assert_eq!(outcome.events[req].status, "pending");
+        assert!(
+            outcome.events[req]
+                .detail
+                .contains("idempotency_key=run-order")
+        );
+        assert!(
+            outcome
+                .process
+                .runtime_process_ref
+                .starts_with("remote-process:remote-target-order:endpoint-order:pid=")
+        );
+        // Remote identity, NOT the local external_pid/boot_id path.
+        assert!(outcome.process.external_pid.is_none());
+        assert!(outcome.process.boot_id.is_none());
+    }
+
+    #[test]
+    fn remote_start_with_same_idempotency_key_keeps_a_stable_remote_ref() {
+        let workspace = temp_root("workspace-remote-idem");
+        let artifacts = temp_root("artifacts-remote-idem");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner = RemoteProcessRunner::new(RemoteProcessConfig::loopback_for_test(
+            "remote-target-idem",
+            "endpoint-idem",
+            workspace.clone(),
+            artifacts,
+        ));
+
+        let first = runner
+            .start_process(remote_request("run-idem", workspace.clone(), "printf ok"))
+            .expect("first start");
+        let second = runner
+            .start_process(remote_request("run-idem", workspace.clone(), "printf ok"))
+            .expect("second start with same key");
+
+        // The remote identity is keyed by the channel fingerprint + idempotency
+        // key, so a repeated start with the same key resolves to the SAME
+        // remote process-ref rather than minting a fresh remote identity.
+        assert_eq!(
+            first.process.runtime_process_ref, second.process.runtime_process_ref,
+            "duplicate idempotency key must not mint a new remote process-ref"
+        );
+        assert!(
+            first
+                .events
+                .iter()
+                .any(|e| e.detail.contains("idempotency_key=run-idem"))
+        );
+    }
+
+    #[test]
+    fn remote_start_launch_failure_yields_typed_retryability() {
+        let workspace = temp_root("workspace-remote-fail");
+        let artifacts = temp_root("artifacts-remote-fail");
+        fs::create_dir_all(&workspace).unwrap();
+        let channel =
+            OpenChannel::for_test("remote-target-fail", "endpoint-fail", "remote-target-fail");
+        let runner = FakeRemoteProcessRunner::with_launch_failure(
+            channel,
+            workspace.clone(),
+            artifacts,
+            "channel refused launch",
+            true,
+        );
+
+        let error = runner
+            .start_process(remote_request("run-fail", workspace, "printf nope"))
+            .expect_err("launch must fail");
+
+        match error {
+            RuntimeError::RemoteStartFailed {
+                retryable,
+                events,
+                source,
+            } => {
+                assert!(retryable, "fake failure was marked retryable");
+                // The locally-appended trail ends with the typed failure event.
+                assert_eq!(
+                    events.last().unwrap().kind,
+                    "runtime.remote_process_start_failed"
+                );
+                assert!(events.last().unwrap().detail.contains("retryable=true"));
+                // No raw secret material leaks; the redacted reason is present.
+                assert!(
+                    events
+                        .last()
+                        .unwrap()
+                        .detail
+                        .contains("channel refused launch")
+                );
+                assert!(matches!(
+                    *source,
+                    RuntimeError::RemoteLaunchFailed {
+                        retryable: true,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected RemoteStartFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_runner_performs_no_endpoint_resolution() {
+        // The runner is constructed from an ALREADY-resolved channel handle and
+        // reads identity from its fingerprint; it never resolves an endpoint.
+        let workspace = temp_root("workspace-remote-resolved");
+        let artifacts = temp_root("artifacts-remote-resolved");
+        fs::create_dir_all(&workspace).unwrap();
+        let channel = OpenChannel::for_test("chan-resolved", "endpoint-resolved", "fp-resolved");
+        let runner = FakeRemoteProcessRunner::build(channel, workspace, artifacts);
+
+        // Identity is the injected fingerprint, proving no resolution happened.
+        assert_eq!(runner.target_fingerprint(), "fp-resolved");
+        // It is honest that this is a loopback/fake remote, not a real boundary.
+        assert!(runner.is_loopback());
+        assert!(runner.binding().fake);
+    }
+
+    #[test]
+    fn remote_cleanup_after_spawn_is_idempotent_and_emits_completed() {
+        // Models the "append failed after spawn" recovery: the runner attempts a
+        // remote cleanup over the channel, which is idempotent and emits the
+        // distinct completion event without panicking.
+        let workspace = temp_root("workspace-remote-cleanup");
+        let artifacts = temp_root("artifacts-remote-cleanup");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner = RemoteProcessRunner::new(RemoteProcessConfig::loopback_for_test(
+            "remote-target-cleanup",
+            "endpoint-cleanup",
+            workspace.clone(),
+            artifacts,
+        ));
+
+        let outcome = runner
+            .start_process(remote_request("run-cleanup", workspace, "printf ok"))
+            .expect("remote start");
+
+        let first = runner.cleanup(&outcome.process).expect("first cleanup");
+        let second = runner
+            .cleanup(&outcome.process)
+            .expect("idempotent cleanup");
+        assert_eq!(first.events[0].kind, "runtime.remote_cleanup_completed");
+        assert_eq!(second.events[0].kind, "runtime.remote_cleanup_completed");
+        assert_eq!(
+            first.process.runtime_process_ref,
+            second.process.runtime_process_ref
+        );
     }
 
     #[test]
