@@ -34,6 +34,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use capo_state::EventKind;
+
 use crate::{
     LocalProcessRequest, LocalProcessRunner, RuntimeError, RuntimeEvent, RuntimeResult,
     normalize_path,
@@ -296,7 +298,7 @@ impl OsSandbox {
             );
             return Ok(SandboxPlan {
                 events: vec![RuntimeEvent {
-                    kind: "sandbox.unenforced".to_string(),
+                    kind: EventKind::SandboxUnenforced.as_str().to_string(),
                     status: "unenforced".to_string(),
                     detail: reason.clone(),
                 }],
@@ -317,7 +319,7 @@ impl OsSandbox {
                 // as unenforced rather than claiming sandboxing.
                 Ok(SandboxPlan {
                     events: vec![RuntimeEvent {
-                        kind: "sandbox.unenforced".to_string(),
+                        kind: EventKind::SandboxUnenforced.as_str().to_string(),
                         status: "unenforced".to_string(),
                         detail: "no sandbox tier selected".to_string(),
                     }],
@@ -335,7 +337,7 @@ impl OsSandbox {
     fn refused(&self, refusal: SandboxRefusal) -> SandboxPlan {
         SandboxPlan {
             events: vec![RuntimeEvent {
-                kind: "sandbox.launch_refused".to_string(),
+                kind: EventKind::SandboxLaunchRefused.as_str().to_string(),
                 status: refusal.reason_code().to_string(),
                 detail: refusal.detail(),
             }],
@@ -416,7 +418,7 @@ impl OsSandbox {
         };
         Ok(SandboxPlan {
             events: vec![RuntimeEvent {
-                kind: "sandbox.enforced".to_string(),
+                kind: EventKind::SandboxEnforced.as_str().to_string(),
                 status: "enforced".to_string(),
                 detail: SandboxTier::MacosSeatbelt.variant().to_string(),
             }],
@@ -461,7 +463,7 @@ impl OsSandbox {
         };
         Ok(SandboxPlan {
             events: vec![RuntimeEvent {
-                kind: "sandbox.enforced".to_string(),
+                kind: EventKind::SandboxEnforced.as_str().to_string(),
                 status: "enforced".to_string(),
                 detail: SandboxTier::LinuxLandlockBwrap.variant().to_string(),
             }],

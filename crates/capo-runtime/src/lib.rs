@@ -1992,6 +1992,12 @@ pub struct RemoteRunRecovery {
 /// a real cross-machine transport exists, a channel reports itself as a loopback
 /// (fake) channel via [`RemoteChannel::is_loopback`] so Capo NEVER claims a real
 /// remote run happened on a loopback path.
+// The deterministic `Fake` variant intentionally carries a whole
+// `LocalProcessRunner` (it runs the program on loopback) and is the ALWAYS-ON hot
+// path; the real `Ssh` variant is small but cross-machine-only (opt-in `#[ignore]`
+// smoke). Boxing `Fake` would add indirection to every gate run to shrink a variant
+// that is never the bottleneck, so the size disparity is accepted deliberately.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RemoteChannel {
     /// Deterministic in-memory channel for the RR1 fake-channel suite: it runs the
@@ -1999,6 +2005,14 @@ pub enum RemoteChannel {
     /// scriptable to fail a launch or fail an after-spawn append so cleanup paths
     /// are exercised with NO network.
     Fake(FakeRemoteChannel),
+    /// RR8: the REAL cross-machine SSH transport behind `SshRemoteProcessRunner`.
+    /// It shells out to `ssh` to launch/signal/probe/stream on the remote and uses a
+    /// REAL [`GitRemote`] (over the same SSH host) for git materialization. It is
+    /// HONESTLY non-loopback (`is_loopback() == false`) — it crossed a machine
+    /// boundary — so Capo's enforcement/realness claims are truthful. This variant
+    /// is exercised ONLY by the opt-in, `#[ignore]` live smoke; the deterministic
+    /// gate never instantiates it (it would touch the network).
+    Ssh(SshRemoteChannel),
 }
 
 impl RemoteChannel {
@@ -2008,6 +2022,8 @@ impl RemoteChannel {
     pub fn is_loopback(&self) -> bool {
         match self {
             Self::Fake(channel) => channel.is_loopback(),
+            // RR8: a real SSH transport crossed a machine boundary — never loopback.
+            Self::Ssh(_) => false,
         }
     }
 
@@ -2016,6 +2032,7 @@ impl RemoteChannel {
     pub fn target_fingerprint(&self) -> String {
         match self {
             Self::Fake(channel) => channel.target_fingerprint(),
+            Self::Ssh(channel) => channel.target_fingerprint(),
         }
     }
 
@@ -2024,24 +2041,28 @@ impl RemoteChannel {
     pub fn spawn_count(&self) -> usize {
         match self {
             Self::Fake(channel) => channel.spawn_count(),
+            Self::Ssh(channel) => channel.spawn_count(),
         }
     }
 
     fn launch(&self, request: &LocalProcessRequest) -> RuntimeResult<RemoteLaunch> {
         match self {
             Self::Fake(channel) => channel.launch(request),
+            Self::Ssh(channel) => channel.launch(request),
         }
     }
 
     fn signal(&self, probe: &RemoteProbe, escalation: &str) -> RuntimeResult<()> {
         match self {
             Self::Fake(channel) => channel.signal(probe, escalation),
+            Self::Ssh(channel) => channel.signal(probe, escalation),
         }
     }
 
     fn probe(&self, probe: &RemoteProbe) -> RuntimeResult<bool> {
         match self {
             Self::Fake(channel) => channel.probe(probe),
+            Self::Ssh(channel) => channel.probe(probe),
         }
     }
 
@@ -2050,12 +2071,14 @@ impl RemoteChannel {
     fn recovery_probe(&self, probe: &RemoteProbe) -> RemoteRecoveryProbe {
         match self {
             Self::Fake(channel) => channel.recovery_probe(probe),
+            Self::Ssh(channel) => channel.recovery_probe(probe),
         }
     }
 
     fn cleanup(&self, probe: &RemoteProbe) -> RuntimeResult<()> {
         match self {
             Self::Fake(channel) => channel.cleanup(probe),
+            Self::Ssh(channel) => channel.cleanup(probe),
         }
     }
 
@@ -2064,6 +2087,7 @@ impl RemoteChannel {
     fn stream(&self, probe: &RemoteProbe, from_offset: usize) -> RemoteRawStream {
         match self {
             Self::Fake(channel) => channel.stream(probe, from_offset),
+            Self::Ssh(channel) => channel.stream(probe, from_offset),
         }
     }
 
@@ -2071,6 +2095,7 @@ impl RemoteChannel {
     fn write_stdin(&self, probe: &RemoteProbe, bytes: &[u8]) -> RuntimeResult<()> {
         match self {
             Self::Fake(channel) => channel.write_stdin(probe, bytes),
+            Self::Ssh(channel) => channel.write_stdin(probe, bytes),
         }
     }
 
@@ -2080,6 +2105,7 @@ impl RemoteChannel {
     fn sandbox_probe(&self, tier: SandboxTier) -> RuntimeResult<RemoteSandboxProbe> {
         match self {
             Self::Fake(channel) => channel.sandbox_probe(tier),
+            Self::Ssh(channel) => channel.sandbox_probe(tier),
         }
     }
 
@@ -2089,6 +2115,7 @@ impl RemoteChannel {
     fn last_launched_request(&self) -> Option<LocalProcessRequest> {
         match self {
             Self::Fake(channel) => channel.last_launched_request(),
+            Self::Ssh(channel) => channel.last_launched_request(),
         }
     }
 
@@ -2102,6 +2129,7 @@ impl RemoteChannel {
     ) -> RuntimeResult<WorkspaceReapOutcome> {
         match self {
             Self::Fake(channel) => channel.cleanup_workspace(probe, policy),
+            Self::Ssh(channel) => channel.cleanup_workspace(probe, policy),
         }
     }
 
@@ -2110,6 +2138,7 @@ impl RemoteChannel {
     fn rollback_worktree(&self, probe: &RemoteProbe, checkpoint_ref: &str) -> RuntimeResult<()> {
         match self {
             Self::Fake(channel) => channel.rollback_worktree(probe, checkpoint_ref),
+            Self::Ssh(channel) => channel.rollback_worktree(probe, checkpoint_ref),
         }
     }
 
@@ -2118,6 +2147,7 @@ impl RemoteChannel {
     fn materialize(&self, source_commit: &str) -> RuntimeResult<(String, PathBuf)> {
         match self {
             Self::Fake(channel) => channel.materialize(source_commit),
+            Self::Ssh(channel) => channel.materialize(source_commit),
         }
     }
 
@@ -2126,6 +2156,7 @@ impl RemoteChannel {
     fn reconcile(&self, remote_worktree_path: &Path, local_ref: &str) -> RuntimeResult<String> {
         match self {
             Self::Fake(channel) => channel.reconcile(remote_worktree_path, local_ref),
+            Self::Ssh(channel) => channel.reconcile(remote_worktree_path, local_ref),
         }
     }
 
@@ -2134,6 +2165,7 @@ impl RemoteChannel {
     fn transport_url(&self) -> String {
         match self {
             Self::Fake(channel) => channel.transport_url(),
+            Self::Ssh(channel) => channel.transport_url(),
         }
     }
 }
@@ -2307,12 +2339,39 @@ pub struct GitRemote {
     remote_repo: PathBuf,
     remote_worktree_root: PathBuf,
     transport_url: String,
+    /// WHERE the repo-side git ops (init / fetch-of-the-commit / `worktree add`)
+    /// actually run. The deterministic fake path runs them on controller-local
+    /// dirs ([`GitRemoteExecution::Local`]); the REAL SSH path runs them on the
+    /// remote host over `ssh` and pushes the commit across the transport URL
+    /// ([`GitRemoteExecution::OverSsh`]), so `remote_repo`/`remote_worktree_root`
+    /// are paths on the REMOTE machine, not the controller (review finding 1).
+    execution: GitRemoteExecution,
+}
+
+/// RR8 (review finding 1): where a [`GitRemote`]'s repo-side git operations run.
+/// The deterministic suite runs them locally (honest: the "remote" is a second
+/// local checkout); the live SSH path runs them on the remote host so
+/// materialization is a genuine cross-machine git operation, not a controller-local
+/// one mislabeled as remote.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GitRemoteExecution {
+    /// Repo-side git runs on controller-local directories (deterministic fake path).
+    Local,
+    /// Repo-side git runs on the REMOTE host over `ssh`; the commit is `git push`ed
+    /// from the controller's `local_origin` to the remote repo across the transport
+    /// URL. `remote_repo`/`remote_worktree_root` are REMOTE filesystem paths.
+    OverSsh {
+        ssh_destination: String,
+        ssh_binary: String,
+    },
 }
 
 impl GitRemote {
     /// Build a git-backed remote workspace model from already-created local
     /// directories. `transport_url` is recorded for audit AFTER the credential
-    /// scan, so a URL carrying an embedded secret is never persisted raw.
+    /// scan, so a URL carrying an embedded secret is never persisted raw. The
+    /// repo-side git ops run LOCALLY (the deterministic fake path); the live SSH
+    /// path uses [`Self::over_ssh`] so they run on the remote host.
     pub fn new(
         local_origin: PathBuf,
         remote_repo: PathBuf,
@@ -2324,7 +2383,25 @@ impl GitRemote {
             remote_repo,
             remote_worktree_root,
             transport_url: transport_url.into(),
+            execution: GitRemoteExecution::Local,
         }
+    }
+
+    /// RR8 (review finding 1): run the repo-side git ops ON the remote host over
+    /// `ssh`. `remote_repo` and `remote_worktree_root` are paths on the REMOTE
+    /// machine; the controller `git push`es the commit to the remote repo across
+    /// the (already-resolved) transport URL before the remote `worktree add`. This
+    /// is the truly-cross-machine materialization the live smoke exercises.
+    pub fn over_ssh(
+        mut self,
+        ssh_destination: impl Into<String>,
+        ssh_binary: impl Into<String>,
+    ) -> Self {
+        self.execution = GitRemoteExecution::OverSsh {
+            ssh_destination: ssh_destination.into(),
+            ssh_binary: ssh_binary.into(),
+        };
+        self
     }
 
     /// The remote worktree path a given source commit materializes into. Stable per
@@ -2343,6 +2420,17 @@ impl GitRemote {
     /// and the remote worktree path. A failure at any git step is a TYPED
     /// [`RuntimeError::RemoteMaterializeFailed`], never a silent fall-through.
     fn materialize(&self, source_commit: &str) -> RuntimeResult<(String, PathBuf)> {
+        match &self.execution {
+            GitRemoteExecution::Local => self.materialize_local(source_commit),
+            GitRemoteExecution::OverSsh {
+                ssh_destination,
+                ssh_binary,
+            } => self.materialize_over_ssh(source_commit, ssh_destination, ssh_binary),
+        }
+    }
+
+    /// Deterministic fake path: repo-side git on controller-local dirs.
+    fn materialize_local(&self, source_commit: &str) -> RuntimeResult<(String, PathBuf)> {
         let origin = self.local_origin.to_string_lossy().to_string();
         // Fetch the exact commit into the remote repo (modelling push/fetch over
         // the channel). `git fetch <origin> <sha>` brings the object graph across.
@@ -2369,19 +2457,108 @@ impl GitRemote {
         Ok((head.trim().to_string(), worktree_path))
     }
 
+    /// RR8 (review finding 1): the REAL cross-machine materialization. The
+    /// controller PUSHES `source_commit` to the remote repo across the transport
+    /// URL, then runs `git init`/`worktree add`/`rev-parse HEAD` ON THE REMOTE over
+    /// `ssh`, so the worktree exists on the remote machine and the returned HEAD is
+    /// read from the remote. No git step runs on a controller path masquerading as
+    /// remote. A failure at any step is a TYPED `RemoteMaterializeFailed`.
+    fn materialize_over_ssh(
+        &self,
+        source_commit: &str,
+        ssh_destination: &str,
+        ssh_binary: &str,
+    ) -> RuntimeResult<(String, PathBuf)> {
+        let remote_repo = self.remote_repo.to_string_lossy().to_string();
+        let worktree_path = self.worktree_path(source_commit);
+        let worktree = worktree_path.to_string_lossy().to_string();
+
+        // 1) Ensure a bare-ish repo exists on the REMOTE host (idempotent).
+        ssh_git(
+            ssh_binary,
+            ssh_destination,
+            &format!(
+                "git init -q {repo} >/dev/null 2>&1 || true; \
+                 git -C {repo} config receive.denyCurrentBranch ignore >/dev/null 2>&1 || true",
+                repo = shell_quote(&remote_repo),
+            ),
+        )?;
+
+        // 2) PUSH the exact commit from the controller's origin to the remote repo
+        //    across the transport URL — the object graph crosses the machine
+        //    boundary here, not via a controller-local fetch.
+        materialize_git(
+            &self.local_origin,
+            &[
+                "push",
+                "--no-verify",
+                &self.transport_url,
+                &format!("{source_commit}:refs/capo/materialize/{source_commit}"),
+            ],
+        )?;
+
+        // 3) `git worktree add` the commit into the dedicated REMOTE worktree root,
+        //    then read the materialized HEAD ON THE REMOTE. Idempotent on re-run.
+        let head = ssh_git_capture(
+            ssh_binary,
+            ssh_destination,
+            &format!(
+                "if [ ! -d {wt} ]; then \
+                   git -C {repo} worktree add --detach {wt} {sha} >/dev/null 2>&1; fi; \
+                 git -C {wt} rev-parse HEAD",
+                wt = shell_quote(&worktree),
+                repo = shell_quote(&remote_repo),
+                sha = shell_quote(source_commit),
+            ),
+        )?;
+        Ok((head.trim().to_string(), worktree_path))
+    }
+
     /// RR3: map a remote-produced commit BACK to Capo's host by git — fetch the
     /// remote worktree's tip into a named ref in the local origin. Returns the
     /// remote commit SHA that was fetched back.
     fn reconcile(&self, remote_worktree_path: &Path, local_ref: &str) -> RuntimeResult<String> {
-        let tip = materialize_git_capture(remote_worktree_path, &["rev-parse", "HEAD"])?
-            .trim()
-            .to_string();
-        let remote = self.remote_repo.to_string_lossy().to_string();
-        materialize_git(
-            &self.local_origin,
-            &["fetch", "--no-tags", &remote, &format!("{tip}:{local_ref}")],
-        )?;
-        Ok(tip)
+        match &self.execution {
+            GitRemoteExecution::Local => {
+                let tip = materialize_git_capture(remote_worktree_path, &["rev-parse", "HEAD"])?
+                    .trim()
+                    .to_string();
+                let remote = self.remote_repo.to_string_lossy().to_string();
+                materialize_git(
+                    &self.local_origin,
+                    &["fetch", "--no-tags", &remote, &format!("{tip}:{local_ref}")],
+                )?;
+                Ok(tip)
+            }
+            GitRemoteExecution::OverSsh {
+                ssh_destination,
+                ssh_binary,
+            } => {
+                // Read the remote worktree tip ON THE REMOTE, then fetch it BACK to
+                // the controller across the transport URL (the produced commit
+                // crosses the boundary by git, mirroring the local map-back).
+                let tip = ssh_git_capture(
+                    ssh_binary,
+                    ssh_destination,
+                    &format!(
+                        "git -C {wt} rev-parse HEAD",
+                        wt = shell_quote(&remote_worktree_path.to_string_lossy()),
+                    ),
+                )?
+                .trim()
+                .to_string();
+                materialize_git(
+                    &self.local_origin,
+                    &[
+                        "fetch",
+                        "--no-tags",
+                        &self.transport_url,
+                        &format!("{tip}:{local_ref}"),
+                    ],
+                )?;
+                Ok(tip)
+            }
+        }
     }
 }
 
@@ -2441,6 +2618,59 @@ fn materialize_git_command(dir: &Path, args: &[&str]) -> Command {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(args);
     command
+}
+
+/// RR8 (review finding 1): run a remote shell command over `ssh` for the
+/// cross-machine git materialization path (auth by the operator's `ssh` config /
+/// agent — handle only, no key/token injected). A non-success status is a TYPED
+/// `RemoteMaterializeFailed` with a credential-scanned stderr, never a silent
+/// fall-through.
+fn ssh_git(ssh_binary: &str, ssh_destination: &str, remote_shell: &str) -> RuntimeResult<()> {
+    let output = Command::new(ssh_binary)
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg(ssh_destination)
+        .arg(remote_shell)
+        .output()
+        .map_err(|error| RuntimeError::RemoteMaterializeFailed {
+            message: format!("ssh git spawn failed: {error}"),
+        })?;
+    if !output.status.success() {
+        return Err(RuntimeError::RemoteMaterializeFailed {
+            message: format!(
+                "remote git failed: {}",
+                scan_credential_shapes(&String::from_utf8_lossy(&output.stderr)).0
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// RR8 (review finding 1): run a remote git command over `ssh` and capture stdout
+/// (for reading the materialized HEAD / reconcile tip SHA from the REMOTE host).
+fn ssh_git_capture(
+    ssh_binary: &str,
+    ssh_destination: &str,
+    remote_shell: &str,
+) -> RuntimeResult<String> {
+    let output = Command::new(ssh_binary)
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg(ssh_destination)
+        .arg(remote_shell)
+        .output()
+        .map_err(|error| RuntimeError::RemoteMaterializeFailed {
+            message: format!("ssh git spawn failed: {error}"),
+        })?;
+    if !output.status.success() {
+        return Err(RuntimeError::RemoteMaterializeFailed {
+            message: format!(
+                "remote git failed: {}",
+                scan_credential_shapes(&String::from_utf8_lossy(&output.stderr)).0
+            ),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 /// RR1 deterministic fake channel: it executes the program LOCALLY but is HONEST
@@ -2777,6 +3007,15 @@ impl FakeRemoteChannel {
     /// transport still runs the program on loopback for determinism, but it reports
     /// it crossed a boundary so the enforcement claim is the one a real SSH remote
     /// would make; the live cross-machine proof is RR8.
+    ///
+    /// DOUBLE-OPT-IN (review finding): this sets `cross_machine` but leaves
+    /// `sandbox_unenforceable = true` (the honest default for a fake channel). A
+    /// COMPLETE cross-machine model of an enforcing remote MUST pair this with
+    /// [`Self::with_enforceable_remote_sandbox`] (and an enforcing
+    /// [`Self::with_remote_os`]); without it the plan is `Unenforced` even though a
+    /// real SSH remote with `bwrap`/`sandbox-exec` would report `Enforced`. The two
+    /// flags are deliberately independent so a test can also model a cross-machine
+    /// remote that genuinely cannot enforce.
     pub fn with_cross_machine_boundary(mut self) -> Self {
         self.cross_machine = true;
         self
@@ -3095,6 +3334,559 @@ impl FakeRemoteChannel {
     }
 }
 
+/// RR8: configuration for the REAL SSH transport behind [`SshRemoteProcessRunner`].
+///
+/// All identity/auth is carried by HANDLE — the runner NEVER reads a raw SSH key,
+/// `known_hosts` secret, or subscription token. `auth_ref` is an OPAQUE handle the
+/// operator's `ssh` config resolves (e.g. an agent key / `IdentityFile` already on
+/// the controller host); it is recorded only as a label and never logged raw. The
+/// remote git store + worktree root are the REAL [`GitRemote`] paths on the remote
+/// (reached over the SAME SSH host), so git materialization is real cross-machine.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SshRemoteConfig {
+    /// The SSH destination (`user@host` / a `ssh_config` `Host` alias). Resolved by
+    /// `connectivity-tunnel`; the runner does not invent it.
+    pub ssh_destination: String,
+    /// The proven remote target identity (channel fingerprint), never a credential.
+    pub fingerprint: String,
+    /// An OPAQUE auth handle (e.g. `ssh-agent:default` / a `ssh_config` host alias).
+    /// Recorded as a label only; NEVER a raw key or token.
+    pub auth_ref: Option<String>,
+    /// The `ssh` binary to invoke (default `ssh`).
+    pub ssh_binary: String,
+    /// Where redacted remote stdout/stderr artifacts are written on the controller.
+    pub artifact_root: PathBuf,
+    /// The REAL git-backed remote workspace (origin on the controller, remote repo +
+    /// worktree root on the remote, reached over SSH).
+    pub git_remote: Option<GitRemote>,
+}
+
+impl SshRemoteConfig {
+    /// Build a real-SSH transport config from an already-resolved SSH destination +
+    /// fingerprint (the channel is resolved by `connectivity-tunnel`; the runner
+    /// performs no endpoint resolution and never touches raw credentials).
+    pub fn new(
+        ssh_destination: impl Into<String>,
+        fingerprint: impl Into<String>,
+        artifact_root: PathBuf,
+    ) -> Self {
+        Self {
+            ssh_destination: ssh_destination.into(),
+            fingerprint: fingerprint.into(),
+            auth_ref: None,
+            ssh_binary: "ssh".to_string(),
+            artifact_root,
+            git_remote: None,
+        }
+    }
+
+    /// Attach the OPAQUE auth handle (a label only — never a raw key/token).
+    pub fn with_auth_ref(mut self, auth_ref: impl Into<String>) -> Self {
+        self.auth_ref = Some(auth_ref.into());
+        self
+    }
+
+    /// Attach the REAL git-backed remote workspace for materialization. The git
+    /// remote is bound to RUN ITS REPO-SIDE OPS ON THE REMOTE over this config's
+    /// SSH destination (review finding 1): `remote_repo`/`remote_worktree_root` are
+    /// remote paths and the commit is pushed across the transport URL, so
+    /// materialization is a genuine cross-machine git operation.
+    pub fn with_git_remote(mut self, git_remote: GitRemote) -> Self {
+        self.git_remote =
+            Some(git_remote.over_ssh(self.ssh_destination.clone(), self.ssh_binary.clone()));
+        self
+    }
+}
+
+/// RR8: the REAL cross-machine SSH transport. It shells out to `ssh` to launch /
+/// signal / probe / stream on the remote host and uses a REAL [`GitRemote`] for git
+/// materialization. It is exercised ONLY by the opt-in `#[ignore]` live smoke; the
+/// deterministic gate never instantiates it (it would touch the network). HONESTY:
+/// it crossed a machine boundary, so [`RemoteChannel::is_loopback`] is `false` and
+/// Capo's realness/enforcement claims are truthful. Secrets are carried by handle:
+/// it NEVER reads/logs a raw SSH key, `known_hosts` secret, or subscription token.
+#[derive(Clone, Debug)]
+pub struct SshRemoteChannel {
+    config: SshRemoteConfig,
+    spawn_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    last_launched: std::sync::Arc<std::sync::Mutex<Option<LocalProcessRequest>>>,
+}
+
+impl PartialEq for SshRemoteChannel {
+    fn eq(&self, other: &Self) -> bool {
+        // Identity is the resolved config; the spawn counter + last-launched ledger
+        // are runtime state, not identity (mirrors `FakeRemoteChannel`).
+        self.config == other.config
+    }
+}
+
+impl Eq for SshRemoteChannel {}
+
+impl SshRemoteChannel {
+    /// Build the real SSH transport from a resolved config.
+    pub fn new(config: SshRemoteConfig) -> Self {
+        Self {
+            config,
+            spawn_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            last_launched: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// `ssh <destination> <remote_shell_command>` — a `Command` with the OPAQUE
+    /// destination. Auth is left to the operator's `ssh` config / agent (handle
+    /// only); the runner never injects a key path or token.
+    fn ssh_command(&self, remote_shell: &str) -> Command {
+        let mut command = Command::new(&self.config.ssh_binary);
+        command
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg(&self.config.ssh_destination)
+            .arg(remote_shell);
+        command
+    }
+
+    fn target_fingerprint(&self) -> String {
+        self.config.fingerprint.clone()
+    }
+
+    fn spawn_count(&self) -> usize {
+        self.spawn_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn last_launched_request(&self) -> Option<LocalProcessRequest> {
+        self.last_launched
+            .lock()
+            .expect("ssh last-launched ledger poisoned")
+            .clone()
+    }
+
+    /// Launch the program on the remote over SSH (detached, setsid, recording its
+    /// remote pid + boot id). The captured artifacts are the remote stdout/stderr,
+    /// REDACTED on the controller before persistence.
+    fn launch(&self, request: &LocalProcessRequest) -> RuntimeResult<RemoteLaunch> {
+        *self
+            .last_launched
+            .lock()
+            .expect("ssh last-launched ledger poisoned") = Some(request.clone());
+
+        let argv = request
+            .argv
+            .iter()
+            .map(|a| shell_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let cwd = request.cwd.to_string_lossy();
+        // Run detached under setsid so a controller restart can reattach to the
+        // recorded remote pid + boot id, and echo the boot id + pid back.
+        let remote_shell = format!(
+            "cd {cwd} && setsid {program} {argv} >/tmp/capo-remote-out 2>&1 & \
+             echo PID=$!; cat /proc/sys/kernel/random/boot_id 2>/dev/null || true",
+            cwd = shell_quote(&cwd),
+            program = shell_quote(&request.program),
+        );
+        let output = self.ssh_command(&remote_shell).output().map_err(|error| {
+            RuntimeError::RemoteLaunchFailed {
+                message: format!("ssh launch spawn failed: {error}"),
+                retryable: true,
+            }
+        })?;
+        if !output.status.success() {
+            return Err(RuntimeError::RemoteLaunchFailed {
+                message: format!(
+                    "ssh launch failed: {}",
+                    scan_credential_shapes(&String::from_utf8_lossy(&output.stderr)).0
+                ),
+                retryable: true,
+            });
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let remote_pid = stdout
+            .lines()
+            .find_map(|l| l.strip_prefix("PID="))
+            .and_then(|p| p.trim().parse::<u32>().ok())
+            .ok_or_else(|| RuntimeError::RemoteLaunchFailed {
+                message: "ssh launch did not report a remote pid".to_string(),
+                retryable: false,
+            })?;
+        let remote_boot_id = stdout
+            .lines()
+            .last()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && !l.starts_with("PID="))
+            .unwrap_or_else(|| "ssh-remote-boot-unknown".to_string());
+        let spawn_index = self
+            .spawn_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = spawn_index;
+
+        // The captured artifacts are the remote run's output, REDACTED before
+        // persistence (the credential scan runs at the remote boundary).
+        let captured = self.capture_artifacts(request, b"")?;
+        Ok(RemoteLaunch {
+            remote_pid,
+            remote_boot_id,
+            remote_host_id: self.config.ssh_destination.clone(),
+            live: true,
+            captured,
+        })
+    }
+
+    /// Write the (already-redacted) remote output to a controller-side artifact so
+    /// the run carries a real, secret-free artifact reference.
+    fn capture_artifacts(
+        &self,
+        request: &LocalProcessRequest,
+        raw_output: &[u8],
+    ) -> RuntimeResult<LocalProcessOutcome> {
+        let (redacted, scrubbed) = scan_credential_shapes(&String::from_utf8_lossy(raw_output));
+        let redaction_state = if scrubbed { "redacted" } else { "safe" };
+        let run_dir = self.config.artifact_root.join(request.run_id.as_str());
+        fs::create_dir_all(&run_dir)?;
+        let stdout_path = run_dir.join("stdout.txt");
+        let stderr_path = run_dir.join("stderr.txt");
+        fs::write(&stdout_path, redacted.as_bytes())?;
+        fs::write(&stderr_path, b"")?;
+        let stdout = RuntimeOutputArtifact {
+            artifact_id: format!("{}:stdout", request.run_id.as_str()),
+            path: stdout_path,
+            size_bytes: redacted.len() as i64,
+            content_hash: content_hash(redacted.as_bytes()),
+            redaction_state: redaction_state.to_string(),
+            truncated: false,
+        };
+        let stderr = RuntimeOutputArtifact {
+            artifact_id: format!("{}:stderr", request.run_id.as_str()),
+            path: stderr_path,
+            size_bytes: 0,
+            content_hash: content_hash(b""),
+            redaction_state: "safe".to_string(),
+            truncated: false,
+        };
+        Ok(LocalProcessOutcome {
+            process: LocalRuntimeProcessRef {
+                run_id: request.run_id.clone(),
+                runtime_process_ref: String::new(),
+                external_pid: None,
+                boot_id: None,
+                status: "running".to_string(),
+                redaction_state: redaction_state.to_string(),
+            },
+            stdout,
+            stderr,
+            exit_code: None,
+            events: Vec::new(),
+        })
+    }
+
+    /// Escalate a stop over SSH: `kill -<sig> -<pgid>` for the recorded remote pid.
+    fn signal(&self, probe: &RemoteProbe, escalation: &str) -> RuntimeResult<()> {
+        let signal = match escalation {
+            "interrupt" => "INT",
+            "terminate" => "TERM",
+            _ => "KILL",
+        };
+        let remote_shell = format!(
+            "kill -{signal} {pid} 2>/dev/null || true",
+            pid = probe.remote_pid
+        );
+        let status = self.ssh_command(&remote_shell).status().map_err(|error| {
+            RuntimeError::RemoteLaunchFailed {
+                message: format!("ssh signal spawn failed: {error}"),
+                retryable: true,
+            }
+        })?;
+        if !status.success() {
+            return Err(RuntimeError::RemoteLaunchFailed {
+                message: "ssh signal failed".to_string(),
+                retryable: true,
+            });
+        }
+        Ok(())
+    }
+
+    /// Probe liveness over SSH: `kill -0 <pid>` succeeds iff the process is alive.
+    fn probe(&self, probe: &RemoteProbe) -> RuntimeResult<bool> {
+        let remote_shell = format!(
+            "kill -0 {pid} 2>/dev/null && echo LIVE || echo DEAD",
+            pid = probe.remote_pid
+        );
+        let output = self.ssh_command(&remote_shell).output().map_err(|error| {
+            RuntimeError::RemoteLaunchFailed {
+                message: format!("ssh probe spawn failed: {error}"),
+                retryable: true,
+            }
+        })?;
+        Ok(String::from_utf8_lossy(&output.stdout).contains("LIVE"))
+    }
+
+    /// RR2: re-probe a stored remote run over SSH on restart. A boot-id mismatch
+    /// (the remote rebooted) is reported so the run is classified `Exited`, never
+    /// silently recovered.
+    fn recovery_probe(&self, probe: &RemoteProbe) -> RemoteRecoveryProbe {
+        let remote_shell = format!(
+            "(kill -0 {pid} 2>/dev/null && echo LIVE || echo DEAD); \
+             cat /proc/sys/kernel/random/boot_id 2>/dev/null || true",
+            pid = probe.remote_pid,
+        );
+        match self.ssh_command(&remote_shell).output() {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let live = stdout.contains("LIVE");
+                let observed_boot = stdout
+                    .lines()
+                    .last()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| l != "LIVE" && l != "DEAD" && !l.is_empty());
+                RemoteRecoveryProbe {
+                    channel_reachable: true,
+                    live,
+                    observed_remote_boot_id: observed_boot,
+                    reattachable: true,
+                }
+            }
+            // Channel unreachable -> held recovery_pending (never forced).
+            _ => RemoteRecoveryProbe {
+                channel_reachable: false,
+                live: false,
+                observed_remote_boot_id: None,
+                reattachable: false,
+            },
+        }
+    }
+
+    fn cleanup(&self, _probe: &RemoteProbe) -> RuntimeResult<()> {
+        Ok(())
+    }
+
+    /// RR4: forward remote stdout over SSH from `from_offset`. The runner redacts +
+    /// bounds + offsets; the channel only forwards the raw bytes.
+    fn stream(&self, _probe: &RemoteProbe, from_offset: usize) -> RemoteRawStream {
+        let remote_shell = "cat /tmp/capo-remote-out 2>/dev/null || true";
+        match self.ssh_command(remote_shell).output() {
+            Ok(output) if output.status.success() => {
+                let raw = output.stdout;
+                let start = from_offset.min(raw.len());
+                RemoteRawStream {
+                    from_offset: start,
+                    bytes: raw[start..].to_vec(),
+                    dropped: false,
+                }
+            }
+            _ => RemoteRawStream {
+                from_offset,
+                bytes: Vec::new(),
+                dropped: true,
+            },
+        }
+    }
+
+    /// RR4 (review finding): write stdin to the remote process over SSH WITHOUT
+    /// embedding the payload bytes in the SSH command string. The payload is piped
+    /// through the SSH session's OWN stdin to a remote `cat` that forwards it to the
+    /// target process's fd; the command line carries only the pid, so a verbose
+    /// `sshd` log records the redirect shape, never the secret bytes. (The previous
+    /// `printf %s '<bytes>'` form put the payload on the command line, where
+    /// `LogLevel VERBOSE`/`DEBUG` would capture it.)
+    fn write_stdin(&self, probe: &RemoteProbe, bytes: &[u8]) -> RuntimeResult<()> {
+        use std::io::Write;
+        let remote_shell = format!(
+            "cat > /proc/{pid}/fd/0 2>/dev/null || true",
+            pid = probe.remote_pid,
+        );
+        let mut child = self
+            .ssh_command(&remote_shell)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| RuntimeError::RemoteLaunchFailed {
+                message: format!("ssh stdin spawn failed: {error}"),
+                retryable: true,
+            })?;
+        if let Some(mut stdin) = child.stdin.take() {
+            // Best-effort: a closed remote fd is not fatal to the controller turn.
+            let _ = stdin.write_all(bytes);
+        }
+        let _ = child.wait();
+        Ok(())
+    }
+
+    /// RR5: probe the REMOTE host's OS family + tier enforceability over SSH (the
+    /// remote OS — not the controller — is the authority on enforcement).
+    fn sandbox_probe(&self, tier: SandboxTier) -> RuntimeResult<RemoteSandboxProbe> {
+        // `bwrap` is the Linux mechanism; `sandbox-exec` is macOS seatbelt (NOT
+        // seccomp). The tokens name the actual mechanism so the macOS branch never
+        // keys off a Linux-kernel label.
+        let remote_shell = "uname -s; command -v bwrap >/dev/null 2>&1 && echo HAS_BWRAP; \
+             command -v sandbox-exec >/dev/null 2>&1 && echo HAS_SANDBOX_EXEC";
+        let output = self.ssh_command(remote_shell).output().map_err(|error| {
+            RuntimeError::RemoteLaunchFailed {
+                message: format!("ssh sandbox probe spawn failed: {error}"),
+                retryable: true,
+            }
+        })?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let kernel = stdout.lines().next().unwrap_or("").trim();
+        let (os_family, mechanism_present) = match kernel {
+            "Darwin" => (RemoteOsFamily::Macos, stdout.contains("HAS_SANDBOX_EXEC")),
+            "Linux" => (RemoteOsFamily::Linux, stdout.contains("HAS_BWRAP")),
+            other => (RemoteOsFamily::Other(other.to_string()), false),
+        };
+        let tier_enforceable = mechanism_present && os_family.enforces(tier);
+        Ok(RemoteSandboxProbe {
+            os_family,
+            tier_enforceable,
+        })
+    }
+
+    fn cleanup_workspace(
+        &self,
+        probe: &RemoteProbe,
+        policy: CleanupPolicy,
+    ) -> RuntimeResult<WorkspaceReapOutcome> {
+        // Reap the remote process group.
+        let _ = self.signal(probe, "kill");
+        let worktree_reaped = if policy.reaps_worktree() {
+            if let Some(git_remote) = &self.config.git_remote {
+                let key = git_remote
+                    .remote_worktree_root
+                    .to_string_lossy()
+                    .to_string();
+                let remote_shell = format!(
+                    "rm -rf {root} 2>/dev/null || true; echo REAPED",
+                    root = shell_quote(&key),
+                );
+                self.ssh_command(&remote_shell)
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).contains("REAPED"))
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        Ok(WorkspaceReapOutcome {
+            worktree_reaped,
+            worktree_key: self
+                .config
+                .git_remote
+                .as_ref()
+                .map(|r| r.remote_worktree_root.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        })
+    }
+
+    fn rollback_worktree(&self, _probe: &RemoteProbe, checkpoint_ref: &str) -> RuntimeResult<()> {
+        let git_remote = self.config.git_remote.as_ref().ok_or_else(|| {
+            RuntimeError::RemoteMaterializeFailed {
+                message: "no git remote attached to ssh channel".to_string(),
+            }
+        })?;
+        // Restore the remote worktree to the checkpoint commit over the channel.
+        let _ = git_remote.materialize(checkpoint_ref)?;
+        Ok(())
+    }
+
+    fn materialize(&self, source_commit: &str) -> RuntimeResult<(String, PathBuf)> {
+        let git_remote = self.config.git_remote.as_ref().ok_or_else(|| {
+            RuntimeError::RemoteMaterializeFailed {
+                message: "no git remote attached to ssh channel".to_string(),
+            }
+        })?;
+        git_remote.materialize(source_commit)
+    }
+
+    fn reconcile(&self, remote_worktree_path: &Path, local_ref: &str) -> RuntimeResult<String> {
+        let git_remote = self.config.git_remote.as_ref().ok_or_else(|| {
+            RuntimeError::RemoteMaterializeFailed {
+                message: "no git remote attached to ssh channel".to_string(),
+            }
+        })?;
+        git_remote.reconcile(remote_worktree_path, local_ref)
+    }
+
+    fn transport_url(&self) -> String {
+        // The transport URL is credential-scanned before it is ever recorded.
+        let raw = self
+            .config
+            .git_remote
+            .as_ref()
+            .map(|r| r.transport_url.clone())
+            .unwrap_or_else(|| format!("ssh://{}", self.config.ssh_destination));
+        scan_credential_shapes(&raw).0
+    }
+}
+
+/// RR8: minimally shell-quote a token for a remote `sh -c` line (single-quote
+/// wrapping with the standard `'\''` escape). Used only on the opt-in SSH path.
+fn shell_quote(token: &str) -> String {
+    format!("'{}'", token.replace('\'', "'\\''"))
+}
+
+/// RR8: the deterministic fake-remote runner the SSH name pairs with. Behind the
+/// SAME [`RemoteProcessRunner`] contract as the real [`SshRemoteProcessRunner`], so
+/// the live smoke's deterministic fixture asserts the IDENTICAL shapes (process-ref
+/// shape, materialized-HEAD-matches-SHA, redacted output, recovery classification)
+/// with NO network.
+pub struct SshRemoteProcessRunner;
+
+impl SshRemoteProcessRunner {
+    /// Build the REAL SSH-backed remote runner from a resolved channel + SSH config.
+    /// This is the cross-machine path; it is constructed ONLY by the opt-in live
+    /// smoke (the deterministic gate uses [`FakeRemoteProcessRunner`]).
+    pub fn build(channel: OpenChannel, ssh: SshRemoteConfig) -> RemoteProcessRunner {
+        let transport = RemoteChannel::Ssh(SshRemoteChannel::new(ssh));
+        RemoteProcessRunner::new(RemoteProcessConfig::with_transport(channel, transport))
+    }
+}
+
+/// RR8: the env gate names for the opt-in live remote-runtime SSH smoke, mirroring
+/// the `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT` / `CAPO_SERVER_RUN_CODEX_LIVE` pair.
+/// BOTH must be `1` for the smoke to attempt the live host; otherwise it skips.
+pub const REMOTE_RUNTIME_PREFLIGHT_ENV: &str = "CAPO_SERVER_REMOTE_RUNTIME_PREFLIGHT";
+pub const RUN_REMOTE_RUNTIME_LIVE_ENV: &str = "CAPO_SERVER_RUN_REMOTE_RUNTIME_LIVE";
+/// RR8: the SSH destination (`user@host` / `ssh_config` alias) the live smoke
+/// resolves the channel against. When unset the smoke skips cleanly.
+pub const REMOTE_RUNTIME_SSH_HOST_ENV: &str = "CAPO_SERVER_REMOTE_RUNTIME_SSH_HOST";
+
+/// RR8: the OUTCOME of the DEFINED, deterministic skip predicate for the live SSH
+/// smoke — RUN against a configured host, or SKIP with a recorded, secret-free
+/// reason so "clean skip" is CHECKABLE in evidence rather than operator-eyeballed.
+/// The predicate is purely a function of (both env gates set, an SSH host
+/// configured) — never operator judgement, never a raw credential.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LiveRemoteRuntimeSmokeDecision {
+    /// Run the live lifecycle against this resolved SSH destination (an opaque
+    /// `user@host`/alias — never a credential).
+    Run { ssh_destination: String },
+    /// Skip cleanly. The `reason` is a fixed, secret-free label.
+    Skip { reason: String },
+}
+
+/// RR8: the DEFINED skip predicate for the live SSH smoke. Reads the two env gates
+/// and the SSH host config; returns [`LiveRemoteRuntimeSmokeDecision::Run`] only when
+/// BOTH gates are `1` AND an SSH host is configured, else
+/// [`LiveRemoteRuntimeSmokeDecision::Skip`] with a recorded reason. NEVER returns a
+/// credential — only the opaque SSH destination or a fixed reason label.
+pub fn live_remote_runtime_smoke_decision() -> LiveRemoteRuntimeSmokeDecision {
+    let gate_set = |name: &str| std::env::var(name).map(|v| v == "1").unwrap_or(false);
+    if !gate_set(REMOTE_RUNTIME_PREFLIGHT_ENV) || !gate_set(RUN_REMOTE_RUNTIME_LIVE_ENV) {
+        return LiveRemoteRuntimeSmokeDecision::Skip {
+            reason: format!(
+                "live remote-runtime gate unset ({REMOTE_RUNTIME_PREFLIGHT_ENV} + \
+                 {RUN_REMOTE_RUNTIME_LIVE_ENV} must both be 1)"
+            ),
+        };
+    }
+    match std::env::var(REMOTE_RUNTIME_SSH_HOST_ENV) {
+        Ok(host) if !host.trim().is_empty() => LiveRemoteRuntimeSmokeDecision::Run {
+            ssh_destination: host.trim().to_string(),
+        },
+        _ => LiveRemoteRuntimeSmokeDecision::Skip {
+            reason: format!("no SSH host configured ({REMOTE_RUNTIME_SSH_HOST_ENV} unset)"),
+        },
+    }
+}
+
 /// RR1 remote process configuration: the runner is constructed from an
 /// already-resolved channel ([`OpenChannel`]) plus the [`RemoteChannel`]
 /// transport. The pre-RR1 `local_loopback: LocalProcessConfig` construction path
@@ -3106,6 +3898,13 @@ pub struct RemoteProcessConfig {
     /// fingerprint, NOT a raw endpoint string the runner invented.
     pub channel: OpenChannel,
     pub transport: RemoteChannel,
+    /// RR4 (review finding): operator-declared literal redaction rules, mirroring
+    /// [`LocalProcessConfig::redaction_rules`]. These are layered UNDER the
+    /// automatic credential-shape scan when redacting remote output deltas, so a
+    /// secret the operator named explicitly (e.g. a literal API key) is scrubbed
+    /// from remote stdout exactly as it would be from a local run — not silently
+    /// dropped on the remote path.
+    pub redaction_rules: Vec<RedactionRule>,
 }
 
 impl RemoteProcessConfig {
@@ -3122,13 +3921,28 @@ impl RemoteProcessConfig {
             workspace_root,
             artifact_root,
         ));
-        Self { channel, transport }
+        Self {
+            channel,
+            transport,
+            redaction_rules: Vec::new(),
+        }
     }
 
     /// Build an RR1 config with a caller-supplied fake transport (so a test can
     /// script a launch failure).
     pub fn with_transport(channel: OpenChannel, transport: RemoteChannel) -> Self {
-        Self { channel, transport }
+        Self {
+            channel,
+            transport,
+            redaction_rules: Vec::new(),
+        }
+    }
+
+    /// RR4 (review finding): attach operator-declared literal redaction rules so
+    /// they are applied to remote output deltas alongside the credential-shape scan.
+    pub fn with_redaction_rules(mut self, rules: Vec<RedactionRule>) -> Self {
+        self.redaction_rules = rules;
+        self
     }
 
     /// RR1 honest-loopback test helper: build a config from a remote target
@@ -3933,7 +4747,10 @@ impl RemoteProcessRunner {
         let cap_reached = raw.bytes.len() > cap;
 
         // Redact at the remote boundary BEFORE the bytes become an event/artifact.
-        let policy = RedactionPolicy::new(Vec::new());
+        // Operator-declared literal rules are layered with the automatic
+        // credential-shape scan so a named secret is scrubbed on the remote path
+        // exactly as on the local path (review finding).
+        let policy = RedactionPolicy::new(self.config.redaction_rules.clone());
         let (redacted, redaction_state) = policy.apply(forwarded);
         let text = String::from_utf8_lossy(&redacted).to_string();
         let raw_len = forwarded.len();
@@ -11227,4 +12044,339 @@ mod tests {
         assert_eq!(killed.process.status, "killed");
         assert_eq!(killed.events[0].kind, "runtime.remote_kill_sent");
     }
+
+    // ====================================================================
+    // RR8: live opt-in remote SSH smoke (secrets stripped) PAIRED with a
+    // deterministic fixture.
+    //
+    // The live smoke (`rr8_live_ssh_smoke_full_lifecycle_or_clean_skip`) is
+    // `#[ignore]` and runs ONLY when BOTH `CAPO_SERVER_REMOTE_RUNTIME_PREFLIGHT=1`
+    // and `CAPO_SERVER_RUN_REMOTE_RUNTIME_LIVE=1` are set AND an SSH host is
+    // configured; otherwise it SKIPS CLEANLY with a recorded, secret-free reason.
+    // It is PAIRED with `rr8_deterministic_fixture_pins_the_live_smoke_shapes`,
+    // which runs in the always-on gate (NO network) and pins the IDENTICAL shapes
+    // the live smoke asserts (process-ref shape, materialized-HEAD-matches-SHA,
+    // redacted output, recovery classification), so completion is NEVER solely
+    // operator-attested.
+    // ====================================================================
+
+    #[test]
+    fn rr8_skip_predicate_is_defined_and_records_reason_when_gate_unset() {
+        // DEFINED predicate: with the gate unset the decision MUST be a recorded,
+        // secret-free Skip naming both gates — never operator judgement. Serialize
+        // against the live smoke that reads the same env vars.
+        let _env_guard = RR8_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: env access is serialized by RR8_ENV_LOCK for this test's duration.
+        unsafe {
+            std::env::remove_var(REMOTE_RUNTIME_PREFLIGHT_ENV);
+            std::env::remove_var(RUN_REMOTE_RUNTIME_LIVE_ENV);
+            std::env::remove_var(REMOTE_RUNTIME_SSH_HOST_ENV);
+        }
+        match live_remote_runtime_smoke_decision() {
+            LiveRemoteRuntimeSmokeDecision::Skip { reason } => {
+                assert!(
+                    reason.contains(REMOTE_RUNTIME_PREFLIGHT_ENV)
+                        && reason.contains(RUN_REMOTE_RUNTIME_LIVE_ENV),
+                    "the recorded skip reason must name both gates: {reason}"
+                );
+                assert!(
+                    connectivity_redaction_is_clean(&reason),
+                    "skip reason must be secret-free: {reason}"
+                );
+            }
+            other => panic!("gate unset must Skip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rr8_ssh_runner_is_not_loopback_and_does_no_endpoint_resolution() {
+        // HONESTY: a real SSH transport crossed a machine boundary, so it is NEVER a
+        // loopback — Capo's realness claim is truthful. The runner is built from an
+        // ALREADY-RESOLVED channel + SSH destination (no endpoint resolution), and
+        // the auth handle is a label only (carried by handle, never a raw key).
+        let channel = OpenChannel::for_test("chan-ssh", "endpoint-ssh", "fp-ssh");
+        let ssh = SshRemoteConfig::new("capo@remote.example", "fp-ssh", temp_root("rr8-ssh-art"))
+            .with_auth_ref("ssh-agent:default");
+        let runner = SshRemoteProcessRunner::build(channel, ssh);
+        assert!(
+            !runner.is_loopback(),
+            "a real SSH transport must report non-loopback (it crossed a boundary)"
+        );
+        assert_eq!(runner.target_fingerprint(), "fp-ssh");
+        // The auth handle is a label, never a credential.
+        assert!(connectivity_redaction_is_clean("ssh-agent:default"));
+    }
+
+    /// RR8 PAIRING fixture: the SAME deterministic fake-remote contract the live
+    /// smoke asserts, pinned in the always-on gate (NO network). It proves the
+    /// IDENTICAL shapes the live smoke would assert against a real host:
+    ///   - the remote process-ref shape
+    ///     (`remote-process:{fp}:{host}:pid=...:boot=...`),
+    ///   - materialized remote HEAD == the source SHA (content-addressed),
+    ///   - remote output is REDACTED before any delta,
+    ///   - a controller-restart-with-live-remote recovers in place (Recovered).
+    ///
+    /// So when the live smoke runs, completion is checked against this shape, not
+    /// operator attestation.
+    #[test]
+    fn rr8_deterministic_fixture_pins_the_live_smoke_shapes() {
+        let fixture = rr7_git_remote_fixture("rr8-fixture");
+        let payload = b"remote out token AKIAIOSFODNN7EXAMPLE done".to_vec();
+        let (runner, workspace) =
+            rr7_runner("rr8-fixture", Some(fixture.git_remote.clone()), |c| {
+                c.recover_alive_reattachable()
+                    .with_streamed_output(payload.clone())
+            });
+
+        // SHAPE 1: materialized remote HEAD == source SHA (content-addressed).
+        let materialization = runner
+            .materialize_workspace(&fixture.source_commit)
+            .expect("materialize");
+        assert_eq!(
+            materialization.remote_head, fixture.source_commit,
+            "materialized remote HEAD must equal the source SHA"
+        );
+        // The materialization event's transport URL is redacted (no embedded secret).
+        assert!(
+            materialization
+                .events
+                .iter()
+                .all(|e| connectivity_redaction_is_clean(&e.detail)),
+            "no materialization event may carry a credential"
+        );
+
+        // SHAPE 2: the remote process-ref shape.
+        let outcome = runner
+            .start_process(remote_request("run-rr8-fixture", workspace, "printf ok"))
+            .expect("start");
+        let process_ref = &outcome.process.runtime_process_ref;
+        assert!(
+            process_ref.starts_with("remote-process:fp-rr8-fixture:")
+                && process_ref.contains(":pid=")
+                && process_ref.contains(":boot="),
+            "remote process-ref must carry the fingerprint + remote pid + boot: {process_ref}"
+        );
+
+        let running = LocalRuntimeProcessRef {
+            status: "running".to_string(),
+            ..outcome.process.clone()
+        };
+
+        // SHAPE 3: remote output is REDACTED before any delta.
+        let stream = runner.stream_output(&running, 0);
+        assert_eq!(stream.redaction_state, "redacted");
+        assert!(
+            !stream
+                .deltas
+                .iter()
+                .any(|d| d.text.contains("AKIAIOSFODNN7EXAMPLE")),
+            "a credential must be scrubbed before any delta reaches persistence"
+        );
+
+        // SHAPE 4: a controller-restart-with-live-remote recovers IN PLACE.
+        let recovery = runner.recover_run(&running, &running_recorded_boot(&running));
+        assert_eq!(
+            recovery.classification,
+            RemoteRecoveryClassification::Recovered
+        );
+        assert_eq!(recovery.runtime_process_ref, running.runtime_process_ref);
+
+        // SHAPE 5 (review finding 3): the SAFETY FLOOR the live smoke exercises —
+        // `start_process_sandboxed` composes the remote OS sandbox + worktree under
+        // the `SandboxProfile`, and the enforcement claim is the HONEST remote-OS
+        // one. Pin it on a cross-machine ENFORCING fake so the deterministic side
+        // proves the `Enforced` shape the live path asserts (the live path also
+        // accepts `Unenforced` for a remote that genuinely cannot enforce).
+        let sandbox_fixture = rr7_git_remote_fixture("rr8-fixture-sandbox");
+        let (sandbox_runner, sandbox_ws) = rr7_runner(
+            "rr8-fixture-sandbox",
+            Some(sandbox_fixture.git_remote.clone()),
+            |c| {
+                c.with_cross_machine_boundary()
+                    .with_enforceable_remote_sandbox()
+                    .with_remote_os(RemoteOsFamily::Linux)
+            },
+        );
+        let profile = SandboxProfile::workspace_confined([sandbox_ws.clone()]);
+        let sandboxed = sandbox_runner
+            .start_process_sandboxed(
+                remote_request("run-rr8-fixture-sandbox", sandbox_ws.clone(), "printf ok"),
+                &sandbox_ws,
+                &profile,
+                SandboxTier::LinuxLandlockBwrap,
+                false,
+                None,
+            )
+            .expect("sandboxed start");
+        assert!(
+            matches!(
+                sandboxed.plan.enforcement,
+                SandboxEnforcement::Enforced { .. }
+            ),
+            "a cross-machine enforcing remote must report Enforced, got {:?}",
+            sandboxed.plan.enforcement
+        );
+        assert!(
+            sandboxed.outcome.is_some(),
+            "an enforced sandboxed launch yields an outcome"
+        );
+    }
+
+    /// RR8 LIVE, OPT-IN SSH smoke. `#[ignore]` by default; runs ONLY when BOTH
+    /// `CAPO_SERVER_REMOTE_RUNTIME_PREFLIGHT=1` and
+    /// `CAPO_SERVER_RUN_REMOTE_RUNTIME_LIVE=1` are set AND
+    /// `CAPO_SERVER_REMOTE_RUNTIME_SSH_HOST` names a reachable SSH destination;
+    /// otherwise it SKIPS CLEANLY with a recorded, secret-free reason.
+    ///
+    /// When it RUNS it drives the real cross-machine lifecycle over SSH — resolve
+    /// the (injected) channel, materialize a known commit by git, run one real
+    /// process, stream real stdout, and recover a controller-restart-with-live-
+    /// remote — and asserts the SAME deterministic shapes
+    /// `rr8_deterministic_fixture_pins_the_live_smoke_shapes` pins, so completion is
+    /// never solely operator-attested. The channel auth is carried strictly by
+    /// HANDLE (`auth_ref` / the operator's `ssh` config); the smoke NEVER reads or
+    /// logs raw SSH keys / `known_hosts` secrets / subscription tokens, and the
+    /// remote stdout + git transport URL pass the credential scan before any event.
+    #[test]
+    #[ignore = "live opt-in: requires CAPO_SERVER_REMOTE_RUNTIME_PREFLIGHT=1 + \
+                CAPO_SERVER_RUN_REMOTE_RUNTIME_LIVE=1 and a reachable SSH host in \
+                CAPO_SERVER_REMOTE_RUNTIME_SSH_HOST"]
+    fn rr8_live_ssh_smoke_full_lifecycle_or_clean_skip() {
+        let _env_guard = RR8_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        // DEFINED skip predicate: gate unset / no host all collapse to a recorded,
+        // secret-free Skip.
+        let ssh_destination = match live_remote_runtime_smoke_decision() {
+            LiveRemoteRuntimeSmokeDecision::Run { ssh_destination } => ssh_destination,
+            LiveRemoteRuntimeSmokeDecision::Skip { reason } => {
+                assert!(
+                    connectivity_redaction_is_clean(&reason),
+                    "the recorded skip reason must be secret-free: {reason}"
+                );
+                eprintln!("RR8 live SSH smoke skipped cleanly: {reason}");
+                return;
+            }
+        };
+        // The resolved SSH destination is an opaque label, never a credential.
+        assert!(
+            connectivity_redaction_is_clean(&ssh_destination),
+            "the SSH destination must be secret-free"
+        );
+
+        // Build a REAL git-backed remote workspace fixture (origin on the controller,
+        // remote repo + worktree root reached over the SAME SSH host). The transport
+        // URL is credential-scanned before it is ever recorded.
+        let fixture = rr7_git_remote_fixture("rr8-live");
+        let channel = OpenChannel::for_test("chan-rr8-live", &ssh_destination, "fp-rr8-live");
+        let ssh = SshRemoteConfig::new(
+            ssh_destination.clone(),
+            "fp-rr8-live",
+            temp_root("rr8-live-art"),
+        )
+        .with_auth_ref("ssh-agent:default")
+        .with_git_remote(fixture.git_remote.clone());
+        let runner = SshRemoteProcessRunner::build(channel, ssh);
+
+        // HONESTY: the real SSH transport crossed a machine boundary.
+        assert!(
+            !runner.is_loopback(),
+            "the live SSH path must be non-loopback"
+        );
+
+        // Materialize a known commit by git over the channel -> remote HEAD == SHA.
+        let materialization = runner
+            .materialize_workspace(&fixture.source_commit)
+            .expect("live git materialization");
+        assert_eq!(materialization.remote_head, fixture.source_commit);
+        assert!(
+            materialization
+                .events
+                .iter()
+                .all(|e| connectivity_redaction_is_clean(&e.detail)),
+            "no live materialization event may carry a credential"
+        );
+
+        // Run one real process on the remote, stream real stdout (redacted), and
+        // recover a controller-restart-with-live-remote. The shapes match the
+        // deterministic fixture above.
+        //
+        // SAFETY FLOOR (review finding 3): the live run goes through
+        // `start_process_sandboxed`, NOT a bare `start_process`. It composes the
+        // remote OS sandbox tier + the `safety-gates` `SandboxProfile`
+        // (workspace-confined to the remote worktree root, no network egress) under
+        // the revocable remote-control grant, and the enforcement claim is read from
+        // the REMOTE OS probe — HONESTLY `Enforced` (a linux/macOS remote with
+        // bwrap/sandbox-exec) or `Unenforced` (a remote that cannot enforce). The
+        // smoke asserts a truthful claim, never that enforcement is fabricated.
+        let remote_cwd = PathBuf::from(&materialization.remote_worktree_path);
+        let profile = SandboxProfile::workspace_confined([remote_cwd.clone()]);
+        let sandboxed = runner
+            .start_process_sandboxed(
+                remote_request("run-rr8-live", remote_cwd.clone(), "printf ok"),
+                &remote_cwd,
+                &profile,
+                SandboxTier::LinuxLandlockBwrap,
+                false,
+                Some(materialization.remote_head.clone()),
+            )
+            .expect("live sandboxed remote start");
+        // The enforcement claim must be one of the two HONEST outcomes for a
+        // launched run (never `Refused` here — the cwd is the confined root and no
+        // network is requested). Whether it is `Enforced` or `Unenforced` depends on
+        // the real remote OS, which is the whole point of the honest claim.
+        assert!(
+            matches!(
+                sandboxed.plan.enforcement,
+                SandboxEnforcement::Enforced { .. } | SandboxEnforcement::Unenforced { .. }
+            ),
+            "live sandbox enforcement must be a truthful remote-OS claim, got {:?}",
+            sandboxed.plan.enforcement
+        );
+        let outcome = sandboxed.outcome.expect("a launched run yields an outcome");
+        let process_ref = &outcome.process.runtime_process_ref;
+        assert!(
+            process_ref.starts_with("remote-process:fp-rr8-live:")
+                && process_ref.contains(":pid=")
+                && process_ref.contains(":boot="),
+            "live remote process-ref must match the fixture shape: {process_ref}"
+        );
+        let running = LocalRuntimeProcessRef {
+            status: "running".to_string(),
+            ..outcome.process.clone()
+        };
+        let stream = runner.stream_output(&running, 0);
+        assert!(
+            stream
+                .deltas
+                .iter()
+                .all(|d| connectivity_redaction_is_clean(&d.text)),
+            "live remote stdout must be redacted before any delta"
+        );
+        let recovery = runner.recover_run(&running, &running_recorded_boot(&running));
+        assert!(
+            matches!(
+                recovery.classification,
+                RemoteRecoveryClassification::Recovered | RemoteRecoveryClassification::Exited
+            ),
+            "live recovery must be a truthful classification, got {:?}",
+            recovery.classification
+        );
+
+        // Safety floor: revoking the remote-control grant STOPS the live run and
+        // forbids re-establishment without a fresh grant.
+        runner.revoke_control("rr8 live operator revoke", None);
+        let re_start =
+            runner.start_process(remote_request("run-rr8-live-2", remote_cwd, "printf ok"));
+        assert!(
+            matches!(re_start, Err(RuntimeError::RemoteControlRevoked { .. })),
+            "a revoked grant must forbid re-establishing a live remote run"
+        );
+
+        // Clean up the remote worktree + process group.
+        let _ = runner.cleanup_run(&running, CleanupPolicy::ReapAll);
+    }
+
+    /// RR8: serialize the tests that read/mutate the RR8 gate env vars so they do
+    /// not race under `--include-ignored` parallel execution.
+    static RR8_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }

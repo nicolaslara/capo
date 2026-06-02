@@ -263,6 +263,41 @@ self-attestation.
   with a recorded reason (never a silent truncation). RR6 adds only the two new facts a
   revocable capability + git-checkpoint rollback require.
 
+## RR8 Decisions (implemented)
+
+- The real cross-machine path is a NEW `RemoteChannel::Ssh(SshRemoteChannel)`
+  variant behind the SAME `RemoteProcessRunner` contract (named
+  `SshRemoteProcessRunner`), NOT a parallel runner. It shells `ssh` for the control
+  surface (launch/signal/probe/recovery_probe/stream/write_stdin/sandbox_probe/
+  cleanup_workspace/rollback_worktree) and REUSES the RR3 `GitRemote` for
+  materialize/reconcile, so git materialization is real cross-machine with no second
+  sync path. The deterministic gate NEVER instantiates it (it would touch the
+  network); only the opt-in `#[ignore]` smoke does.
+- HONESTY: `RemoteChannel::is_loopback()` returns `false` for the `Ssh` variant — a
+  real SSH transport crossed a machine boundary, so Capo's realness + sandbox
+  enforcement claims are truthful (the RR5 loopback short-circuit no longer applies).
+  The fake channel stays the loopback; the SSH channel is the only non-loopback.
+- Auth is carried strictly by HANDLE. `SshRemoteConfig::auth_ref` is an OPAQUE label
+  (e.g. `ssh-agent:default` / a `ssh_config` host alias) resolved by the operator's
+  `ssh` config; the runner NEVER reads or logs a raw SSH key, `known_hosts` secret, or
+  subscription token. `ssh` is invoked with `BatchMode=yes` so a missing credential
+  fails fast (clean skip) rather than prompting. The git transport URL passes the
+  credential scan (`scan_credential_shapes`) before `transport_url()` ever returns it.
+- The DEFINED skip predicate `live_remote_runtime_smoke_decision()` is purely a
+  function of (both gates set, an SSH host configured) — never operator judgement,
+  never a credential. It returns `LiveRemoteRuntimeSmokeDecision::{Run{ssh_destination},
+  Skip{reason}}` with a fixed secret-free reason, so a clean skip is CHECKABLE in
+  evidence. Gates mirror the Codex pair: `CAPO_SERVER_REMOTE_RUNTIME_PREFLIGHT` +
+  `CAPO_SERVER_RUN_REMOTE_RUNTIME_LIVE` (+ `CAPO_SERVER_REMOTE_RUNTIME_SSH_HOST`).
+- The live smoke is PAIRED with an always-on deterministic fixture
+  (`rr8_deterministic_fixture_pins_the_live_smoke_shapes` in `capo-runtime`, mirrored
+  by `server_rr8_deterministic_fixture_pins_the_live_smoke_shapes` in `capo-server`)
+  that pins the IDENTICAL shapes the live smoke asserts (process-ref shape,
+  materialized-HEAD==SHA, redacted-output, Recovered recovery classification), so no
+  acceptance criterion rests on operator self-attestation. The live smoke also
+  confirms the safety floor engages: revoking the remote-control grant forbids
+  re-establishing the run.
+
 ## Non-Goals
 
 - The channel itself (endpoint resolution, SSH/Tailscale/reverse transport,

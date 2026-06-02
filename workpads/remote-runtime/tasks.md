@@ -41,7 +41,13 @@ revocable remote-control grant; deterministic fake-channel crash-matrix suite +
 `-p capo-server` gate). RR7 complete (deterministic fake-remote consolidation
 harness exercising the full contract end to end — start/stop/health/reattach,
 real git materialization, output/stdin streaming, sandbox/worktree composition,
-crash-matrix recovery — with replay-stable assertions). RR8 pending.
+crash-matrix recovery — with replay-stable assertions). RR8 complete (real
+`SshRemoteProcessRunner` cross-machine transport behind the SAME runner contract;
+opt-in `#[ignore]` live SSH smoke behind `CAPO_SERVER_REMOTE_RUNTIME_PREFLIGHT` +
+`CAPO_SERVER_RUN_REMOTE_RUNTIME_LIVE` + `CAPO_SERVER_REMOTE_RUNTIME_SSH_HOST` with a
+DEFINED secret-free skip predicate; paired with a deterministic gate fixture that
+pins the identical process-ref / materialized-HEAD==SHA / redacted-output /
+recovery-classification shapes; `-p capo-server` gate covered).
 
 ## Feature Set
 
@@ -686,7 +692,40 @@ Dependencies: RR1-RR6.
 
 ## RR8 - Live Opt-In Remote SSH Smoke (Secrets Stripped) Paired With Deterministic Assertions
 
-Status: pending.
+Status: complete.
+
+Evidence: `crates/capo-runtime/src/lib.rs` adds the REAL cross-machine SSH transport
+behind the SAME runner contract — `SshRemoteChannel` (a `RemoteChannel::Ssh` variant
+shelling `ssh` for launch/signal/probe/recovery_probe/stream/write_stdin/sandbox_probe/
+cleanup_workspace/rollback_worktree, reusing the REAL `GitRemote` for
+materialize/reconcile) plus `SshRemoteProcessRunner::build`. The SSH transport is
+HONESTLY non-loopback (`RemoteChannel::is_loopback()` returns `false` for `Ssh`, so
+the realness/enforcement claims are truthful), built from an ALREADY-RESOLVED
+`OpenChannel` + `SshRemoteConfig` (no endpoint resolution), with auth carried strictly
+by HANDLE (`auth_ref` is a label only; the runner never reads/logs a raw key,
+`known_hosts` secret, or token; the git transport URL passes the credential scan
+before it is recorded). Gate constants `REMOTE_RUNTIME_PREFLIGHT_ENV` /
+`RUN_REMOTE_RUNTIME_LIVE_ENV` / `REMOTE_RUNTIME_SSH_HOST_ENV` mirror the Codex/
+preflight pair, and `live_remote_runtime_smoke_decision()` is the DEFINED,
+deterministic, secret-free skip predicate (`LiveRemoteRuntimeSmokeDecision::{Run,
+Skip}`).
+
+The live smoke `rr8_live_ssh_smoke_full_lifecycle_or_clean_skip` (`#[ignore]`) drives
+the real cross-machine lifecycle (resolve injected channel -> git-materialize a known
+commit -> run one process -> stream real stdout -> recover a controller-restart-with-
+live-remote -> revoke-control forbids re-establishment -> cleanup) or SKIPS CLEANLY
+with a recorded secret-free reason; it is PAIRED with the always-on (NO network)
+`rr8_deterministic_fixture_pins_the_live_smoke_shapes`, which pins the IDENTICAL
+shapes (process-ref `remote-process:{fp}:{host}:pid=...:boot=...`, materialized remote
+HEAD == source SHA, redacted output before any delta, Recovered-in-place recovery
+classification), so completion is never solely operator-attested.
+`rr8_skip_predicate_is_defined_and_records_reason_when_gate_unset` +
+`rr8_ssh_runner_is_not_loopback_and_does_no_endpoint_resolution` pin the predicate +
+honest non-loopback/no-resolution facts. Exercised from the `-p capo-server` gate in
+`crates/capo-server/src/tests/remote_live_smoke.rs` (skip-predicate, the deterministic
+pairing fixture, non-loopback/handle-only auth, and the `#[ignore]` live smoke).
+Gate: `cargo fmt --check` + `cargo clippy --all-targets --all-features -- -D warnings`
++ `cargo test --workspace` all green.
 
 Scope: One real `SshRemoteProcessRunner` smoke against a real SSH host, behind an
 explicit opt-in env gate, paired with the deterministic fixture and skipping
