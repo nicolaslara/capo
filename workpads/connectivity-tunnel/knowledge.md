@@ -146,6 +146,22 @@ lifecycle from scratch.
   Loopback keeps working with zero config (byte-for-byte unchanged default,
   pinned by regression); non-loopback requires explicit promotion + auth,
   fail-closed otherwise.
+### `authorize_socket` transport-level guard — PRE-CT8 PREREQUISITE
+
+- `ExposurePolicy::authorize_socket` is the TRANSPORT-level guard (it sees a
+  `SocketAddr`, not an `ExposureScope`). It deliberately classifies any non-loopback
+  socket as `ExposureScope::Private` — see the SCOPE NOTE in its doc comment. As a
+  consequence, a `Public`-scope bind PASSES `authorize_socket` whenever the ceiling
+  is at least `Private`; the socket layer cannot distinguish Private from Public.
+- This is CORRECT for CT2 (loopback vs non-loopback is all the socket layer can
+  know): the real Public/Funnel gate lives in `authorize()`, which sees the declared
+  `ExposureScope` and refuses Public by default (`ScopeExceedsCeiling`).
+- PRE-CT8 PREREQUISITE: when CT8 wires `TailscaleTunnel` + Funnel/public binds, the
+  CT8 implementer MUST NOT treat an `authorize_socket` pass as a Public authorization.
+  Funnel/public binds must additionally be gated through `authorize()` with the
+  declared `ExposureScope::Public` (plus the short-lived + audited grant), or a
+  Public bind that classifies as `Private` at the socket layer will silently slip the
+  ceiling check. Verify this guard chain before enabling any Funnel/public path.
 - `ExposureScope::requires_permission()`/`permission_scope()` remain the bridge
   into the `safety-gates` grant scopes; the policy gates BIND/CONNECT/resolution,
   the grant gates ACTIVATION — two independent checks, both required for a live

@@ -24,6 +24,10 @@ pub(crate) fn expose_connectivity_stub(
     let channel = parse_channel_kind(&required_arg(args, "--channel")?)?;
     let exposure = parse_exposure_scope(&required_arg(args, "--exposure")?)?;
     let address_ref = optional_arg(args, "--address").unwrap_or_else(|| owner_id.clone());
+    // CT2: opaque credential/identity HANDLES (never raw credentials). Empty flags
+    // normalize to absent so a blank `--auth-ref ""` does not masquerade as present.
+    let auth_ref = optional_arg(args, "--auth-ref").filter(|value| !value.is_empty());
+    let identity_ref = optional_arg(args, "--identity-ref").filter(|value| !value.is_empty());
     let record = has_flag(args, "--record");
     if let Some(unknown) = args.iter().find(|arg| {
         arg.starts_with("--")
@@ -35,6 +39,8 @@ pub(crate) fn expose_connectivity_stub(
                     | "--channel"
                     | "--exposure"
                     | "--address"
+                    | "--auth-ref"
+                    | "--identity-ref"
                     | "--record"
             )
     }) {
@@ -43,14 +49,26 @@ pub(crate) fn expose_connectivity_stub(
         ));
     }
 
+    // CT2 redaction guard (SECONDARY net, fail-closed on handle fields): refuse to
+    // proceed if a raw-credential-looking value was passed into a HANDLE field. A
+    // raw value in a handle field is a BUG, not something to silently scrub.
+    capo_state::guard_connectivity_handles(&capo_state::ConnectivityHandles {
+        auth_ref: auth_ref.as_deref(),
+        identity_ref: identity_ref.as_deref(),
+        identity_fingerprint: None,
+    })
+    .map_err(|error| format!("connectivity handle redaction guard failed closed: {error}"))?;
+
     let owner = endpoint_owner(&owner_kind, &owner_id)?;
     let tunnel = match exposure {
         ExposureScope::Loopback => ConnectivityTunnel::local_loopback(),
         ExposureScope::Private => ConnectivityTunnel::endpoint_stub(
-            ConnectivityEndpointConfig::stub_private(endpoint_id.clone(), address_ref),
+            ConnectivityEndpointConfig::stub_private(endpoint_id.clone(), address_ref)
+                .with_handles(auth_ref.clone(), identity_ref.clone()),
         ),
         ExposureScope::Public => ConnectivityTunnel::endpoint_stub(
-            ConnectivityEndpointConfig::stub_public(endpoint_id.clone(), address_ref),
+            ConnectivityEndpointConfig::stub_public(endpoint_id.clone(), address_ref)
+                .with_handles(auth_ref.clone(), identity_ref.clone()),
         ),
     };
     let resolved = tunnel
@@ -72,7 +90,7 @@ pub(crate) fn expose_connectivity_stub(
     // surfaced status is provably the POLICY gate (AuthRequired/ScopeExceedsCeiling)
     // and not merely the downstream grant gate — this is what distinguishes the
     // CT1 policy block from the pre-CT1 grant block.
-    let policy_decision = policy.authorize(resolved.exposure, None);
+    let policy_decision = policy.authorize(resolved.exposure, auth_ref.as_deref());
     let (permission_required, policy_block_reason) = match &policy_decision {
         Ok(required) => (*required, None),
         Err(error @ ConnectivityError::AuthRequired { .. }) => {
@@ -111,6 +129,14 @@ pub(crate) fn expose_connectivity_stub(
         health_status: health.status.clone(),
         reachable: health.reachable,
         revoked_at: None,
+        // CT2: opaque handles + derived audit fields. The handles came from the
+        // CLI flags (already guarded fail-closed above); the fingerprint/expiry
+        // come off the resolved endpoint (None for the stub today, populated by
+        // CT4/CT8). All are pointers/derived values, never raw credentials.
+        auth_ref: auth_ref.clone(),
+        identity_ref: identity_ref.clone(),
+        identity_fingerprint: resolved.identity_fingerprint.clone(),
+        expires_at: resolved.expires_at.clone(),
         updated_sequence: 0,
     };
     let sequence = if record {
@@ -130,8 +156,17 @@ pub(crate) fn expose_connectivity_stub(
         );
         event.project_id = Some(exposure.project_id.clone());
         event.item_id = Some(exposure.exposure_id.clone());
+        // CT2: record auth MODE + the opaque handles only — never the resolved
+        // credential. `auth_mode` mirrors the protocol-provider "record auth mode
+        // only" rule; the handle/identity refs are opaque pointers (already guarded
+        // fail-closed). `null` when absent so the payload stays replay-stable.
+        let auth_mode = if exposure.auth_ref.is_some() {
+            "auth_ref_handle"
+        } else {
+            "none"
+        };
         event.payload_json = format!(
-            "{{\"exposure_id\":\"{}\",\"resolved_endpoint_id\":\"{}\",\"endpoint_id\":\"{}\",\"owner_kind\":\"{}\",\"owner_id\":\"{}\",\"channel\":\"{}\",\"exposure\":\"{}\",\"permission_scope\":\"{}\",\"status\":\"{}\"}}",
+            "{{\"exposure_id\":\"{}\",\"resolved_endpoint_id\":\"{}\",\"endpoint_id\":\"{}\",\"owner_kind\":\"{}\",\"owner_id\":\"{}\",\"channel\":\"{}\",\"exposure\":\"{}\",\"permission_scope\":\"{}\",\"status\":\"{}\",\"auth_mode\":\"{}\",\"auth_ref\":{},\"identity_ref\":{},\"identity_fingerprint\":{},\"expires_at\":{}}}",
             escape_json(&exposure.exposure_id),
             escape_json(&resolved.resolved_endpoint_id),
             escape_json(&exposure.connectivity_endpoint_id),
@@ -140,7 +175,12 @@ pub(crate) fn expose_connectivity_stub(
             escape_json(&exposure.channel_kind),
             escape_json(&exposure.exposure),
             escape_json(&exposure.permission_scope),
-            escape_json(&exposure.status)
+            escape_json(&exposure.status),
+            auth_mode,
+            json_opt_string(exposure.auth_ref.as_deref()),
+            json_opt_string(exposure.identity_ref.as_deref()),
+            json_opt_string(exposure.identity_fingerprint.as_deref()),
+            json_opt_string(exposure.expires_at.as_deref()),
         );
         event.idempotency_key = Some(format!(
             "connectivity-exposure:{}:{}:{}:{}:{}:{}",
@@ -151,6 +191,13 @@ pub(crate) fn expose_connectivity_stub(
             exposure.channel_kind,
             exposure.exposure
         ));
+        // CT2 emitted-surface guard: make the `Safe` marker MEAN something by
+        // scanning the payload for any leaked credential pattern before persisting.
+        if let Err(pattern) = capo_state::assert_connectivity_event_safe(&event.payload_json) {
+            return Err(format!(
+                "connectivity event payload marked Safe but leaked a `{pattern}` credential pattern; refusing to persist"
+            ));
+        }
         event.redaction_state = RedactionState::Safe;
         Some(
             state(parsed)?
@@ -395,7 +442,13 @@ pub(crate) fn revoke_connectivity_exposure(
     args: &[String],
 ) -> Result<String, String> {
     let exposure_id = required_arg(args, "--exposure")?;
-    let reason = optional_arg(args, "--reason").unwrap_or_else(|| "operator_revoked".to_string());
+    let raw_reason =
+        optional_arg(args, "--reason").unwrap_or_else(|| "operator_revoked".to_string());
+    // CT2 FREE-TEXT rule: `--reason` is operator-supplied free text and the only
+    // free-text vector on any connectivity event payload. Scrub any recognized
+    // credential pattern out of it BEFORE it reaches the payload, the CLI render, or
+    // persistence, so the `RedactionState::Safe` marker below is earned, not assumed.
+    let (reason, _scrubbed) = capo_state::scrub_free_text(&raw_reason);
     if let Some(unknown) = args
         .iter()
         .find(|arg| arg.starts_with("--") && !matches!(arg.as_str(), "--exposure" | "--reason"))
@@ -440,6 +493,14 @@ pub(crate) fn revoke_connectivity_exposure(
         "connectivity-exposure-revoke:{}:{}",
         revoked.project_id, revoked.exposure_id
     ));
+    // CT2 emitted-surface guard: the `reason` free text was scrubbed above, but make
+    // the `Safe` marker MEAN something by scanning the fully-built payload for any
+    // leaked credential pattern before persisting, mirroring the expose-stub path.
+    if let Err(pattern) = capo_state::assert_connectivity_event_safe(&event.payload_json) {
+        return Err(format!(
+            "connectivity event payload marked Safe but leaked a `{pattern}` credential pattern; refusing to persist"
+        ));
+    }
     event.redaction_state = RedactionState::Safe;
     let sequence = state
         .append_event(
@@ -683,6 +744,18 @@ fn unix_timestamp_label() -> Result<String, String> {
         .map_err(|error| format!("system time before unix epoch: {error}"))?
         .as_secs();
     Ok(format!("unix:{seconds}"))
+}
+
+/// CT2: render an optional opaque HANDLE as a JSON value — a quoted, escaped
+/// string when present, the literal `null` when absent. The value is an opaque
+/// pointer/derived field (auth_ref/identity_ref/fingerprint/expiry), never a raw
+/// credential, and the emitted-surface guard scans the assembled payload before
+/// persistence as a secondary net.
+fn json_opt_string(value: Option<&str>) -> String {
+    match value {
+        Some(value) => format!("\"{}\"", escape_json(value)),
+        None => "null".to_string(),
+    }
 }
 
 pub(crate) fn parse_channel_kind(value: &str) -> Result<ChannelKind, String> {

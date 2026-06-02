@@ -401,6 +401,14 @@ pub struct ConnectivityExposureProjection {
     pub health_status: String,
     pub reachable: bool,
     pub revoked_at: Option<String>,
+    /// CT2: opaque credential/identity HANDLES + derived audit fields. These are
+    /// pointers/fingerprints/instants only — NEVER raw credentials. The connectivity
+    /// redaction guard fails closed before persistence if a raw-credential-looking
+    /// value ever lands in `auth_ref` / `identity_ref` / `identity_fingerprint`.
+    pub auth_ref: Option<String>,
+    pub identity_ref: Option<String>,
+    pub identity_fingerprint: Option<String>,
+    pub expires_at: Option<String>,
     pub updated_sequence: i64,
 }
 

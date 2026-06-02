@@ -4175,6 +4175,10 @@ fn dashboard_renders_connectivity_exposure_state() {
                     health_status: "unknown".to_string(),
                     reachable: false,
                     revoked_at: None,
+                    auth_ref: None,
+                    identity_ref: None,
+                    identity_fingerprint: None,
+                    expires_at: None,
                     updated_sequence: 0,
                 },
             )],
@@ -4821,6 +4825,178 @@ fn ct1_loopback_expose_stub_is_active_with_no_policy_block_reason() {
     assert!(
         planned.contains("policy_block_reason=none"),
         "loopback must carry no policy block reason, got: {planned}"
+    );
+}
+
+#[test]
+fn ct2_expose_stub_with_raw_credential_in_handle_field_fails_closed() {
+    // CT2 fail-closed (NOT scrubbed): a raw-credential-looking value passed into a
+    // HANDLE field (`--auth-ref`) is a BUG. The redaction guard refuses to proceed
+    // rather than silently scrubbing, because a raw value in a handle field could
+    // mask a real programming error that was about to log a token.
+    let state_root = temp_root("cli-ct2-handle-fail-closed");
+    let refused = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct2".to_string(),
+        "--owner-kind".to_string(),
+        "capo_server".to_string(),
+        "--owner-id".to_string(),
+        "server-ct2".to_string(),
+        "--channel".to_string(),
+        "control".to_string(),
+        "--exposure".to_string(),
+        "private".to_string(),
+        "--auth-ref".to_string(),
+        // A planted raw Tailscale authkey — must fail closed, never persist/scrub.
+        "tskey-auth-DEADBEEFCAFEBABE1234567890".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect_err("a raw credential in a handle field must fail closed");
+    assert!(
+        refused.contains("redaction guard failed closed"),
+        "expected the fail-closed guard, got: {refused}"
+    );
+    assert!(
+        refused.contains("tailscale_authkey"),
+        "the refusal must name the matched PATTERN, got: {refused}"
+    );
+    // The error names the pattern, never the planted value.
+    assert!(
+        !refused.contains("DEADBEEF"),
+        "the refusal must not echo the planted value"
+    );
+}
+
+#[test]
+fn ct2_opaque_handle_round_trips_and_no_secret_on_any_surface() {
+    // CT2: an OPAQUE auth_ref/identity_ref handle round-trips through expose-stub ->
+    // projection -> dashboard -> exposure-evidence; and a planted fake authkey
+    // placed in the FREE-TEXT reason of a revoke is never present on any emitted
+    // surface (defense-in-depth net behind architectural confinement).
+    let state_root = temp_root("cli-ct2-handle-roundtrip");
+    let planned = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct2-rt".to_string(),
+        "--owner-kind".to_string(),
+        "capo_server".to_string(),
+        "--owner-id".to_string(),
+        "server-ct2-rt".to_string(),
+        "--channel".to_string(),
+        "control".to_string(),
+        "--exposure".to_string(),
+        "private".to_string(),
+        "--auth-ref".to_string(),
+        // Legitimate OPAQUE handle (pointer to where a credential lives), not a raw key.
+        "keychain:capo/tailnet-authkey".to_string(),
+        "--identity-ref".to_string(),
+        "tailscale:device:n7Qk2cFf".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("record private exposure with opaque handles");
+    assert!(planned.contains("recorded=true"));
+    // The opaque handle does not flip the policy: the unpromoted loopback ceiling
+    // still blocks a private exposure (the handle satisfies CT1's auth-required
+    // check, but the ceiling check still fails closed).
+    assert!(planned.contains("status=blocked_pending_permission"));
+    let exposure_id = output_value(&planned, "exposure");
+
+    // The handle survives onto the dashboard exposure read model.
+    let dashboard = run_cli(vec![
+        "dashboard".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("dashboard");
+    assert!(dashboard.contains("connectivity_exposures=1"));
+
+    // The exposure-evidence artifact renders the OPAQUE handle + auth mode, never a
+    // raw credential, and passes the CT2 guard (it would refuse to retain otherwise).
+    let out_dir = state_root.join("ct2-evidence");
+    let evidence = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-evidence".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--out".to_string(),
+        out_dir.display().to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("export exposure evidence");
+    assert!(evidence.contains("connectivity_exposure_evidence_exported=true"));
+    let artifact_path = output_value(&evidence, "path");
+    let artifact = std::fs::read_to_string(&artifact_path).expect("read evidence artifact");
+    assert!(
+        artifact.contains("keychain:capo/tailnet-authkey"),
+        "evidence must render the opaque handle"
+    );
+    assert!(
+        artifact.contains("Auth mode: `auth_ref_handle`"),
+        "evidence must record auth MODE only"
+    );
+    // No raw credential pattern leaked onto the artifact surface.
+    assert_eq!(capo_state::scan_emitted_surface(&artifact), None);
+
+    // Defense-in-depth: PLANT a fake authkey in the FREE-TEXT revoke reason and
+    // prove the planted pattern is scrubbed out of EVERY emitted surface — the CLI
+    // render AND the persisted event payload read back from the store. This proves
+    // the planted shape is caught (not that an arbitrary credential is universally
+    // caught; that rests on architectural confinement).
+    let planted_key = "tskey-auth-DEADBEEFCAFEBABE1234567890";
+    let revoked = run_cli(vec![
+        "connectivity".to_string(),
+        "revoke-exposure".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--reason".to_string(),
+        planted_key.to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("revoke exposure");
+    assert!(revoked.contains("connectivity_exposure_revoked=true") || revoked.contains("revoked"));
+    // The planted key must not appear in the CLI render surface.
+    assert!(
+        !revoked.contains(planted_key),
+        "planted authkey leaked onto the CLI revoke render surface"
+    );
+    // Read the persisted revoke event back from the store and assert the raw key is
+    // ABSENT from the stored payload, that it was scrubbed to the redaction marker,
+    // and that no credential pattern survives the emitted-surface scan.
+    let state = SqliteStateStore::open(&state_root).expect("reopen state");
+    let events = state
+        .events_after(0, 1024)
+        .expect("read events back from store");
+    let revoke_event = events
+        .iter()
+        .find(|event| {
+            event.item_id.as_deref() == Some(exposure_id.as_str())
+                && event.payload_json.contains("\"status\":\"revoked\"")
+        })
+        .expect("persisted revoke event present");
+    assert!(
+        !revoke_event.payload_json.contains(planted_key),
+        "planted authkey leaked into the persisted revoke event payload: {}",
+        revoke_event.payload_json
+    );
+    assert!(
+        revoke_event
+            .payload_json
+            .contains(capo_state::CONNECTIVITY_REDACTION_MARKER),
+        "planted authkey was not scrubbed to the redaction marker: {}",
+        revoke_event.payload_json
+    );
+    assert_eq!(
+        capo_state::scan_emitted_surface(&revoke_event.payload_json),
+        None,
+        "credential pattern survived on the persisted revoke event payload surface"
     );
 }
 

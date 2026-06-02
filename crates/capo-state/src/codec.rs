@@ -273,6 +273,11 @@ pub(crate) fn projection_record_from_row(
                         ))
                     })?,
                     revoked_at: g,
+                    // CT2: opaque handle/derived fields rebuilt from the payload.
+                    auth_ref: payload_optional_string(&payload, "auth_ref"),
+                    identity_ref: payload_optional_string(&payload, "identity_ref"),
+                    identity_fingerprint: payload_optional_string(&payload, "identity_fingerprint"),
+                    expires_at: payload_optional_string(&payload, "expires_at"),
                     updated_sequence: 0,
                 },
             ))

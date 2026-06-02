@@ -95,6 +95,16 @@ pub(crate) fn connectivity_exposure_evidence(
         Some(exposure.exposure_id.clone()),
     );
     let markdown = render_connectivity_exposure_evidence(&project_id, &exposure);
+    // CT2 emitted-surface guard: the evidence artifact is one of the surfaces the
+    // redaction guard covers. Before retaining it, scan for any leaked credential
+    // pattern so the `RedactionState::Safe` marker on the artifact + event is
+    // earned, not asserted. A handle field that ever carried a raw credential
+    // already failed closed at expose-stub time; this is the defense-in-depth net.
+    if let Err(pattern) = capo_state::assert_connectivity_event_safe(&markdown) {
+        return Err(format!(
+            "connectivity exposure-evidence artifact leaked a `{pattern}` credential pattern; refusing to retain"
+        ));
+    }
     fs::create_dir_all(&out).map_err(|error| error.to_string())?;
     let content_hash = stable_cli_hash(&markdown);
     let artifact_id = format!("artifact-connectivity-exposure-evidence-{content_hash}");
@@ -179,7 +189,7 @@ fn render_connectivity_exposure_evidence(
     exposure: &ConnectivityExposureProjection,
 ) -> String {
     format!(
-        "<!-- capo:connectivity-exposure-evidence -->\n# Capo Connectivity Exposure Evidence - {}\n\n## Objective\n\nReview a recorded connectivity exposure without opening tunnels or touching runtime/provider processes.\n\n## Exposure\n\n- Project: `{}`\n- Exposure: `{}`\n- Endpoint: `{}`\n- Owner: `{}:{}`\n- Channel: `{}`\n- Exposure scope: `{}`\n- Permission scope: `{}`\n- Status: `{}`\n- Health: `{}`\n- Reachable: `{}`\n- Linked grant: `{}`\n- Revoked at: `{}`\n- Updated sequence: `{}`\n\n## Review Notes\n\n- Active exposure requires a matching durable allow grant before the exposure state can become active.\n- Revocation disables the exposure read model and marks it unreachable while preserving historical grant evidence.\n- This artifact records Capo connectivity metadata only; it is not proof of real tunnel reachability.\n\n## Evidence Policy\n\n- This report is derived from persisted Capo connectivity read models only.\n- It does not open tunnels, launch runtimes, launch provider CLIs, inspect credentials, materialize prompts, or mutate exposure state.\n- Credential material, tokens, cookies, subscription sessions, raw prompts, and provider output are not rendered.\n",
+        "<!-- capo:connectivity-exposure-evidence -->\n# Capo Connectivity Exposure Evidence - {}\n\n## Objective\n\nReview a recorded connectivity exposure without opening tunnels or touching runtime/provider processes.\n\n## Exposure\n\n- Project: `{}`\n- Exposure: `{}`\n- Endpoint: `{}`\n- Owner: `{}:{}`\n- Channel: `{}`\n- Exposure scope: `{}`\n- Permission scope: `{}`\n- Status: `{}`\n- Health: `{}`\n- Reachable: `{}`\n- Linked grant: `{}`\n- Revoked at: `{}`\n- Auth mode: `{}`\n- Auth handle ref: `{}`\n- Identity handle ref: `{}`\n- Identity fingerprint: `{}`\n- Expires at: `{}`\n- Updated sequence: `{}`\n\n## Review Notes\n\n- Active exposure requires a matching durable allow grant before the exposure state can become active.\n- Revocation disables the exposure read model and marks it unreachable while preserving historical grant evidence.\n- This artifact records Capo connectivity metadata only; it is not proof of real tunnel reachability.\n\n## Evidence Policy\n\n- This report is derived from persisted Capo connectivity read models only.\n- It does not open tunnels, launch runtimes, launch provider CLIs, inspect credentials, materialize prompts, or mutate exposure state.\n- The auth/identity values above are OPAQUE HANDLES and a derived fingerprint only (CT2); credential material, tokens, cookies, subscription sessions, raw prompts, and provider output are never rendered.\n",
         exposure.exposure_id,
         project_id,
         exposure.exposure_id,
@@ -194,6 +204,15 @@ fn render_connectivity_exposure_evidence(
         exposure.reachable,
         exposure.capability_grant_id.as_deref().unwrap_or("none"),
         exposure.revoked_at.as_deref().unwrap_or("none"),
+        if exposure.auth_ref.is_some() {
+            "auth_ref_handle"
+        } else {
+            "none"
+        },
+        exposure.auth_ref.as_deref().unwrap_or("none"),
+        exposure.identity_ref.as_deref().unwrap_or("none"),
+        exposure.identity_fingerprint.as_deref().unwrap_or("none"),
+        exposure.expires_at.as_deref().unwrap_or("none"),
         exposure.updated_sequence
     )
 }

@@ -153,6 +153,12 @@ pub(crate) fn projection_record_to_row(record: &ProjectionRecord) -> ProjectionR
                 "owner_id": exposure.owner_id,
                 "channel_kind": exposure.channel_kind,
                 "exposure": exposure.exposure,
+                // CT2: opaque handle/derived fields ride the projection payload
+                // (the lettered columns are exhausted). Round-trips replay-stable.
+                "auth_ref": exposure.auth_ref,
+                "identity_ref": exposure.identity_ref,
+                "identity_fingerprint": exposure.identity_fingerprint,
+                "expires_at": exposure.expires_at,
             })
             .to_string(),
         },

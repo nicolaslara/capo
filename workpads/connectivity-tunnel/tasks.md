@@ -215,7 +215,25 @@ not modify the grant engine.
 
 ## CT2 - Auth By `auth_ref` Handles + Schema Extension: Confined Resolution, Never Logged, Redaction Guard
 
-Status: pending.
+Status: done. `ConnectivityEndpointConfig` gained opaque `auth_ref`/`identity_ref`
+HANDLES (`with_handles` builder, empty normalized to `None`); `ResolvedEndpoint`
+gained `identity_fingerprint`/`expires_at` (`with_identity_fingerprint`/
+`with_expires_at` builders). The four fields propagate through the
+`ConnectivityExposureProjection`, the `capo-state` event codec (payload_json,
+since the lettered columns were exhausted), the `connectivity_exposures` table
+(+ nullable back-fill migration), the projection reader, and the exposure
+projection — round-trip + restart-replay stable (`capo-state`
+`ct2_connectivity_handle_schema_round_trips_and_replays`). The connectivity
+redaction guard (`crates/capo-state/src/connectivity_redaction.rs`) is the
+SECONDARY net with PER-FIELD rules: a credential-pattern match in a HANDLE field
+FAILS CLOSED (refuse to persist), free-text payload fields are scrubbed; it scans
+every emitted surface (expose-stub event payload + exposure-evidence artifact)
+before emission, making the previously-unverified `RedactionState::Safe` marker
+mean something. The expose-stub CLI takes `--auth-ref`/`--identity-ref`, guards
+them fail-closed, records auth MODE + opaque handles only (never a raw key), and
+the policy `authorize` now consults the handle. The PRIMARY never-logged
+guarantee remains ARCHITECTURAL CONFINEMENT (the planted-pattern net proves only
+the planted shapes are caught, not an arbitrary credential).
 
 Scope:
 

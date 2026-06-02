@@ -2290,6 +2290,19 @@ pub struct ConnectivityEndpointConfig {
     pub exposure: ExposureScope,
     pub allowed_channels: Vec<ChannelKind>,
     pub status: String,
+    /// CT2: an OPAQUE pointer to where the tunnel/device auth credential lives
+    /// (e.g. `keychain:capo/tailnet-authkey`), NEVER the raw authkey/token/cookie.
+    /// A non-loopback exposure requires this handle to be present (CT1
+    /// `ExposurePolicy::authorize`). Resolution of the handle to a real credential
+    /// is ARCHITECTURALLY CONFINED to the tunnel adapter at connect time (CT3); the
+    /// resolved value is structurally never returned to the controller, stored, or
+    /// logged. The redaction guard (CT2 secondary net) fails closed if a
+    /// raw-credential-looking value is ever placed in this handle field.
+    pub auth_ref: Option<String>,
+    /// CT2: an OPAQUE pointer to the EXPECTED tunnel/device identity (e.g.
+    /// `tailscale:device:<stable-id>` / a node-key fingerprint), checked by the
+    /// adapter (CT4) before resolving a private endpoint. Never a raw credential.
+    pub identity_ref: Option<String>,
 }
 
 impl ConnectivityEndpointConfig {
@@ -2302,6 +2315,8 @@ impl ConnectivityEndpointConfig {
             exposure: ExposureScope::Private,
             allowed_channels: vec![ChannelKind::Control, ChannelKind::Stdio, ChannelKind::Logs],
             status: "available".to_string(),
+            auth_ref: None,
+            identity_ref: None,
         }
     }
 
@@ -2314,7 +2329,19 @@ impl ConnectivityEndpointConfig {
             exposure: ExposureScope::Public,
             allowed_channels: vec![ChannelKind::Dashboard],
             status: "available".to_string(),
+            auth_ref: None,
+            identity_ref: None,
         }
+    }
+
+    /// CT2 builder: attach the OPAQUE `auth_ref` / `identity_ref` HANDLES. Neither
+    /// is ever a raw credential — they are pointers/fingerprints the adapter
+    /// resolves at connect time. An empty string is normalized to `None` so a
+    /// blank CLI flag does not masquerade as a present handle.
+    pub fn with_handles(mut self, auth_ref: Option<String>, identity_ref: Option<String>) -> Self {
+        self.auth_ref = auth_ref.filter(|value| !value.is_empty());
+        self.identity_ref = identity_ref.filter(|value| !value.is_empty());
+        self
     }
 
     fn resolved_uri(&self) -> String {
@@ -2336,6 +2363,16 @@ pub struct ResolvedEndpoint {
     pub exposure: ExposureScope,
     pub permission_scope: String,
     pub permission_required: bool,
+    /// CT2: the OBSERVED tunnel/device identity FINGERPRINT recorded by the
+    /// adapter at resolve time (CT4 writes it after an identity check). A derived
+    /// value (e.g. a hash of the node key), NEVER the raw key/credential. `None`
+    /// for tunnels that do not verify a device identity (loopback/fake/stub).
+    pub identity_fingerprint: Option<String>,
+    /// CT2: an OPTIONAL expiry instant for a short-lived resolution. Required for
+    /// any (gated) public exposure (CT8 enforces this + a clock-swept auto-revoke);
+    /// `None` for an open-ended loopback/private resolution. A bare instant, not a
+    /// credential.
+    pub expires_at: Option<String>,
 }
 
 impl ResolvedEndpoint {
@@ -2365,7 +2402,24 @@ impl ResolvedEndpoint {
             exposure,
             permission_scope: exposure.permission_scope().to_string(),
             permission_required,
+            identity_fingerprint: None,
+            expires_at: None,
         }
+    }
+
+    /// CT2 builder: record the OBSERVED identity fingerprint onto the resolved
+    /// endpoint (CT4 calls this after a successful device-identity check). An empty
+    /// string is normalized to `None`.
+    pub fn with_identity_fingerprint(mut self, fingerprint: Option<String>) -> Self {
+        self.identity_fingerprint = fingerprint.filter(|value| !value.is_empty());
+        self
+    }
+
+    /// CT2 builder: stamp the short-lived expiry instant (CT8 requires it for a
+    /// gated public resolution). An empty string is normalized to `None`.
+    pub fn with_expires_at(mut self, expires_at: Option<String>) -> Self {
+        self.expires_at = expires_at.filter(|value| !value.is_empty());
+        self
     }
 }
 
@@ -2837,6 +2891,46 @@ mod tests {
             promoted.authorize_socket(false, Some("keychain:capo/authkey")),
             Ok(())
         );
+    }
+
+    #[test]
+    fn ct2_endpoint_config_and_resolved_endpoint_carry_opaque_handles_only() {
+        // CT2: the schema additions are opaque pointers/derived values, set via the
+        // builder, and normalized so an empty flag does not masquerade as present.
+        let config = ConnectivityEndpointConfig::stub_private("endpoint-ct2", "100.64.0.7")
+            .with_handles(
+                Some("keychain:capo/tailnet-authkey".to_string()),
+                Some("tailscale:device:n7Qk2cFf".to_string()),
+            );
+        assert_eq!(
+            config.auth_ref.as_deref(),
+            Some("keychain:capo/tailnet-authkey")
+        );
+        assert_eq!(
+            config.identity_ref.as_deref(),
+            Some("tailscale:device:n7Qk2cFf")
+        );
+
+        // Empty strings normalize to None (not a present-but-blank handle).
+        let blank = ConnectivityEndpointConfig::stub_private("endpoint-ct2", "100.64.0.7")
+            .with_handles(Some(String::new()), None);
+        assert_eq!(blank.auth_ref, None);
+        assert_eq!(blank.identity_ref, None);
+
+        // ResolvedEndpoint carries the derived fingerprint + expiry (None by default).
+        let resolved = ConnectivityTunnel::endpoint_stub(config)
+            .resolve_endpoint(EndpointOwner::capo_server("server-1"), ChannelKind::Control)
+            .expect("resolve");
+        assert_eq!(resolved.identity_fingerprint, None);
+        assert_eq!(resolved.expires_at, None);
+        let stamped = resolved
+            .with_identity_fingerprint(Some("sha256:9f86d081".to_string()))
+            .with_expires_at(Some("2026-06-02T12:00:00Z".to_string()));
+        assert_eq!(
+            stamped.identity_fingerprint.as_deref(),
+            Some("sha256:9f86d081")
+        );
+        assert_eq!(stamped.expires_at.as_deref(), Some("2026-06-02T12:00:00Z"));
     }
 
     #[test]

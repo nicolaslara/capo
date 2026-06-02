@@ -158,6 +158,10 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
             health_status TEXT NOT NULL,
             reachable INTEGER NOT NULL,
             revoked_at TEXT,
+            auth_ref TEXT,
+            identity_ref TEXT,
+            identity_fingerprint TEXT,
+            expires_at TEXT,
             updated_sequence INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS runtime_targets (
@@ -707,6 +711,19 @@ pub(crate) fn migrate(connection: &mut Connection) -> StateResult<()> {
     // non-validation reports (which carry no outcome) stay NULL. The auditor keys
     // its weak/skipped downgrade on this enum, NOT on free-text summary prose.
     add_missing_column(connection, "goal_reports", "outcome", "TEXT")?;
+    // CT2: opaque credential/identity HANDLES + derived audit fields on the
+    // connectivity exposure projection. Nullable so exposures recorded before CT2
+    // back-fill as NULL. These carry handles/fingerprints/instants only — never raw
+    // credentials (the redaction guard fails closed before persistence).
+    add_missing_column(connection, "connectivity_exposures", "auth_ref", "TEXT")?;
+    add_missing_column(connection, "connectivity_exposures", "identity_ref", "TEXT")?;
+    add_missing_column(
+        connection,
+        "connectivity_exposures",
+        "identity_fingerprint",
+        "TEXT",
+    )?;
+    add_missing_column(connection, "connectivity_exposures", "expires_at", "TEXT")?;
     Ok(())
 }
 

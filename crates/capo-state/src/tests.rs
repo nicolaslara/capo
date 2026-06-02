@@ -2765,6 +2765,10 @@ fn connectivity_exposure_requires_grant_and_projects_revocation_and_health() {
                     health_status: "unknown".to_string(),
                     reachable: false,
                     revoked_at: None,
+                    auth_ref: None,
+                    identity_ref: None,
+                    identity_fingerprint: None,
+                    expires_at: None,
                     updated_sequence: 0,
                 },
             )],
@@ -2849,6 +2853,10 @@ fn connectivity_exposure_requires_grant_and_projects_revocation_and_health() {
                     health_status: "available".to_string(),
                     reachable: true,
                     revoked_at: None,
+                    auth_ref: None,
+                    identity_ref: None,
+                    identity_fingerprint: None,
+                    expires_at: None,
                     updated_sequence: 0,
                 },
             )],
@@ -2897,6 +2905,10 @@ fn connectivity_exposure_requires_grant_and_projects_revocation_and_health() {
                     channel_kind: "control".to_string(),
                     exposure: "private".to_string(),
                     permission_scope: "network:connect:private_tunnel".to_string(),
+                    auth_ref: None,
+                    identity_ref: None,
+                    identity_fingerprint: None,
+                    expires_at: None,
                     updated_sequence: 0,
                 },
             )],
@@ -2913,6 +2925,114 @@ fn connectivity_exposure_requires_grant_and_projects_revocation_and_health() {
     assert_eq!(revoked.health_status, "disabled");
     assert!(!revoked.reachable);
     assert_eq!(revoked.revoked_at.as_deref(), Some("2026-05-25T00:00:00Z"));
+}
+
+/// CT2 schema round-trip + replay: a connectivity exposure carrying the opaque
+/// `auth_ref`/`identity_ref` HANDLES and the derived `identity_fingerprint`/
+/// `expires_at` fields round-trips through the codec + projection, and a RESTART
+/// (fresh store reopened from the same on-disk event log) rebuilds the four CT2
+/// fields identically. Only opaque/derived values are stored — never a raw
+/// credential.
+#[test]
+fn ct2_connectivity_handle_schema_round_trips_and_replays() {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("capo-state-ct2-handles-{nanos}"));
+    let project_id = ProjectId::new("project-capo");
+    let exposure_id = "connectivity-exposure-ct2";
+
+    let exposure = ConnectivityExposureProjection {
+        exposure_id: exposure_id.to_string(),
+        project_id: project_id.clone(),
+        connectivity_endpoint_id: "endpoint-tailnet-1".to_string(),
+        owner_kind: "capo_server".to_string(),
+        owner_id: "capo-server-1".to_string(),
+        channel_kind: "control".to_string(),
+        exposure: "private".to_string(),
+        permission_scope: "network:connect:private_tunnel".to_string(),
+        status: "active".to_string(),
+        capability_grant_id: Some("grant-ct2".to_string()),
+        health_status: "available".to_string(),
+        reachable: true,
+        revoked_at: None,
+        // CT2: opaque handles + derived audit fields only.
+        auth_ref: Some("keychain:capo/tailnet-authkey".to_string()),
+        identity_ref: Some("tailscale:device:n7Qk2cFf".to_string()),
+        identity_fingerprint: Some("sha256:9f86d081884c7d65".to_string()),
+        expires_at: Some("2026-06-02T12:00:00Z".to_string()),
+        updated_sequence: 0,
+    };
+
+    {
+        let store = SqliteStateStore::open(&root).expect("open state store");
+        store
+            .append_event(
+                {
+                    let mut event = NewEvent::new(
+                        "event-connectivity-exposure-ct2",
+                        EventKind::ConnectivityExposureChanged,
+                        "test",
+                    );
+                    event.project_id = Some(project_id.clone());
+                    event.item_id = Some(exposure_id.to_string());
+                    event.payload_json =
+                        "{\"exposure_id\":\"connectivity-exposure-ct2\",\"auth_mode\":\"auth_ref_handle\"}"
+                            .to_string();
+                    event
+                },
+                &[ProjectionRecord::ConnectivityExposure(exposure.clone())],
+            )
+            .expect("append ct2 exposure");
+
+        let stored = store
+            .connectivity_exposures(&project_id)
+            .expect("exposures")
+            .pop()
+            .expect("exposure row");
+        // `updated_sequence` is assigned by the store on append; the CT2 fields are
+        // what must round-trip, so normalize the sequence before the field compare.
+        assert_eq!(
+            ConnectivityExposureProjection {
+                updated_sequence: 0,
+                ..stored.clone()
+            },
+            exposure,
+            "CT2 fields must round-trip through codec + projection"
+        );
+        assert_eq!(
+            stored.auth_ref.as_deref(),
+            Some("keychain:capo/tailnet-authkey")
+        );
+        assert_eq!(
+            stored.identity_ref.as_deref(),
+            Some("tailscale:device:n7Qk2cFf")
+        );
+        assert_eq!(
+            stored.identity_fingerprint.as_deref(),
+            Some("sha256:9f86d081884c7d65")
+        );
+        assert_eq!(stored.expires_at.as_deref(), Some("2026-06-02T12:00:00Z"));
+    }
+
+    // Restart: a fresh store reopened from the same root rebuilds the read model
+    // from the event log alone — the CT2 handle/derived fields must be identical.
+    let reopened = SqliteStateStore::open(&root).expect("reopen state store");
+    reopened.rebuild_projections().expect("rebuild projections");
+    let rebuilt = reopened
+        .connectivity_exposures(&project_id)
+        .expect("rebuilt exposures")
+        .pop()
+        .expect("rebuilt exposure row");
+    assert_eq!(
+        ConnectivityExposureProjection {
+            updated_sequence: 0,
+            ..rebuilt
+        },
+        exposure,
+        "CT2 handle/derived fields must rebuild identically after restart"
+    );
 }
 
 #[test]

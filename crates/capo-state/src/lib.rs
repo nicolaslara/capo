@@ -19,6 +19,7 @@ mod broadcast;
 mod codec;
 mod codec_adapter;
 mod codec_encode;
+mod connectivity_redaction;
 mod error;
 mod event;
 mod goal_report;
@@ -28,6 +29,11 @@ mod schema;
 mod thread;
 
 pub use broadcast::{EventBroadcaster, EventSubscription};
+pub use connectivity_redaction::{
+    CONNECTIVITY_REDACTION_MARKER, ConnectivityHandles, HandleRedactionError,
+    assert_connectivity_event_safe, guard_connectivity_handles, matched_credential_pattern,
+    scan_emitted_surface, scan_handle_field, scrub_free_text,
+};
 pub use error::{StateError, StateResult};
 pub use event::{
     ArtifactRecord, EventKind, EventRecord, NewEvent, ProjectedTurnOutcome, RecoveryAttempt,
