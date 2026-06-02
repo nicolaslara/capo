@@ -757,7 +757,34 @@ reuses teardown).
 
 ## CT9 - Consolidated Deterministic FakeTunnel/Replay Suite (No Live Tailnet)
 
-Status: pending.
+Status: done. The CT1-CT8 deterministic tests already pin each invariant in
+isolation; CT9 adds the CONSOLIDATED suite that asserts the full set holds TOGETHER
+on a single deterministic FakeTunnel substrate with NO live tailnet and NO real
+network, and that the whole exposure/health/audit state is replay-stable INCLUDING
+the CT2 schema fields. Three consolidated tests were added:
+`capo-runtime` `tests::ct9_consolidated_fake_tunnel_invariants_hold_with_no_live_tailnet`
+drives the runtime/`ConnectivityTunnel` tier end-to-end in one assertion block —
+CT1 policy (loopback default + opt-in + auth-required on bind AND connect, audited
+replay-stable `policy_changed`), CT3/CT4 private resolution + scope +
+`permission_required` + observed-fingerprint + channel open/close round-trip with
+PARITY between the scripted `TailscaleStatusSource` adapter and `FakeTunnel`, CT4
+identity-mismatch typed refusal on BOTH surfaces, CT3/CT8 Tailscale Public adapter
+refusal (`ScopeNotSupported`), CT5 reachable->unreachable->reconnected timeline +
+fake-clock stall-past-deadline transition (no wall-clock), CT7 close_channel ->
+proven unreachability, CT6 anti-sleep off-by-default/engage/last-revoke-release on
+the one-way edge with a secret-free status. `capo-cli`
+`tests::ct9_consolidated_exposure_lifecycle_is_replay_stable_including_ct2_schema`
+drives the FULL private lifecycle through the REAL CLI (requested(blocked) -> grant
+-> active -> CT5 heartbeat -> CT7 revoke teardown) carrying the CT2 opaque handles,
+then RESTARTS (reopen + `rebuild_projections` from the event log alone) and asserts
+the rebuilt `ConnectivityExposureProjection` is identical field-for-field to the
+live row (modulo the `updated_sequence` rebuild cursor), INCLUDING `auth_ref` /
+`identity_ref` / `last_heartbeat_at` and the grant id / `revoked_at`. `capo-cli`
+`tests::ct9_consolidated_policy_and_secrecy_invariants_fail_closed` pins the
+secrecy/policy invariants in the same suite: a public exposure is refused-by-default
+AND audited (never silent), and a raw-credential-looking value planted in a HANDLE
+field FAILS CLOSED (nothing persisted), not silently scrubbed. Live tailnet is
+deferred to CT10.
 
 Scope:
 

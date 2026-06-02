@@ -6745,6 +6745,247 @@ fn ct8_gated_public_exposure_cannot_activate_without_grant() {
     );
 }
 
+/// CT9: the consolidated CLI-tier replay-stability assertion. The per-task CLI
+/// tests (`ct1_*`..`ct8_*`) pin each invariant in isolation; this test drives the
+/// FULL private exposure lifecycle through the real CLI on a deterministic
+/// FakeTunnel substrate (NO live tailnet) carrying the CT2 opaque handles + CT5
+/// heartbeat + CT7 teardown, then RESTARTS — reopening the store and rebuilding the
+/// projections from the event log alone — and asserts the rebuilt
+/// `ConnectivityExposureProjection` is IDENTICAL to the live row, field-for-field,
+/// INCLUDING the CT2 schema fields (`auth_ref` / `identity_ref` /
+/// `identity_fingerprint` / `expires_at`) and the CT5 `last_heartbeat_at`. This is
+/// the CT9 "every assertion replay-stable: a restart/rebuild reproduces identical
+/// projected exposure/health/audit state including the CT2 schema fields" criterion.
+#[test]
+fn ct9_consolidated_exposure_lifecycle_is_replay_stable_including_ct2_schema() {
+    let state_root = temp_root("cli-ct9-replay");
+
+    // requested(blocked) with the CT2 opaque handles attached.
+    let planned = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct9".to_string(),
+        "--owner-kind".to_string(),
+        "capo_server".to_string(),
+        "--owner-id".to_string(),
+        "server-ct9".to_string(),
+        "--channel".to_string(),
+        "control".to_string(),
+        "--exposure".to_string(),
+        "private".to_string(),
+        "--auth-ref".to_string(),
+        "keychain:capo/tailnet-authkey".to_string(),
+        "--identity-ref".to_string(),
+        "tailscale:device:n7Qk2cFf".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("record private exposure with opaque handles");
+    assert!(planned.contains("status=blocked_pending_permission"));
+    let exposure_id = output_value(&planned, "exposure");
+
+    // grant: request-approval -> allow_once -> activate.
+    run_cli(vec![
+        "connectivity".to_string(),
+        "request-approval".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--approval".to_string(),
+        "approval-ct9".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("request approval");
+    run_cli(vec![
+        "permission".to_string(),
+        "decide".to_string(),
+        "--approval".to_string(),
+        "approval-ct9".to_string(),
+        "--decision".to_string(),
+        "allow_once".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("allow approval");
+    let activated = run_cli(vec![
+        "connectivity".to_string(),
+        "activate-exposure".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("activate exposure");
+    assert!(activated.contains("status=active"));
+
+    // CT5: a deterministic heartbeat timeline stamps last_heartbeat_at off the
+    // injectable clock (transition Initial@0 -> Lost@15000), no wall-clock.
+    let heartbeat = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-heartbeat".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--fake-timeline".to_string(),
+        "true,false".to_string(),
+        "--start-ms".to_string(),
+        "0".to_string(),
+        "--step-ms".to_string(),
+        "15000".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("run heartbeat");
+    assert!(heartbeat.contains("last_heartbeat_at=heartbeat-ms:15000"));
+
+    // CT7: a real revoke teardown (close_channel + proven unreachability).
+    let revoked = run_cli(vec![
+        "connectivity".to_string(),
+        "revoke-exposure".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--reason".to_string(),
+        "operator closed the ct9 control surface".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("revoke exposure");
+    assert!(revoked.contains("status=revoked"));
+    assert!(revoked.contains("channel_closed=true"));
+    assert!(revoked.contains("proven_unreachable=true"));
+
+    // Snapshot the LIVE projected exposure row after the full lifecycle.
+    let live = SqliteStateStore::open(&state_root)
+        .expect("open state")
+        .connectivity_exposures(&project_id())
+        .expect("live exposures")
+        .into_iter()
+        .find(|exposure| exposure.exposure_id == exposure_id)
+        .expect("live exposure row");
+
+    // The CT2 handle + audit fields survived end-to-end onto the live projection,
+    // as OPAQUE values only (never a raw credential).
+    assert_eq!(live.status, "revoked");
+    assert!(!live.reachable);
+    assert_eq!(
+        live.auth_ref.as_deref(),
+        Some("keychain:capo/tailnet-authkey")
+    );
+    assert_eq!(
+        live.identity_ref.as_deref(),
+        Some("tailscale:device:n7Qk2cFf")
+    );
+    assert_eq!(
+        live.last_heartbeat_at.as_deref(),
+        Some("heartbeat-ms:15000"),
+        "CT5: the heartbeat instant is on the projection"
+    );
+    assert!(
+        live.capability_grant_id.is_some(),
+        "an activated-then-revoked exposure carries its grant id"
+    );
+    assert!(live.revoked_at.is_some());
+
+    // RESTART: reopen the store and rebuild the projections from the event LOG
+    // alone, then assert the rebuilt row is byte-for-byte identical to the live row
+    // (modulo `updated_sequence`, which is the rebuild cursor, not exposure state).
+    let reopened = SqliteStateStore::open(&state_root).expect("reopen state");
+    reopened.rebuild_projections().expect("rebuild projections");
+    let rebuilt = reopened
+        .connectivity_exposures(&project_id())
+        .expect("rebuilt exposures")
+        .into_iter()
+        .find(|exposure| exposure.exposure_id == exposure_id)
+        .expect("rebuilt exposure row");
+
+    let normalized = |mut exposure: ConnectivityExposureProjection| {
+        exposure.updated_sequence = 0;
+        exposure
+    };
+    assert_eq!(
+        normalized(rebuilt),
+        normalized(live),
+        "CT9: a restart/rebuild must reproduce identical projected exposure state, \
+         including the CT2 handle/audit fields and the CT5 heartbeat instant"
+    );
+}
+
+/// CT9: in the SAME consolidated suite, the policy/secrecy invariants — a public
+/// exposure is refused-by-default and AUDITED (CT8/CT1), and a raw-credential-looking
+/// value in a HANDLE field FAILS CLOSED rather than being silently scrubbed (CT2).
+#[test]
+fn ct9_consolidated_policy_and_secrecy_invariants_fail_closed() {
+    // CT8/CT1: a public exposure is refused by default and recorded as an audited
+    // blocked event — never a silent allow.
+    let public_root = temp_root("cli-ct9-public-refused");
+    let refused = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct9-public".to_string(),
+        "--owner-kind".to_string(),
+        "capo_server".to_string(),
+        "--owner-id".to_string(),
+        "server-ct9-public".to_string(),
+        "--channel".to_string(),
+        "dashboard".to_string(),
+        "--exposure".to_string(),
+        "public".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        public_root.display().to_string(),
+    ])
+    .unwrap_err();
+    assert!(refused.contains("public/Funnel exposure is out of scope"));
+    assert!(refused.contains("block_reason=public_out_of_scope"));
+    assert_ne!(
+        output_value(&refused, "recorded_sequence"),
+        "none",
+        "the public refusal must be audited, not silent"
+    );
+
+    // CT2: a raw-credential-looking value planted in a HANDLE field (auth_ref) FAILS
+    // CLOSED — the handle guard refuses to persist rather than silently scrubbing a
+    // raw secret into an opaque-handle slot.
+    let handle_root = temp_root("cli-ct9-handle-failclosed");
+    let planted_authkey = "tskey-auth-DEADBEEFCAFEBABE1234567890";
+    let failed = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct9-handle".to_string(),
+        "--owner-kind".to_string(),
+        "capo_server".to_string(),
+        "--owner-id".to_string(),
+        "server-ct9-handle".to_string(),
+        "--channel".to_string(),
+        "control".to_string(),
+        "--exposure".to_string(),
+        "private".to_string(),
+        "--auth-ref".to_string(),
+        planted_authkey.to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        handle_root.display().to_string(),
+    ])
+    .unwrap_err();
+    assert!(
+        !failed.contains(planted_authkey),
+        "the planted authkey must never appear on the failure surface: {failed}"
+    );
+    // Nothing was persisted: the fail-closed guard fired BEFORE emission.
+    let store = SqliteStateStore::open(&handle_root).expect("open state");
+    assert!(
+        store
+            .connectivity_exposures(&project_id())
+            .expect("exposures")
+            .into_iter()
+            .all(|exposure| exposure.connectivity_endpoint_id != "endpoint-ct9-handle"),
+        "a raw value in a handle field must fail closed: no exposure may be persisted"
+    );
+}
+
 #[test]
 fn adapter_fixture_replay_cli_exports_evidence_without_raw_provider_text() {
     let state_root = temp_root("cli-adapter-replay-state");

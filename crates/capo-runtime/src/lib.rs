@@ -4484,6 +4484,225 @@ mod tests {
         }
     }
 
+    // ---- CT9: Consolidated deterministic FakeTunnel suite (no live tailnet) ----
+
+    /// CT9: one consolidated end-to-end assertion of every connectivity invariant
+    /// that can be exercised at the runtime/`ConnectivityTunnel` tier with NO live
+    /// tailnet and NO real network, asserting parity between the scripted
+    /// `TailscaleStatusSource` adapter and the `FakeTunnel`. The per-task tests
+    /// (`ct1_*`..`ct8_*`) pin each invariant in isolation; this test pins that the
+    /// FULL set holds TOGETHER on a single deterministic substrate, which is the
+    /// CT9 acceptance shape. The CLI-tier replay-stability half lives in
+    /// `capo-cli` (`ct9_consolidated_exposure_lifecycle_is_replay_stable`).
+    #[test]
+    fn ct9_consolidated_fake_tunnel_invariants_hold_with_no_live_tailnet() {
+        use crate::anti_sleep::{AntiSleepController, AntiSleepTransition, FakeInhibitorBackend};
+        use crate::connectivity_health::{ConnectivityClock, HeartbeatConfig, HeartbeatMonitor};
+
+        // --- CT1: policy invariants (loopback default, opt-in, auth-required) ---
+        let policy = ExposurePolicy::loopback_default();
+        assert_eq!(policy.ceiling(), ExposureScope::Loopback);
+        // Loopback authorizes with no auth and no opt-in, on BOTH the exposure layer
+        // and the (scope-blind) transport socket guard — the zero-config default.
+        assert_eq!(policy.authorize(ExposureScope::Loopback, None), Ok(false));
+        assert_eq!(policy.authorize_socket(true, None), Ok(()));
+        // Non-loopback without an auth handle is a typed AuthRequired refusal on BOTH
+        // sides (bind + connect), never a silent allow.
+        assert_eq!(
+            policy.authorize(ExposureScope::Private, None),
+            Err(ConnectivityError::AuthRequired {
+                scope: ExposureScope::Private
+            })
+        );
+        assert_eq!(
+            policy.authorize_socket(false, None),
+            Err(ConnectivityError::AuthRequired {
+                scope: ExposureScope::Private
+            })
+        );
+        // A handle present but an unpromoted ceiling still fails closed (no implicit
+        // widening). Promotion + handle permits resolution but still requires a grant.
+        assert_eq!(
+            policy.authorize(ExposureScope::Private, Some("keychain:capo/authkey")),
+            Err(ConnectivityError::ScopeExceedsCeiling {
+                requested: ExposureScope::Private,
+                ceiling: ExposureScope::Loopback,
+            })
+        );
+        let (promoted, promotion) =
+            policy.promote(ExposureScope::Private, "config", "unix:1700000000");
+        assert_eq!(
+            promoted.authorize(ExposureScope::Private, Some("keychain:capo/authkey")),
+            Ok(true),
+            "promotion + handle permits resolution but the grant still gates activation"
+        );
+        // The promotion is an audited, replay-stable event with no secret.
+        let promotion = promotion.expect("a real ceiling widening emits policy_changed");
+        let payload = promotion.payload_json();
+        assert!(payload.contains("\"previous_ceiling\":\"loopback\""));
+        assert!(payload.contains("\"new_ceiling\":\"private\""));
+        assert!(payload.contains("\"opt_in_source\":\"config\""));
+        assert!(
+            !payload.contains("keychain"),
+            "no handle/secret in the audit"
+        );
+
+        // --- CT3/CT4: private resolution + scope + identity parity (Tailscale vs Fake) ---
+        // Build a scripted Tailscale adapter and a FakeTunnel that both verify the
+        // SAME trusted device, and assert they agree on the resolution shape.
+        let tailscale = ConnectivityTunnel::tailscale(
+            ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker").with_handles(
+                Some("keychain:capo/tailnet-authkey".to_string()),
+                Some("tailscale:device:trusted-node".to_string()),
+            ),
+            TailscaleStatusSource::scripted(TailscalePeerStatus {
+                tailnet_address: "capo-worker.tailnet-1234.ts.net".to_string(),
+                observed_device_id: "trusted-node".to_string(),
+                reachable: true,
+            }),
+        );
+        let fake = ConnectivityTunnel::fake_scripted(FakeTunnelScript::private_matching(
+            "ts-endpoint-1",
+            "trusted-node",
+        ));
+        for tunnel in [&tailscale, &fake] {
+            let resolved = tunnel
+                .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+                .expect("private resolution succeeds for a verified device");
+            assert_eq!(resolved.exposure, ExposureScope::Private);
+            assert_eq!(resolved.permission_scope, "network:connect:private_tunnel");
+            assert!(resolved.permission_required);
+            // CT4: the OBSERVED device fingerprint is recorded for audit, never the key.
+            assert_eq!(
+                resolved.identity_fingerprint.as_deref(),
+                Some(identity_fingerprint_of("trusted-node").as_str())
+            );
+            // CT3 channel round-trip on both surfaces.
+            let channel = tunnel.open_channel(&resolved).expect("open channel");
+            assert_eq!(channel.identity_fingerprint, resolved.identity_fingerprint);
+            tunnel.close_channel(channel).expect("close channel");
+            // CT2/CT3: nothing secret leaks onto the resolution surface.
+            let rendered = format!("{resolved:?}");
+            assert!(!rendered.contains("tskey-auth"));
+            assert!(!rendered.contains("DEADBEEF"));
+        }
+
+        // CT4: an UNEXPECTED device yields the SAME typed IdentityMismatch on BOTH
+        // the scripted Tailscale adapter and the FakeTunnel — refusal+audit parity,
+        // never a silent connect.
+        let mismatched_tailscale = ConnectivityTunnel::tailscale(
+            ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker")
+                .with_handles(None, Some("tailscale:device:trusted-node".to_string())),
+            TailscaleStatusSource::scripted(TailscalePeerStatus {
+                tailnet_address: "capo-worker.tailnet-1234.ts.net".to_string(),
+                observed_device_id: "impostor-node".to_string(),
+                reachable: true,
+            }),
+        );
+        let mismatched_fake = ConnectivityTunnel::fake_scripted(
+            FakeTunnelScript::private_matching("ts-endpoint-1", "impostor-node")
+                .with_expected_identity_ref(Some("tailscale:device:trusted-node".to_string())),
+        );
+        for tunnel in [&mismatched_tailscale, &mismatched_fake] {
+            let err = tunnel
+                .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+                .expect_err("an unexpected device is refused");
+            assert!(
+                matches!(err, ConnectivityError::IdentityMismatch { .. }),
+                "identity mismatch must be a typed refusal, got {err:?}"
+            );
+        }
+
+        // CT3/CT8: the Tailscale adapter refuses a Public scope with a typed adapter
+        // refusal — a test-covered refusal, not a silent pass. The gated short-lived
+        // public prototype rides EndpointStub + grant, never the tailnet Funnel.
+        let mut public_config = ConnectivityEndpointConfig::tailscale("ts-public", "capo-worker");
+        public_config.exposure = ExposureScope::Public;
+        public_config.allowed_channels = vec![ChannelKind::Dashboard];
+        let public_tailscale =
+            ConnectivityTunnel::tailscale(public_config, reachable_tailnet_source());
+        let public_refusal = public_tailscale
+            .resolve_endpoint(EndpointOwner::capo_server("dash"), ChannelKind::Dashboard)
+            .expect_err("public scope is refused at the adapter");
+        assert!(matches!(
+            public_refusal,
+            ConnectivityError::ScopeNotSupported {
+                requested: ExposureScope::Public,
+                supported: ExposureScope::Private,
+                ..
+            }
+        ));
+
+        // --- CT5: health timeline (reachable -> unreachable -> reconnected) + stall ---
+        // Driven by the injectable clock on the FakeTunnel, NO wall-clock.
+        let clock = ConnectivityClock::manual(0);
+        let mut monitor = HeartbeatMonitor::new(
+            ConnectivityTunnel::fake_scripted(
+                FakeTunnelScript::private_matching("ts-endpoint-1", "trusted-node")
+                    .with_health_timeline(vec![true, false, true]),
+            ),
+            clock.clone(),
+            HeartbeatConfig::default(),
+        );
+        let b0 = monitor.beat();
+        assert_eq!(b0.transition, HealthTransition::Initial);
+        assert_eq!(b0.last_heartbeat_at, "heartbeat-ms:0");
+        clock.advance(15_000);
+        let b1 = monitor.beat();
+        assert_eq!(b1.transition, HealthTransition::Lost);
+        assert!(!b1.reachable);
+        assert_eq!(b1.last_heartbeat_at, "heartbeat-ms:15000");
+        clock.advance(15_000);
+        assert_eq!(monitor.beat().transition, HealthTransition::Reconnected);
+        // Stall-past-deadline is a TRANSITION (proven by advancing the clock), not a hang.
+        let stall_clock = ConnectivityClock::manual(0);
+        let mut stall_monitor = HeartbeatMonitor::new(
+            ConnectivityTunnel::fake_scripted(
+                FakeTunnelScript::private_matching("ts-endpoint-1", "trusted-node")
+                    .with_health_timeline(vec![true]),
+            ),
+            stall_clock.clone(),
+            HeartbeatConfig::new(10_000, 30_000),
+        );
+        assert_eq!(stall_monitor.beat().transition, HealthTransition::Initial);
+        stall_clock.advance(60_000);
+        assert_eq!(stall_monitor.beat().transition, HealthTransition::Stalled);
+
+        // --- CT7: real teardown — close_channel then PROVE unreachability ---
+        let teardown = ConnectivityTunnel::fake_scripted(
+            FakeTunnelScript::private_matching("ts-endpoint-1", "trusted-node")
+                .with_health_timeline(vec![true, false]),
+        );
+        let resolved = teardown
+            .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+            .expect("resolve");
+        let channel = teardown.open_channel(&resolved).expect("open");
+        assert!(
+            teardown.check_reachability().reachable,
+            "reachable while the channel is open"
+        );
+        teardown.close_channel(channel).expect("close");
+        assert!(
+            !teardown.check_reachability().reachable,
+            "after close_channel the tunnel proves unreachable"
+        );
+
+        // --- CT6: anti-sleep state machine (off-by-default / engage / release, one-way) ---
+        let mut off = AntiSleepController::new(false, Box::new(FakeInhibitorBackend::enforced()));
+        assert_eq!(off.set_active_exposures(1), AntiSleepTransition::Unchanged);
+        assert!(!off.is_engaged(), "anti-sleep is OFF by default");
+        let mut on = AntiSleepController::new(true, Box::new(FakeInhibitorBackend::enforced()));
+        assert_eq!(on.set_active_exposures(2), AntiSleepTransition::Engaged);
+        assert_eq!(on.set_active_exposures(1), AntiSleepTransition::Unchanged);
+        assert_eq!(
+            on.set_active_exposures(0),
+            AntiSleepTransition::Released,
+            "the last-revoke (count -> 0) releases on the one-way edge"
+        );
+        // The status carries no secret.
+        assert!(!format!("{:?}", on.status()).contains("keychain"));
+    }
+
     #[test]
     fn local_process_runner_captures_redacted_output_and_lifecycle_controls() {
         let workspace = temp_root("workspace");
