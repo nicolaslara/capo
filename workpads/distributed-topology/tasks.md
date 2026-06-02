@@ -536,11 +536,30 @@ Acceptance criteria:
   `ConnectivityEndpoint.status`. Every LOGGED transition is a recorded event,
   never a silent flag; ephemeral client transitions are observable via a status
   query, not the log.
-- Implement reconnect: when the runner leg recovers, emit
-  `connectivity.channel_opened` and re-run the `runtime-tunnel.md` recovery
-  sequence -- `RuntimeRunner.health(...)` / `recover_orphan(...)` -> `run.recovered`
-  / `run.orphaned` / `run.exited`. Keep-alive NEVER fabricates process liveness; a
-  heartbeat is a liveness signal, not proof the process exists.
+- Implement reconnect: when the runner leg recovers, RECORD the reconnect as an
+  auditable event and re-run the `runtime-tunnel.md` recovery sequence --
+  `RuntimeRunner.health(...)` / `recover_orphan(...)` / `recover_run(...)` ->
+  `run.recovered` / `run.orphaned` / `run.exited`. Keep-alive NEVER fabricates
+  process liveness; a heartbeat is a liveness signal, not proof the process exists.
+  - DECIDED (DT2, resolving the DT-pre-A open question and review finding 2): the
+    reconnect signal takes form (a) -- `EventKind::ConnectivityHealthChanged`
+    (`"connectivity.health_changed"`) with `status="available"` and
+    `detail="reconnected"`. NO new `ConnectivityChannelOpened` event kind is added.
+    Rationale: the in-tree `connectivity.health_changed` family already names every
+    health edge auditably (`initial`/`degraded`/`lost`/`stalled`/`reconnected`),
+    adding a parallel `channel_opened` kind would create a SECOND audit path for the
+    same fact (the review's own "no parallel/duplicate event path" invariant), and
+    the recovery re-run -- not a discrete open event -- is the load-bearing
+    reconnect behavior. The reconnect IS auditable from the log via this named,
+    in-tree-verified mechanism, which is exactly what the AC requires.
+  - WIRED (resolving review finding 3): `RunnerBeat.must_rerun_recovery` is acted
+    on, not merely flagged. `RunnerServerPlane::beat()` ->
+    `must_rerun_recovery=true` -> `RemoteProcessRunner::recover_run(...)` ->
+    `run.recovered` / `run.exited`, proven end-to-end by
+    `dt2_runner_reconnect_drives_recover_run_and_emits_run_recovered` and
+    `dt2_runner_reconnect_to_gone_remote_records_run_exited_not_fabricated_liveness`
+    (a returned LEG over a GONE process records `run.exited`, never fabricated
+    liveness).
 - Heartbeat payloads carry NO credential material and NO transcript content -- only
   liveness/health and the `runtime_process_ref` / `connectivity_endpoint_id`
   handles.
@@ -554,11 +573,36 @@ Verification (deterministic-first, live opt-in gated):
 - Deterministic `FakeTunnel` + fake-clock test: a missed runner heartbeat
   transitions LOGGED health `available` -> `degraded` -> `unreachable` and records
   each transition; a recovered heartbeat emits the reconnect event and re-runs the
-  runner recovery sequence.
+  runner recovery sequence. DONE: the LOGGED `RunnerServerPlane` owns the three-state
+  vocabulary layered on the CT5 binary probe -- the FIRST confirmed miss records
+  `degraded` and a CONTINUED miss escalates to `unreachable`, each its own
+  `connectivity.health_changed` event (resolving review finding 1; the runner leg no
+  longer skips `degraded`). Covered by
+  `runner_leg_logs_three_state_transitions_and_reruns_recovery_on_reconnect`,
+  `runner_degraded_recovers_directly_to_available_and_reruns_recovery`, and
+  `runner_stall_past_deadline_logs_degraded_with_stalled_cause`. The recovery re-run
+  is wired (see the WIRED note above).
 - Deterministic test: a missed client heartbeat degrades the EPHEMERAL connection
-  state and adds NO authoritative event; the event log is byte-identical to a run
-  with no client jitter.
-- Deterministic test: a heartbeat frame carries no credential/transcript fields.
+  state and adds NO authoritative event. SCOPED (resolving review finding 4): DT2
+  proves this STRUCTURALLY -- the `ClientServerPlane` API has no path to produce a
+  logged event (`observe_miss`/`observe_beat` return only a changed-bool), proven by
+  `client_jitter_produces_no_logged_event_type`. The FULL byte-identical event-log
+  comparison (start a real server, jitter the client plane, snapshot-compare the log
+  against a no-jitter run) is the DT6 byte-for-byte regression and is DEFERRED to DT6
+  by design; DT2's claim is the structural inertness, not the byte-equality snapshot.
+- Deterministic test: a heartbeat frame carries no credential/transcript fields
+  (`heartbeat_event_carries_no_credentials`).
+- Server-side validation (resolving review finding 6): the `RegisterRuntimeTarget`
+  server handler re-validates `runner_kind` / `status` against the closed
+  vocabularies BEFORE appending, so a raw-TCP JSON-RPC caller bypassing the CLI
+  cannot inject an arbitrary string into `runtime.target_registered`
+  (`ServerError::InvalidRuntimeTargetField`).
+- Test-port TOCTOU (resolving review finding 5): the dead-server announce test
+  reserves + releases the loopback port at the call site (`ReservedPort`), so the
+  connect hits a closed port and fails FAST with ConnectionRefused while keeping the
+  TOCTOU window minimal. (Holding an open-but-silent listener is deliberately NOT
+  done: it would accept the connection and the announce would block forever reading
+  a reply that never comes -- a hang, not a loud failure.)
 - `cargo fmt`; focused `cargo test -p capo-runtime -p capo-server`.
 - `git diff --check`.
 

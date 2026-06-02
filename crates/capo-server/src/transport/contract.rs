@@ -575,6 +575,7 @@ fn error_kinds() -> Vec<&'static str> {
         "goal_complete_not_a_lifecycle_command",
         "illegal_goal_status_transition",
         "unclassifiable_report_source",
+        "invalid_runtime_target_field",
         "remote",
         "cancelled",
         "interrupted",

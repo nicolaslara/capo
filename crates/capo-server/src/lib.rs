@@ -382,6 +382,31 @@ impl CapoServer {
                 // endpoint is carried by handle only -- no raw address/credential
                 // ever reaches the log. Idempotent on the target id, so a
                 // re-announce on reconnect does not duplicate the target.
+                //
+                // Review finding 6: this command can arrive from a remote runner
+                // speaking JSON-RPC directly, bypassing the CLI's
+                // `parse_runtime_runner_kind` / `parse_runtime_target_status`. The
+                // server is the single writer to the authoritative log, so it
+                // re-validates `runner_kind` / `status` against the SAME closed
+                // vocabularies here, BEFORE appending -- a raw-TCP caller cannot
+                // inject an arbitrary string into `runtime.target_registered`.
+                if !matches!(
+                    runner_kind.as_str(),
+                    "local-process" | "remote-process" | "container"
+                ) {
+                    return Err(ServerError::InvalidRuntimeTargetField {
+                        field: "runner_kind",
+                        value: runner_kind,
+                        expected: "local-process, remote-process, or container",
+                    });
+                }
+                if !matches!(status.as_str(), "available" | "disabled" | "unhealthy") {
+                    return Err(ServerError::InvalidRuntimeTargetField {
+                        field: "status",
+                        value: status,
+                        expected: "available, disabled, or unhealthy",
+                    });
+                }
                 let (target, sequence) = self
                     .controller
                     .register_runtime_target(

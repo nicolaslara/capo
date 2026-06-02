@@ -198,7 +198,42 @@ pub(crate) fn temp_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("capo-{name}-{nanos}"))
 }
 
+/// A loopback port reserved by a momentarily-held listener. The listener is closed
+/// by [`ReservedPort::release`], which returns the freed `127.0.0.1:<port>`.
+///
+/// We deliberately RELEASE (rather than hold) the listener before handing the
+/// address to a "dead server" test: an open-but-silent listener would ACCEPT the
+/// connection and the client would block forever reading a reply that never comes
+/// (a hang, not a loud failure). Releasing makes the connect hit a closed port and
+/// fail FAST with ConnectionRefused. Reserving + releasing right at the call site
+/// (rather than binding far ahead of the connect) keeps the TOCTOU window in which a
+/// stray process could grab the freed port as small as the kernel allows.
+pub(crate) struct ReservedPort {
+    listener: std::net::TcpListener,
+    address: String,
+}
+
+impl ReservedPort {
+    pub(crate) fn bind() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind reserved port");
+        let address = listener
+            .local_addr()
+            .expect("reserved local address")
+            .to_string();
+        Self { listener, address }
+    }
+
+    /// Close the held listener and return the now-free address.
+    pub(crate) fn release(self) -> String {
+        drop(self.listener);
+        self.address
+    }
+}
+
+/// Reserve a free loopback port and immediately release it, returning the address
+/// string. Used both where a later bind to the address is intended (the
+/// server-autostart path) and for a "dead server" address a test connects to and
+/// expects to be refused.
 pub(crate) fn unused_loopback_address() -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind unused address");
-    listener.local_addr().expect("local address").to_string()
+    ReservedPort::bind().release()
 }

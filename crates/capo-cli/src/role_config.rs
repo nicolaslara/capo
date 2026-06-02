@@ -327,9 +327,23 @@ pub(crate) fn role_server(_parsed: &ParsedArgs, args: &[String]) -> Result<Strin
         EndpointOwner::capo_server("server"),
         ChannelKind::Control,
     )?;
+    // DT2: report whether the keep-alive planes would be CONSTRUCTED for this
+    // server bind. The bind itself is the runner/client legs' server endpoint, so a
+    // non-loopback bind is what makes the two health planes live; a loopback bind
+    // keeps them inert (the all-local default). This is reported, not started — the
+    // long-lived listener + heartbeat loop are wired by `capo server serve`.
+    let keep_alive = keep_alive_config_for(Some(&resolved), Some(&resolved));
     let mut output = String::new();
     output.push_str("role=server\n");
     output.push_str(&render_resolved("server_bind", &resolved));
+    output.push_str(&format!(
+        "keep_alive_planes={}\n",
+        if keep_alive.is_some() {
+            "live"
+        } else {
+            "inert"
+        }
+    ));
     output.push_str(&format!(
         "all_local_default={}\nnext_action={}\n",
         matches!(peer, PeerEndpoint::Loopback(_)) && exposure == ExposureScope::Loopback,
@@ -542,6 +556,42 @@ fn default_loopback_addr() -> String {
     crate::server_client::DEFAULT_SERVER_ADDR.to_string()
 }
 
+// ----------------------------------------------------------------------------
+// DT2: keep-alive gating — derive the two-plane KeepAliveConfig from the resolved
+// role peers. The gate IS the resolved exposure: a fully-loopback (all-local)
+// deployment yields `None`, so the DT2 heartbeat machinery is never constructed
+// (the DT6 inertness guarantee, anchored to the SAME resolution path the role
+// commands use, not a second classifier).
+// ----------------------------------------------------------------------------
+
+/// Classify a resolved role peer's leg as loopback or non-loopback for DT2 gating.
+/// A peer reachable on a loopback exposure is an inert leg; any tunnel-resolved
+/// (`private`/`public`) peer is a live leg whose keep-alive plane is constructed.
+fn leg_for(resolved: &ResolvedRolePeer) -> capo_runtime::LegEndpoint {
+    if resolved.exposure == ExposureScope::Loopback.as_str() {
+        capo_runtime::LegEndpoint::classify(&resolved.resolved_uri)
+    } else {
+        // A private/public exposure is, by definition, a non-loopback leg.
+        capo_runtime::LegEndpoint::NonLoopback
+    }
+}
+
+/// DT2 inertness gate, anchored to the role resolution: build a
+/// [`capo_runtime::KeepAliveConfig`] from the resolved runner/client legs, or
+/// `None` when the deployment is all-loopback (single box). The all-local default
+/// therefore constructs NO keep-alive planes — the DT6 structural inertness
+/// guarantee, expressed against the exact resolution the role commands run.
+pub(crate) fn keep_alive_config_for(
+    runner_leg: Option<&ResolvedRolePeer>,
+    client_leg: Option<&ResolvedRolePeer>,
+) -> Option<capo_runtime::KeepAliveConfig> {
+    capo_runtime::KeepAliveConfig::for_role(
+        runner_leg.map(leg_for),
+        client_leg.map(leg_for),
+        capo_runtime::HeartbeatConfig::default(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,6 +728,49 @@ mod tests {
             resolved.reachability,
             PeerReachability::BlockedPendingPermission
         );
+    }
+
+    #[test]
+    fn dt2_keep_alive_is_inert_for_all_local_default() {
+        // DT6 inertness anchored to the DT1 resolution: a loopback server + loopback
+        // runner leg (the single-box default) builds NO keep-alive config, so the DT2
+        // heartbeat machinery is never constructed.
+        let loopback = resolve_for(
+            &PeerEndpoint::Loopback("127.0.0.1:7878".to_string()),
+            ExposureScope::Loopback,
+            EndpointOwner::capo_server("server"),
+            ChannelKind::Control,
+        )
+        .expect("resolve loopback");
+        let config = keep_alive_config_for(Some(&loopback), Some(&loopback));
+        assert!(
+            config.is_none(),
+            "the all-local default must construct no keep-alive plane"
+        );
+    }
+
+    #[test]
+    fn dt2_keep_alive_is_live_for_non_loopback_runner_leg() {
+        // A private (tunnel-resolved) runner leg makes the keep-alive plane LIVE; the
+        // loopback client leg stays inert within the same distributed deployment.
+        let runner_leg = resolve_for(
+            &PeerEndpoint::Endpoint("ep-private".to_string()),
+            ExposureScope::Private,
+            EndpointOwner::capo_server("server"),
+            ChannelKind::Control,
+        )
+        .expect("resolve private runner leg");
+        let client_leg = resolve_for(
+            &PeerEndpoint::Loopback("127.0.0.1:7878".to_string()),
+            ExposureScope::Loopback,
+            EndpointOwner::capo_server("server"),
+            ChannelKind::Control,
+        )
+        .expect("resolve loopback client leg");
+        let config = keep_alive_config_for(Some(&runner_leg), Some(&client_leg))
+            .expect("a non-loopback runner leg builds a keep-alive config");
+        assert_eq!(config.runner_leg, capo_runtime::LegEndpoint::NonLoopback);
+        assert_eq!(config.client_leg, capo_runtime::LegEndpoint::Loopback);
     }
 
     #[test]

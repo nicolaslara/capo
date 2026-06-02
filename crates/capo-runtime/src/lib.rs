@@ -28,6 +28,11 @@ mod async_runner;
 /// state and from `RuntimeRunner` (it depends only on the `ConnectivityTunnel`
 /// surface).
 pub mod connectivity_health;
+/// DT2: keep-alive across the whole distributed path on TWO SEPARATE health planes
+/// (runner<->server LOGGED, client<->server EPHEMERAL). Composes the CT5
+/// `connectivity_health` heartbeat into the two-plane policy and is gated so the
+/// all-local default constructs neither plane.
+pub mod keep_alive;
 mod sandbox;
 mod worktree;
 
@@ -35,6 +40,10 @@ pub use connectivity_health::{
     ConnectivityClock, HealthTransition, HeartbeatConfig, HeartbeatHandle, HeartbeatMonitor,
     HeartbeatOutcome, PUBLIC_EXPOSURE_MAX_TTL_MS, expiry_label, parse_expiry_ms,
     public_expiry_label,
+};
+pub use keep_alive::{
+    ClientServerPlane, HealthPlanes, HealthState, KeepAliveConfig, LegEndpoint, RunnerBeat,
+    RunnerHealthEvent, RunnerServerPlane, runner_health_event_is_clean,
 };
 
 pub use async_runner::{
@@ -10131,6 +10140,105 @@ mod tests {
         let first = runner.recover_run(&running, &recorded_boot);
         let second = runner.recover_run(&running, &recorded_boot);
         assert_eq!(first, second, "recovery must be replay-stable");
+    }
+
+    #[test]
+    fn dt2_runner_reconnect_drives_recover_run_and_emits_run_recovered() {
+        // DT2 (review finding 3): the LOGGED runner plane does not just FLAG a
+        // reconnect -- the flag is WIRED to the real `runtime-tunnel.md` recovery
+        // sequence. This test drives the full seam end-to-end:
+        //   beat() -> RunnerBeat.must_rerun_recovery -> recover_run() -> run.recovered
+        // with NO wall-clock sleep (a fake clock advances the heartbeat) and NO
+        // network (the recovery probe is the deterministic fake channel). It proves
+        // the reconnect signal actually PRODUCES the recovery events, not that a bool
+        // was set.
+        use crate::connectivity_health::{ConnectivityClock, HeartbeatConfig, HeartbeatMonitor};
+        use crate::keep_alive::RunnerServerPlane;
+
+        // A remote run whose channel comes back ALIVE + reattachable at recovery
+        // time (the scripted fake), so a re-probe classifies `Recovered`.
+        let (runner, running, recorded_boot) =
+            scripted_recovery_runner("dt2-reconnect", |c| c.recover_alive_reattachable());
+
+        // The runner leg: available, then a missed heartbeat, then a recovered one.
+        let clock = ConnectivityClock::manual(0);
+        let tunnel = ConnectivityTunnel::fake_scripted(
+            FakeTunnelScript::private_matching("dt2-runner-leg", "trusted-runner")
+                .with_health_timeline(vec![true, false, true]),
+        );
+        let monitor = HeartbeatMonitor::new(tunnel, clock.clone(), HeartbeatConfig::default());
+        let mut plane = RunnerServerPlane::new(monitor, running.runtime_process_ref.clone());
+
+        let b0 = plane.beat(); // available (initial)
+        assert!(!b0.must_rerun_recovery);
+        clock.advance(15_000);
+        let b1 = plane.beat(); // first miss -> degraded
+        assert!(!b1.must_rerun_recovery);
+        clock.advance(15_000);
+        let b2 = plane.beat(); // recovered -> available, MUST re-run recovery
+        assert!(
+            b2.must_rerun_recovery,
+            "a recovered runner leg must signal a recovery re-run"
+        );
+
+        // Act on the signal: the keep-alive flag DRIVES the runtime recovery
+        // sequence (it never fabricates liveness itself -- recover_run re-probes the
+        // actual remote over the channel and classifies the truth).
+        assert!(b2.must_rerun_recovery);
+        let recovery = runner.recover_run(&running, &recorded_boot);
+        assert_eq!(
+            recovery.classification,
+            RemoteRecoveryClassification::Recovered
+        );
+        let kinds: Vec<&str> = recovery.events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "runtime.remote_recovery_attempted",
+                "runtime.remote_run_recovered"
+            ],
+            "the reconnect must actually produce the recovery event trail"
+        );
+    }
+
+    #[test]
+    fn dt2_runner_reconnect_to_gone_remote_records_run_exited_not_fabricated_liveness() {
+        // DT2 honesty (review finding 3 + spec "keep-alive NEVER fabricates process
+        // liveness"): a recovered LEG does not mean a recovered RUN. When the leg
+        // returns but the remote process is GONE, driving the recovery sequence
+        // records `run.exited`, NOT `run.recovered` -- the heartbeat is a liveness
+        // signal for the LEG, never proof the process survived.
+        use crate::connectivity_health::{ConnectivityClock, HeartbeatConfig, HeartbeatMonitor};
+        use crate::keep_alive::RunnerServerPlane;
+
+        let (runner, running, recorded_boot) =
+            scripted_recovery_runner("dt2-reconnect-gone", |c| c.recover_gone());
+
+        let clock = ConnectivityClock::manual(0);
+        let tunnel = ConnectivityTunnel::fake_scripted(
+            FakeTunnelScript::private_matching("dt2-runner-leg-gone", "trusted-runner")
+                .with_health_timeline(vec![true, false, true]),
+        );
+        let monitor = HeartbeatMonitor::new(tunnel, clock.clone(), HeartbeatConfig::default());
+        let mut plane = RunnerServerPlane::new(monitor, running.runtime_process_ref.clone());
+
+        plane.beat();
+        clock.advance(15_000);
+        plane.beat();
+        clock.advance(15_000);
+        let reconnect = plane.beat();
+        assert!(reconnect.must_rerun_recovery);
+
+        let recovery = runner.recover_run(&running, &recorded_boot);
+        assert_eq!(
+            recovery.classification,
+            RemoteRecoveryClassification::Exited,
+            "a returned leg over a gone process must record run.exited, not run.recovered"
+        );
+        assert_eq!(
+            recovery.events.last().unwrap().kind,
+            "runtime.remote_run_exited"
+        );
     }
 
     #[test]

@@ -220,5 +220,13 @@ fn server_error_wire(error: &ServerError) -> (&'static str, String) {
                  observed-evidence source"
             ),
         ),
+        ServerError::InvalidRuntimeTargetField {
+            field,
+            value,
+            expected,
+        } => (
+            "invalid_runtime_target_field",
+            format!("invalid runtime target {field} `{value}`; expected {expected}"),
+        ),
     }
 }

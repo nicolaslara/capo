@@ -77,6 +77,17 @@ pub enum ServerError {
     UnclassifiableReportSource {
         source: String,
     },
+    /// DT1/DT2 (review finding 6): a `RegisterRuntimeTarget` announce -- which may
+    /// arrive from a remote runner speaking JSON-RPC directly, bypassing the CLI's
+    /// `parse_runtime_runner_kind` / `parse_runtime_target_status` -- carried a
+    /// `runner_kind` or `status` outside the closed vocabularies. Rejected at the
+    /// server seam BEFORE anything is appended, so a raw-TCP caller cannot inject an
+    /// arbitrary string into the authoritative `runtime.target_registered` event.
+    InvalidRuntimeTargetField {
+        field: &'static str,
+        value: String,
+        expected: &'static str,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -186,6 +186,30 @@ are recorded events (runner leg) or observable status (client leg), never silent
 flags; heartbeat payloads carry only liveness + handles, never credentials or
 transcripts.
 
+DECISION (DT2, resolving the DT-pre-A open reconnect-form question + adversarial
+review findings 1-3):
+
+- **Three-state on the LOGGED plane.** The CT5 `HeartbeatMonitor` is a BINARY probe
+  (reachable | unreachable). The DT2 `RunnerServerPlane` owns the
+  `available -> degraded -> unreachable` three-state vocabulary that
+  `ConnectivityEndpoint.status` publishes: the FIRST confirmed miss records
+  `degraded`, a CONTINUED miss escalates to `unreachable`, and each edge is its own
+  `connectivity.health_changed` event. The runner leg does NOT skip `degraded`
+  (finding 1). The `status` field carries the three-state value; the `detail` field
+  carries the CAUSE (`initial` / `lost` / `stalled` / `reconnected`).
+- **Reconnect form = (a), `health_changed` + `detail="reconnected"`.** No new
+  `ConnectivityChannelOpened` event kind is added (finding 2). The in-tree
+  `connectivity.health_changed` family already names every health edge auditably; a
+  separate `channel_opened` kind would be a SECOND audit path for the same fact,
+  violating the "no parallel/duplicate event path" invariant. Leg recovery is
+  auditable from the log via this named, in-tree-verified mechanism.
+- **The reconnect flag is WIRED, not self-attesting (finding 3).**
+  `RunnerBeat.must_rerun_recovery` is acted on by the caller, which drives
+  `RemoteProcessRunner::recover_run(...)` -> `run.recovered` / `run.orphaned` /
+  `run.exited` / `recovery_pending`. A returned LEG over a GONE process records
+  `run.exited`, never fabricated liveness. Proven end-to-end (no sleep, no network)
+  by the `dt2_runner_reconnect_*` tests in `capo-runtime`.
+
 ## Streaming Resume Is The Core Integration Guarantee (Split DT4a / DT4b)
 
 The `Subscribe { from_sequence }` tail resumes across a client OR runner

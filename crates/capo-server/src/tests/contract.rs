@@ -321,6 +321,7 @@ fn schema_enumerations_cover_every_wire_variant() {
             }
             ServerError::IllegalGoalStatusTransition { .. } => "illegal_goal_status_transition",
             ServerError::UnclassifiableReportSource { .. } => "unclassifiable_report_source",
+            ServerError::InvalidRuntimeTargetField { .. } => "invalid_runtime_target_field",
         }
     }
 
@@ -1002,5 +1003,10 @@ fn sample_errors() -> Vec<ServerError> {
             requested_status: s(),
         },
         ServerError::UnclassifiableReportSource { source: s() },
+        ServerError::InvalidRuntimeTargetField {
+            field: "runner_kind",
+            value: s(),
+            expected: "local-process, remote-process, or container",
+        },
     ]
 }

@@ -177,8 +177,14 @@ fn runner_announces_runtime_target_over_jsonrpc_and_client_tail_sees_server_appe
 fn runner_announce_against_dead_server_fails_loudly_no_inprocess_fallback() {
     let runner_state = temp_root("role-topology-dead-server-state");
     let runner_state_str = runner_state.display().to_string();
-    // A loopback address with no server bound to it.
-    let dead_addr = unused_loopback_address();
+    // A loopback address whose port we RESERVE, then RELEASE immediately before the
+    // announce, so the runner's connect hits a genuinely-closed port and fails FAST
+    // with ConnectionRefused (we must NOT hold an open-but-silent listener: that
+    // would ACCEPT the connection and the announce would block forever reading a
+    // reply that never comes). Reserving + releasing right at the call site -- rather
+    // than the old bind-at-top-of-test-and-drop -- minimizes the TOCTOU window in
+    // which a stray process could grab the freed port on a busy CI box.
+    let dead_addr = ReservedPort::bind().release();
 
     let output = capo_failure([
         "role",
@@ -203,9 +209,9 @@ fn runner_announce_against_dead_server_fails_loudly_no_inprocess_fallback() {
         &runner_state_str,
     ]);
     // The announce must FAIL loudly (non-zero exit, captured by `capo_failure`)
-    // because there is no live server and no in-process fallback. We do not pin
-    // the exact transport errno (a dropped listener may surface as
-    // ConnectionRefused or ConnectionReset depending on the OS); the load-bearing
+    // because there is no JSON-RPC server at the released port and no in-process
+    // fallback. We do not pin the exact transport errno (a freed loopback port may
+    // surface as ConnectionRefused or, rarely, ConnectionReset); the load-bearing
     // facts are (a) it failed and (b) it did NOT silently write in-process.
     assert!(
         !output.contains("runner_announced=true"),
