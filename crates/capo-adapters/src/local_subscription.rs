@@ -476,6 +476,12 @@ fn local_adapter_redaction_rules() -> Vec<RedactionRule> {
         ("api_key", "api_[REDACTED]"),
         ("access_token", "access_[REDACTED]"),
         ("refresh_token", "refresh_[REDACTED]"),
+        // CS1: parity with the secondary scan keywords. A connector
+        // `ANTHROPIC_AUTH_TOKEN` / generic `auth_token` value is redacted
+        // pre-write (redact-first, then scan) so the artifact is kept in
+        // redacted form rather than dropped wholesale by the scan.
+        ("anthropic_auth_token", "anthropic_auth_[REDACTED]"),
+        ("auth_token", "auth_[REDACTED]"),
     ]
     .into_iter()
     .map(|(pattern, replacement)| RedactionRule {
@@ -507,6 +513,18 @@ fn sensitive_marker(contents: &str) -> Option<String> {
             "session_token",
             "access_token",
             "refresh_token",
+            // CS1: a bearer/session `ANTHROPIC_AUTH_TOKEN` value has no `sk-`
+            // shape and was previously missed by the keyword scan. The primary
+            // defense is the env allowlist + `env_clear()` (the token is never
+            // handed to the spawned process), but the secondary stdout scan now
+            // also recognizes the `anthropic_auth_token` / `auth_token` keywords
+            // so a leaked bearer value is caught before retention. The more
+            // specific `anthropic_auth_token` is checked first so it is the
+            // marker reported for the connector token; `auth_token` then covers
+            // the generic case (it would otherwise subsume the specific match
+            // since `.find` returns the first hit).
+            "anthropic_auth_token",
+            "auth_token",
             "oauth",
             "api_key",
             "anthropic_api_key",

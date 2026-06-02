@@ -516,20 +516,24 @@ fn require_fake_arg(args: &[String], key: &str) -> Result<(), String> {
     }
 }
 
-/// AI2: resolve the agent's CHAT adapter binding from `key` (e.g. `--adapter`).
+/// AI2/CS5: resolve the agent's CHAT adapter binding from `key` (e.g.
+/// `--adapter`).
 ///
-/// Accepts `fake` (the default when omitted) and `codex`; rejects anything else.
-/// `codex` binds the real read-only one-shot Codex chat adapter for the agent's
-/// `SendTask`/`SteerAgent` turns (fail-closed-fast when the live-provider gate is
-/// off). This RELAXES the previous `require_fake_arg("--adapter")` so a user can
-/// register a Codex-bound agent and reach real Codex chat through the running
-/// server; the default stays `fake`, so mock/fake agents are unchanged.
-fn require_chat_adapter_arg(args: &[String], key: &str) -> Result<String, String> {
+/// Accepts `fake` (the default when omitted), `codex`, and `claude`; rejects
+/// anything else. `codex` binds the real read-only one-shot Codex chat adapter;
+/// `claude` binds the real Claude subscription one-shot chat adapter (CS5) -- both
+/// fail-closed-fast when their respective live-provider gate is off, and both
+/// reach the server's already-wired `RealChatBinding`. This RELAXES the previous
+/// `require_fake_arg("--adapter")` so a user can register a Codex- or Claude-bound
+/// agent and reach the real one-shot chat through the running server; the default
+/// stays `fake`, so mock/fake agents are unchanged.
+pub(crate) fn require_chat_adapter_arg(args: &[String], key: &str) -> Result<String, String> {
     match optional_value(args, key)?.as_deref() {
         None | Some("fake") => Ok("fake".to_string()),
         Some("codex") => Ok("codex".to_string()),
+        Some("claude") => Ok("claude".to_string()),
         Some(other) => Err(format!(
-            "{key} supports `fake` (default) or `codex`, got `{other}`"
+            "{key} supports `fake` (default), `codex`, or `claude`, got `{other}`"
         )),
     }
 }

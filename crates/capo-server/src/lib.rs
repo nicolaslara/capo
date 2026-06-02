@@ -1029,6 +1029,15 @@ impl CapoServer {
                         .ok()
                         .filter(|path| std::path::Path::new(path.trim()).is_absolute())
                 });
+                // CS5: the dispatch-side Claude spawn override. Like the Codex
+                // one, ops pin an absolute `CAPO_CLAUDE_BIN` so a live Claude
+                // smoke can run an exact `claude` build; a bare/relative value is
+                // ignored downstream (the runtime spawns with `env_clear()`). This
+                // dispatch seam is distinct from the chat-side `CAPO_CLAUDE_BIN`
+                // consumed by `claude_live.rs`.
+                let claude_program_override = std::env::var("CAPO_CLAUDE_BIN")
+                    .ok()
+                    .filter(|path| std::path::Path::new(path.trim()).is_absolute());
                 // RTL9: resolve the write mode through the RTL6 gate. A live
                 // workspace write requires the caller opt-in AND
                 // `CAPO_SERVER_RUN_CODEX_LIVE` AND an attended run; anything short
@@ -1046,6 +1055,7 @@ impl CapoServer {
                         mock_provider_output_jsonl: mock_provider_output_jsonl.as_deref(),
                         timeout_seconds,
                         codex_program_override: codex_program_override.as_deref().map(str::trim),
+                        claude_program_override: claude_program_override.as_deref().map(str::trim),
                         write_mode,
                         record_selected_argv: None,
                     },

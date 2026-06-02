@@ -421,6 +421,7 @@ fn deterministic_workspace_write_smoke_matches_the_paired_shape() {
                 mock_provider_output_jsonl: None,
                 timeout_seconds: 10,
                 codex_program_override: Some(stub.as_str()),
+                claude_program_override: None,
                 write_mode: WriteMode::LiveWrite,
                 record_selected_argv: None,
             },
@@ -471,6 +472,188 @@ fn deterministic_workspace_write_smoke_matches_the_paired_shape() {
         escape.is_err(),
         "an out-of-confinement write target must be rejected before any process runs"
     );
+}
+
+/// CS6 (blocker 1): the live opt-in CLAUDE workspace-write smoke, PAIRED with the
+/// always-on deterministic stub-binary dispatch assertion
+/// (`live_provider::server_live_provider_claude_spawn_arm_ingests_stub_stream_json_through_override`,
+/// CS5 (b)), which exercises the IDENTICAL `run_live_provider_local` spawn arm with
+/// a `/bin/sh` claude stub and asserts the same normalized-event/read-model shape.
+///
+/// `#[ignore]`d and behind THREE explicit gates: the chat gates
+/// `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1` + `CAPO_SERVER_RUN_CLAUDE_LIVE=1` AND the
+/// provider-agnostic dispatch write-mode gate `CAPO_SERVER_RUN_CODEX_LIVE=1` (the
+/// Claude dispatch write rides the SAME `safety_floor.rs` write-mode gate Codex
+/// does -- there is NO Claude-specific dispatch RUN env; see knowledge.md). It
+/// skips cleanly (passing) when any gate is unset or `claude` is unavailable, so it
+/// is never fatal for operators who have not opted in.
+///
+/// Run it with:
+///   `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 CAPO_SERVER_RUN_CLAUDE_LIVE=1 \`
+///   `  CAPO_SERVER_RUN_CODEX_LIVE=1 cargo test -p capo-server -- --ignored \`
+///   `  live_claude_workspace_write_smoke`
+///
+/// It drives ONE real confined Claude workspace-write turn through the dispatch
+/// `run_live_provider_local` executor (no `claude_program_override`, so the
+/// production `claude`/`CAPO_CLAUDE_BIN` resolution is used), asserts the edit
+/// landed + a pre-write checkpoint was recorded + the parsed `stream-json` ingested,
+/// and runs `scan_artifacts_for_sensitive_markers` over the artifact tree so the
+/// live evidence is secrets-stripped.
+#[cfg(unix)]
+#[test]
+#[ignore = "live Claude write smoke: set CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 CAPO_SERVER_RUN_CLAUDE_LIVE=1 CAPO_SERVER_RUN_CODEX_LIVE=1"]
+fn live_claude_workspace_write_smoke() {
+    use crate::live_provider::LiveProviderLocalRunRequest;
+    use crate::safety_floor::WriteMode;
+
+    const CLAUDE_CHAT_GATE_ENV: &str = "CAPO_SERVER_RUN_CLAUDE_LIVE";
+
+    let preflight_gate = std::env::var(LIVE_PREFLIGHT_ENV).as_deref() == Ok("1");
+    let claude_chat_gate = std::env::var(CLAUDE_CHAT_GATE_ENV).as_deref() == Ok("1");
+    let write_gate = std::env::var(LIVE_WRITE_ENV).as_deref() == Ok("1");
+    if !(preflight_gate && claude_chat_gate && write_gate) {
+        // Not opted in: skip cleanly. The always-on stub-binary dispatch test
+        // (`server_live_provider_claude_spawn_arm_ingests_stub_stream_json_through_override`)
+        // is the deterministic paired assertion of the same spawn-arm shape.
+        eprintln!(
+            "skipping live Claude workspace-write smoke: set {LIVE_PREFLIGHT_ENV}=1 \
+             {CLAUDE_CHAT_GATE_ENV}=1 {LIVE_WRITE_ENV}=1 to run it"
+        );
+        return;
+    }
+    // `claude` must be resolvable, else skip cleanly (never fatal for operators
+    // without the CLI installed).
+    if std::env::var_os("CAPO_CLAUDE_BIN").is_none()
+        && std::process::Command::new("claude")
+            .arg("--version")
+            .output()
+            .map(|out| !out.status.success())
+            .unwrap_or(true)
+    {
+        eprintln!("skipping live Claude workspace-write smoke: `claude` is not available on PATH");
+        return;
+    }
+
+    let goal = "Create a file named CAPO_CS6.txt containing exactly the line \
+                capo-cs6-live-write and apply it; do not inspect other files.";
+    let root = temp_root();
+    let workspace = root.join("workspace");
+    let artifacts = root.join("artifacts");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("seed.txt"), b"seed\n").expect("seed");
+    let workspace_str = workspace.to_string_lossy().to_string();
+    let artifacts_str = artifacts.to_string_lossy().to_string();
+
+    let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
+    handle(
+        &server,
+        ServerCommand::RegisterAgent {
+            name: "claude-local".to_string(),
+            adapter: "fake".to_string(),
+        },
+    );
+    handle(
+        &server,
+        ServerCommand::StartSession {
+            agent_name: "claude-local".to_string(),
+            goal: goal.to_string(),
+            adapter: "claude".to_string(),
+            session_id: Some("session-cs6-live".to_string()),
+            run_id: Some("run-cs6-live".to_string()),
+        },
+    );
+    let preflight = handle(
+        &server,
+        ServerCommand::PreflightLiveProvider {
+            agent_name: "claude-local".to_string(),
+            adapter: "claude".to_string(),
+            goal: goal.to_string(),
+            workspace: workspace_str.clone(),
+            artifacts: artifacts_str.clone(),
+            session_id: "session-cs6-live".to_string(),
+            run_id: "run-cs6-live".to_string(),
+            turn_id: "turn-cs6-live".to_string(),
+            capability_profile: "trusted-local".to_string(),
+            runtime_scope: "local_process_loopback".to_string(),
+            credential_scan_policy: "metadata_only_no_secret_read".to_string(),
+            raw_prompt_policy: "not_rendered".to_string(),
+            raw_output_policy: "artifacts_scanned_redacted".to_string(),
+            tool_wrapper_policy: "capo_wrapped_required".to_string(),
+            live_provider_opt_in: true,
+        },
+    );
+    let ServerResponsePayload::LiveProviderPreflighted(preflight) = preflight.payload else {
+        panic!("expected preflight response");
+    };
+
+    let origin = ServerClientOrigin {
+        client_id: "test-client".to_string(),
+        actor_id: "test-actor".to_string(),
+        input_origin: ServerInputOrigin::System,
+    };
+    // ONE real confined Claude workspace-write turn through the dispatch executor.
+    // `claude_program_override: None` resolves the real `claude` (or an absolute
+    // `CAPO_CLAUDE_BIN`); the three gates resolve `WriteMode::LiveWrite`.
+    let run = server
+        .run_live_provider_local(
+            &origin,
+            LiveProviderLocalRunRequest {
+                dispatch_plan_id: &preflight.dispatch_plan_id,
+                goal,
+                live_execution_opt_in: true,
+                mock_runtime_opt_in: false,
+                mock_provider_output_name: None,
+                mock_provider_output_jsonl: None,
+                timeout_seconds: 120,
+                codex_program_override: None,
+                claude_program_override: None,
+                write_mode: WriteMode::LiveWrite,
+                record_selected_argv: None,
+            },
+        )
+        .expect("live claude write run");
+
+    // PAIRED ASSERTION (same shape as the CS5 (b) stub-binary dispatch test): the
+    // spawn arm spawned the provider, the run exited, and the parsed `stream-json`
+    // ingested through the SAME `apply_normalized_adapter_events_with_turn` route.
+    assert!(
+        run.provider_cli_executed,
+        "the live Claude write must spawn the provider"
+    );
+    assert_eq!(run.status, "exited");
+    assert!(
+        run.input_event_count >= 1,
+        "the live Claude write must ingest at least one parsed stream-json event"
+    );
+
+    // The confined live edit landed in the workspace (the model may name a
+    // different file; accept any non-seed file the model created).
+    let landed = collect_files(&workspace)
+        .into_iter()
+        .any(|path| path.file_name().and_then(|n| n.to_str()) != Some("seed.txt"));
+    assert!(
+        landed,
+        "the confined live Claude write must create at least one file in the workspace"
+    );
+
+    // A pre-write checkpoint was recorded (RTL6, provider-agnostic floor).
+    let state = SqliteStateStore::open(&root).expect("state");
+    let events = state
+        .recent_events_for_session(&SessionId::new("session-cs6-live"), 256)
+        .expect("events");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == "checkpoint.created"),
+        "a pre-write checkpoint must be recorded for a live Claude write"
+    );
+
+    // SECRETS CONTRACT: every persisted artifact passes the credential scan, so the
+    // live Claude evidence is secrets-stripped (the scrubbed spawn env + redacted
+    // stream-json retention leave no token/key/cookie/auth-token marker).
+    let artifact_files = collect_files(&artifacts);
+    scan_artifacts_for_sensitive_markers(artifact_files.iter())
+        .expect("all live Claude write artifacts must be secrets-stripped (no credential markers)");
 }
 
 /// RTL13: the live opt-in Codex workspace-write smoke. `#[ignore]`d and behind

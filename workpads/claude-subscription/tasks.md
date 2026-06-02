@@ -198,6 +198,13 @@ Acceptance criteria:
 - `knowledge.md` records that the subscription is referenced by handle (the local
   `claude` login), that Capo never reads `~/.claude` credential material, and that
   the redaction rules + sensitive-marker scan are the retention defense on stdout.
+- Close the `sensitive_marker` scan gap (verified `local_subscription.rs:488-521`):
+  the scanner does not recognize `auth_token` / `anthropic_auth_token` keyword
+  substrings and an `ANTHROPIC_AUTH_TOKEN` value has no `sk-` shape, so a bearer
+  token value in stdout would not be caught. Add `auth_token` / `anthropic_auth_token`
+  (and any other bearer keyword) to the keyword list, with a deterministic test that
+  a line containing an `auth_token`-style value is flagged by `sensitive_marker`. The
+  env-clear allowlist remains the primary defense; this hardens the secondary scan.
 
 Verification:
 
@@ -211,8 +218,13 @@ Dependencies: CS0. Intra-workpad: feeds CS2/CS5.
 
 ## CS2 - Real send_turn: Chat One-Shot + Workspace-Write Profile (Mirror The Codex Chat Path)
 
-Status: pending (chat one-shot largely landed under DP4; this task pins parity and
-the profile facts with assertions).
+Status: LANDED. Chat one-shot largely landed under DP4; CS2 pinned parity and the
+profile facts with deterministic assertions in
+`crates/capo-adapters/src/claude_live.rs`
+(`claude_try_send_turn_stub_matches_codex_turn_output_reduction`,
+`claude_launch_profiles_pin_exact_argv`, and the KEPT gate-off
+`claude_send_turn_fails_closed_fast_when_gate_off`), plus the test-only
+`codex_live::turn_output_from_events_for_test` parity helper. No live provider.
 
 Prerequisite: `real-turn-loop` + `tools-aci`; CS1.
 
@@ -269,8 +281,15 @@ Dependencies: CS0, CS1. Intra-workpad: feeds CS5/CS6.
 
 ## CS3 - stream-json Parsing Into The Loop's Existing Ingestion Route
 
-Status: pending (parser landed under DP4; this task PROVES loop-route reuse + usage
-mapping with assertions; the parity guard test already exists and is KEPT).
+Status: LANDED. The parser landed under DP4; CS3 PROVED loop-route reuse + usage
+mapping with deterministic assertions. The parity guard
+(`claude_normalized_events_match_codex_trait_seam_shape`) and the usage/session-ref
+test (`claude_turn_completed_carries_usage_tokens_and_session_ref`) are KEPT in
+`crates/capo-adapters/src/claude_live.rs`; the NEW capo-server loop-route proof
+(`crates/capo-server/src/tests/claude_loop_route.rs::claude_turn_lands_same_read_model_row_shape_as_codex_through_shared_ingestion_route`)
+feeds Claude + Codex fixtures through the SAME ungated `ReplayAdapterFixture` ->
+`parse_adapter_events` -> `apply_normalized_adapter_events_with_turn` route and
+asserts identical projected read-model row shapes. No live provider.
 
 Prerequisite: `real-turn-loop` + `tools-aci`; CS2.
 
@@ -315,7 +334,15 @@ Dependencies: CS0, CS2. Intra-workpad: feeds CS5.
 
 ## CS4 - Tool-Result Round-Trip (Observed-Only, Mirroring Codex)
 
-Status: pending.
+Status: LANDED. Claude `tool_use`/`tool_result` map to observed-only tool results
+(new `claude_tool_result_content` helper handling string- and array-shaped
+`tool_result.content` in `crates/capo-adapters/src/provider_parsers.rs`), proven
+by the deterministic fixture test
+`claude_tool_use_result_pair_projects_observed_only_distinct_from_agent_message`
+and the no-injection negative
+`claude_one_shot_writes_no_capo_authored_tool_result_and_has_no_result_channel`
+(`crates/capo-adapters/src/tests.rs`, fixture
+`crates/capo-adapters/fixtures/claude-code-tool-result.jsonl`). No live provider.
 
 Prerequisite: `real-turn-loop` + `tools-aci`; CS3.
 
@@ -363,7 +390,22 @@ Dependencies: CS0, CS3. Intra-workpad: feeds CS5.
 
 ## CS5 - Unblock To Parity: CLI Chat Seam + Dispatch Executor (Spawn Arm + Override + Allow-List)
 
-Status: pending.
+Status: LANDED. All three unblock gaps closed behind the shared preflight + the
+existing provider-agnostic `safety_floor.rs` write-mode gate, deterministic-only
+(no live `claude`): (1) `require_chat_adapter_arg` accepts `claude`
+(`crates/capo-cli/src/server_client.rs`, made `pub(crate)`); (2)
+`live_execution_blockers` admits the `{codex_exec, claude_code}` allow-list
+(`crates/capo-server/src/live_provider.rs`); (3) the `run_live_provider_local`
+spawn arm is branched on `(adapter_kind, write_mode)` to build the Claude launch
+plans, with a new `claude_program_override` field + `CAPO_CLAUDE_BIN` dispatch
+threading; `execute_codex_live_provider` renamed `execute_live_provider`. The
+write gate is UNCHANGED (rides `CAPO_SERVER_RUN_CODEX_LIVE`). Tests:
+`require_chat_adapter_arg_accepts_claude_and_rejects_unknown` (capo-cli),
+`server_live_provider_local_run_admits_claude_and_ingests_mock_stream_json` (CS5 a,
+replaced the obsolete blocked-Claude test),
+`server_live_provider_claude_spawn_arm_ingests_stub_stream_json_through_override`
+(CS5 b), and `server_live_provider_preflight_rejects_unsupported_acp_adapter`
+(provider-scoped). See `knowledge.md` "CS5 Status (Landed)".
 
 Prerequisite: `real-turn-loop` + `tools-aci`; CS1-CS4. (The `safety-gates`
 confinement/permission floor is the live-execution precondition the executor
@@ -498,6 +540,19 @@ Acceptance criteria:
 - Every smoke strips secrets: artifacts pass `scan_artifacts_for_sensitive_markers`;
   the agent stderr is scanned for token markers; raw `stream-json` is redacted /
   content-hashed before retention; a leaked-marker artifact is dropped.
+- STRENGTHEN the already-landed `claude_live_chat_smoke` (`claude_chat.rs:289`),
+  which today asserts only the STATIC `external_session_ref` and `!summary.is_empty()`
+  (a liveness ping, not a shape check): the extended smoke MUST assert the SAME
+  `TurnOutput` shape the always-on stub test pins AND run a smoke-level
+  `scan_artifacts_for_sensitive_markers`, so the paired-deterministic-assertion
+  invariant actually holds (it does not for the landed smoke as written).
+- Process-global env safety: the gate-toggling tests
+  (`open_live_gate`/`close_live_gate`/`set_claude_bin`/`clear_claude_bin`) must
+  restore env on PANIC, not only on the happy path. Use a Drop guard (a struct whose
+  `Drop` impl resets the gate/bin env) rather than a manual close at the end of the
+  test body, so a mid-test assertion failure cannot leak gate env into other tests in
+  the same binary (the `CLAUDE_CHAT_ENV_LOCK` mutex serializes but does not restore
+  env on unwind).
 - A review note in `knowledge.md` records architecture fit (Claude rides the same
   `AgentAdapter` trait, the same chat route, and the same dispatch executor as
   Codex; no new ingestion vocabulary; connector stays scrub-only; the dispatch

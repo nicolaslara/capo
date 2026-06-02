@@ -382,6 +382,12 @@ mod tests {
         assert!(!binding.fake, "claude-live is a real provider binding");
     }
 
+    /// CS2 gate-OFF fail-closed-fast (KEPT, landed under DP4): with neither gate
+    /// set, `try_send_turn` returns `GateClosed { missing_env: [PREFLIGHT,
+    /// RUN_CLAUDE_LIVE] }` IMMEDIATELY and spawns nothing (the program override
+    /// points at a nonexistent binary that must never run), and the infallible
+    /// `send_turn` shim surfaces a `blocked` turn with `confidence: 0`. This is
+    /// CONFIRMED/KEPT, not new CS2 work.
     #[test]
     fn claude_send_turn_fails_closed_fast_when_gate_off() {
         let _guard = CLAUDE_LIVE_ENV_LOCK
@@ -463,6 +469,200 @@ mod tests {
         assert_eq!(claude_out.external_session_ref, "claude-sess-1");
         assert_eq!(claude_out.confidence, 80);
         assert_eq!(claude_out.turn_id.as_str(), "turn-claude-1");
+    }
+
+    /// CS2: drive `try_send_turn` (gate ON) through a pinned absolute-path stub
+    /// spawned by `LocalProcessRunner`, and assert the reduced `TurnOutput` shape
+    /// equals the Codex `turn_output_from_events` reduction for the SAME logical
+    /// turn. This proves the real chat path (gate -> spawn -> parse -> reduce)
+    /// end-to-end against a deterministic binary, not a fabricated summary.
+    #[test]
+    fn claude_try_send_turn_stub_matches_codex_turn_output_reduction() {
+        let _guard = CLAUDE_LIVE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env = GateGuard::open();
+
+        let root = temp_root("claude-cs2-try-send");
+        std::fs::create_dir_all(&root).expect("root");
+        // A stub that ignores its args (it receives the workspace-write profile
+        // argv ending in the prompt) and prints the fixture `stream-json` on
+        // stdout. The runtime spawns with `env_clear()`, so the stub uses only
+        // POSIX builtins and an absolute fixture path.
+        let fixture = root.join("stream.jsonl");
+        std::fs::write(&fixture, CLAUDE_STREAM_JSON).expect("fixture");
+        let stub = root.join("claude-stub.sh");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nwhile IFS= read -r line; do printf '%s\\n' \"$line\"; done < '{}'\n",
+                fixture.display()
+            ),
+        )
+        .expect("stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&stub).expect("meta").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&stub, perms).expect("chmod");
+        }
+
+        let adapter = ClaudeCodeLiveAdapter::new(root.join("ws"), root.join("art"))
+            .with_claude_program_override(stub.to_string_lossy().to_string());
+        let session = session("worker");
+        let request = turn("worker", "edit the file");
+        let out = adapter
+            .try_send_turn(&session, &request)
+            .expect("gate open: stub turn must succeed");
+
+        // The SAME reduction the Codex chat adapter performs on the SAME logical
+        // turn: summary = last item content, status = result.subtype, first tool,
+        // session-id as external_session_ref, confidence 80.
+        assert_eq!(out.summary, "applied the workspace edit");
+        assert_eq!(out.status, "success");
+        assert_eq!(out.tool_name, "Edit");
+        assert_eq!(out.external_session_ref, "claude-sess-1");
+        assert_eq!(out.confidence, 80);
+        assert_eq!(out.turn_id.as_str(), "turn-claude-1");
+
+        // Pin equality against the Codex reduction directly: parse the equivalent
+        // Codex turn and reduce it through the SAME provider-neutral shape.
+        let codex_jsonl = concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"claude-sess-1\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"id\":\"item-1\",\"type\":\"agent_message\",\"text\":\"applied the workspace edit\"}}\n",
+            "{\"type\":\"tool_call.started\",\"call_id\":\"call-1\",\"tool_name\":\"Edit\"}\n",
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":11,\"output_tokens\":7}}\n",
+        );
+        let codex_events = CodexExecAdapter::parse_jsonl(codex_jsonl)
+            .expect("codex parse")
+            .events;
+        let codex_out = crate::codex_live::turn_output_from_events_for_test(
+            &session.external_session_ref,
+            &request,
+            &codex_events,
+        );
+        // Same provider-neutral fields the loop consumes (status differs only by
+        // the providers' native subtype vocabulary, which both map identically
+        // here: Claude `result.subtype=success`, Codex `turn.completed`).
+        assert_eq!(out.summary, codex_out.summary);
+        assert_eq!(out.tool_name, codex_out.tool_name);
+        assert_eq!(out.external_session_ref, codex_out.external_session_ref);
+        assert_eq!(out.confidence, codex_out.confidence);
+        assert_eq!(out.turn_id.as_str(), codex_out.turn_id.as_str());
+    }
+
+    /// CS2 argv parity: pin the EXACT profile the live chat adapter invokes
+    /// (`local_workspace_write_launch_plan`) and assert the SEPARATE read-bounded
+    /// `local_launch_plan` profile exists and is distinct, so the two are never
+    /// conflated.
+    #[test]
+    fn claude_launch_profiles_pin_exact_argv() {
+        let ws = PathBuf::from("/tmp/capo-cs2-ws");
+        let art = PathBuf::from("/tmp/capo-cs2-art");
+
+        // The profile the LIVE chat adapter and the dispatch write arm share.
+        let write = ClaudeCodeAdapter::local_workspace_write_launch_plan(
+            ws.clone(),
+            art.clone(),
+            "edit the file",
+        );
+        assert_eq!(write.program, "claude");
+        assert_eq!(
+            write.argv,
+            vec![
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--permission-mode",
+                "acceptEdits",
+                "--no-session-persistence",
+                "--disable-slash-commands",
+                "--mcp-config",
+                "/dev/null",
+                "--strict-mcp-config",
+                "--add-dir",
+                "/tmp/capo-cs2-ws",
+                "edit the file",
+            ]
+        );
+
+        // The SEPARATE read-bounded profile: `plan` mode, no tools, NO `--add-dir`.
+        let plan = ClaudeCodeAdapter::local_launch_plan(ws, art, "edit the file");
+        assert_eq!(
+            plan.argv,
+            vec![
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--permission-mode",
+                "plan",
+                "--no-session-persistence",
+                "--disable-slash-commands",
+                "--tools",
+                "",
+                "--disallowedTools",
+                "*",
+                "--mcp-config",
+                "/dev/null",
+                "--strict-mcp-config",
+                "edit the file",
+            ]
+        );
+        // The two profiles are distinct (mode + `--add-dir` presence).
+        assert!(write.argv.iter().any(|a| a == "acceptEdits"));
+        assert!(write.argv.iter().any(|a| a == "--add-dir"));
+        assert!(plan.argv.iter().any(|a| a == "plan"));
+        assert!(!plan.argv.iter().any(|a| a == "--add-dir"));
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("capo-adapter-{name}-{nanos}"))
+    }
+
+    /// A Drop guard that opens BOTH chat gates for the duration of a test and
+    /// restores the prior env on drop -- even on a panic mid-test -- so the
+    /// process-global gate never leaks into other tests in this binary.
+    struct GateGuard {
+        prev_preflight: Option<String>,
+        prev_run: Option<String>,
+    }
+
+    impl GateGuard {
+        fn open() -> Self {
+            let prev_preflight = std::env::var(CODEX_LIVE_PREFLIGHT_OPT_IN_ENV).ok();
+            let prev_run = std::env::var(CLAUDE_LIVE_RUN_OPT_IN_ENV).ok();
+            unsafe {
+                std::env::set_var(CODEX_LIVE_PREFLIGHT_OPT_IN_ENV, "1");
+                std::env::set_var(CLAUDE_LIVE_RUN_OPT_IN_ENV, "1");
+            }
+            Self {
+                prev_preflight,
+                prev_run,
+            }
+        }
+    }
+
+    impl Drop for GateGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prev_preflight {
+                    Some(v) => std::env::set_var(CODEX_LIVE_PREFLIGHT_OPT_IN_ENV, v),
+                    None => std::env::remove_var(CODEX_LIVE_PREFLIGHT_OPT_IN_ENV),
+                }
+                match &self.prev_run {
+                    Some(v) => std::env::set_var(CLAUDE_LIVE_RUN_OPT_IN_ENV, v),
+                    None => std::env::remove_var(CLAUDE_LIVE_RUN_OPT_IN_ENV),
+                }
+            }
+        }
     }
 
     #[test]

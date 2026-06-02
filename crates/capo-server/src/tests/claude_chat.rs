@@ -61,29 +61,74 @@ fn write_claude_chat_stub(dir: &std::path::Path) -> String {
     stub.to_string_lossy().to_string()
 }
 
-fn open_live_gate() {
-    unsafe {
-        std::env::set_var(PREFLIGHT_GATE_ENV, "1");
-        std::env::set_var(CLAUDE_RUN_GATE_ENV, "1");
+/// CS6 process-global env safety: a Drop guard that snapshots the three
+/// process-global env vars these tests mutate (`CAPO_CLAUDE_BIN` + the two
+/// live-provider opt-in gates) on construction and RESTORES them on drop --
+/// including on an unwinding PANIC mid-test. The `CLAUDE_CHAT_ENV_LOCK` mutex
+/// serializes the tests but does NOT restore env on unwind, so a mid-test
+/// assertion failure could otherwise leak a half-open gate into other tests in
+/// the same binary. Holding this guard for the lifetime of the test body closes
+/// that leak: whatever the test set is reset to the pre-test value when the
+/// guard drops, even if a `panic!`/failed `assert!` unwinds past the end of the
+/// body.
+struct LiveGateEnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    preflight: Option<String>,
+    run: Option<String>,
+    bin: Option<String>,
+}
+
+impl LiveGateEnvGuard {
+    /// Acquire the env lock and snapshot the current values of all three vars.
+    fn acquire() -> Self {
+        let lock = CLAUDE_CHAT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Self {
+            _lock: lock,
+            preflight: std::env::var(PREFLIGHT_GATE_ENV).ok(),
+            run: std::env::var(CLAUDE_RUN_GATE_ENV).ok(),
+            bin: std::env::var(CLAUDE_BIN_ENV).ok(),
+        }
+    }
+
+    fn open_live_gate(&self) {
+        unsafe {
+            std::env::set_var(PREFLIGHT_GATE_ENV, "1");
+            std::env::set_var(CLAUDE_RUN_GATE_ENV, "1");
+        }
+    }
+
+    fn close_live_gate(&self) {
+        unsafe {
+            std::env::remove_var(PREFLIGHT_GATE_ENV);
+            std::env::remove_var(CLAUDE_RUN_GATE_ENV);
+        }
+    }
+
+    fn set_claude_bin(&self, path: &str) {
+        unsafe {
+            std::env::set_var(CLAUDE_BIN_ENV, path);
+        }
     }
 }
 
-fn close_live_gate() {
-    unsafe {
-        std::env::remove_var(PREFLIGHT_GATE_ENV);
-        std::env::remove_var(CLAUDE_RUN_GATE_ENV);
-    }
-}
-
-fn set_claude_bin(path: &str) {
-    unsafe {
-        std::env::set_var(CLAUDE_BIN_ENV, path);
-    }
-}
-
-fn clear_claude_bin() {
-    unsafe {
-        std::env::remove_var(CLAUDE_BIN_ENV);
+/// Restore each var to its snapshotted pre-test value (set it back, or remove it
+/// if it was unset before) so a panic mid-test cannot leak gate env. Runs on
+/// every exit path, including unwind.
+impl Drop for LiveGateEnvGuard {
+    fn drop(&mut self) {
+        fn restore(name: &str, value: &Option<String>) {
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+        restore(PREFLIGHT_GATE_ENV, &self.preflight);
+        restore(CLAUDE_RUN_GATE_ENV, &self.run);
+        restore(CLAUDE_BIN_ENV, &self.bin);
     }
 }
 
@@ -98,15 +143,13 @@ fn send(address: std::net::SocketAddr, request_id: &str, command: ServerCommand)
 #[cfg(unix)]
 #[test]
 fn claude_bound_chat_flows_real_stub_output_end_to_end_through_the_running_server() {
-    let _guard: MutexGuard<'_, ()> = CLAUDE_CHAT_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let env = LiveGateEnvGuard::acquire();
 
     let root = temp_root();
     let stub = write_claude_chat_stub(&root.join("stub"));
 
-    set_claude_bin(&stub);
-    open_live_gate();
+    env.set_claude_bin(&stub);
+    env.open_live_gate();
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let address = listener.local_addr().expect("address");
@@ -207,8 +250,11 @@ fn claude_bound_chat_flows_real_stub_output_end_to_end_through_the_running_serve
 
     assert_eq!(server_thread.join().expect("server thread"), 5);
 
-    close_live_gate();
-    clear_claude_bin();
+    // `env` is intentionally kept alive (not explicitly dropped) until here: its
+    // Drop guard is what restores the gate/bin env on EVERY exit path, including a
+    // panic from any assertion above. An explicit `drop(env)` would be redundant
+    // (the binding drops at scope exit anyway) and could mislead a future refactor
+    // into thinking cleanup is a manual step that may be skipped.
 }
 
 /// DP4 FAIL-CLOSED-FAST END-TO-END: with the Claude live gate OFF, a
@@ -218,12 +264,10 @@ fn claude_bound_chat_flows_real_stub_output_end_to_end_through_the_running_serve
 #[cfg(unix)]
 #[test]
 fn claude_bound_chat_fails_closed_fast_end_to_end_when_gate_is_off() {
-    let _guard: MutexGuard<'_, ()> = CLAUDE_CHAT_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let env = LiveGateEnvGuard::acquire();
 
-    close_live_gate();
-    set_claude_bin("/nonexistent/claude-must-never-spawn");
+    env.close_live_gate();
+    env.set_claude_bin("/nonexistent/claude-must-never-spawn");
 
     let root = temp_root();
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
@@ -274,7 +318,9 @@ fn claude_bound_chat_fails_closed_fast_end_to_end_when_gate_is_off() {
 
     assert_eq!(server_thread.join().expect("server thread"), 2);
 
-    clear_claude_bin();
+    // `env`'s Drop guard restores the gate/bin env on scope exit, including the
+    // unwind path of any assertion above; no explicit drop is needed.
+    let _ = &env;
 }
 
 /// DP4 LIVE OPT-IN SMOKE: register a claude agent and send a trivial goal through
@@ -287,9 +333,7 @@ fn claude_bound_chat_fails_closed_fast_end_to_end_when_gate_is_off() {
 #[test]
 #[ignore = "live Claude chat smoke: set CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 CAPO_SERVER_RUN_CLAUDE_LIVE=1"]
 fn claude_live_chat_smoke() {
-    let _guard: MutexGuard<'_, ()> = CLAUDE_CHAT_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _env = LiveGateEnvGuard::acquire();
 
     let preflight = std::env::var(PREFLIGHT_GATE_ENV).as_deref() == Ok("1");
     let run = std::env::var(CLAUDE_RUN_GATE_ENV).as_deref() == Ok("1");
@@ -344,6 +388,15 @@ fn claude_live_chat_smoke() {
     let ServerResponsePayload::TaskSent(run_refs) = sent.payload else {
         panic!("expected task sent for claude-live");
     };
+    // PAIRED SHAPE (1/3): the SAME `external_session_ref` shape the always-on stub
+    // test pins (`claude-live-session-<agent>`), proving the live turn ran through
+    // the real Claude adapter binding -- not the fake adapter. NOTE this is a
+    // BINDING check, not a liveness proof: this ref is constructed by
+    // `open_session()` and is the same string whether or not `send_turn` ran. The
+    // real liveness proof is the non-empty provider-shaped summary below. (The
+    // earlier `assert_ne!` against `fake-adapter-session-claude-live` was removed:
+    // the fake and Claude refs are structurally distinct strings at construction,
+    // so it could never fail and added no signal -- CS6 review fix, finding 4.)
     assert_eq!(
         run_refs.external_session_ref, "claude-live-session-claude-live",
         "the live claude chat must run through the real Claude adapter binding"
@@ -360,13 +413,66 @@ fn claude_live_chat_smoke() {
         panic!("expected agent status for claude-live");
     };
     let session = agent.session.expect("claude-live must have a session");
+    // PAIRED SHAPE (2/3): a live turn produces a real, non-empty parsed assistant
+    // summary -- the SAME `TurnOutput.summary` field the stub test pins (there the
+    // value is the fixed `CLAUDE_STUB_CHAT_SUMMARY`; here it is whatever the live
+    // model returned, but it must be present and non-empty, not the empty/fake
+    // fallback). This is the shape pairing the CS6 invariant requires; the static
+    // session-ref check alone is only a liveness ping.
     let summary = session
         .latest_summary
-        .expect("a live claude chat turn must produce a summary");
+        .expect("a live claude chat turn must produce a TurnOutput summary");
     assert!(
-        !summary.is_empty(),
-        "the live claude chat summary must be real output"
+        !summary.trim().is_empty(),
+        "the live claude chat summary must be real, non-empty output"
+    );
+    // The summary must be REAL provider output, not the fake-adapter fallback nor a
+    // blocked/error marker. The fake adapter summarizes as "Fake adapter processed
+    // goal ..."; a gate-blocked turn surfaces a "blocked"/"fail-closed" marker. A
+    // live turn produces neither. This is the load-bearing liveness assertion the
+    // CS6 paired-shape invariant requires (the static session-ref above is only a
+    // binding check).
+    assert!(
+        !summary.contains("Fake adapter"),
+        "the live claude chat summary must not be the fake-adapter fallback, got: {summary}"
+    );
+    assert!(
+        !summary.contains("fail-closed") && !summary.starts_with("blocked"),
+        "the live claude chat summary must not be a blocked/error marker, got: {summary}"
     );
 
+    // PAIRED SHAPE (3/3) -- SECRETS CONTRACT: scan the server's whole on-disk tree
+    // (state + any persisted artifacts) for credential markers. The live
+    // `stream-json` is redacted/content-hashed before retention and the spawn env
+    // is scrubbed, so a clean live run must leave NO token/key/cookie/auth-token
+    // marker anywhere it persisted. The scan is text-only (it reads UTF-8); the
+    // binary state DB is not human-readable retained output, so we scan only the
+    // text-readable files and fail-closed on any marker, so a leaked secret fails
+    // the smoke rather than passing silently.
+    let persisted = collect_text_files(&root);
+    capo_adapters::scan_artifacts_for_sensitive_markers(persisted.iter())
+        .expect("live Claude chat smoke evidence must be secrets-stripped (no credential markers)");
+
     assert_eq!(server_thread.join().expect("server thread"), 3);
+}
+
+/// Recursively collect every regular, UTF-8-readable file under `dir` so the
+/// credential scan can fail-closed on persisted TEXT smoke evidence (logs,
+/// artifacts, retained redacted output). Binary files (e.g. the sqlite state DB)
+/// are skipped: they are not human-readable retained output and the scan reads
+/// UTF-8 only.
+fn collect_text_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(collect_text_files(&path));
+        } else if path.is_file() && std::fs::read_to_string(&path).is_ok() {
+            files.push(path);
+        }
+    }
+    files
 }

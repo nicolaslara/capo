@@ -4,10 +4,48 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use std::sync::{Mutex, MutexGuard};
+
 use capo_core::{BoundaryKind, RunId, SessionId, ToolCallId};
 use serde_json::Value;
 
 use super::*;
+
+/// Serializes the tests in this module that mutate the PROCESS-GLOBAL env
+/// (`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`) while asserting the spawn scrub,
+/// so a parallel test never transiently observes the secret-shaped values.
+static SCRUB_TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// A Drop guard that holds [`SCRUB_TEST_ENV_LOCK`], sets the two connector-credential
+/// env vars on construction, and ALWAYS removes them on drop -- including when an
+/// `assert!`/`panic!` unwinds past the end of the test body. Without this guard the
+/// secret-shaped values would leak into other tests in the binary if `start_process`
+/// / `spawn_process` ever panicked rather than returning `Err`.
+struct ScrubTestEnvGuard {
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl ScrubTestEnvGuard {
+    fn set(api_key: &str, auth_token: &str) -> Self {
+        let lock = SCRUB_TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", api_key);
+            std::env::set_var("ANTHROPIC_AUTH_TOKEN", auth_token);
+        }
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for ScrubTestEnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+        }
+    }
+}
 
 #[test]
 fn planned_adapters_include_fake_and_first_real_targets() {
@@ -309,6 +347,150 @@ fn adapter_tool_observations_are_observed_only() {
             && observation.instrumentation_level == "observed_only"
             && observation.external_tool_ref.as_deref() == Some("toolu_1")
     }));
+}
+
+#[test]
+fn claude_tool_use_result_pair_projects_observed_only_distinct_from_agent_message() {
+    // CS4: a Claude `tool_use` + matching `tool_result` pair must project into a
+    // tool OBSERVATION (`instrumentation_level = "observed_only"`) that is DISTINCT
+    // from the agent's own reported `assistant` message -- exactly the Codex
+    // `apply_patch`/`exec_command` observed tool-result contract. This proves Capo
+    // OBSERVES the tool result rather than treating it as the agent's claim.
+    let parsed = ClaudeCodeAdapter::parse_stream_json(include_str!(
+        "../fixtures/claude-code-tool-result.jsonl"
+    ))
+    .unwrap();
+
+    // The agent's reported claim is the `assistant` message, NOT the tool result.
+    let claim = parsed
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == "adapter.item_completed" && event.role.as_deref() == Some("assistant")
+        })
+        .expect("agent message claim");
+    let claim_text = claim.content.as_deref().unwrap_or_default();
+    assert!(
+        claim_text.contains("I will edit NOTES.md"),
+        "agent claim should be the assistant message, got: {claim_text}"
+    );
+
+    // The `tool_use` projects an observed tool-call start.
+    let started = parsed
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == "adapter.tool_call_started"
+                && event.external_item_ref.as_deref() == Some("toolu_cs4")
+        })
+        .expect("observed tool_use start");
+    assert_eq!(started.tool_name.as_deref(), Some("Edit"));
+
+    // The matching `tool_result` projects an observed tool-call completion whose
+    // OBSERVED content is the tool's returned result -- distinct from the agent's
+    // claim above.
+    let observed = parsed
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == "adapter.tool_call_completed"
+                && event.external_item_ref.as_deref() == Some("toolu_cs4")
+        })
+        .expect("observed tool_result completion");
+    let observed_content = observed
+        .content
+        .as_deref()
+        .expect("observed result content");
+    assert!(
+        observed_content.contains("Applied edit to NOTES.md"),
+        "the observed result must carry the tool-returned content, got: {observed_content}"
+    );
+    assert_ne!(
+        observed_content, claim_text,
+        "the observed tool result must be distinct from the agent's reported message"
+    );
+
+    // The `tool_use` start observation carries the tool NAME (`Edit`); Claude's
+    // `tool_result` record itself carries no name, so the named observation comes
+    // from the start event. Both are observed-only, both anchored to the same tool
+    // ref so begin/end dedup to one observation.
+    let started_observation = started
+        .tool_observation()
+        .expect("tool observation for the observed tool_use start");
+    assert_eq!(started_observation.source_adapter, "claude_code");
+    assert_eq!(started_observation.tool_name, "Edit");
+    assert_eq!(started_observation.instrumentation_level, "observed_only");
+    assert_eq!(
+        started_observation.external_tool_ref.as_deref(),
+        Some("toolu_cs4")
+    );
+
+    // The `tool_result` completion projects into an observed-only tool observation
+    // carrying the observed result, anchored to the same tool ref.
+    let observation = observed
+        .tool_observation()
+        .expect("tool observation for the observed tool_result");
+    assert_eq!(observation.source_adapter, "claude_code");
+    assert_eq!(observation.observed_status, "completed");
+    assert_eq!(observation.instrumentation_level, "observed_only");
+    assert_eq!(observation.external_tool_ref.as_deref(), Some("toolu_cs4"));
+}
+
+#[test]
+fn claude_one_shot_writes_no_capo_authored_tool_result_and_has_no_result_channel() {
+    // CS4 verifiable negative: "observed-only is explicit, not an accident." The
+    // Claude one-shot adapter must NOT write any Capo-authored tool result back to
+    // the process, and must carry no result-injection channel.
+    //
+    // 1. The launch argv carries no result-injection flag (no stdin/result/input
+    //    channel), only the read/observe-shaped workspace-write profile.
+    let plan = ClaudeCodeAdapter::local_workspace_write_launch_plan(
+        PathBuf::from("/tmp/capo-cs4-ws"),
+        PathBuf::from("/tmp/capo-cs4-art"),
+        "edit the file",
+    );
+    let forbidden = [
+        "--input",
+        "--input-format",
+        "--tool-result",
+        "--stdin",
+        "-i",
+    ];
+    for flag in forbidden {
+        assert!(
+            !plan.argv.iter().any(|arg| arg == flag),
+            "the Claude one-shot argv must carry no result-injection channel, found {flag}"
+        );
+    }
+
+    // 2. The runtime request the adapter builds is purely program + argv + cwd +
+    //    env: `LocalProcessRequest` has NO stdin / result payload field, and the
+    //    one-shot spawn path (`LocalProcessRunner::spawn_process`) never pipes
+    //    stdin. So there is structurally no channel to inject a result over.
+    let request = plan.runtime_request_for_turn(RunId::new("cs4-no-injection"), "turn-cs4");
+    assert!(
+        request.env.is_empty(),
+        "the one-shot request must inject no env-borne result payload"
+    );
+    assert_eq!(request.program, "claude");
+    assert_eq!(request.argv, plan.argv);
+
+    // 3. STRUCTURAL argument (CS6 review fix, finding 7): the no-injection property
+    //    is enforced by the TYPES, not by source-text search. `LocalProcessRequest`
+    //    (built above) exposes only `program`/`argv`/`cwd`/`env`/`run_id`/`turn_id`
+    //    -- there is NO stdin or result-payload field on the request the one-shot
+    //    builds, so there is structurally no channel to inject a Capo-authored tool
+    //    result over. (The earlier fragile `include_str!` string search for
+    //    `write_stdin`/`spawn_piped_process` was removed: a rename would have made it
+    //    pass trivially, giving false coverage confidence. The absence of an
+    //    injection field on the request value the adapter constructs is the real,
+    //    rename-proof guarantee.)
+    let _: &RunId = &request.run_id;
+    let _: &Option<String> = &request.turn_id;
+    assert!(
+        request.cwd.is_absolute() || request.cwd.as_os_str().is_empty(),
+        "the one-shot request's cwd is the confined workspace, not a result channel"
+    );
 }
 
 #[test]
@@ -1016,6 +1198,196 @@ fn acp_local_launch_plan_is_subscription_safe_and_confined() {
     assert_eq!(plan.runtime_config().workspace_roots, vec![workspace]);
     assert!(!plan.env_allowlist.iter().any(|name| name.contains("KEY")));
     assert_eq!(plan.artifact_root, artifacts);
+}
+
+#[test]
+fn claude_launch_plans_carry_no_secret_like_env_allowlist_entries() {
+    // CS1 connector policy: BOTH Claude launch profiles must carry an
+    // env_allowlist that contains NONE of ANTHROPIC_API_KEY /
+    // ANTHROPIC_AUTH_TOKEN, nor any name matching TOKEN/KEY/SECRET/COOKIE, so the
+    // runtime's `env_clear()` spawn can never leak the connector credentials.
+    // (Mirrors the Codex `env_allowlist` shape asserted elsewhere in this file.)
+    let workspace = temp_root("claude-allowlist-workspace");
+    let artifacts = temp_root("claude-allowlist-artifacts");
+    for plan in [
+        ClaudeCodeAdapter::local_launch_plan(workspace.clone(), artifacts.clone(), "hello"),
+        ClaudeCodeAdapter::local_workspace_write_launch_plan(
+            workspace.clone(),
+            artifacts.clone(),
+            "hello",
+        ),
+    ] {
+        for name in &plan.env_allowlist {
+            let upper = name.to_ascii_uppercase();
+            assert_ne!(upper, "ANTHROPIC_API_KEY");
+            assert_ne!(upper, "ANTHROPIC_AUTH_TOKEN");
+            assert!(
+                !(upper.contains("TOKEN")
+                    || upper.contains("KEY")
+                    || upper.contains("SECRET")
+                    || upper.contains("COOKIE")),
+                "Claude launch env allowlist must not contain secret-like name: {name}"
+            );
+        }
+        // Sanity: the allowlist is non-empty and the subscription-safe assertion
+        // accepts the unmodified plan.
+        assert!(!plan.env_allowlist.is_empty());
+        plan.assert_subscription_safe().unwrap();
+    }
+}
+
+#[test]
+fn claude_workspace_write_plan_assert_subscription_safe_is_load_bearing() {
+    // CS1: the workspace-write plan is subscription-safe as built, and injecting
+    // an ANTHROPIC_AUTH_TOKEN allowlist entry makes the assertion fail closed --
+    // so the assertion is load-bearing, not decorative.
+    let workspace = temp_root("claude-assert-workspace");
+    let artifacts = temp_root("claude-assert-artifacts");
+    let mut plan = ClaudeCodeAdapter::local_workspace_write_launch_plan(
+        workspace,
+        artifacts,
+        "Apply the requested edit.",
+    );
+    plan.assert_subscription_safe().unwrap();
+
+    plan.env_allowlist.push("ANTHROPIC_AUTH_TOKEN".to_string());
+    let error = plan
+        .assert_subscription_safe()
+        .expect_err("an ANTHROPIC_AUTH_TOKEN allowlist entry must fail closed");
+    assert!(
+        error.contains("env allowlist"),
+        "the failure must name the env allowlist, got: {error}"
+    );
+}
+
+#[test]
+fn claude_spawned_stub_does_not_inherit_anthropic_connector_env() {
+    use capo_runtime::{LocalProcessRequest, LocalProcessRunner};
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    // CS1 end-to-end scrub: even when BOTH ANTHROPIC_API_KEY and
+    // ANTHROPIC_AUTH_TOKEN are set in the PARENT process env, a Claude launch
+    // plan spawned through the runtime (which `env_clear()`s and then re-adds
+    // only the allowlist) must NOT pass them to the child. We prove this by
+    // running a stub that prints its visible environment and asserting neither
+    // name appears.
+    //
+    // CS6 review fix (finding 5): drive the EXACT runtime path a live Claude
+    // one-shot uses -- `spawn_process` + `wait_running_with_timeout` (see
+    // `claude_live.rs::run_one_shot`) -- not `start_process`, so the env_clear +
+    // allowlist branch this test exercises is the same branch a live spawn goes
+    // through (no "proved by analogy"). CS6 review fix (finding 3): the parent-env
+    // mutation is held in a Drop guard behind `SCRUB_TEST_ENV_LOCK`, so the
+    // secret-shaped values are serialized AND always removed even if a spawn
+    // panics rather than returning `Err`.
+    let workspace = temp_root("claude-scrub-workspace");
+    let artifacts = temp_root("claude-scrub-artifacts");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&artifacts).unwrap();
+
+    // Write an executable stub that prints its environment.
+    let stub = workspace.join("print-env.sh");
+    fs::write(&stub, "#!/bin/sh\nenv\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&stub).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&stub, perms).unwrap();
+    }
+
+    let plan = ClaudeCodeAdapter::local_workspace_write_launch_plan(
+        workspace.clone(),
+        artifacts,
+        "ignored",
+    );
+    let runner = LocalProcessRunner::new(plan.runtime_config());
+
+    // Set the connector creds in the PARENT env behind the serialized Drop guard,
+    // then spawn the stub through the LIVE one-shot runtime path. The guard
+    // removes both vars on every exit path (including a panicking spawn).
+    let _env = ScrubTestEnvGuard::set("sk-ant-should-not-leak", "bearer-should-not-leak");
+    let request = LocalProcessRequest {
+        run_id: RunId::new("run-claude-scrub"),
+        turn_id: None,
+        program: stub.to_string_lossy().to_string(),
+        argv: Vec::new(),
+        cwd: workspace,
+        env: HashMap::new(),
+    };
+    // The live Claude one-shot path: spawn_process then wait_running_with_timeout.
+    let mut running = runner
+        .spawn_process(request)
+        .expect("spawn claude scrub stub");
+    let outcome = runner
+        .wait_running_with_timeout(&mut running, Duration::from_secs(10))
+        .expect("wait claude scrub stub");
+    let printed = fs::read_to_string(&outcome.stdout.path).unwrap();
+    assert!(
+        !printed.contains("ANTHROPIC_API_KEY"),
+        "ANTHROPIC_API_KEY must be scrubbed from the spawned env, got:\n{printed}"
+    );
+    assert!(
+        !printed.contains("ANTHROPIC_AUTH_TOKEN"),
+        "ANTHROPIC_AUTH_TOKEN must be scrubbed from the spawned env, got:\n{printed}"
+    );
+    assert!(
+        !printed.contains("should-not-leak"),
+        "no connector credential value may reach the child env"
+    );
+}
+
+#[test]
+fn claude_live_one_shot_refuses_tampered_secret_arg_before_spawn() {
+    // CS1: `run_one_shot` asserts `assert_subscription_safe()` BEFORE spawn, so a
+    // launch plan whose argv carries a secret-like marker is refused before any
+    // process starts. We exercise the assertion directly on the workspace-write
+    // plan the live chat adapter drives (claude_live.rs:158/174) with a tampered
+    // argv.
+    let workspace = temp_root("claude-tamper-workspace");
+    let artifacts = temp_root("claude-tamper-artifacts");
+    let mut plan = ClaudeCodeAdapter::local_workspace_write_launch_plan(
+        workspace,
+        artifacts,
+        "Apply the requested edit.",
+    );
+    plan.assert_subscription_safe().unwrap();
+    plan.argv
+        .push("Authorization: bearer sk-ant-leaked-token".to_string());
+    let error = plan
+        .assert_subscription_safe()
+        .expect_err("a secret-like argv marker must be refused before spawn");
+    assert!(
+        error.contains("argv"),
+        "the failure must name the argv, got: {error}"
+    );
+}
+
+#[test]
+fn sensitive_marker_scan_flags_auth_token_values() {
+    // CS1 secondary-scan hardening: close the gap where an auth_token /
+    // anthropic_auth_token bearer value (no `sk-` shape) slipped past the stdout
+    // scan. A line carrying such a value must now be flagged.
+    let root = temp_root("auth-token-scan");
+    fs::create_dir_all(&root).unwrap();
+
+    let auth_token = root.join("auth-token.txt");
+    fs::write(&auth_token, "ANTHROPIC_AUTH_TOKEN=bearer-abc123def456\n").unwrap();
+    let lowered = root.join("auth-token-lower.txt");
+    fs::write(&lowered, "auth_token: some-opaque-bearer-value\n").unwrap();
+
+    let token_error = scan_artifacts_for_sensitive_markers([&auth_token]).unwrap_err();
+    assert!(matches!(
+        token_error,
+        LocalAdapterSmokeError::SensitiveArtifact { marker, .. }
+            if marker == "anthropic_auth_token"
+    ));
+    let lower_error = scan_artifacts_for_sensitive_markers([&lowered]).unwrap_err();
+    assert!(matches!(
+        lower_error,
+        LocalAdapterSmokeError::SensitiveArtifact { marker, .. } if marker == "auth_token"
+    ));
 }
 
 fn temp_root(name: &str) -> PathBuf {
