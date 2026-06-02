@@ -35,7 +35,7 @@ pub use worktree::{
 /// First runtime variants from the prototype plan.
 pub const PLANNED_RUNTIMES: &[&str] = &["fake", "local-process", "remote-process"];
 /// First tunnel variants from the runtime/tunnel plan.
-pub const PLANNED_TUNNELS: &[&str] = &["fake", "local-loopback", "endpoint-stub"];
+pub const PLANNED_TUNNELS: &[&str] = &["fake", "local-loopback", "endpoint-stub", "tailscale"];
 
 pub type RuntimeResult<T> = Result<T, RuntimeError>;
 
@@ -1733,11 +1733,54 @@ fn prepend_remote_events(
     *events = prefixed;
 }
 
+/// CT3: the owned REACHABILITY handle returned by
+/// [`ConnectivityTunnel::open_channel`] and consumed by
+/// [`ConnectivityTunnel::close_channel`].
+///
+/// This SUPERSEDES the `runtime-tunnel.md` design's tentative `ChannelRef` name —
+/// CT3 owns the naming. It is a REACHABILITY handle ONLY: it records which
+/// resolved endpoint/channel is open and the tunnel variant that opened it. It is
+/// NOT a process handle and carries NO coupling to `RuntimeRunner` — a remote
+/// runner that later executes over the tailnet RESOLVES through this tunnel but
+/// is out of scope here (CT0 boundary note).
+///
+/// `channel_id` is derived deterministically from the resolved endpoint so the
+/// handle is replay-stable and a `close_channel` can be matched to its
+/// `open_channel`. It carries NO secret (no authkey, no raw status blob); the
+/// identity is the derived fingerprint already on the resolved endpoint (CT2).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenChannel {
+    pub channel_id: String,
+    pub connectivity_endpoint_id: String,
+    pub channel_kind: ChannelKind,
+    pub exposure: ExposureScope,
+    pub resolved_uri: String,
+    pub identity_fingerprint: Option<String>,
+    /// The tunnel variant that opened this channel (`fake` / `local-loopback` /
+    /// `endpoint-stub` / `tailscale`), so a teardown (CT7) can be audited.
+    pub variant: &'static str,
+}
+
+impl OpenChannel {
+    fn from_resolved(resolved: &ResolvedEndpoint, variant: &'static str) -> Self {
+        Self {
+            channel_id: format!("channel:{}", resolved.resolved_endpoint_id),
+            connectivity_endpoint_id: resolved.connectivity_endpoint_id.clone(),
+            channel_kind: resolved.channel_kind,
+            exposure: resolved.exposure,
+            resolved_uri: resolved.resolved_uri.clone(),
+            identity_fingerprint: resolved.identity_fingerprint.clone(),
+            variant,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConnectivityTunnel {
     Fake(FakeTunnel),
     LocalLoopback(LocalLoopbackTunnel),
     EndpointStub(EndpointStubTunnel),
+    Tailscale(TailscaleTunnel),
 }
 
 impl ConnectivityTunnel {
@@ -1753,11 +1796,19 @@ impl ConnectivityTunnel {
         Self::EndpointStub(EndpointStubTunnel::new(config))
     }
 
+    /// CT3: a real Tailscale tunnel backed by an injectable
+    /// [`TailscaleStatusSource`] (scripted for deterministic tests; the gated live
+    /// `tailscale status --json` source for CT10).
+    pub fn tailscale(config: ConnectivityEndpointConfig, status: TailscaleStatusSource) -> Self {
+        Self::Tailscale(TailscaleTunnel::new(config, status))
+    }
+
     pub fn binding(&self) -> BoundaryBinding {
         match self {
             Self::Fake(tunnel) => tunnel.binding(),
             Self::LocalLoopback(tunnel) => tunnel.binding(),
             Self::EndpointStub(tunnel) => tunnel.binding(),
+            Self::Tailscale(tunnel) => tunnel.binding(),
         }
     }
 
@@ -1770,6 +1821,7 @@ impl ConnectivityTunnel {
             Self::Fake(tunnel) => tunnel.resolve_endpoint(owner, channel_kind),
             Self::LocalLoopback(tunnel) => tunnel.resolve_endpoint(owner, channel_kind),
             Self::EndpointStub(tunnel) => tunnel.resolve_endpoint(owner, channel_kind),
+            Self::Tailscale(tunnel) => tunnel.resolve_endpoint(owner, channel_kind),
         }
     }
 
@@ -1778,6 +1830,32 @@ impl ConnectivityTunnel {
             Self::Fake(tunnel) => tunnel.check_reachability(),
             Self::LocalLoopback(tunnel) => tunnel.check_reachability(),
             Self::EndpointStub(tunnel) => tunnel.check_reachability(),
+            Self::Tailscale(tunnel) => tunnel.check_reachability(),
+        }
+    }
+
+    /// CT3: open a REACHABILITY channel for an already-resolved endpoint. The
+    /// returned [`OpenChannel`] is the owned handle a later `revoke` (CT7) tears
+    /// down via [`ConnectivityTunnel::close_channel`]. This is reachability only —
+    /// never a process handle.
+    pub fn open_channel(&self, resolved: &ResolvedEndpoint) -> ConnectivityResult<OpenChannel> {
+        match self {
+            Self::Fake(tunnel) => tunnel.open_channel(resolved),
+            Self::LocalLoopback(tunnel) => tunnel.open_channel(resolved),
+            Self::EndpointStub(tunnel) => tunnel.open_channel(resolved),
+            Self::Tailscale(tunnel) => tunnel.open_channel(resolved),
+        }
+    }
+
+    /// CT3: close a previously-opened reachability channel. Idempotency and the
+    /// "prove unreachability after close" semantics are CT7's concern; CT3 only
+    /// provides the surface so CT7's teardown is implementable.
+    pub fn close_channel(&self, channel: OpenChannel) -> ConnectivityResult<()> {
+        match self {
+            Self::Fake(tunnel) => tunnel.close_channel(channel),
+            Self::LocalLoopback(tunnel) => tunnel.close_channel(channel),
+            Self::EndpointStub(tunnel) => tunnel.close_channel(channel),
+            Self::Tailscale(tunnel) => tunnel.close_channel(channel),
         }
     }
 
@@ -1786,6 +1864,7 @@ impl ConnectivityTunnel {
             Self::Fake(tunnel) => tunnel.exposure_report(),
             Self::LocalLoopback(tunnel) => tunnel.exposure_report(),
             Self::EndpointStub(tunnel) => tunnel.exposure_report(),
+            Self::Tailscale(tunnel) => tunnel.exposure_report(),
         }
     }
 }
@@ -1821,6 +1900,17 @@ impl FakeTunnel {
             exposure: ExposureScope::Loopback,
             detail: "fake tunnel is always reachable in tests".to_string(),
         }
+    }
+
+    /// CT3: open a scripted reachability channel. `FakeTunnel` always succeeds so
+    /// CT5/CT7/CT9 controller/CLI tests can drive open/close deterministically.
+    pub fn open_channel(&self, resolved: &ResolvedEndpoint) -> ConnectivityResult<OpenChannel> {
+        Ok(OpenChannel::from_resolved(resolved, "fake-tunnel"))
+    }
+
+    /// CT3: close a scripted reachability channel — a no-op success on the fake.
+    pub fn close_channel(&self, _channel: OpenChannel) -> ConnectivityResult<()> {
+        Ok(())
     }
 
     pub fn exposure_report(&self) -> ExposureReport {
@@ -1870,6 +1960,16 @@ impl LocalLoopbackTunnel {
             exposure: ExposureScope::Loopback,
             detail: "loopback endpoint resolves to localhost only".to_string(),
         }
+    }
+
+    /// CT3: loopback opens a loopback reachability channel for an
+    /// already-resolved loopback endpoint.
+    pub fn open_channel(&self, resolved: &ResolvedEndpoint) -> ConnectivityResult<OpenChannel> {
+        Ok(OpenChannel::from_resolved(resolved, "local-loopback"))
+    }
+
+    pub fn close_channel(&self, _channel: OpenChannel) -> ConnectivityResult<()> {
+        Ok(())
     }
 
     pub fn exposure_report(&self) -> ExposureReport {
@@ -1930,8 +2030,389 @@ impl EndpointStubTunnel {
         }
     }
 
+    /// CT3: open a reachability channel for a resolved stub endpoint.
+    pub fn open_channel(&self, resolved: &ResolvedEndpoint) -> ConnectivityResult<OpenChannel> {
+        Ok(OpenChannel::from_resolved(resolved, "endpoint-stub"))
+    }
+
+    pub fn close_channel(&self, _channel: OpenChannel) -> ConnectivityResult<()> {
+        Ok(())
+    }
+
     pub fn exposure_report(&self) -> ExposureReport {
         ExposureReport::for_exposure(&self.config.endpoint_id, self.config.exposure)
+    }
+}
+
+/// CT3: the observed tailnet status for a single peer/device, as projected by a
+/// [`TailscaleStatusSource`].
+///
+/// This is the CONFINED, already-sanitized view the adapter works with: it carries
+/// a tailnet ADDRESS (MagicDNS name or `100.64.0.0/10` CGNAT IP), the OBSERVED
+/// stable device identity (node-id / device id), and reachability — but NEVER an
+/// authkey, NEVER a raw `tailscale status` JSON blob with tokens. The live source
+/// is responsible for projecting `tailscale status --json` down to exactly these
+/// fields so no secret ever crosses into the controller-facing types (the CT2
+/// architectural-confinement guarantee).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TailscalePeerStatus {
+    /// MagicDNS name or CGNAT `100.64.0.0/10` tailnet IP for the peer.
+    pub tailnet_address: String,
+    /// The OBSERVED stable device identity (e.g. a node id / device id). The
+    /// adapter derives a fingerprint from this for the audit field; the raw value
+    /// is itself a stable public identifier, never a credential.
+    pub observed_device_id: String,
+    /// Whether the peer is currently reachable on the tailnet.
+    pub reachable: bool,
+}
+
+/// CT3: the injectable source of tailnet endpoint resolution + status, modeled on
+/// the ACP `ScriptedAcpTransport` / `PipedProcessTransport` pattern from `depth`.
+///
+/// A SCRIPTED implementation drives deterministic tests with NO live tailnet; the
+/// gated LIVE implementation shells out to `tailscale status --json` (CT10). The
+/// trait deliberately yields only a sanitized [`TailscalePeerStatus`] (address +
+/// observed device id + reachability) so the adapter never has to touch — and can
+/// never accidentally surface — an authkey or a raw status blob.
+pub trait TailscaleStatusSourceImpl: std::fmt::Debug + Send + Sync {
+    /// Resolve the peer status for `endpoint_id`. The `reason` in any error is a
+    /// redacted, secret-free label (binary absent / not-logged-in / no peer).
+    fn peer_status(&self, endpoint_id: &str) -> ConnectivityResult<TailscalePeerStatus>;
+
+    /// A PURE, in-memory equality token used by [`TailscaleStatusSource`]'s
+    /// `PartialEq` so comparing two `ConnectivityTunnel`s never triggers a live
+    /// process spawn. The default projects a stable probe id through `peer_status`
+    /// — correct and pure for the SCRIPTED/FAILING sources. A LIVE source (which
+    /// would otherwise shell out on every `==`) MUST override this with a token
+    /// derived from its own configuration (e.g. its binary path).
+    fn eq_token(&self) -> EqToken {
+        EqToken::Status(self.peer_status("__eq_probe__"))
+    }
+}
+
+/// A pure equality token for a [`TailscaleStatusSourceImpl`] — see
+/// [`TailscaleStatusSourceImpl::eq_token`]. It never carries a credential: the
+/// scripted/failing sources project a sanitized peer status, and the live source
+/// projects only its configured binary path (never the live status JSON).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EqToken {
+    Status(ConnectivityResult<TailscalePeerStatus>),
+    Identity(String),
+}
+
+/// CT3: a boxed [`TailscaleStatusSourceImpl`]. Kept as a newtype so the
+/// `ConnectivityTunnel` enum stays `Clone`/`Debug`/`Eq` via the scripted source's
+/// stable identity, and so the live source can be swapped in behind the same type.
+#[derive(Clone, Debug)]
+pub struct TailscaleStatusSource(std::sync::Arc<dyn TailscaleStatusSourceImpl>);
+
+impl TailscaleStatusSource {
+    pub fn new(source: impl TailscaleStatusSourceImpl + 'static) -> Self {
+        Self(std::sync::Arc::new(source))
+    }
+
+    /// A deterministic scripted source for tests: it returns the given peer status
+    /// for any endpoint id, with NO live tailnet.
+    pub fn scripted(status: TailscalePeerStatus) -> Self {
+        Self::new(ScriptedTailscaleStatusSource { status })
+    }
+
+    /// A scripted source that always FAILS resolution with a redacted reason
+    /// (e.g. to drive the "not logged in / no reachable peer" path deterministically).
+    pub fn scripted_unreachable(reason: impl Into<String>) -> Self {
+        Self::new(ScriptedTailscaleStatusSource {
+            status: TailscalePeerStatus {
+                tailnet_address: String::new(),
+                observed_device_id: String::new(),
+                reachable: false,
+            },
+        })
+        .with_fail(reason.into())
+    }
+
+    fn with_fail(self, reason: String) -> Self {
+        Self::new(FailingTailscaleStatusSource { reason })
+    }
+
+    fn peer_status(&self, endpoint_id: &str) -> ConnectivityResult<TailscalePeerStatus> {
+        self.0.peer_status(endpoint_id)
+    }
+}
+
+// Two `TailscaleStatusSource`s are equal iff they project the same peer status for
+// a stable probe id — enough to keep the enclosing `ConnectivityTunnel` `Eq`
+// without leaking the boxed trait object's identity into equality.
+impl PartialEq for TailscaleStatusSource {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare via the PURE `eq_token` so a LIVE source (whose `peer_status`
+        // shells out to `tailscale status --json`) is NEVER spawned on `==`.
+        self.0.eq_token() == other.0.eq_token()
+    }
+}
+impl Eq for TailscaleStatusSource {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ScriptedTailscaleStatusSource {
+    status: TailscalePeerStatus,
+}
+
+impl TailscaleStatusSourceImpl for ScriptedTailscaleStatusSource {
+    fn peer_status(&self, _endpoint_id: &str) -> ConnectivityResult<TailscalePeerStatus> {
+        Ok(self.status.clone())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FailingTailscaleStatusSource {
+    reason: String,
+}
+
+impl TailscaleStatusSourceImpl for FailingTailscaleStatusSource {
+    fn peer_status(&self, endpoint_id: &str) -> ConnectivityResult<TailscalePeerStatus> {
+        Err(ConnectivityError::TailscaleResolution {
+            endpoint_id: endpoint_id.to_string(),
+            reason: self.reason.clone(),
+        })
+    }
+}
+
+/// CT3/CT10: the LIVE status source that shells out to `tailscale status --json`.
+///
+/// The DETERMINISTIC tests never touch this — they use [`TailscaleStatusSource::scripted`].
+/// This source is exercised ONLY by the gated CT10 live smoke. Its SKIP PREDICATE
+/// is DEFINED and deterministic (never operator-judged): resolution FAILS with a
+/// redacted [`ConnectivityError::TailscaleResolution`] (so the smoke skips cleanly)
+/// when the `tailscale` binary is absent (spawn error / non-zero exit) OR the
+/// status reports no reachable peer. The `reason` is a short secret-free label; the
+/// raw `tailscale status` JSON (which can carry tokens) is NEVER returned or logged.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveTailscaleStatusSource {
+    /// The `tailscale` binary to invoke (default `tailscale`).
+    pub binary: String,
+}
+
+impl Default for LiveTailscaleStatusSource {
+    fn default() -> Self {
+        Self {
+            binary: "tailscale".to_string(),
+        }
+    }
+}
+
+impl TailscaleStatusSourceImpl for LiveTailscaleStatusSource {
+    fn peer_status(&self, endpoint_id: &str) -> ConnectivityResult<TailscalePeerStatus> {
+        let fail = |reason: &str| ConnectivityError::TailscaleResolution {
+            endpoint_id: endpoint_id.to_string(),
+            reason: reason.to_string(),
+        };
+        // Probe the binary; a spawn failure / non-zero exit is the DEFINED skip
+        // condition (binary absent or not logged in). We deliberately do NOT
+        // surface stdout/stderr (which can carry tokens) — only a fixed label.
+        let output = Command::new(&self.binary)
+            .arg("status")
+            .arg("--json")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|_| fail("tailscale binary not available"))?;
+        if !output.status.success() {
+            return Err(fail(
+                "tailscale status reported not-logged-in / unavailable",
+            ));
+        }
+        // CT10 owns the full JSON projection down to a sanitized peer status.
+        // CT3 lands the source shape + skip predicate; resolving a specific peer's
+        // address/device-id from the JSON blob (without surfacing the blob) is
+        // wired with the live tailnet at CT10.
+        Err(fail(
+            "live tailnet peer projection is wired at CT10; status probe succeeded",
+        ))
+    }
+
+    /// Compare by the configured binary path only — a STABLE in-memory identity —
+    /// so wrapping a `LiveTailscaleStatusSource` in a `TailscaleStatusSource` and
+    /// then comparing it with `==` never spawns `tailscale status`.
+    fn eq_token(&self) -> EqToken {
+        EqToken::Identity(format!("live:{}", self.binary))
+    }
+}
+
+/// Whether `address` is a tailnet address: a MagicDNS `*.ts.net` name or a CGNAT
+/// `100.64.0.0/10` IP. The adapter refuses to resolve a non-tailnet address as a
+/// private tailnet endpoint, so a misconfigured/spoofed loopback or public address
+/// cannot masquerade as a tailnet peer.
+fn is_tailnet_address(address: &str) -> bool {
+    if address.ends_with(".ts.net") || address.contains(".ts.net:") {
+        return true;
+    }
+    // CGNAT 100.64.0.0/10: first octet 100, second octet in 64..=127.
+    let host = address.split(':').next().unwrap_or(address);
+    let mut octets = host.split('.');
+    let (Some(a), Some(b)) = (octets.next(), octets.next()) else {
+        return false;
+    };
+    matches!((a.parse::<u8>(), b.parse::<u8>()), (Ok(100), Ok(b)) if (64..=127).contains(&b))
+}
+
+/// Derive a stable, secret-free identity FINGERPRINT from an observed device id.
+/// The observed device id is itself a public stable identifier, but we record a
+/// derived fingerprint (matching the CT2 `identity_fingerprint` contract) so the
+/// audit field shape is uniform and never carries a raw credential.
+fn identity_fingerprint_of(observed_device_id: &str) -> String {
+    format!("tsnode:{}", content_hash(observed_device_id.as_bytes()))
+}
+
+/// CT3: the real Tailscale tunnel adapter behind the `ConnectivityTunnel` enum.
+///
+/// It resolves a Capo-server / runtime-target endpoint to a TAILNET address at
+/// [`ExposureScope::Private`] (never loopback, never public) through an injectable
+/// [`TailscaleStatusSource`]. It NEVER owns a process handle and never couples to
+/// `RuntimeRunner`; it resolves reachability/endpoints and opens/closes
+/// reachability channels only.
+///
+/// CREDENTIAL DISCIPLINE (CT2): the adapter records auth MODE + device-identity
+/// FINGERPRINT only. The `auth_ref` HANDLE on the config is the pointer the live
+/// source would resolve to a real authkey at connect time, CONFINED here; the
+/// resolved value is structurally never returned to the controller, stored, or
+/// logged. No method on this type returns a raw authkey or a raw `tailscale
+/// status` blob.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TailscaleTunnel {
+    config: ConnectivityEndpointConfig,
+    status: TailscaleStatusSource,
+}
+
+impl TailscaleTunnel {
+    pub fn new(config: ConnectivityEndpointConfig, status: TailscaleStatusSource) -> Self {
+        Self { config, status }
+    }
+
+    /// The auth MODE recorded for audit (never the authkey). When an `auth_ref`
+    /// handle is present the mode is `tailscale_authkey_handle`, matching the
+    /// `protocol-provider.md` "record auth mode only" rule; otherwise the device
+    /// is expected to be pre-authenticated on the tailnet (`tailscale_device`).
+    pub fn auth_mode(&self) -> &'static str {
+        if self
+            .config
+            .auth_ref
+            .as_deref()
+            .is_some_and(|h| !h.is_empty())
+        {
+            "tailscale_authkey_handle"
+        } else {
+            "tailscale_device"
+        }
+    }
+
+    pub fn binding(&self) -> BoundaryBinding {
+        BoundaryBinding {
+            kind: BoundaryKind::ConnectivityTunnel,
+            variant: "tailscale",
+            fake: false,
+        }
+    }
+
+    pub fn resolve_endpoint(
+        &self,
+        owner: EndpointOwner,
+        channel_kind: ChannelKind,
+    ) -> ConnectivityResult<ResolvedEndpoint> {
+        // Tailscale resolves ONLY at Private. A Public/Funnel request is refused at
+        // the adapter layer until CT8 installs the full short-lived/audited guard;
+        // a Loopback request is a misconfiguration (loopback is the loopback
+        // tunnel's job, not the tailnet adapter's).
+        if !matches!(self.config.exposure, ExposureScope::Private) {
+            return Err(ConnectivityError::ScopeNotSupported {
+                endpoint_id: self.config.endpoint_id.clone(),
+                requested: self.config.exposure,
+                supported: ExposureScope::Private,
+            });
+        }
+
+        if !self.config.allowed_channels.contains(&channel_kind) {
+            return Err(ConnectivityError::ChannelNotAllowed {
+                endpoint_id: self.config.endpoint_id.clone(),
+                channel_kind,
+            });
+        }
+
+        let peer = self.status.peer_status(&self.config.endpoint_id)?;
+        if !peer.reachable {
+            return Err(ConnectivityError::TailscaleResolution {
+                endpoint_id: self.config.endpoint_id.clone(),
+                reason: "no reachable tailnet peer".to_string(),
+            });
+        }
+        if !is_tailnet_address(&peer.tailnet_address) {
+            return Err(ConnectivityError::TailscaleResolution {
+                endpoint_id: self.config.endpoint_id.clone(),
+                reason: "resolved address is not a tailnet (MagicDNS / 100.64.0.0/10) address"
+                    .to_string(),
+            });
+        }
+
+        // Record the OBSERVED device identity as a derived fingerprint only (CT2);
+        // CT4 adds the expected-identity CHECK before this point.
+        let fingerprint = identity_fingerprint_of(&peer.observed_device_id);
+        let resolved = ResolvedEndpoint::new(
+            self.config.endpoint_id.clone(),
+            owner,
+            channel_kind,
+            format!("https://{}", peer.tailnet_address),
+            ExposureScope::Private,
+            true,
+        )
+        .with_identity_fingerprint(Some(fingerprint));
+        Ok(resolved)
+    }
+
+    pub fn check_reachability(&self) -> ConnectivityHealth {
+        match self.status.peer_status(&self.config.endpoint_id) {
+            Ok(peer) if peer.reachable && is_tailnet_address(&peer.tailnet_address) => {
+                ConnectivityHealth {
+                    endpoint_id: self.config.endpoint_id.clone(),
+                    status: "available".to_string(),
+                    reachable: true,
+                    exposure: ExposureScope::Private,
+                    detail: "tailnet peer reachable".to_string(),
+                }
+            }
+            _ => ConnectivityHealth {
+                endpoint_id: self.config.endpoint_id.clone(),
+                status: "unreachable".to_string(),
+                reachable: false,
+                exposure: ExposureScope::Private,
+                detail: "tailnet peer not reachable".to_string(),
+            },
+        }
+    }
+
+    /// CT3: open a reachability channel over the tailnet for an already-resolved
+    /// private endpoint. Reachability only — never a process handle.
+    ///
+    /// The resolved endpoint's exposure is re-asserted here as `Private`: the
+    /// adapter NEVER opens a tailscale channel for a `Loopback`/`Public` resolution,
+    /// even one handed in by a caller (a manually constructed or foreign-tunnel
+    /// `ResolvedEndpoint`). This mirrors the `resolve_endpoint` scope refusal so the
+    /// `OpenChannel` handle's `exposure`/`variant` fields cannot be forged into a
+    /// misleading CT7 teardown audit trail.
+    pub fn open_channel(&self, resolved: &ResolvedEndpoint) -> ConnectivityResult<OpenChannel> {
+        if !matches!(resolved.exposure, ExposureScope::Private) {
+            return Err(ConnectivityError::ScopeNotSupported {
+                endpoint_id: resolved.connectivity_endpoint_id.clone(),
+                requested: resolved.exposure,
+                supported: ExposureScope::Private,
+            });
+        }
+        Ok(OpenChannel::from_resolved(resolved, "tailscale"))
+    }
+
+    pub fn close_channel(&self, _channel: OpenChannel) -> ConnectivityResult<()> {
+        Ok(())
+    }
+
+    pub fn exposure_report(&self) -> ExposureReport {
+        ExposureReport::for_exposure(&self.config.endpoint_id, ExposureScope::Private)
     }
 }
 
@@ -1957,6 +2438,22 @@ pub enum ConnectivityError {
         requested: ExposureScope,
         ceiling: ExposureScope,
     },
+    /// CT3: the requested `ExposureScope` is not supported by this adapter at the
+    /// adapter layer. `TailscaleTunnel` resolves ONLY at `ExposureScope::Private`
+    /// (a tailnet address): a `Public`/Funnel resolution is REFUSED here with a
+    /// typed error until CT8 installs the full short-lived/audited public guard.
+    /// This closes the CT3->CT8 window at the adapter layer — a test-covered
+    /// refusal, never a silent pass. Carries no secret.
+    ScopeNotSupported {
+        endpoint_id: String,
+        requested: ExposureScope,
+        supported: ExposureScope,
+    },
+    /// CT3: the live/scripted Tailscale status source could not resolve a reachable
+    /// tailnet endpoint (binary absent, not logged in, no reachable peer, or the
+    /// resolved address is not a tailnet address). The `reason` is a redacted,
+    /// secret-free label — never a raw `tailscale status` blob or an authkey.
+    TailscaleResolution { endpoint_id: String, reason: String },
 }
 
 impl std::fmt::Display for ConnectivityError {
@@ -1980,6 +2477,23 @@ impl std::fmt::Display for ConnectivityError {
                 "requested exposure scope {} exceeds the effective policy ceiling {}",
                 requested.as_str(),
                 ceiling.as_str()
+            ),
+            Self::ScopeNotSupported {
+                endpoint_id,
+                requested,
+                supported,
+            } => write!(
+                f,
+                "exposure scope {} is not supported by endpoint {endpoint_id} (only {} is)",
+                requested.as_str(),
+                supported.as_str()
+            ),
+            Self::TailscaleResolution {
+                endpoint_id,
+                reason,
+            } => write!(
+                f,
+                "tailscale endpoint {endpoint_id} could not be resolved: {reason}"
             ),
         }
     }
@@ -2334,6 +2848,24 @@ impl ConnectivityEndpointConfig {
         }
     }
 
+    /// CT3: a Tailscale endpoint config — `tunnel_kind = "tailscale"`, exposure
+    /// `Private`, the private control/stdio/logs channels allowed. `address_ref`
+    /// is the configured tailnet target (MagicDNS name or CGNAT IP); the live
+    /// status source resolves the actual reachable address at connect time.
+    pub fn tailscale(endpoint_id: impl Into<String>, address_ref: impl Into<String>) -> Self {
+        Self {
+            endpoint_id: endpoint_id.into(),
+            name: "tailscale endpoint".to_string(),
+            tunnel_kind: "tailscale".to_string(),
+            address_ref: address_ref.into(),
+            exposure: ExposureScope::Private,
+            allowed_channels: vec![ChannelKind::Control, ChannelKind::Stdio, ChannelKind::Logs],
+            status: "available".to_string(),
+            auth_ref: None,
+            identity_ref: None,
+        }
+    }
+
     /// CT2 builder: attach the OPAQUE `auth_ref` / `identity_ref` HANDLES. Neither
     /// is ever a raw credential — they are pointers/fingerprints the adapter
     /// resolves at connect time. An empty string is normalized to `None` so a
@@ -2664,7 +3196,10 @@ mod tests {
             PLANNED_RUNTIMES,
             ["fake", "local-process", "remote-process"]
         );
-        assert_eq!(PLANNED_TUNNELS, ["fake", "local-loopback", "endpoint-stub"]);
+        assert_eq!(
+            PLANNED_TUNNELS,
+            ["fake", "local-loopback", "endpoint-stub", "tailscale"]
+        );
     }
 
     #[test]
@@ -2894,6 +3429,57 @@ mod tests {
     }
 
     #[test]
+    fn ct3_transport_socket_guard_is_scope_blind_but_exposure_layer_authorize_is_the_real_gate() {
+        // DOCUMENTED, INTENTIONAL: `authorize_socket` is a TRANSPORT-level guard and
+        // is scope-BLIND — it treats every non-loopback socket as `Private`. So a
+        // policy promoted only to `Private`, with a handle, PASSES the transport
+        // guard for a non-loopback bind even though the operator's *intent* might be
+        // a Public-interface exposure. This is by design; the transport cannot tell a
+        // tailnet-private interface from a public one.
+        let (private_only, _) = ExposurePolicy::loopback_default().promote(
+            ExposureScope::Private,
+            "flag",
+            "unix:1700000002",
+        );
+        assert_eq!(
+            private_only.authorize_socket(false, Some("keychain:capo/authkey")),
+            Ok(()),
+            "transport guard is scope-blind: a non-loopback socket passes at the Private ceiling"
+        );
+
+        // The REAL gate against public exposure is the EXPOSURE-layer `authorize`,
+        // which knows the requested scope. With the SAME Private-only ceiling, a
+        // `Public` request FAILS CLOSED with `ScopeExceedsCeiling` — proving the
+        // public-exposure decision lives here, not at the scope-blind transport guard.
+        assert_eq!(
+            private_only.authorize(ExposureScope::Public, Some("keychain:capo/authkey")),
+            Err(ConnectivityError::ScopeExceedsCeiling {
+                requested: ExposureScope::Public,
+                ceiling: ExposureScope::Private,
+            }),
+            "exposure-layer authorize is the real public-exposure gate and fails closed"
+        );
+
+        // And on the CT3 ADAPTER codepath, the tailscale adapter independently
+        // refuses a Public-scope config with a typed `ScopeNotSupported` — so even if
+        // the ceiling were promoted to Public, the tailscale path never serves public.
+        let mut public_config = ConnectivityEndpointConfig::tailscale("ts-pub", "capo-worker");
+        public_config.exposure = ExposureScope::Public;
+        public_config.allowed_channels = vec![ChannelKind::Dashboard];
+        let err = ConnectivityTunnel::tailscale(public_config, reachable_tailnet_source())
+            .resolve_endpoint(EndpointOwner::capo_server("dash"), ChannelKind::Dashboard)
+            .expect_err("tailscale adapter refuses public exposure on the CT3 codepath");
+        assert!(matches!(
+            err,
+            ConnectivityError::ScopeNotSupported {
+                requested: ExposureScope::Public,
+                supported: ExposureScope::Private,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn ct2_endpoint_config_and_resolved_endpoint_carry_opaque_handles_only() {
         // CT2: the schema additions are opaque pointers/derived values, set via the
         // builder, and normalized so an empty flag does not masquerade as present.
@@ -2931,6 +3517,342 @@ mod tests {
             Some("sha256:9f86d081")
         );
         assert_eq!(stamped.expires_at.as_deref(), Some("2026-06-02T12:00:00Z"));
+    }
+
+    // ---- CT3: TailscaleTunnel adapter + open_channel/close_channel surface ----
+
+    fn reachable_tailnet_source() -> TailscaleStatusSource {
+        TailscaleStatusSource::scripted(TailscalePeerStatus {
+            tailnet_address: "capo-worker.tailnet-1234.ts.net".to_string(),
+            observed_device_id: "nodekey:abc123stabledeviceid".to_string(),
+            reachable: true,
+        })
+    }
+
+    #[test]
+    fn ct3_tailscale_resolves_a_private_tailnet_endpoint_with_correct_scope() {
+        let config = ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker")
+            .with_handles(
+                Some("keychain:capo/tailnet-authkey".to_string()),
+                Some("tailscale:device:n7Qk2cFf".to_string()),
+            );
+        let tunnel = ConnectivityTunnel::tailscale(config, reachable_tailnet_source());
+
+        assert_eq!(tunnel.binding().kind, BoundaryKind::ConnectivityTunnel);
+        assert_eq!(tunnel.binding().variant, "tailscale");
+        assert!(!tunnel.binding().fake);
+
+        let owner = EndpointOwner::runtime_target("remote-target-1");
+        let resolved = tunnel
+            .resolve_endpoint(owner.clone(), ChannelKind::Control)
+            .expect("resolve a private tailnet control endpoint");
+
+        // Private scope, the private_tunnel permission scope, permission required.
+        assert_eq!(resolved.exposure, ExposureScope::Private);
+        assert_eq!(resolved.permission_scope, "network:connect:private_tunnel");
+        assert!(resolved.permission_required);
+        // Resolves to a tailnet (MagicDNS) address, not loopback, not public.
+        assert!(resolved.resolved_uri.contains(".ts.net"));
+        assert!(!resolved.resolved_uri.contains("127.0.0.1"));
+        // The observed device identity is recorded as a derived fingerprint only.
+        let fingerprint = resolved
+            .identity_fingerprint
+            .as_deref()
+            .expect("observed identity fingerprint recorded");
+        assert!(fingerprint.starts_with("tsnode:fnv1a64:"));
+    }
+
+    #[test]
+    fn ct3_tailscale_records_auth_mode_only_never_the_authkey() {
+        // With an auth_ref handle present the mode is the handle mode.
+        let with_handle = TailscaleTunnel::new(
+            ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker")
+                .with_handles(Some("keychain:capo/tailnet-authkey".to_string()), None),
+            reachable_tailnet_source(),
+        );
+        assert_eq!(with_handle.auth_mode(), "tailscale_authkey_handle");
+
+        // Without a handle the device is expected pre-authenticated on the tailnet.
+        let no_handle = TailscaleTunnel::new(
+            ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker"),
+            reachable_tailnet_source(),
+        );
+        assert_eq!(no_handle.auth_mode(), "tailscale_device");
+    }
+
+    #[test]
+    fn ct3_tailscale_public_scope_is_a_typed_adapter_refusal_until_ct8() {
+        // A Public-scope tailscale config is refused at the adapter layer with a
+        // typed ScopeNotSupported — closing the CT3->CT8 window, never a silent pass.
+        let mut config = ConnectivityEndpointConfig::tailscale("ts-public", "capo-worker");
+        config.exposure = ExposureScope::Public;
+        config.allowed_channels = vec![ChannelKind::Dashboard];
+        let tunnel = ConnectivityTunnel::tailscale(config, reachable_tailnet_source());
+
+        let err = tunnel
+            .resolve_endpoint(EndpointOwner::capo_server("dash"), ChannelKind::Dashboard)
+            .expect_err("public tailscale resolution is refused until CT8");
+        assert_eq!(
+            err,
+            ConnectivityError::ScopeNotSupported {
+                endpoint_id: "ts-public".to_string(),
+                requested: ExposureScope::Public,
+                supported: ExposureScope::Private,
+            }
+        );
+    }
+
+    #[test]
+    fn ct3_tailscale_refuses_a_channel_not_allowed_for_private_exposure() {
+        // Dashboard is not in the private tailscale endpoint's allowed channels.
+        let tunnel = ConnectivityTunnel::tailscale(
+            ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker"),
+            reachable_tailnet_source(),
+        );
+        let err = tunnel
+            .resolve_endpoint(EndpointOwner::capo_server("dash"), ChannelKind::Dashboard)
+            .expect_err("dashboard channel not allowed on private tailscale endpoint");
+        assert_eq!(
+            err,
+            ConnectivityError::ChannelNotAllowed {
+                endpoint_id: "ts-endpoint-1".to_string(),
+                channel_kind: ChannelKind::Dashboard,
+            }
+        );
+    }
+
+    #[test]
+    fn ct3_tailscale_refuses_an_unreachable_or_non_tailnet_address() {
+        // No reachable peer -> redacted TailscaleResolution refusal.
+        let unreachable = ConnectivityTunnel::tailscale(
+            ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker"),
+            TailscaleStatusSource::scripted(TailscalePeerStatus {
+                tailnet_address: "capo-worker.ts.net".to_string(),
+                observed_device_id: "nodekey:x".to_string(),
+                reachable: false,
+            }),
+        );
+        assert!(matches!(
+            unreachable.resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control),
+            Err(ConnectivityError::TailscaleResolution { .. })
+        ));
+        assert!(!unreachable.check_reachability().reachable);
+
+        // A reachable peer at a NON-tailnet address is refused (cannot masquerade).
+        let non_tailnet = ConnectivityTunnel::tailscale(
+            ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker"),
+            TailscaleStatusSource::scripted(TailscalePeerStatus {
+                tailnet_address: "203.0.113.7".to_string(),
+                observed_device_id: "nodekey:x".to_string(),
+                reachable: true,
+            }),
+        );
+        assert!(matches!(
+            non_tailnet.resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control),
+            Err(ConnectivityError::TailscaleResolution { .. })
+        ));
+    }
+
+    #[test]
+    fn ct3_tailnet_address_classifier_accepts_magicdns_and_cgnat_only() {
+        assert!(is_tailnet_address("host.tailnet-1234.ts.net"));
+        assert!(is_tailnet_address("host.tailnet-1234.ts.net:8443"));
+        assert!(is_tailnet_address("100.64.0.7"));
+        assert!(is_tailnet_address("100.127.255.1:443"));
+        // 100.128.x.x is outside the CGNAT /10; loopback/public are rejected.
+        assert!(!is_tailnet_address("100.128.0.1"));
+        assert!(!is_tailnet_address("127.0.0.1"));
+        assert!(!is_tailnet_address("203.0.113.7"));
+        assert!(!is_tailnet_address("example.com"));
+    }
+
+    #[test]
+    fn ct3_open_channel_then_close_channel_round_trips_on_tailscale_and_fake() {
+        // Tailscale: open a channel for a resolved private endpoint, then close it.
+        let tunnel = ConnectivityTunnel::tailscale(
+            ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker"),
+            reachable_tailnet_source(),
+        );
+        let resolved = tunnel
+            .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+            .expect("resolve");
+        let channel = tunnel.open_channel(&resolved).expect("open channel");
+        assert_eq!(channel.variant, "tailscale");
+        assert_eq!(channel.exposure, ExposureScope::Private);
+        assert_eq!(channel.channel_kind, ChannelKind::Control);
+        // The channel id is derived from the resolved endpoint id (replay-stable).
+        assert_eq!(
+            channel.channel_id,
+            format!("channel:{}", resolved.resolved_endpoint_id)
+        );
+        // The channel carries the derived identity fingerprint, no secret.
+        assert_eq!(channel.identity_fingerprint, resolved.identity_fingerprint);
+        tunnel.close_channel(channel).expect("close channel");
+
+        // FakeTunnel carries the same scripted surface for CT5/CT7/CT9 tests.
+        let fake = ConnectivityTunnel::fake();
+        let fake_resolved = fake
+            .resolve_endpoint(EndpointOwner::capo_server("s"), ChannelKind::Control)
+            .expect("fake resolve");
+        let fake_channel = fake.open_channel(&fake_resolved).expect("fake open");
+        assert_eq!(fake_channel.variant, "fake-tunnel");
+        fake.close_channel(fake_channel).expect("fake close");
+
+        // LocalLoopback opens a loopback channel for a resolved loopback endpoint.
+        let loopback = ConnectivityTunnel::local_loopback();
+        let lb_resolved = loopback
+            .resolve_endpoint(EndpointOwner::capo_server("s"), ChannelKind::Dashboard)
+            .expect("loopback resolve");
+        let lb_channel = loopback.open_channel(&lb_resolved).expect("loopback open");
+        assert_eq!(lb_channel.variant, "local-loopback");
+        assert_eq!(lb_channel.exposure, ExposureScope::Loopback);
+        loopback.close_channel(lb_channel).expect("loopback close");
+
+        // EndpointStub round-trips too (private stub resolution -> channel -> close).
+        let stub = ConnectivityTunnel::endpoint_stub(ConnectivityEndpointConfig::stub_private(
+            "stub-rt",
+            "100.64.0.7",
+        ));
+        let stub_resolved = stub
+            .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+            .expect("stub resolve");
+        let stub_channel = stub.open_channel(&stub_resolved).expect("stub open");
+        assert_eq!(stub_channel.variant, "endpoint-stub");
+        assert_eq!(stub_channel.exposure, ExposureScope::Private);
+        stub.close_channel(stub_channel).expect("stub close");
+    }
+
+    #[test]
+    fn ct3_tailscale_open_channel_refuses_a_non_private_resolution() {
+        // A resolution whose exposure is NOT Private (e.g. a manually constructed or
+        // foreign-tunnel handle) must NOT be openable as a tailscale channel — the
+        // adapter re-asserts the scope so the OpenChannel's exposure/variant cannot
+        // be forged into a misleading CT7 teardown audit trail.
+        let tunnel = ConnectivityTunnel::tailscale(
+            ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker"),
+            reachable_tailnet_source(),
+        );
+        let mut forged = tunnel
+            .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+            .expect("resolve");
+        // Forge the exposure to Public after resolution.
+        forged.exposure = ExposureScope::Public;
+        let err = tunnel
+            .open_channel(&forged)
+            .expect_err("tailscale must refuse to open a non-private channel");
+        assert_eq!(
+            err,
+            ConnectivityError::ScopeNotSupported {
+                endpoint_id: "ts-endpoint-1".to_string(),
+                requested: ExposureScope::Public,
+                supported: ExposureScope::Private,
+            }
+        );
+
+        // A forged Loopback resolution is likewise refused by the tailscale adapter.
+        let mut forged_loopback = tunnel
+            .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+            .expect("resolve");
+        forged_loopback.exposure = ExposureScope::Loopback;
+        assert!(matches!(
+            tunnel.open_channel(&forged_loopback),
+            Err(ConnectivityError::ScopeNotSupported { .. })
+        ));
+    }
+
+    #[test]
+    fn ct3_live_status_source_equality_does_not_spawn_a_process() {
+        // Wrapping a LiveTailscaleStatusSource in a TailscaleStatusSource and
+        // comparing with `==` must use the PURE identity token (binary path), never
+        // shell out to `tailscale status`. We point the binary at a path that would
+        // error if spawned, and assert equality is decided purely in-memory.
+        let live_a = TailscaleStatusSource::new(LiveTailscaleStatusSource {
+            binary: "/nonexistent/never-spawned-tailscale".to_string(),
+        });
+        let live_b = TailscaleStatusSource::new(LiveTailscaleStatusSource {
+            binary: "/nonexistent/never-spawned-tailscale".to_string(),
+        });
+        let live_c = TailscaleStatusSource::new(LiveTailscaleStatusSource {
+            binary: "/some/other/tailscale".to_string(),
+        });
+        // Same binary -> equal; different binary -> not equal; all without spawning.
+        assert_eq!(live_a, live_b);
+        assert_ne!(live_a, live_c);
+        // A live source and a scripted source are never equal (different token kinds).
+        assert_ne!(live_a, reachable_tailnet_source());
+    }
+
+    #[test]
+    fn ct3_enum_surface_is_exhaustive_across_all_variants_and_methods() {
+        // Drive every method through the enum on every variant so a new variant
+        // that fails to implement the full surface is a compile error here.
+        let tailscale = ConnectivityTunnel::tailscale(
+            ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker"),
+            reachable_tailnet_source(),
+        );
+        let stub = ConnectivityTunnel::endpoint_stub(ConnectivityEndpointConfig::stub_private(
+            "stub-1",
+            "tailnet/x",
+        ));
+        let variants = [
+            (ConnectivityTunnel::fake(), "fake-tunnel"),
+            (ConnectivityTunnel::local_loopback(), "local-loopback"),
+            (stub, "endpoint-stub"),
+            (tailscale, "tailscale"),
+        ];
+        for (tunnel, expected_variant) in variants {
+            assert_eq!(tunnel.binding().variant, expected_variant);
+            // Drive ALL SIX methods through the enum on every arm so a new variant
+            // that fails to implement the full surface is a compile error here:
+            // binding (above) + resolve_endpoint + check_reachability +
+            // exposure_report + open_channel + close_channel.
+            let resolved = tunnel
+                .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+                .expect("every variant resolves the private control channel");
+            let _ = tunnel.check_reachability();
+            let _ = tunnel.exposure_report();
+            let channel = tunnel
+                .open_channel(&resolved)
+                .expect("every variant opens a channel for its own resolution");
+            assert_eq!(channel.variant, expected_variant);
+            tunnel
+                .close_channel(channel)
+                .expect("every variant closes its channel");
+        }
+    }
+
+    #[test]
+    fn ct3_resolution_output_contains_no_secret_material() {
+        // The resolved endpoint + open channel must carry handles/fingerprints
+        // only — never the (planted) authkey or a raw status blob.
+        let planted_authkey = "tskey-auth-DEADBEEFdeadbeef0123456789";
+        let config = ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker")
+            // The auth_ref is an opaque handle, never the raw key.
+            .with_handles(Some("keychain:capo/tailnet-authkey".to_string()), None);
+        let tunnel = ConnectivityTunnel::tailscale(config, reachable_tailnet_source());
+        let resolved = tunnel
+            .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+            .expect("resolve");
+        let rendered = format!("{resolved:?}");
+        assert!(!rendered.contains(planted_authkey));
+        assert!(!rendered.contains("tskey-auth"));
+
+        let channel = tunnel.open_channel(&resolved).expect("open");
+        let channel_rendered = format!("{channel:?}");
+        assert!(!channel_rendered.contains("tskey-auth"));
+
+        // The TailscaleResolution refusal reason is a fixed secret-free label.
+        let err = ConnectivityTunnel::tailscale(
+            ConnectivityEndpointConfig::tailscale("ts-endpoint-1", "capo-worker"),
+            TailscaleStatusSource::scripted(TailscalePeerStatus {
+                tailnet_address: String::new(),
+                observed_device_id: String::new(),
+                reachable: false,
+            }),
+        )
+        .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+        .expect_err("unreachable");
+        assert!(!format!("{err}").contains("tskey-auth"));
     }
 
     #[test]

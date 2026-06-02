@@ -4998,6 +4998,20 @@ fn ct2_opaque_handle_round_trips_and_no_secret_on_any_surface() {
         None,
         "credential pattern survived on the persisted revoke event payload surface"
     );
+    // Prove the scrub was FIELD-SCOPED, not a wipe of the whole payload: the
+    // structural keys around the scrubbed free-text reason still survive, so we know
+    // only the matching free-text field was redacted (and the redaction marker
+    // appearing above is not the result of nuking the entire JSON blob).
+    assert!(
+        revoke_event.payload_json.contains("\"exposure_id\""),
+        "field-scoped scrubbing must keep structural keys: missing exposure_id in {}",
+        revoke_event.payload_json
+    );
+    assert!(
+        revoke_event.payload_json.contains("\"status\""),
+        "field-scoped scrubbing must keep structural keys: missing status in {}",
+        revoke_event.payload_json
+    );
 }
 
 #[test]
