@@ -31,10 +31,18 @@ load-bearing mechanism decisions (runner<->server channel, runner-reconnect
 reconciliation), and the verification + safety invariant; no DT task begins before
 its named prerequisite has actually LANDED in-tree (not merely been named).
 
-### Substrate Reality (verified in-tree, 2026-06-02)
+### Substrate Reality (ORIGINAL snapshot at authoring; SUPERSEDED -- see Substrate Update below)
 
-The named prerequisites this workpad composes are NOT all present today. This is
-recorded so the plan does not assert capabilities the tree lacks:
+NOTE: the bullets in this subsection are the snapshot taken WHEN THIS WORKPAD WAS
+AUTHORED. They are retained as a historical record of why DT-pre-A / DT-pre-B were
+created. Most of them are NO LONGER TRUE: the `connectivity-tunnel` track (CT0-CT10)
+and the `remote-runtime` RR8 SSH transport have since landed. Read the "Substrate
+Update" subsection immediately after this list for the CURRENT in-tree state; the
+gate and the DT-pre-A / DT-pre-B scopes are governed by that update, not by the
+stale bullets here.
+
+The named prerequisites this workpad composes were NOT all present at authoring
+time. This was recorded so the plan did not assert capabilities the tree lacked:
 
 - There is NO `connectivity-tunnel` workpad in `workpads/`; the
   `ConnectivityTunnel` enum in `crates/capo-runtime/src/lib.rs` has only
@@ -59,6 +67,52 @@ Accordingly, the workpad adds explicit UPSTREAM PREREQUISITE TASKS (`DT-pre-A`,
 DT task's DETERMINISTIC tier is scoped to what the tree (or the named, planned
 prerequisite) actually supports; live SSH/tailnet work sits behind the DT7 opt-in
 gate.
+
+### Substrate Update (re-verified in-tree, 2026-06-02 after CT/RR landed)
+
+The original snapshot above is superseded. The connectivity + remote-runtime
+substrate has LANDED on this branch (off main). Verified in-tree today:
+
+- The `connectivity-tunnel` workpad EXISTS (`workpads/connectivity-tunnel/`) with
+  CT2/CT5/CT6/CT7/CT8/CT9/CT10 marked `done` (CT0/CT1/CT3/CT4 still `pending`, but
+  the load-bearing tunnel + health + exposure surface they front is in-tree).
+- `ConnectivityTunnel::Tailscale(TailscaleTunnel)` IS in-tree
+  (`crates/capo-runtime/src/lib.rs:5403`), with `resolve_endpoint` /
+  `check_reachability` / `open_channel` / `close_channel`. The enum is now
+  `Fake` / `Tailscale` (plus the loopback/endpoint-stub fakes).
+  IMPORTANT: `ConnectivityTunnel::Ssh` is NOT in-tree and is NOT owned by any CT
+  task -- `connectivity-tunnel/knowledge.md` EXPLICITLY DEFERS `SshTunnel`
+  ("This scope DOES NOT add `SshTunnel`..."). The SSH that DID land is the
+  `remote-runtime` RR8 `SshRemoteProcessRunner` (an execution-runner transport via
+  `SshRemoteConfig`), which is a DIFFERENT boundary from a `ConnectivityTunnel::Ssh`
+  reachability variant. See the revised gate and DT-pre-A below.
+- Heartbeat health LANDED (CT5): `RuntimeProcessRef.last_heartbeat_at` IS written
+  (`crates/capo-state/src/apply.rs`, `schema.rs`, `projections.rs`) and
+  `EventKind::ConnectivityHealthChanged` ("connectivity.health_changed") IS emitted
+  (`crates/capo-state/src/event.rs:25,283`).
+- The reconnect "channel" signal exists ONLY as a `channel_closed` BOOLEAN payload
+  field on the `connectivity_exposure_revoked` event
+  (`crates/capo-cli/src/connectivity.rs:1152`), NOT as discrete
+  `EventKind::ConnectivityChannelOpened` / `ConnectivityChannelClosed` event kinds
+  (those do not exist in `event.rs`). DT-pre-A's acceptance criterion is corrected
+  accordingly below.
+- `SshRemoteProcessRunner` IS in-tree (`crates/capo-runtime/src/lib.rs:3830`, RR8),
+  with `SshRemoteConfig` (`:3337`) and the loopback-parity `FakeRemoteProcessRunner`.
+- `transport.rs` now binds via `ExposurePolicy::loopback_default().authorize_socket(
+  bound_address.ip().is_loopback(), None)` on both the bind and connect sides
+  (CT1 form, `crates/capo-server/src/transport.rs:564-677`), NOT a hand-rolled
+  unconditional `is_loopback()` rejection. The CONDITIONAL non-loopback bind that
+  DT5 still owns is the grant-gated `authorize_socket(..., Some(grant))` path; the
+  `ExposurePolicy` seam to thread it through already exists.
+
+What is STILL missing (and therefore still owned by DT/DT-pre tasks):
+- `ConnectivityTunnel::Ssh` reachability variant -- unowned upstream; see DT-pre-A.
+- The runner->server ANNOUNCE path (`runtime.target_registered` is still only a
+  LOCAL CLI store write per `crates/capo-cli/src/runtime_target.rs`) -- DT1.
+- Runner-side redaction-before-transit and runner-side env scrub -- DT3 / DT5.
+- The buffered-event runner SPOOL + idempotent replay -- DT4b.
+- `ConnectivityTunnel`-backed endpoint resolution wiring into the runner attach --
+  DT1 / DT3 (RR8 uses a direct `SshRemoteConfig`, not a `ConnectivityTunnel`).
 
 ## Feature Set
 
@@ -88,7 +142,16 @@ gate.
 
 ## DT0 - Workpad, Roles, Routing, Scope, Substrate Gate, Mechanism Decisions, And The Verification + Safety Invariant
 
-Status: pending.
+Status: done. The three deliverable files (`tasks.md`, `knowledge.md`,
+`references.md`) exist, follow the house format, and record every required element:
+the three roles, the integration boundary, the hard do-not-start substrate gate, the
+differentiated per-task prerequisites, the two resolved load-bearing mechanism
+decisions (DT-D1, DT-D2, each with a falsification condition), the verification
+invariant (deterministic-first, controllable timing, env gate
+`CAPO_SERVER_RUN_DISTRIBUTED_LIVE`, `#[ignore]`, skip-clean, paired), the safety
+invariant, and the injected topology-over-boundaries decision. The substrate
+snapshot has been re-verified against the tree (see "Substrate Update" below).
+Markdown only; `git diff --check` clean.
 
 Scope:
 
@@ -124,11 +187,30 @@ Acceptance criteria:
   - `streaming-transport` has landed the server listener + `subscribe_tcp` /
     `SubscribeStream` client + `EventStream::delivered_through()` resume cursor +
     the ST9 contract wire snapshots + the ST11 restart-resume property;
-  - `DT-pre-A` (below) has landed: `ConnectivityTunnel::Ssh`/`Tailscale` variants,
-    a heartbeat emission path that writes `RuntimeProcessRef.last_heartbeat_at`,
-    and the `connectivity.health_changed` / reconnect event family;
+  - `DT-pre-A` (below) has landed its substrate. As of 2026-06-02 this is
+    PARTIALLY SATISFIED by the `connectivity-tunnel` track: the
+    `ConnectivityTunnel::Tailscale` variant (`resolve_endpoint` /
+    `check_reachability`), the heartbeat emission path that writes
+    `RuntimeProcessRef.last_heartbeat_at`, and the `connectivity.health_changed`
+    transition event have all LANDED (CT3/CT5). The gate's reachability requirement
+    is therefore "a non-loopback `ConnectivityTunnel` variant landed (Tailscale,
+    in-tree)" -- NOT `ConnectivityTunnel::Ssh`, which no CT task owns and which
+    `connectivity-tunnel/knowledge.md` explicitly defers. If the DT track needs an
+    `Ssh` reachability variant (distinct from the RR8 SSH execution runner), it is a
+    NEW, unowned deliverable that DT-pre-A must add with a concrete in-tree path;
+    otherwise the DT live path resolves reachability over Tailscale / the RR8 SSH
+    runner and `ConnectivityTunnel::Ssh` is OUT OF SCOPE for this gate. The one
+    still-open DT-pre-A item is the reconnect-leg auditability signal: today only a
+    `channel_closed` BOOLEAN exists on the exposure-revoke event, not discrete
+    `ConnectivityChannelOpened` / `ConnectivityChannelClosed` event kinds (see the
+    corrected DT-pre-A acceptance criterion);
   - `DT-pre-B` (below) has landed: a real `SshRemoteProcessRunner` transport type
-    with a runner-side spawn path.
+    with a runner-side spawn path. As of 2026-06-02 the `SshRemoteProcessRunner`
+    type + `SshRemoteConfig` HAVE LANDED via `remote-runtime` RR8
+    (`crates/capo-runtime/src/lib.rs:3830`). DT-pre-B's residual is verifying the
+    `identity_ref` handle proof and the append-first start ordering as inputs to
+    DT3, and noting that `ConnectivityTunnel`-backed endpoint resolution (vs. the
+    direct `SshRemoteConfig` RR8 uses) is the DT1/DT3 seam, not DT-pre-B's.
   - These signals supersede the references to a nonexistent `connectivity-tunnel`
     workpad: the variant+heartbeat work is OWNED by `DT-pre-A` here (or by a
     dedicated upstream workpad that DT-pre-A links to), never assumed to exist.
@@ -219,10 +301,21 @@ Dependencies: none (planning task). Cross-workpad: reads `remote-runtime`,
 
 Status: pending.
 
-Prerequisite: `runtime-tunnel.md` design (in-tree architecture doc). This task
-EXISTS because the named `connectivity-tunnel` workpad does not exist; the variant
-+ heartbeat + reconnect work is owned here (or by a dedicated upstream workpad this
-task links to) and must LAND before DT2/DT3.
+Prerequisite: `runtime-tunnel.md` design (in-tree architecture doc).
+
+SUBSTRATE UPDATE (2026-06-02): this task was authored when no `connectivity-tunnel`
+workpad existed. That workpad now EXISTS and CT3/CT5 LANDED the bulk of this scope:
+`ConnectivityTunnel::Tailscale` (`resolve_endpoint` / `check_reachability`), the
+heartbeat loop that WRITES `RuntimeProcessRef.last_heartbeat_at`, and the
+`connectivity.health_changed` transition event. DT-pre-A's REMAINING, still-unowned
+work is therefore narrow: (1) if the DT track requires a `ConnectivityTunnel::Ssh`
+reachability variant distinct from the RR8 SSH execution runner, build it (CT
+explicitly defers `SshTunnel`, so no task owns it today); and (2) decide whether the
+reconnect-leg auditability needs first-class `ConnectivityChannelOpened` /
+`ConnectivityChannelClosed` event kinds, since today only a `channel_closed` boolean
+payload field exists on `connectivity_exposure_revoked`. A future implementer must
+NOT re-build Tailscale or the heartbeat path -- those are done. This must LAND
+before DT2/DT3.
 
 Scope:
 
@@ -243,8 +336,20 @@ Acceptance criteria:
   interval, with health states `available` -> `degraded` -> `unreachable` matching
   the `ConnectivityEndpoint.status` vocabulary; each transition is a recorded
   `connectivity.health_changed` event.
-- Add the reconnect event family (`connectivity.channel_opened` /
-  `channel_closed`) so a leg recovery is auditable from the log.
+- Make a leg recovery auditable from the log. IN-TREE TODAY (2026-06-02): the
+  health transition itself is auditable via `EventKind::ConnectivityHealthChanged`
+  ("connectivity.health_changed"), and `channel_closed` exists as a BOOLEAN payload
+  field on the `connectivity_exposure_revoked` event
+  (`crates/capo-cli/src/connectivity.rs:1152`). There are NO discrete
+  `EventKind::ConnectivityChannelOpened` / `ConnectivityChannelClosed` event kinds
+  in `crates/capo-state/src/event.rs`. DT-pre-A must DECIDE and record which form
+  the reconnect-leg signal takes: either (a) `connectivity.health_changed` +
+  the `channel_closed` payload boolean are SUFFICIENT for "auditable leg recovery"
+  (then this AC is already met and is documented as such), or (b) first-class
+  `ConnectivityChannelOpened` / `ConnectivityChannelClosed` event kinds are
+  required, in which case they are a NEW deliverable to add to `event.rs`. The AC is
+  not "a channel_opened/closed event family exists" -- it is "leg recovery is
+  auditable from the log, by a named and in-tree-verified mechanism."
 - Heartbeat/health payloads carry NO credential material and NO transcript content
   -- only liveness/health + `runtime_process_ref` / `connectivity_endpoint_id`
   handles.
@@ -267,16 +372,30 @@ reconnect events, recovery sequence).
 
 Status: pending.
 
-Prerequisite: `remote-runtime` RR (loopback-delegating `RemoteProcessRunner`) +
-DT-pre-A. This task EXISTS because no `SshRemoteProcessRunner` type is in-tree; the
-real transport `remote-runtime.md` deferred is owned here and must LAND before DT3.
+Prerequisite: `remote-runtime` RR + DT-pre-A.
+
+SUBSTRATE UPDATE (2026-06-02): this task was authored when no `SshRemoteProcessRunner`
+type was in-tree. That type HAS SINCE LANDED via `remote-runtime` RR8 --
+`SshRemoteProcessRunner` (`crates/capo-runtime/src/lib.rs:3830`) + `SshRemoteConfig`
+(`:3337`) + the loopback-parity `FakeRemoteProcessRunner`. A future implementer must
+NOT re-build the SSH transport. DT-pre-B's REMAINING work is verification-and-seam,
+not new transport: (1) verify the `identity_ref` handle proof before launch and the
+append-first start ordering (`runtime.start_requested` before spawn) hold and are
+the inputs DT3 relies on; (2) record that RR8 resolves its endpoint via a DIRECT
+`SshRemoteConfig` (host/key), NOT via `ConnectivityTunnel` -- so the
+`ConnectivityTunnel`-backed endpoint resolution is the DT1/DT3 seam, explicitly NOT
+owned by DT-pre-B. This must LAND/verify before DT3.
 
 Scope:
 
-- Build the real remote-process transport type behind the `RuntimeRunner` boundary:
-  `SshRemoteProcessRunner` that spawns + reaps a process group on a remote device
-  over an `Ssh`/`Tailscale` endpoint, reusing the loopback runner's event/recovery
-  shape. Runtime ownership only; no loop change, no exposure gating yet.
+- Confirm and harden the real remote-process transport type behind the
+  `RuntimeRunner` boundary: `SshRemoteProcessRunner` (LANDED via RR8) that spawns +
+  reaps a process group on a remote device, reusing the loopback runner's
+  event/recovery shape. NOTE: RR8 resolves its target via a DIRECT `SshRemoteConfig`
+  (host/key), NOT via a `ConnectivityTunnel::Ssh`/`Tailscale` endpoint -- the
+  `ConnectivityTunnel`-backed endpoint resolution is DT1/DT3's seam, not this task's.
+  DT-pre-B owns runtime ownership + identity-proof + append-first ordering
+  verification only; no loop change, no exposure gating, no tunnel wiring here.
 
 Acceptance criteria:
 

@@ -13,8 +13,9 @@ does NOT re-architect the loop, transport, permission, or goal models.
 
 ## Substrate Reality And The Hard Do-Not-Start Gate
 
-This workpad was authored AHEAD of its substrate. The named prerequisites are not
-all present in-tree today (verified 2026-06-02), so the plan does NOT assume them:
+This workpad was authored AHEAD of its substrate. The bullets below are the
+ORIGINAL authoring-time snapshot and are NOW MOSTLY SUPERSEDED -- read the
+"Substrate Update" subsection that follows for the current in-tree state:
 
 - There is no `connectivity-tunnel` workpad; `ConnectivityTunnel` has only
   `Fake`/`LocalLoopback`/`EndpointStub` -- no `Ssh`/`Tailscale`.
@@ -28,6 +29,35 @@ all present in-tree today (verified 2026-06-02), so the plan does NOT assume the
 - `transport.rs` enforces loopback unconditionally; there is no conditional
   non-loopback bind.
 
+### Substrate Update (re-verified in-tree, 2026-06-02 after CT/RR landed)
+
+The snapshot above is superseded; the connectivity + remote-runtime substrate has
+LANDED on this branch. Current in-tree reality:
+
+- The `connectivity-tunnel` workpad EXISTS (CT2/CT5/CT6/CT7/CT8/CT9/CT10 `done`).
+- `ConnectivityTunnel::Tailscale` is in-tree (`crates/capo-runtime/src/lib.rs:5403`)
+  with `resolve_endpoint`/`check_reachability`/`open_channel`. There is NO
+  `ConnectivityTunnel::Ssh` variant (CT explicitly DEFERS `SshTunnel`); the SSH that
+  landed is the RR8 `SshRemoteProcessRunner` EXECUTION runner, a different boundary.
+- Heartbeat landed (CT5): `RuntimeProcessRef.last_heartbeat_at` IS written and
+  `EventKind::ConnectivityHealthChanged` ("connectivity.health_changed") IS emitted
+  (`crates/capo-state/src/event.rs:25`, `apply.rs`, `schema.rs`).
+- `SshRemoteProcessRunner` + `SshRemoteConfig` ARE in-tree via RR8
+  (`crates/capo-runtime/src/lib.rs:3830`, `:3337`).
+- `transport.rs` already routes the bind/connect decision through
+  `ExposurePolicy::loopback_default().authorize_socket(..)` (CT1), not a hand-rolled
+  unconditional `is_loopback()`; the grant-gated non-loopback branch is the DT5 seam.
+
+Still missing (still owned by DT/DT-pre tasks): the `ConnectivityTunnel::Ssh`
+reachability variant if the DT track needs one (unowned upstream -- DT-pre-A); the
+runner->server ANNOUNCE path (`runtime.target_registered` is still a local CLI store
+write -- DT1); runner-side redaction-before-transit and env scrub (DT3/DT5); the
+buffered-event runner spool + idempotent replay (DT4b); `ConnectivityTunnel`-backed
+endpoint resolution into the runner attach (DT1/DT3, vs. RR8's direct
+`SshRemoteConfig`); and the reconnect-leg auditability decision (today only a
+`channel_closed` payload boolean, not discrete `ConnectivityChannelOpened/Closed`
+event kinds).
+
 Two consequences, both recorded as decisions:
 
 1. The variant + heartbeat + reconnect work and the real SSH transport are made
@@ -40,9 +70,13 @@ Two consequences, both recorded as decisions:
    (`safety-gates` grant merged; `streaming-transport` listener + resume cursor +
    ST9 snapshots + ST11 restart-resume landed; `DT-pre-A` tunnel variants +
    heartbeat landed; `DT-pre-B` `SshRemoteProcessRunner` landed), not soft prose.
-   Per `TASKS.md` the active workpad is `real-turn-loop` and the entire
-   connectivity track is unstarted; this capstone is far ahead of its substrate and
-   must wait for these signals.
+   UPDATE (2026-06-02): much of this gate is now SATISFIED -- the
+   `connectivity-tunnel` track (CT3 Tailscale variant, CT5 heartbeat +
+   `connectivity.health_changed`) and `remote-runtime` RR8 (`SshRemoteProcessRunner`)
+   have LANDED on this branch. The still-open gate items are the
+   `ConnectivityTunnel::Ssh` reachability variant (if the DT track needs one --
+   unowned, CT defers it), the reconnect-leg event-kind decision, and the
+   `safety-gates` grant model; see the "Substrate Update" subsection above.
 
 ## Injected Decision: Topology Over Boundaries, Single Authoritative Writer
 
