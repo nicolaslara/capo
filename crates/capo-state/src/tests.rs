@@ -989,6 +989,69 @@ fn ga1_goal_lifecycle_event_kinds_round_trip() {
     }
 }
 
+// RR1 + RR2 (remote-runtime): every remote-runtime event kind must serialize to a
+// stable wire string AND round-trip back through `from_wire`, so a persisted
+// remote-runtime event replays to the identical typed kind after a rebuild.
+#[test]
+fn rr1_rr2_remote_runtime_event_kinds_round_trip() {
+    for (kind, wire) in [
+        // RR1: append-first start sequence + control + cleanup.
+        (
+            EventKind::RuntimeRemoteStartRequested,
+            "runtime.remote_start_requested",
+        ),
+        (
+            EventKind::RuntimeRemoteTargetResolved,
+            "runtime.remote_target_resolved",
+        ),
+        (
+            EventKind::RuntimeRemoteProcessStarted,
+            "runtime.remote_process_started",
+        ),
+        (
+            EventKind::RuntimeRemoteProcessStartFailed,
+            "runtime.remote_process_start_failed",
+        ),
+        (
+            EventKind::RuntimeRemoteInterruptSent,
+            "runtime.remote_interrupt_sent",
+        ),
+        (
+            EventKind::RuntimeRemoteTerminateSent,
+            "runtime.remote_terminate_sent",
+        ),
+        (EventKind::RuntimeRemoteKillSent, "runtime.remote_kill_sent"),
+        (
+            EventKind::RuntimeRemoteCleanupCompleted,
+            "runtime.remote_cleanup_completed",
+        ),
+        // RR2: restart recovery / reattach across the boundary.
+        (
+            EventKind::RuntimeRemoteRecoveryAttempted,
+            "runtime.remote_recovery_attempted",
+        ),
+        (
+            EventKind::RuntimeRemoteRunRecovered,
+            "runtime.remote_run_recovered",
+        ),
+        (
+            EventKind::RuntimeRemoteRunOrphaned,
+            "runtime.remote_run_orphaned",
+        ),
+        (
+            EventKind::RuntimeRemoteRunExited,
+            "runtime.remote_run_exited",
+        ),
+        (
+            EventKind::RuntimeRemoteRecoveryPending,
+            "runtime.remote_recovery_pending",
+        ),
+    ] {
+        assert_eq!(kind.as_str(), wire);
+        assert_eq!(EventKind::from_wire(wire), Some(kind));
+    }
+}
+
 // CT1 (connectivity-tunnel): the new policy-change audit kind round-trips, so a
 // `connectivity.policy_changed` event replays back to the typed kind identically.
 #[test]

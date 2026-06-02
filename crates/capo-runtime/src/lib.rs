@@ -209,7 +209,7 @@ impl RuntimeRunner {
         reason: &str,
     ) -> RuntimeControlResult {
         match self {
-            Self::LocalProcess(runner) => runner.kill(process),
+            Self::LocalProcess(runner) => runner.kill(process, reason),
             Self::RemoteProcess(runner) => runner.kill(process, reason),
             Self::Fake(_) => RuntimeControlResult {
                 process: process.clone(),
@@ -922,13 +922,12 @@ impl LocalProcessRunner {
         )
     }
 
-    pub fn kill(&self, process: &LocalRuntimeProcessRef) -> RuntimeControlResult {
-        self.control(
-            process,
-            "killed",
-            "runtime.kill_requested",
-            "kill requested",
-        )
+    /// Hard-kill, recording the caller's `reason`. The `reason` argument aligns the
+    /// signature with [`RemoteProcessRunner::kill`] so both runners satisfy the
+    /// shared [`RuntimeRunnerContract`] (review finding 4); pass `"kill requested"`
+    /// for the default operator-initiated kill.
+    pub fn kill(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult {
+        self.control(process, "killed", "runtime.kill_requested", reason)
     }
 
     pub fn kill_running(
@@ -1605,6 +1604,86 @@ pub struct OrphanRecovery {
     pub detail: String,
 }
 
+/// A unified cleanup result the controller can handle uniformly across the local
+/// and remote runners (review finding 5). The two runners reap fundamentally
+/// different things — the LOCAL runner preserves an on-disk artifact directory and
+/// drops a marker; the REMOTE runner reaps a remote process group over the channel
+/// and emits events — so the unified shape carries the common identity + the
+/// runner-specific evidence, rather than forcing one runner to fake the other's
+/// fields. A caller that only needs "which ref was cleaned up?" reads
+/// [`Self::runtime_process_ref`]; a caller that wants the runner-specific detail
+/// matches the variant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CleanupOutcome {
+    /// The local runner preserved an artifact dir + dropped a marker on disk.
+    Local(CleanupReport),
+    /// The remote runner reaped the remote process group over the channel and
+    /// recorded `runtime.remote_cleanup_completed`.
+    Remote(RuntimeControlResult),
+}
+
+impl CleanupOutcome {
+    /// The process ref that was cleaned up, available uniformly for either runner.
+    pub fn runtime_process_ref(&self) -> &str {
+        match self {
+            Self::Local(report) => &report.runtime_process_ref,
+            Self::Remote(result) => &result.process.runtime_process_ref,
+        }
+    }
+}
+
+/// The shared execution + control contract both [`LocalProcessRunner`] and
+/// [`RemoteProcessRunner`] satisfy, so the controller drives them with the SAME
+/// method shapes (review finding 4 + 5). Defining it as a trait gives a
+/// COMPILE-TIME check that the two runners never silently diverge on the control
+/// surface: if a future method drifts (e.g. drops the `reason` arg, or returns a
+/// different cleanup shape), the `impl` stops compiling. The async streaming and
+/// the runner-specific spawn paths stay off this trait on purpose; this is the
+/// control parity surface the dispatcher folds over.
+pub trait RuntimeRunnerContract {
+    fn interrupt(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult;
+    fn terminate(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult;
+    fn kill(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult;
+    fn health(&self, process: &LocalRuntimeProcessRef) -> RuntimeResult<RuntimeHealth>;
+    fn cleanup(&self, process: &LocalRuntimeProcessRef) -> RuntimeResult<CleanupOutcome>;
+}
+
+impl RuntimeRunnerContract for LocalProcessRunner {
+    fn interrupt(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult {
+        LocalProcessRunner::interrupt(self, process, reason)
+    }
+    fn terminate(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult {
+        LocalProcessRunner::terminate(self, process, reason)
+    }
+    fn kill(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult {
+        LocalProcessRunner::kill(self, process, reason)
+    }
+    fn health(&self, process: &LocalRuntimeProcessRef) -> RuntimeResult<RuntimeHealth> {
+        Ok(LocalProcessRunner::health(self, process))
+    }
+    fn cleanup(&self, process: &LocalRuntimeProcessRef) -> RuntimeResult<CleanupOutcome> {
+        LocalProcessRunner::cleanup(self, process).map(CleanupOutcome::Local)
+    }
+}
+
+impl RuntimeRunnerContract for RemoteProcessRunner {
+    fn interrupt(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult {
+        RemoteProcessRunner::interrupt(self, process, reason)
+    }
+    fn terminate(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult {
+        RemoteProcessRunner::terminate(self, process, reason)
+    }
+    fn kill(&self, process: &LocalRuntimeProcessRef, reason: &str) -> RuntimeControlResult {
+        RemoteProcessRunner::kill(self, process, reason)
+    }
+    fn health(&self, process: &LocalRuntimeProcessRef) -> RuntimeResult<RuntimeHealth> {
+        RemoteProcessRunner::health(self, process)
+    }
+    fn cleanup(&self, process: &LocalRuntimeProcessRef) -> RuntimeResult<CleanupOutcome> {
+        RemoteProcessRunner::cleanup(self, process).map(CleanupOutcome::Remote)
+    }
+}
+
 /// The result of probing and reaping an orphaned process group by PID on
 /// restart (RTL10). See [`LocalProcessRunner::reap_orphan_process_group`].
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1668,6 +1747,104 @@ pub struct RunHealthProbe {
     pub observed_state_hash: String,
 }
 
+/// RR2: how a restart classified a stored REMOTE run after re-resolving the
+/// channel and re-probing the remote over it.
+///
+/// This mirrors the local-path mapping (`LocalProcessRunner::probe_run_health` ->
+/// `run.recovered` / `run.orphaned` / `run.exited`) but the liveness signal comes
+/// from a REMOTE probe over the channel, and it adds ONE remote-only state the
+/// local path cannot have: when the channel itself is unreachable at recovery
+/// time, the run is NOT forced to recovered or exited — it is left
+/// [`RemoteRecoveryClassification::RecoveryPending`] and retried when the channel
+/// returns. A remote-reboot (boot-id mismatch) is classified
+/// [`RemoteRecoveryClassification::Exited`] (gone), never silently `Recovered`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteRecoveryClassification {
+    /// The remote process is alive within its recording boot AND the launch is
+    /// reattachable (a recorded remote pid + boot identity), so the run is
+    /// recovered in place. Maps to `runtime.remote_run_recovered` (`run.recovered`).
+    Recovered,
+    /// The remote process is alive but the launch is NOT reattachable (e.g. a bare
+    /// SSH-launched process with no recorded remote pid/boot file), so Capo cannot
+    /// re-attach; the remote logs are left inspectable. Maps to
+    /// `runtime.remote_run_orphaned` (`run.orphaned`).
+    Orphaned,
+    /// The remote process is gone with no terminal event — either it exited while
+    /// Capo was down, OR the remote machine rebooted (boot-id mismatch), so the
+    /// recorded remote pid can never be trusted as "our" run. Maps to
+    /// `runtime.remote_run_exited` (`run.exited`, unknown exit detail).
+    Exited,
+    /// The CHANNEL itself was unreachable at recovery time, so liveness is unknown.
+    /// The run is held in `recovery_pending` (NOT forced to recovered or exited)
+    /// and retried when the channel returns. Maps to
+    /// `runtime.remote_recovery_pending`.
+    RecoveryPending,
+}
+
+impl RemoteRecoveryClassification {
+    /// The stable token recorded in the recovery event detail / read model.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Recovered => "remote_recovered",
+            Self::Orphaned => "remote_orphaned",
+            Self::Exited => "remote_exited",
+            Self::RecoveryPending => "recovery_pending",
+        }
+    }
+
+    /// The terminal recovery event kind for this classification.
+    pub const fn event_kind(self) -> EventKind {
+        match self {
+            Self::Recovered => EventKind::RuntimeRemoteRunRecovered,
+            Self::Orphaned => EventKind::RuntimeRemoteRunOrphaned,
+            Self::Exited => EventKind::RuntimeRemoteRunExited,
+            Self::RecoveryPending => EventKind::RuntimeRemoteRecoveryPending,
+        }
+    }
+
+    /// `true` only for `RecoveryPending` — the one classification recovery RETRIES
+    /// (because the channel was unreachable), as opposed to the terminal mappings.
+    pub const fn is_pending(self) -> bool {
+        matches!(self, Self::RecoveryPending)
+    }
+}
+
+/// RR2: what the channel observed when a restart re-probed a stored remote run.
+///
+/// This is the remote analogue of [`RunHealthProbe`]: the channel is the AUTHORITY
+/// on remote liveness + reachability + the remote boot identity now seen on the
+/// host, so the runner classifies recovery from this rather than from a stored
+/// status string. A boot-id that differs from the one recorded at launch means the
+/// remote rebooted and the recorded pid is meaningless (mirrors the local
+/// same-boot rule in `probe_run_health`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteRecoveryProbe {
+    /// `false` when the channel could not be re-resolved / was unreachable. When
+    /// this is `false`, `live`/`observed_remote_boot_id` are not meaningful.
+    pub channel_reachable: bool,
+    /// Whether the remote process group is alive (only meaningful when reachable).
+    pub live: bool,
+    /// The remote boot id the host reports NOW. A mismatch with the recorded boot
+    /// id means the remote rebooted (the recorded pid is recycled / gone).
+    pub observed_remote_boot_id: Option<String>,
+    /// Whether THIS remote launch can be reattached to in place — i.e. it recorded
+    /// a durable remote pid + boot identity. A bare launch with no recorded remote
+    /// pid is alive-but-unattachable -> orphaned.
+    pub reattachable: bool,
+}
+
+/// RR2: the result of a restart re-probing a stored remote run over a re-resolved
+/// channel — the truthful classification plus the append-first recovery events.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteRunRecovery {
+    pub runtime_process_ref: String,
+    pub classification: RemoteRecoveryClassification,
+    pub detail: String,
+    /// Append-first: a `runtime.remote_recovery_attempted` then the single terminal
+    /// classification event. Recorded by the controller's recovery seam.
+    pub events: Vec<RuntimeEvent>,
+}
+
 /// RR1: the resolved-channel transport a [`RemoteProcessRunner`] executes over.
 ///
 /// This is the SAFETY/HONESTY boundary the adversarial review demanded: the
@@ -1707,6 +1884,14 @@ impl RemoteChannel {
         }
     }
 
+    /// How many times the transport ACTUALLY spawned a remote process. The
+    /// idempotency test reads this to prove a duplicate key did not double-spawn.
+    pub fn spawn_count(&self) -> usize {
+        match self {
+            Self::Fake(channel) => channel.spawn_count(),
+        }
+    }
+
     fn launch(&self, request: &LocalProcessRequest) -> RuntimeResult<RemoteLaunch> {
         match self {
             Self::Fake(channel) => channel.launch(request),
@@ -1722,6 +1907,14 @@ impl RemoteChannel {
     fn probe(&self, probe: &RemoteProbe) -> RuntimeResult<bool> {
         match self {
             Self::Fake(channel) => channel.probe(probe),
+        }
+    }
+
+    /// RR2: re-probe a stored remote run on restart. The channel is the authority
+    /// on reachability + remote liveness + the remote boot id now observed.
+    fn recovery_probe(&self, probe: &RemoteProbe) -> RemoteRecoveryProbe {
+        match self {
+            Self::Fake(channel) => channel.recovery_probe(probe),
         }
     }
 
@@ -1769,7 +1962,7 @@ pub struct RemoteLaunch {
 /// that it is a loopback (`is_loopback() == true`). It is scriptable so the
 /// fake-channel suite can drive a launch failure (with retryability) and an
 /// "append failed after spawn" cleanup path with NO network and NO real SSH.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FakeRemoteChannel {
     fingerprint: String,
     remote_host_id: String,
@@ -1778,8 +1971,40 @@ pub struct FakeRemoteChannel {
     /// When set, every `launch` fails with this transport error (and the runner
     /// emits `runtime.remote_process_start_failed` with retryability).
     launch_failure: Option<RemoteLaunchFailure>,
+    /// RR2: scripts what a restart re-probe observes for a stored remote run. When
+    /// `None`, the recovery probe derives an alive+reattachable+same-boot result
+    /// from the stored ref's liveness (the happy reattach path).
+    recovery_script: Option<RemoteRecoveryProbe>,
+    /// When `true`, `probe` reports the remote process DEAD regardless of the
+    /// stored `live` hint — modelling a real transport whose probe contradicts the
+    /// last-known local status. This exercises the override path: `health` must
+    /// return `live=false` even when the stored ref still says `running`.
+    probe_reports_dead: bool,
+    /// Observability for the idempotency invariant: every time the channel
+    /// ACTUALLY spawns a remote process (a successful `launch`), this counter is
+    /// incremented. The fake-channel suite asserts a duplicate idempotency key
+    /// leaves this at 1 — proving the runner de-duplicated rather than relying on
+    /// a constant pid happening to match.
+    spawn_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     loopback: LocalProcessRunner,
 }
+
+impl PartialEq for FakeRemoteChannel {
+    fn eq(&self, other: &Self) -> bool {
+        // The spawn counter is runtime observability, not identity; everything
+        // else defines the channel.
+        self.fingerprint == other.fingerprint
+            && self.remote_host_id == other.remote_host_id
+            && self.remote_boot_id == other.remote_boot_id
+            && self.next_remote_pid == other.next_remote_pid
+            && self.launch_failure == other.launch_failure
+            && self.recovery_script == other.recovery_script
+            && self.probe_reports_dead == other.probe_reports_dead
+            && self.loopback == other.loopback
+    }
+}
+
+impl Eq for FakeRemoteChannel {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteLaunchFailure {
@@ -1805,11 +2030,20 @@ impl FakeRemoteChannel {
             remote_boot_id: format!("remote-boot-{}", channel.channel_id),
             next_remote_pid: 41000,
             launch_failure: None,
+            recovery_script: None,
+            probe_reports_dead: false,
+            spawn_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             loopback: LocalProcessRunner::new(LocalProcessConfig::for_test(
                 workspace_root,
                 artifact_root,
             )),
         }
+    }
+
+    /// How many times this channel ACTUALLY spawned a remote process. Used by the
+    /// idempotency test to prove a duplicate idempotency key did not double-spawn.
+    pub fn spawn_count(&self) -> usize {
+        self.spawn_count.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Script the next (and every) launch to fail with the given retryability, so
@@ -1818,6 +2052,73 @@ impl FakeRemoteChannel {
         self.launch_failure = Some(RemoteLaunchFailure {
             message: message.into(),
             retryable,
+        });
+        self
+    }
+
+    /// RR2: the remote boot id this fake host reports — used both to stamp a
+    /// launch and to detect a remote reboot at recovery time (boot-id mismatch).
+    pub fn remote_boot_id(&self) -> String {
+        self.remote_boot_id.clone()
+    }
+
+    /// RR2: script the next restart re-probe to see an ALIVE remote whose launch is
+    /// reattachable (a recorded remote pid + boot identity) — the happy in-place
+    /// reattach path. The observed boot id matches the launch boot id.
+    pub fn recover_alive_reattachable(mut self) -> Self {
+        self.recovery_script = Some(RemoteRecoveryProbe {
+            channel_reachable: true,
+            live: true,
+            observed_remote_boot_id: Some(self.remote_boot_id.clone()),
+            reattachable: true,
+        });
+        self
+    }
+
+    /// RR2: script an ALIVE remote that CANNOT be reattached to (no durable remote
+    /// pid/boot record) -> orphaned, with the remote logs left inspectable.
+    pub fn recover_alive_unattachable(mut self) -> Self {
+        self.recovery_script = Some(RemoteRecoveryProbe {
+            channel_reachable: true,
+            live: true,
+            observed_remote_boot_id: Some(self.remote_boot_id.clone()),
+            reattachable: false,
+        });
+        self
+    }
+
+    /// RR2: script a remote that REBOOTED — the host reports a different boot id
+    /// than was recorded at launch, so the recorded pid is meaningless -> exited.
+    pub fn recover_rebooted(mut self) -> Self {
+        self.recovery_script = Some(RemoteRecoveryProbe {
+            channel_reachable: true,
+            live: true,
+            observed_remote_boot_id: Some(format!("{}-after-reboot", self.remote_boot_id)),
+            reattachable: true,
+        });
+        self
+    }
+
+    /// RR2: script a remote whose process is GONE (exited while Capo was down,
+    /// same boot, no terminal event) -> exited.
+    pub fn recover_gone(mut self) -> Self {
+        self.recovery_script = Some(RemoteRecoveryProbe {
+            channel_reachable: true,
+            live: false,
+            observed_remote_boot_id: Some(self.remote_boot_id.clone()),
+            reattachable: true,
+        });
+        self
+    }
+
+    /// RR2: script the CHANNEL itself as unreachable at recovery time -> the run is
+    /// held `recovery_pending` (never forced to recovered/exited) until it returns.
+    pub fn recover_channel_unreachable(mut self) -> Self {
+        self.recovery_script = Some(RemoteRecoveryProbe {
+            channel_reachable: false,
+            live: false,
+            observed_remote_boot_id: None,
+            reattachable: false,
         });
         self
     }
@@ -1838,10 +2139,16 @@ impl FakeRemoteChannel {
             });
         }
         // Honest loopback: actually run the program (locally) so the captured
-        // artifacts are real, while reporting a synthetic remote identity.
+        // artifacts are real, while reporting a synthetic remote identity. Each
+        // actual spawn mints a DISTINCT remote pid (base + spawn index) so the
+        // idempotency invariant cannot pass by accident on a constant pid: a
+        // second real spawn would produce a different pid and a different ref.
         let captured = self.loopback.start_process(request.clone())?;
+        let spawn_index = self
+            .spawn_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(RemoteLaunch {
-            remote_pid: self.next_remote_pid,
+            remote_pid: self.next_remote_pid + spawn_index as u32,
             remote_boot_id: self.remote_boot_id.clone(),
             remote_host_id: self.remote_host_id.clone(),
             live: true,
@@ -1849,12 +2156,41 @@ impl FakeRemoteChannel {
         })
     }
 
+    /// Script the channel probe to report the remote process DEAD even when the
+    /// stored ref still says `running`, so the override path (`health` trusting the
+    /// remote probe over the local status string) is exercised.
+    pub fn with_probe_reports_dead(mut self) -> Self {
+        self.probe_reports_dead = true;
+        self
+    }
+
     fn signal(&self, _probe: &RemoteProbe, _escalation: &str) -> RuntimeResult<()> {
         Ok(())
     }
 
     fn probe(&self, probe: &RemoteProbe) -> RuntimeResult<bool> {
+        // The transport probe is the AUTHORITY: when scripted dead it overrides the
+        // stored `live` hint, proving health does not merely echo a local status
+        // string (the stub's behaviour the review flagged).
+        if self.probe_reports_dead {
+            return Ok(false);
+        }
         Ok(probe.live)
+    }
+
+    fn recovery_probe(&self, probe: &RemoteProbe) -> RemoteRecoveryProbe {
+        // A scripted outcome wins (the suite drives every recovery class through
+        // it). With no script, the default is the happy reattach path: the host is
+        // reachable, the remote is alive within the same boot, and the launch is
+        // reattachable, so a stored running ref recovers in place.
+        self.recovery_script
+            .clone()
+            .unwrap_or_else(|| RemoteRecoveryProbe {
+                channel_reachable: true,
+                live: probe.live,
+                observed_remote_boot_id: Some(self.remote_boot_id.clone()),
+                reattachable: true,
+            })
     }
 
     fn cleanup(&self, _probe: &RemoteProbe) -> RuntimeResult<()> {
@@ -1919,14 +2255,32 @@ impl RemoteProcessConfig {
 /// `health`/`recover_orphan` across the injected [`RemoteChannel`], emitting the
 /// append-first Start Sequence. It performs NO endpoint resolution: the channel is
 /// injected fully resolved, and it reads identity from the channel fingerprint.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct RemoteProcessRunner {
     config: RemoteProcessConfig,
+    /// RR1 idempotency ledger: the remote launch outcome keyed by idempotency key
+    /// (the run id). A repeated `start_process` with a key already present returns
+    /// the recorded outcome and NEVER calls `transport.launch` again, so the same
+    /// idempotency key can never spawn a second remote process. Shared (`Arc`) so a
+    /// cloned runner enforces the same invariant; excluded from identity equality.
+    launched: std::sync::Arc<std::sync::Mutex<HashMap<String, LocalProcessOutcome>>>,
 }
+
+impl PartialEq for RemoteProcessRunner {
+    fn eq(&self, other: &Self) -> bool {
+        // The idempotency ledger is runtime state, not identity.
+        self.config == other.config
+    }
+}
+
+impl Eq for RemoteProcessRunner {}
 
 impl RemoteProcessRunner {
     pub fn new(config: RemoteProcessConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            launched: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
     }
 
     /// HONESTY: the runner advertises `fake: true` while every available transport
@@ -1954,6 +2308,13 @@ impl RemoteProcessRunner {
         self.config.transport.target_fingerprint()
     }
 
+    /// Test/observability hook: how many times the underlying transport ACTUALLY
+    /// spawned a remote process. The idempotency test asserts this stays at 1
+    /// across a duplicate start, proving real de-duplication (not a constant pid).
+    pub fn transport_spawn_count(&self) -> usize {
+        self.config.transport.spawn_count()
+    }
+
     /// Implements `runtime-tunnel.md`'s append-first Start Sequence across the
     /// boundary:
     ///   1. `runtime.remote_start_requested` (idempotency key = run id, status
@@ -1973,11 +2334,39 @@ impl RemoteProcessRunner {
         request: LocalProcessRequest,
     ) -> RuntimeResult<LocalProcessOutcome> {
         let run_id = request.run_id.clone();
+        let idempotency_key = run_id.to_string();
+
+        // RR1 idempotency: a repeated start with the SAME key never spawns a second
+        // remote process. If we already launched under this key, return the
+        // recorded outcome (same remote ref, no second `transport.launch`).
+        {
+            let launched = self
+                .launched
+                .lock()
+                .expect("remote runner idempotency ledger poisoned");
+            if let Some(existing) = launched.get(&idempotency_key) {
+                let mut replay = existing.clone();
+                // Mark the duplicate request so the trail records that this start was
+                // de-duplicated against the existing remote process, not re-spawned.
+                replay.events.insert(
+                    0,
+                    RuntimeEvent {
+                        kind: EventKind::RuntimeRemoteStartRequested.as_str().to_string(),
+                        status: "pending".to_string(),
+                        detail: format!(
+                            "idempotency_key={idempotency_key} deduplicated=true (already launched)"
+                        ),
+                    },
+                );
+                return Ok(replay);
+            }
+        }
+
         // 1. append-first pending request, idempotency-keyed by run id.
         let mut events = vec![RuntimeEvent {
             kind: EventKind::RuntimeRemoteStartRequested.as_str().to_string(),
             status: "pending".to_string(),
-            detail: format!("idempotency_key={run_id}"),
+            detail: format!("idempotency_key={idempotency_key}"),
         }];
 
         // 2. prove the remote peer identity BEFORE launch.
@@ -2029,7 +2418,7 @@ impl RemoteProcessRunner {
         let mut merged_events = events;
         merged_events.extend(captured.events);
 
-        Ok(LocalProcessOutcome {
+        let outcome = LocalProcessOutcome {
             process: LocalRuntimeProcessRef {
                 run_id,
                 runtime_process_ref: remote_ref,
@@ -2042,7 +2431,16 @@ impl RemoteProcessRunner {
             stderr: captured.stderr,
             exit_code: captured.exit_code,
             events: merged_events,
-        })
+        };
+
+        // Record under the idempotency key so a repeated start returns this exact
+        // outcome instead of spawning again.
+        self.launched
+            .lock()
+            .expect("remote runner idempotency ledger poisoned")
+            .insert(idempotency_key, outcome.clone());
+
+        Ok(outcome)
     }
 
     pub fn interrupt(
@@ -2136,6 +2534,121 @@ impl RemoteProcessRunner {
         })
     }
 
+    /// RR2: re-probe a stored remote run on restart over the (re-resolved) channel
+    /// and classify it EXACTLY like the local recovery path, with the one
+    /// remote-only `recovery_pending` addition for an unreachable channel.
+    ///
+    /// `recorded_remote_boot_id` is the remote boot id captured in the stored
+    /// `remote_process_ref` at launch (parsed from `:boot=...`). It is compared
+    /// against the boot id the host reports NOW: a mismatch means the remote
+    /// rebooted, the recorded pid is recycled/gone, and the run is classified
+    /// `Exited` — NEVER silently `Recovered` (the truthful-reattach rule).
+    ///
+    /// The mapping mirrors `runtime-tunnel.md`'s Recovery Behavior:
+    ///   - channel unreachable -> `RecoveryPending` (retried when it returns);
+    ///   - alive + same boot + reattachable -> `Recovered` (`run.recovered`);
+    ///   - alive + same boot + NOT reattachable -> `Orphaned` (`run.orphaned`,
+    ///     remote logs inspectable);
+    ///   - alive but boot mismatch (reboot) -> `Exited` (`run.exited`);
+    ///   - gone -> `Exited` (`run.exited`, unknown exit detail).
+    pub fn recover_run(
+        &self,
+        process: &LocalRuntimeProcessRef,
+        recorded_remote_boot_id: &str,
+    ) -> RemoteRunRecovery {
+        let fingerprint = self.config.transport.target_fingerprint();
+        // Append-first: record that we are re-probing this stored remote ref BEFORE
+        // we commit to a classification.
+        let mut events = vec![RuntimeEvent {
+            kind: EventKind::RuntimeRemoteRecoveryAttempted
+                .as_str()
+                .to_string(),
+            status: "attempting".to_string(),
+            detail: format!(
+                "fingerprint={fingerprint} ref={} recorded_boot={recorded_remote_boot_id}",
+                process.runtime_process_ref
+            ),
+        }];
+
+        let probe = self.probe_from_ref(process);
+        let observed = self.config.transport.recovery_probe(&probe);
+
+        let (classification, detail) = if !observed.channel_reachable {
+            (
+                RemoteRecoveryClassification::RecoveryPending,
+                format!(
+                    "channel to {fingerprint} unreachable at recovery; holding recovery_pending (will retry on channel return)"
+                ),
+            )
+        } else if !observed.live {
+            (
+                RemoteRecoveryClassification::Exited,
+                format!(
+                    "remote {fingerprint} reports process gone; recording exited (unknown exit detail)"
+                ),
+            )
+        } else {
+            // Alive. The boot identity must match the one recorded at launch; a
+            // mismatch is a remote reboot, so a recycled pid must never be trusted.
+            let same_boot = observed
+                .observed_remote_boot_id
+                .as_deref()
+                .map(|observed_boot| observed_boot == recorded_remote_boot_id)
+                .unwrap_or(false);
+            if !same_boot {
+                (
+                    RemoteRecoveryClassification::Exited,
+                    format!(
+                        "remote {fingerprint} boot-id mismatch (recorded {recorded_remote_boot_id}, observed {}); remote rebooted, classifying exited",
+                        observed
+                            .observed_remote_boot_id
+                            .as_deref()
+                            .unwrap_or("<none>")
+                    ),
+                )
+            } else if observed.reattachable {
+                (
+                    RemoteRecoveryClassification::Recovered,
+                    format!(
+                        "remote {fingerprint} alive within recorded boot and reattachable; recovered in place"
+                    ),
+                )
+            } else {
+                (
+                    RemoteRecoveryClassification::Orphaned,
+                    format!(
+                        "remote {fingerprint} alive but launch is not reattachable; orphaned, remote logs left inspectable"
+                    ),
+                )
+            }
+        };
+
+        events.push(RuntimeEvent {
+            kind: classification.event_kind().as_str().to_string(),
+            status: classification.as_str().to_string(),
+            detail: detail.clone(),
+        });
+
+        RemoteRunRecovery {
+            runtime_process_ref: process.runtime_process_ref.clone(),
+            classification,
+            detail,
+            events,
+        }
+    }
+
+    /// RR2: whether THIS remote launch can be reattached to in place after a
+    /// controller restart — truthfully `true` only when the launch recorded a
+    /// durable remote pid + boot identity in the `remote_process_ref` (the
+    /// `:pid=...:boot=...` shape). A bare ref with no recorded pid/boot is NOT
+    /// reattachable and a still-alive run under it recovers as `Orphaned`.
+    ///
+    /// `runtime-tunnel.md` Remote runtime responsibility: "Report whether process
+    /// reattach is supported after Capo restart." This is that honest report.
+    pub fn reattach_supported(&self, process: &LocalRuntimeProcessRef) -> bool {
+        parse_remote_ref_pid_boot(&process.runtime_process_ref).is_some()
+    }
+
     fn remote_control(
         &self,
         process: &LocalRuntimeProcessRef,
@@ -2178,17 +2691,87 @@ impl RemoteProcessRunner {
         )
     }
 
-    /// Reconstruct a probe handle from a stored ref. The remote identity is encoded
-    /// in the ref; liveness is decided by the transport probe, not this struct.
+    /// Reconstruct a probe handle from a stored ref. The remote identity (pid +
+    /// boot) is encoded in the ref's `:pid=...:boot=...` tail, so a probe/recovery
+    /// after restart carries the SAME remote pid + boot the launch recorded;
+    /// liveness is decided by the transport probe, not this struct.
     fn probe_from_ref(&self, process: &LocalRuntimeProcessRef) -> RemoteProbe {
         let live = process.status == "running";
+        // Parse pid + boot + host from the STORED ref so a probe/recovery after a
+        // channel re-resolution carries the host id recorded at launch, not
+        // whatever endpoint the channel happens to resolve to now (finding 9). Fall
+        // back to the current channel endpoint only for a bare ref.
+        let parsed = parse_remote_ref(&process.runtime_process_ref);
+        let (remote_pid, remote_boot_id) = parsed
+            .as_ref()
+            .map(|p| (p.pid, p.boot.clone()))
+            .unwrap_or((0, String::new()));
+        let remote_host_id = parsed
+            .as_ref()
+            .map(|p| p.host.clone())
+            .filter(|host| !host.is_empty())
+            .unwrap_or_else(|| self.config.channel.connectivity_endpoint_id.clone());
         RemoteProbe {
-            remote_pid: 0,
-            remote_boot_id: String::new(),
-            remote_host_id: self.config.channel.connectivity_endpoint_id.clone(),
+            remote_pid,
+            remote_boot_id,
+            remote_host_id,
             live,
         }
     }
+}
+
+/// The structured remote identity recovered from a stored `remote_process_ref`
+/// (`remote-process:{fingerprint}:{host}:pid={pid}:boot={boot}`): the recorded
+/// remote pid, boot id, AND the host segment recorded at launch. Parsing from the
+/// END (the `:boot=` then `:pid=` markers are the LAST occurrences) makes the
+/// parser robust to a fingerprint or host segment that itself contains a literal
+/// `:pid=` substring — the structured tail still resolves correctly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedRemoteRef {
+    host: String,
+    pid: u32,
+    boot: String,
+}
+
+/// Parse the structured tail of a remote process-ref back into the recorded
+/// remote pid + boot id + host. Returns `None` when the ref has no such tail
+/// (a bare/non-reattachable ref), which is how [`RemoteProcessRunner::
+/// reattach_supported`] reports reattachability truthfully.
+fn parse_remote_ref(remote_ref: &str) -> Option<ParsedRemoteRef> {
+    let prefix = "remote-process:";
+    let body = remote_ref.strip_prefix(prefix)?;
+    let pid_marker = ":pid=";
+    let boot_marker = ":boot=";
+    // Use the LAST occurrence of each marker so a fingerprint/host that embeds the
+    // literal marker substring cannot mislead the parser (review finding 10).
+    let boot_at = body.rfind(boot_marker)?;
+    let boot = &body[boot_at + boot_marker.len()..];
+    if boot.is_empty() {
+        return None;
+    }
+    let head = &body[..boot_at];
+    let pid_at = head.rfind(pid_marker)?;
+    let pid_str = &head[pid_at + pid_marker.len()..];
+    let pid = pid_str.parse::<u32>().ok()?;
+    // Everything before `:pid=` is `{fingerprint}:{host}`; the host is the last
+    // colon-delimited segment so it is recoverable even after a channel
+    // re-resolution to a different endpoint (review finding 9).
+    let fingerprint_and_host = &head[..pid_at];
+    let host = fingerprint_and_host
+        .rsplit_once(':')
+        .map(|(_, host)| host.to_string())
+        .unwrap_or_default();
+    Some(ParsedRemoteRef {
+        host,
+        pid,
+        boot: boot.to_string(),
+    })
+}
+
+/// Back-compat helper: the `(pid, boot)` pair used by reattach-support + probe
+/// reconstruction, derived from [`parse_remote_ref`].
+fn parse_remote_ref_pid_boot(remote_ref: &str) -> Option<(u32, String)> {
+    parse_remote_ref(remote_ref).map(|parsed| (parsed.pid, parsed.boot))
 }
 
 /// RR1: the deterministic fake-remote runner the verification suite names. It is
@@ -5736,7 +6319,7 @@ mod tests {
         assert_eq!(interrupted.events[0].kind, "runtime.interrupt_requested");
         let terminated = runner.terminate(&outcome.process, "test terminate");
         assert_eq!(terminated.process.status, "terminating");
-        let killed = runner.kill(&outcome.process);
+        let killed = runner.kill(&outcome.process, "kill requested");
         assert_eq!(killed.process.status, "killed");
         assert!(!runner.health(&outcome.process).live);
         assert_eq!(
@@ -6254,22 +6837,59 @@ mod tests {
         let first = runner
             .start_process(remote_request("run-idem", workspace.clone(), "printf ok"))
             .expect("first start");
+        // After exactly one start the transport has spawned exactly once.
+        assert_eq!(
+            runner.transport_spawn_count(),
+            1,
+            "first start must spawn exactly one remote process"
+        );
+
         let second = runner
             .start_process(remote_request("run-idem", workspace.clone(), "printf ok"))
             .expect("second start with same key");
 
-        // The remote identity is keyed by the channel fingerprint + idempotency
-        // key, so a repeated start with the same key resolves to the SAME
-        // remote process-ref rather than minting a fresh remote identity.
+        // THE INVARIANT: a repeated start with the same idempotency key must NOT
+        // spawn a second remote process. We assert this directly against the
+        // transport's actual spawn counter — not by relying on a constant pid.
+        assert_eq!(
+            runner.transport_spawn_count(),
+            1,
+            "duplicate idempotency key must NOT spawn a second remote process"
+        );
+        // And the recorded remote identity is the SAME one (the de-duplicated
+        // outcome is the first launch replayed).
         assert_eq!(
             first.process.runtime_process_ref, second.process.runtime_process_ref,
-            "duplicate idempotency key must not mint a new remote process-ref"
+            "duplicate idempotency key must resolve to the same remote process-ref"
         );
         assert!(
             first
                 .events
                 .iter()
                 .any(|e| e.detail.contains("idempotency_key=run-idem"))
+        );
+        // The duplicate's trail records that it was de-duplicated, not re-spawned.
+        assert!(
+            second
+                .events
+                .iter()
+                .any(|e| e.detail.contains("deduplicated=true")),
+            "duplicate start must record that it was de-duplicated"
+        );
+
+        // A DIFFERENT idempotency key DOES spawn a second process with a distinct
+        // remote pid — proving the dedup is keyed, and the pid is not a constant.
+        let other = runner
+            .start_process(remote_request("run-idem-2", workspace, "printf ok"))
+            .expect("start with a different key");
+        assert_eq!(
+            runner.transport_spawn_count(),
+            2,
+            "a different idempotency key must spawn a new remote process"
+        );
+        assert_ne!(
+            first.process.runtime_process_ref, other.process.runtime_process_ref,
+            "distinct keys must mint distinct remote process-refs"
         );
     }
 
@@ -6371,6 +6991,338 @@ mod tests {
             first.process.runtime_process_ref,
             second.process.runtime_process_ref
         );
+    }
+
+    #[test]
+    fn remote_health_probe_overrides_a_stale_running_status() {
+        // The stored ref says `running`, but the channel probe reports the remote
+        // process DEAD. `health` must trust the probe (live=false), NOT echo the
+        // local status string the pre-RR1 stub used.
+        let workspace = temp_root("workspace-remote-probe-override");
+        let artifacts = temp_root("artifacts-remote-probe-override");
+        fs::create_dir_all(&workspace).unwrap();
+        let channel = OpenChannel::for_test(
+            "remote-target-probe",
+            "endpoint-probe",
+            "remote-target-probe",
+        );
+        let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts);
+        let runner = RemoteProcessRunner::new(RemoteProcessConfig::with_transport(
+            channel,
+            RemoteChannel::Fake(base.with_probe_reports_dead()),
+        ));
+        let outcome = runner
+            .start_process(remote_request("run-probe", workspace, "printf ok"))
+            .expect("remote start");
+
+        // Force the stored status to `running` so the ONLY thing that can make
+        // health report dead is the probe overriding it.
+        let stored = LocalRuntimeProcessRef {
+            status: "running".to_string(),
+            ..outcome.process
+        };
+        let health = runner.health(&stored).expect("health probe");
+        assert!(
+            !health.live,
+            "the remote probe must override the stale running status"
+        );
+        assert_eq!(health.status, "exited");
+    }
+
+    // ----- RR2: reattach-after-restart + recovery across the boundary -----
+
+    /// Build a remote runner over a fake channel with a scripted recovery outcome,
+    /// run a process so a REAL stored `remote_process_ref` (with the recorded
+    /// `:pid=...:boot=...` tail) exists, and return the runner, the stored ref
+    /// flipped to the in-flight `running` state a crash interrupts, and the remote
+    /// boot id recorded at launch. NO network — the channel is the deterministic
+    /// fake; this is the deterministic-fake-before-live discipline RR2 requires.
+    fn scripted_recovery_runner(
+        name: &str,
+        script: impl FnOnce(FakeRemoteChannel) -> FakeRemoteChannel,
+    ) -> (RemoteProcessRunner, LocalRuntimeProcessRef, String) {
+        let workspace = temp_root(&format!("workspace-{name}"));
+        let artifacts = temp_root(&format!("artifacts-{name}"));
+        fs::create_dir_all(&workspace).unwrap();
+        let channel = OpenChannel::for_test(
+            format!("chan-{name}"),
+            format!("endpoint-{name}"),
+            format!("fp-{name}"),
+        );
+        let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts);
+        let recorded_boot = base.remote_boot_id();
+        let transport = RemoteChannel::Fake(script(base));
+        let runner =
+            RemoteProcessRunner::new(RemoteProcessConfig::with_transport(channel, transport));
+
+        let outcome = runner
+            .start_process(remote_request(
+                &format!("run-{name}"),
+                workspace,
+                "printf ok",
+            ))
+            .expect("remote start for recovery fixture");
+        // The crash interrupts an in-flight (running) run.
+        let running = LocalRuntimeProcessRef {
+            status: "running".to_string(),
+            ..outcome.process
+        };
+        (runner, running, recorded_boot)
+    }
+
+    #[test]
+    fn remote_recovery_alive_reattachable_recovers_in_place() {
+        let (runner, running, recorded_boot) =
+            scripted_recovery_runner("rec-alive", |c| c.recover_alive_reattachable());
+
+        // The launch recorded a remote pid + boot, so reattach is truthfully
+        // supported.
+        assert!(runner.reattach_supported(&running));
+
+        let recovery = runner.recover_run(&running, &recorded_boot);
+        assert_eq!(
+            recovery.classification,
+            RemoteRecoveryClassification::Recovered
+        );
+        // Append-first: a recovery_attempted precedes the single terminal event.
+        let kinds: Vec<&str> = recovery.events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "runtime.remote_recovery_attempted",
+                "runtime.remote_run_recovered"
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_recovery_alive_but_unattachable_is_orphaned() {
+        let (runner, running, recorded_boot) =
+            scripted_recovery_runner("rec-orphan", |c| c.recover_alive_unattachable());
+
+        let recovery = runner.recover_run(&running, &recorded_boot);
+        assert_eq!(
+            recovery.classification,
+            RemoteRecoveryClassification::Orphaned
+        );
+        assert_eq!(
+            recovery.events.last().unwrap().kind,
+            "runtime.remote_run_orphaned"
+        );
+        assert!(recovery.detail.contains("inspectable"));
+    }
+
+    #[test]
+    fn remote_recovery_reboot_boot_id_mismatch_is_exited_never_recovered() {
+        let (runner, running, recorded_boot) =
+            scripted_recovery_runner("rec-reboot", |c| c.recover_rebooted());
+
+        let recovery = runner.recover_run(&running, &recorded_boot);
+        // A rebooted remote is GONE — never silently "recovered" on a recycled pid.
+        assert_eq!(
+            recovery.classification,
+            RemoteRecoveryClassification::Exited
+        );
+        assert_eq!(
+            recovery.events.last().unwrap().kind,
+            "runtime.remote_run_exited"
+        );
+        assert!(recovery.detail.contains("boot-id mismatch"));
+    }
+
+    #[test]
+    fn remote_recovery_gone_is_exited_unknown_detail() {
+        let (runner, running, recorded_boot) =
+            scripted_recovery_runner("rec-gone", |c| c.recover_gone());
+
+        let recovery = runner.recover_run(&running, &recorded_boot);
+        assert_eq!(
+            recovery.classification,
+            RemoteRecoveryClassification::Exited
+        );
+        assert_eq!(
+            recovery.events.last().unwrap().kind,
+            "runtime.remote_run_exited"
+        );
+        assert!(recovery.detail.contains("unknown exit detail"));
+    }
+
+    #[test]
+    fn remote_recovery_channel_unreachable_is_pending_then_recovers_on_return() {
+        // Build ONE channel identity + start ONE process so a single REAL stored
+        // remote ref exists (with the recorded :pid=...:boot=... tail). The two
+        // recovery attempts below re-probe THIS SAME stored ref, modelling a single
+        // run whose channel was unreachable on the first restart and reachable on a
+        // later one — not two independent happy paths.
+        let workspace = temp_root("workspace-rec-return");
+        let artifacts = temp_root("artifacts-rec-return");
+        fs::create_dir_all(&workspace).unwrap();
+        let channel =
+            OpenChannel::for_test("chan-rec-return", "endpoint-rec-return", "fp-rec-return");
+        let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts);
+        let recorded_boot = base.remote_boot_id();
+
+        // Launch once over a plain channel to mint the stored ref.
+        let launch_runner = RemoteProcessRunner::new(RemoteProcessConfig::with_transport(
+            channel.clone(),
+            RemoteChannel::Fake(base),
+        ));
+        let outcome = launch_runner
+            .start_process(remote_request(
+                "run-rec-return",
+                workspace.clone(),
+                "printf ok",
+            ))
+            .expect("remote start for recovery fixture");
+        let stored = LocalRuntimeProcessRef {
+            status: "running".to_string(),
+            ..outcome.process
+        };
+
+        // Helper: re-resolve the SAME channel identity with a given recovery script.
+        let rebuild = |script: fn(FakeRemoteChannel) -> FakeRemoteChannel| {
+            let chan = FakeRemoteChannel::from_open_channel(
+                &channel,
+                workspace.clone(),
+                temp_root("artifacts-rec-return-reresolve"),
+            );
+            RemoteProcessRunner::new(RemoteProcessConfig::with_transport(
+                channel.clone(),
+                RemoteChannel::Fake(script(chan)),
+            ))
+        };
+
+        // First restart: channel unreachable -> recovery_pending (NOT forced to
+        // recovered or exited). This is the remote-only state the local path
+        // cannot have.
+        let pending_runner = rebuild(|c| c.recover_channel_unreachable());
+        let pending = pending_runner.recover_run(&stored, &recorded_boot);
+        assert_eq!(
+            pending.classification,
+            RemoteRecoveryClassification::RecoveryPending
+        );
+        assert!(pending.classification.is_pending());
+        assert_eq!(
+            pending.events.last().unwrap().kind,
+            "runtime.remote_recovery_pending"
+        );
+
+        // Channel returns on a later restart: re-resolve the SAME channel identity
+        // to a now-reachable one and re-run recovery against the SAME stored ref.
+        // The previously-pending run now recovers in place — recovery retried, the
+        // run never lost or forced.
+        let return_runner = rebuild(|c| c.recover_alive_reattachable());
+        let recovered = return_runner.recover_run(&stored, &recorded_boot);
+        assert_eq!(
+            recovered.classification,
+            RemoteRecoveryClassification::Recovered,
+            "the same pending stored ref must recover when the channel returns"
+        );
+        assert_eq!(recovered.runtime_process_ref, stored.runtime_process_ref);
+    }
+
+    #[test]
+    fn remote_recovery_is_replay_stable_across_repeated_restarts() {
+        // Restart/replay: re-running recovery against the SAME stored ref + the same
+        // scripted channel rebuilds an IDENTICAL classification + event trail, so a
+        // recovered projection is replay-stable (no duplicate/divergent recovery).
+        let (runner, running, recorded_boot) =
+            scripted_recovery_runner("rec-replay", |c| c.recover_alive_reattachable());
+
+        let first = runner.recover_run(&running, &recorded_boot);
+        let second = runner.recover_run(&running, &recorded_boot);
+        assert_eq!(first, second, "recovery must be replay-stable");
+    }
+
+    #[test]
+    fn remote_recovery_is_in_place_not_a_relaunch_with_recovery_of_run_id() {
+        // `recovery_of_run_id` is ONLY for a relaunch/retry after restart, never for
+        // a simple in-place reattach. The runner's recover_run reattaches in place:
+        // it carries NO new run id and does not relaunch (no second start event).
+        let (runner, running, recorded_boot) =
+            scripted_recovery_runner("rec-inplace", |c| c.recover_alive_reattachable());
+
+        let recovery = runner.recover_run(&running, &recorded_boot);
+        // The recovered ref is the SAME stored ref — an in-place reattach.
+        assert_eq!(recovery.runtime_process_ref, running.runtime_process_ref);
+        // No relaunch happened: there is no remote_process_started in the recovery
+        // trail (that belongs to start_process / a relaunch, not a reattach).
+        assert!(
+            !recovery
+                .events
+                .iter()
+                .any(|e| e.kind == "runtime.remote_process_started"),
+            "an in-place reattach must NOT relaunch the remote process"
+        );
+    }
+
+    #[test]
+    fn remote_reattach_unsupported_for_bare_ref_without_pid_boot() {
+        // A bare ref with no recorded remote pid/boot is NOT reattachable: the
+        // runner reports reattach support truthfully (the runtime-tunnel.md
+        // "report whether reattach is supported" responsibility).
+        let workspace = temp_root("workspace-rec-bare");
+        let artifacts = temp_root("artifacts-rec-bare");
+        fs::create_dir_all(&workspace).unwrap();
+        let runner = RemoteProcessRunner::new(RemoteProcessConfig::loopback_for_test(
+            "remote-target-bare",
+            "endpoint-bare",
+            workspace,
+            artifacts,
+        ));
+        let bare = LocalRuntimeProcessRef {
+            run_id: RunId::new("run-bare"),
+            runtime_process_ref: "remote-process:fp:host".to_string(),
+            external_pid: None,
+            boot_id: None,
+            status: "running".to_string(),
+            redaction_state: "clean".to_string(),
+        };
+        assert!(!runner.reattach_supported(&bare));
+    }
+
+    #[test]
+    fn parse_remote_ref_is_robust_to_pid_marker_inside_fingerprint() {
+        // A fingerprint/host that itself embeds the literal `:pid=` substring must
+        // NOT mislead the parser: the structured tail is parsed from the end, so the
+        // REAL recorded pid/boot/host still resolve (review finding 10).
+        let evil = "remote-process:fp:pid=spoof:host-real:pid=4242:boot=boot-real";
+        let parsed = parse_remote_ref(evil).expect("structured tail must still parse");
+        assert_eq!(
+            parsed.pid, 4242,
+            "the real recorded pid, not the embedded one"
+        );
+        assert_eq!(parsed.boot, "boot-real");
+        assert_eq!(parsed.host, "host-real");
+    }
+
+    #[test]
+    fn probe_carries_host_from_stored_ref_not_the_reresolved_channel() {
+        // After a channel re-resolution to a DIFFERENT endpoint, a probe built from
+        // a stored ref must carry the host recorded at launch, not the new endpoint
+        // (review finding 9).
+        let workspace = temp_root("workspace-probe-host");
+        let artifacts = temp_root("artifacts-probe-host");
+        fs::create_dir_all(&workspace).unwrap();
+        // The channel now resolves to "endpoint-NEW", but the stored ref recorded
+        // "host-ORIGINAL" at launch.
+        let channel = OpenChannel::for_test("chan-host", "endpoint-NEW", "fp-host");
+        let runner = FakeRemoteProcessRunner::build(channel, workspace, artifacts);
+        let stored = LocalRuntimeProcessRef {
+            run_id: RunId::new("run-host"),
+            runtime_process_ref: "remote-process:fp-host:host-ORIGINAL:pid=51000:boot=boot-x"
+                .to_string(),
+            external_pid: None,
+            boot_id: None,
+            status: "running".to_string(),
+            redaction_state: "clean".to_string(),
+        };
+        let probe = runner.probe_from_ref(&stored);
+        assert_eq!(
+            probe.remote_host_id, "host-ORIGINAL",
+            "probe must carry the host recorded in the stored ref, not the re-resolved endpoint"
+        );
+        assert_eq!(probe.remote_pid, 51000);
     }
 
     #[test]

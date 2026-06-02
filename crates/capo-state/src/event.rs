@@ -157,6 +157,21 @@ pub enum EventKind {
     RuntimeRemoteTerminateSent,
     RuntimeRemoteKillSent,
     RuntimeRemoteCleanupCompleted,
+    // RR2 (remote-runtime): restart recovery / reattach across the boundary.
+    // On restart, each stored remote `RuntimeProcessRef` is re-probed over a
+    // re-resolved channel and classified EXACTLY like the local path
+    // (`run.recovered` / `run.orphaned` / `run.exited`), with one remote-only
+    // addition: when the channel itself is unreachable at recovery time the run
+    // is NOT forced to recovered or exited but left `recovery_pending` until the
+    // channel returns. `RuntimeRemoteRecoveryAttempted` is the append-first "we
+    // are re-probing a stored remote ref" fact; the other three are the truthful
+    // classifications. A remote-reboot (boot-id mismatch) maps to
+    // `RuntimeRemoteRunExited` (gone), never silently recovered.
+    RuntimeRemoteRecoveryAttempted,
+    RuntimeRemoteRunRecovered,
+    RuntimeRemoteRunOrphaned,
+    RuntimeRemoteRunExited,
+    RuntimeRemoteRecoveryPending,
 }
 
 /// The terminal outcome a projected turn-ending event carries, in the
@@ -274,6 +289,11 @@ impl EventKind {
             Self::RuntimeRemoteTerminateSent => "runtime.remote_terminate_sent",
             Self::RuntimeRemoteKillSent => "runtime.remote_kill_sent",
             Self::RuntimeRemoteCleanupCompleted => "runtime.remote_cleanup_completed",
+            Self::RuntimeRemoteRecoveryAttempted => "runtime.remote_recovery_attempted",
+            Self::RuntimeRemoteRunRecovered => "runtime.remote_run_recovered",
+            Self::RuntimeRemoteRunOrphaned => "runtime.remote_run_orphaned",
+            Self::RuntimeRemoteRunExited => "runtime.remote_run_exited",
+            Self::RuntimeRemoteRecoveryPending => "runtime.remote_recovery_pending",
         }
     }
 
@@ -381,6 +401,11 @@ impl EventKind {
             EventKind::RuntimeRemoteTerminateSent,
             EventKind::RuntimeRemoteKillSent,
             EventKind::RuntimeRemoteCleanupCompleted,
+            EventKind::RuntimeRemoteRecoveryAttempted,
+            EventKind::RuntimeRemoteRunRecovered,
+            EventKind::RuntimeRemoteRunOrphaned,
+            EventKind::RuntimeRemoteRunExited,
+            EventKind::RuntimeRemoteRecoveryPending,
         ];
         ALL.iter()
             .copied()

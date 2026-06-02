@@ -172,6 +172,36 @@ explicit opt-in env gates (`CAPO_SERVER_RUN_REMOTE_RUNTIME_LIVE` +
 `#[ignore]` / skip cleanly when no host is configured. Nothing completes on operator
 self-attestation.
 
+## RR1 + RR2 Decisions (implemented)
+
+- Idempotency is ENFORCED, not incidental. `RemoteProcessRunner` carries a launched
+  ledger (`Arc<Mutex<HashMap<run_id, LocalProcessOutcome>>>`) keyed by the run-id
+  idempotency key; a repeated `start_process` returns the recorded outcome and never
+  calls `transport.launch` again. The fake channel exposes a real `spawn_count()` and
+  mints a distinct remote pid per actual spawn, so the no-double-spawn invariant is
+  asserted against the spawn counter — a constant pid can no longer make the test pass
+  by accident.
+- Health trusts the remote probe, not a local status string. The fake channel can be
+  scripted (`with_probe_reports_dead`) to report a process dead while the stored ref
+  still says `running`, and a test proves `health` returns `live=false` in that case
+  (the probe overrides the stored status).
+- Contract parity is compile-time enforced. `RuntimeRunnerContract` is implemented by
+  both `LocalProcessRunner` and `RemoteProcessRunner` with the SAME control method
+  shapes; `LocalProcessRunner::kill` was aligned to take a `reason`, and a unified
+  `CleanupOutcome` lets the controller handle local + remote cleanup through one type.
+- Recovery re-resolution truthfulness. The channel-unreachable-then-return test
+  re-probes the SAME stored ref against a now-reachable re-resolution of the same
+  channel identity (it does not run two independent happy paths). The remote-ref
+  parser reads the structured `:pid=...:boot=...` tail from the END so an embedded
+  `:pid=` substring in a fingerprint/host cannot mislead it, and recovers the host
+  segment so a probe carries the host recorded at launch, not the re-resolved endpoint.
+- Recovery is exercised at the `-p capo-server` gate
+  (`crates/capo-server/src/tests/remote_recovery.rs`) so the recovery path is not
+  self-attested solely inside `capo-runtime`. Full controller restart-loop wiring of
+  remote recovery (the seam that persists these events into the server event log) is
+  deferred to the controller-integration scope; RR2 ships the runner-level
+  `recover_run` + its truthful classification matrix.
+
 ## Non-Goals
 
 - The channel itself (endpoint resolution, SSH/Tailscale/reverse transport,

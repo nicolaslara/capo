@@ -28,7 +28,8 @@ stub with a real remote runner whose channel is provided by the
 
 ## Status
 
-Planned. All tasks pending.
+In progress. RR0 complete. RR1 complete. RR2 complete (deterministic
+fake-channel recovery suite). RR3-RR8 pending.
 
 ## Feature Set
 
@@ -137,7 +138,26 @@ Dependencies: none (planning). Cross-workpad: names `connectivity-tunnel`,
 
 ## RR1 - Remote Process Lifecycle Over The Channel (start/stop/health) + Start Sequence
 
-Status: pending.
+Status: complete.
+
+Evidence: `crates/capo-runtime/src/lib.rs` `RemoteProcessRunner` (real
+`start_process`/`interrupt`/`terminate`/`kill`/`health`/`cleanup` over an injected
+`RemoteChannel`), `RuntimeRunner::{interrupt,terminate,kill,health}_local`
+dispatching `RemoteProcess` to the real runner (not the `FakeRuntimeRunner`
+fall-through). `RuntimeRunnerContract` trait gives a compile-time check that the
+local + remote control surfaces share the SAME method shapes (aligned
+`kill(reason)`, unified `CleanupOutcome`). Idempotency is ENFORCED by a launched-run
+ledger keyed by run id (a duplicate start returns the recorded outcome and never
+calls `transport.launch` again); the fake channel exposes a real `spawn_count()` and
+mints a distinct pid per spawn so the no-double-spawn invariant is asserted directly,
+not by a constant pid. 13 new `runtime.remote_*` `EventKind`s in
+`crates/capo-state/src/event.rs` round-trip (`rr1_rr2_remote_runtime_event_kinds_round_trip`).
+Tests: `remote_start_appends_request_then_resolve_then_started_in_order`,
+`remote_start_with_same_idempotency_key_keeps_a_stable_remote_ref` (now asserts
+`transport_spawn_count() == 1`), `remote_start_launch_failure_yields_typed_retryability`,
+`remote_runner_performs_no_endpoint_resolution`,
+`remote_cleanup_after_spawn_is_idempotent_and_emits_completed`,
+`remote_health_probe_overrides_a_stale_running_status` (probe overrides stored status).
 
 Scope: A real remote runner whose `start_process` / `interrupt` / `terminate` /
 `kill` / `health` cross a machine boundary over a `connectivity-tunnel`-provided
@@ -201,7 +221,32 @@ fingerprint), `real-turn-loop` (confinement + start-sequence event contract),
 
 ## RR2 - Reattach-After-Restart + Recovery Behavior Across The Boundary
 
-Status: pending.
+Status: complete.
+
+Evidence: `RemoteProcessRunner::recover_run` re-probes a stored remote ref over the
+(re-resolved) channel and classifies it as `Recovered` / `Orphaned` / `Exited` /
+`RecoveryPending` (`RemoteRecoveryClassification`), mapping each to a distinct
+`runtime.remote_run_*` / `runtime.remote_recovery_pending` event after an append-first
+`runtime.remote_recovery_attempted`. A remote-reboot (boot-id mismatch) is `Exited`,
+never silently recovered. `reattach_supported` reports truthfully from the
+`:pid=...:boot=...` tail; the ref parser (`parse_remote_ref`) reads the tail from the
+END so an embedded `:pid=` substring cannot mislead it, and recovers the host segment
+so a probe after channel re-resolution carries the host recorded at launch.
+Deterministic fake-channel tests (NO network):
+`remote_recovery_alive_reattachable_recovers_in_place`,
+`remote_recovery_alive_but_unattachable_is_orphaned`,
+`remote_recovery_reboot_boot_id_mismatch_is_exited_never_recovered`,
+`remote_recovery_gone_is_exited_unknown_detail`,
+`remote_recovery_channel_unreachable_is_pending_then_recovers_on_return` (re-resolves
+the SAME stored ref against a now-reachable channel — proves the retry path, not two
+independent runners), `remote_recovery_is_replay_stable_across_repeated_restarts`,
+`remote_recovery_is_in_place_not_a_relaunch_with_recovery_of_run_id`,
+`remote_reattach_unsupported_for_bare_ref_without_pid_boot`,
+`parse_remote_ref_is_robust_to_pid_marker_inside_fingerprint`,
+`probe_carries_host_from_stored_ref_not_the_reresolved_channel`. Recovery is exercised
+from the `-p capo-server` gate in `crates/capo-server/src/tests/remote_recovery.rs`
+(restart-with-live-remote, channel-unreachable-then-return on the SAME ref,
+replay-stable rebuild).
 
 Scope: Realize `runtime-tunnel.md`'s Recovery Behavior for remote runs: on Capo
 restart, recover a remote run in place when the remote process is still alive, and
