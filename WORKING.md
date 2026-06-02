@@ -73,6 +73,21 @@ Every task needs evidence before marking complete. Match depth to scope:
 
 Record skipped verification in the task or `knowledge.md` with a reason.
 
+## CI
+
+GitHub Actions enforces the deterministic unattended subset of the verification
+contract:
+
+- Rust workspace: `cargo fmt --check`, `cargo clippy --all-targets
+  --all-features -- -D warnings`, `cargo test --workspace`, and
+  `git diff --check`.
+- Dashboard static smoke: `node web/dashboard/scripts/verify.mjs`.
+
+CI uses `TMPDIR=/tmp` so path-sensitive worktree/checkpoint tests do not inherit
+long platform temp roots. Live provider smokes, subscription-backed runs, and
+other explicit opt-in gates stay out of unattended CI unless a later workpad
+adds a dedicated, secret-safe job.
+
 ## Workpad Gates
 
 1. Research gate: `workpads/research/knowledge.md` records enough prior-art, ACP, stack, connector, and memory findings to choose a prototype direction.

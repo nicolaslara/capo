@@ -512,6 +512,7 @@ mod tests {
     use capo_core::RunId;
 
     use super::*;
+    #[cfg(target_os = "macos")]
     use crate::LocalProcessConfig;
 
     fn tmp_root(name: &str) -> PathBuf {
@@ -521,6 +522,7 @@ mod tests {
         dir.canonicalize().unwrap()
     }
 
+    #[cfg(target_os = "macos")]
     fn runner_for(root: &Path) -> LocalProcessRunner {
         LocalProcessRunner::new(LocalProcessConfig::for_test(
             root.to_path_buf(),
