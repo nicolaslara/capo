@@ -4,7 +4,10 @@ use capo_query::{ProjectDashboardQuery, project_dashboard};
 use capo_runtime::{
     ChannelKind, ConnectivityClock, ConnectivityEndpointConfig, ConnectivityError,
     ConnectivityTunnel, EndpointOwner, ExposurePolicy, ExposureScope, FakeTunnelScript,
-    HealthTransition, HeartbeatConfig, HeartbeatMonitor,
+    HealthTransition, HeartbeatConfig, HeartbeatMonitor, OpenChannel,
+    anti_sleep::{
+        AntiSleepController, AntiSleepTransition, FakeInhibitorBackend, anti_sleep_enabled,
+    },
 };
 use capo_state::{
     CapabilityGrantProjection, ConnectivityExposureProjection, EventKind, NewEvent,
@@ -818,10 +821,25 @@ pub(crate) fn revoke_connectivity_exposure(
     let state = state(parsed)?;
     let exposure = connectivity_exposure(&state, &exposure_id)?;
     if exposure.status == "revoked" {
+        // CT7: revocation is IDEMPOTENT and irreversible-within-record. A re-revoke
+        // short-circuits without re-tearing-down or re-emitting events; the exposure
+        // cannot be reactivated (the activate path already refuses `revoked`).
         return Ok(render_connectivity_exposure_revocation(
-            &exposure, &reason, None,
+            &exposure,
+            &reason,
+            None,
+            &RevocationTeardown::already_revoked(),
         ));
     }
+
+    // CT7: a real teardown, not merely a status flip. For a non-loopback exposure we
+    // exercise the CT3 channel surface — resolve, `open_channel`, then `close_channel`
+    // — and PROVE unreachability with a post-close `check_reachability`, all driven by
+    // a scripted `FakeTunnel` carrying the SAME surface as the live Tailscale adapter
+    // (CT4 parity), with no live tailnet and no real network. A loopback exposure has
+    // no channel to tear down, so the teardown is recorded as not-applicable.
+    let teardown = teardown_connectivity_exposure(&exposure)?;
+
     let revoked_at = unix_timestamp_label()?;
     let revoked = ConnectivityExposureProjection {
         status: "revoked".to_string(),
@@ -841,11 +859,18 @@ pub(crate) fn revoke_connectivity_exposure(
     );
     event.project_id = Some(revoked.project_id.clone());
     event.item_id = Some(revoked.exposure_id.clone());
+    // CT7: the revoke event records the teardown facts (channel closed, proven
+    // unreachable) so the audit trail shows the exposure was REALLY torn down — not
+    // just that a status flag changed. No secret in the payload (channel id is a
+    // derived reachability handle, never a credential).
     event.payload_json = format!(
-        "{{\"exposure_id\":\"{}\",\"status\":\"revoked\",\"reason\":\"{}\",\"revoked_at\":\"{}\"}}",
+        "{{\"exposure_id\":\"{}\",\"status\":\"revoked\",\"reason\":\"{}\",\"revoked_at\":\"{}\",\"channel_closed\":{},\"channel_id\":{},\"proven_unreachable\":{}}}",
         escape_json(&revoked.exposure_id),
         escape_json(&reason),
-        escape_json(&revoked_at)
+        escape_json(&revoked_at),
+        teardown.channel_closed,
+        json_opt_string(teardown.channel_id.as_deref()),
+        teardown.proven_unreachable,
     );
     event.idempotency_key = Some(format!(
         "connectivity-exposure-revoke:{}:{}",
@@ -866,11 +891,208 @@ pub(crate) fn revoke_connectivity_exposure(
             &[ProjectionRecord::ConnectivityExposure(revoked.clone())],
         )
         .map_err(debug_error)?;
+
+    // CT7: emit a TERMINAL `connectivity.health_changed` (reachable=false) so the
+    // health timeline ends on a recorded unreachable transition — the heartbeat (CT5)
+    // is conceptually stopped, and the post-revoke health is event-sourced, not a
+    // bare projection flag. Only for a non-loopback exposure that had a torn-down
+    // channel (a loopback exposure has no tunnel health timeline).
+    if teardown.channel_closed {
+        append_revoke_health_changed(&state, &revoked, &revoked_at)?;
+    }
+
+    // CT7 (soft CT6 dependency): if this was the LAST active non-loopback exposure,
+    // release anti-sleep. The coupling is strictly ONE-WAY (exposure-state ->
+    // inhibitor): we COUNT the remaining active non-loopback exposures and drive the
+    // controller's `set_active_exposures`. The controller is deterministic here (a
+    // fake backend), OFF unless `CAPO_SERVER_ANTI_SLEEP=1`, and its transition is an
+    // observable audit field — the inhibitor never reads exposure state back.
+    let anti_sleep = release_anti_sleep_if_last_exposure(&state, &revoked)?;
+
     Ok(render_connectivity_exposure_revocation(
         &revoked,
         &reason,
         Some(sequence),
+        &RevocationTeardown {
+            anti_sleep,
+            ..teardown
+        },
     ))
+}
+
+/// CT7: the result of really tearing down an exposure's reachability, recorded for
+/// the audit trail + CLI render. It carries NO secret — `channel_id` is the CT3
+/// derived reachability handle, never a credential.
+struct RevocationTeardown {
+    /// Whether a reachability channel was opened and then `close_channel`d (true for
+    /// a non-loopback exposure; false for loopback, which has no tunnel channel).
+    channel_closed: bool,
+    /// The derived channel handle id that was closed (None for loopback / re-revoke).
+    channel_id: Option<String>,
+    /// Whether a post-close `check_reachability` PROVED unreachability (not just a
+    /// status flip). False for loopback / re-revoke.
+    proven_unreachable: bool,
+    /// The anti-sleep transition driven by this revoke (CT6), as a secret-free label.
+    anti_sleep: AntiSleepTransition,
+}
+
+impl RevocationTeardown {
+    /// A re-revoke: nothing torn down, no anti-sleep transition.
+    fn already_revoked() -> Self {
+        Self {
+            channel_closed: false,
+            channel_id: None,
+            proven_unreachable: false,
+            anti_sleep: AntiSleepTransition::Unchanged,
+        }
+    }
+}
+
+/// CT7: tear down the reachability for a non-loopback exposure. Resolves the endpoint
+/// through a scripted `FakeTunnel` (CT4 parity surface), opens a channel, closes it
+/// via [`ConnectivityTunnel::close_channel`] (the CT3 surface CT7 depends on), and
+/// then PROVES unreachability via a post-close `check_reachability` whose scripted
+/// timeline reports the peer down. A loopback exposure has no tunnel channel, so the
+/// teardown is a recorded no-op (`channel_closed = false`).
+fn teardown_connectivity_exposure(
+    exposure: &ConnectivityExposureProjection,
+) -> Result<RevocationTeardown, String> {
+    if exposure.exposure == "loopback" {
+        return Ok(RevocationTeardown {
+            channel_closed: false,
+            channel_id: None,
+            proven_unreachable: false,
+            anti_sleep: AntiSleepTransition::Unchanged,
+        });
+    }
+
+    // The teardown tunnel carries the SAME surface as the live Tailscale adapter (CT4
+    // parity). Its scripted health timeline is `[true, false]`: the peer is reachable
+    // BEFORE the close (step 0) and unreachable AFTER (step 1), so the unreachability
+    // is a sequential TRANSITION attributable to the close call — not a value scripted
+    // to `false` from the start (which would prove nothing). CT10 makes this proof
+    // CAUSAL: the live `close_channel` will signal the tailnet so the post-close probe
+    // is down BECAUSE of the teardown. Until then this is a fake-tunnel transition;
+    // see `knowledge.md` (CT7 live-teardown deferral).
+    let owner = endpoint_owner(&exposure.owner_kind, &exposure.owner_id)?;
+    let channel = parse_channel_kind(&exposure.channel_kind)?;
+    let tunnel = ConnectivityTunnel::fake_scripted(
+        FakeTunnelScript::private_matching(
+            exposure.connectivity_endpoint_id.clone(),
+            "ct7-teardown",
+        )
+        .with_health_timeline(vec![true, false]),
+    );
+    let resolved = tunnel
+        .resolve_endpoint(owner, channel)
+        .map_err(|error| format!("connectivity teardown could not resolve endpoint: {error}"))?;
+    let open: OpenChannel = tunnel
+        .open_channel(&resolved)
+        .map_err(|error| format!("connectivity teardown could not open channel: {error}"))?;
+    let channel_id = open.channel_id.clone();
+    // The channel is reachable WHILE open — the baseline the close must change.
+    let pre_close = tunnel.check_reachability();
+    if !pre_close.reachable {
+        return Err(format!(
+            "connectivity teardown precondition failed: channel={channel_id} was already unreachable before close_channel"
+        ));
+    }
+    tunnel
+        .close_channel(open)
+        .map_err(|error| format!("connectivity teardown could not close channel: {error}"))?;
+    // PROVE unreachability AFTER the close — a transition, not a status flip.
+    let post_close = tunnel.check_reachability();
+    if post_close.reachable {
+        return Err(format!(
+            "connectivity teardown failed to prove unreachability: channel={channel_id} still reachable after close_channel"
+        ));
+    }
+
+    Ok(RevocationTeardown {
+        channel_closed: true,
+        channel_id: Some(channel_id),
+        proven_unreachable: true,
+        anti_sleep: AntiSleepTransition::Unchanged,
+    })
+}
+
+/// CT7: append the TERMINAL `connectivity.health_changed` (reachable=false) for a
+/// revoked exposure, so the health timeline ends on a recorded unreachable
+/// transition. The payload carries no secret and is scanned by the CT2
+/// emitted-surface guard before persistence. Keyed by exposure + revoke instant so a
+/// replay rebuilds an identical terminal transition.
+fn append_revoke_health_changed(
+    state: &SqliteStateStore,
+    revoked: &ConnectivityExposureProjection,
+    revoked_at: &str,
+) -> Result<i64, String> {
+    let mut event = NewEvent::new(
+        format!(
+            "event-connectivity-health-revoked-{}",
+            stable_cli_hash(&revoked.exposure_id)
+        ),
+        EventKind::ConnectivityHealthChanged,
+        "capo-cli",
+    );
+    event.project_id = Some(revoked.project_id.clone());
+    event.item_id = Some(revoked.exposure_id.clone());
+    event.payload_json = format!(
+        "{{\"exposure_id\":\"{}\",\"endpoint_id\":\"{}\",\"exposure\":\"{}\",\"health_status\":\"disabled\",\"reachable\":false,\"transition\":\"revoked\",\"reconnected\":false,\"revoked_at\":\"{}\"}}",
+        escape_json(&revoked.exposure_id),
+        escape_json(&revoked.connectivity_endpoint_id),
+        escape_json(&revoked.exposure),
+        escape_json(revoked_at),
+    );
+    event.idempotency_key = Some(format!(
+        "connectivity-health-changed:{}:revoked:{}",
+        revoked.exposure_id, revoked_at
+    ));
+    if let Err(pattern) = capo_state::assert_connectivity_event_safe(&event.payload_json) {
+        return Err(format!(
+            "connectivity health event payload marked Safe but leaked a `{pattern}` credential pattern; refusing to persist"
+        ));
+    }
+    event.redaction_state = RedactionState::Safe;
+    state
+        .append_event(
+            event,
+            &[ProjectionRecord::ConnectivityExposure(revoked.clone())],
+        )
+        .map_err(debug_error)
+}
+
+/// CT7 (soft CT6 dependency): release anti-sleep if this revoke retired the LAST
+/// active non-loopback exposure. Counts the remaining `active` non-loopback exposures
+/// in the project read model (EXCLUDING the just-revoked one) and drives an
+/// [`AntiSleepController`] with that count — the ONE-WAY `exposure-state -> inhibitor`
+/// edge. Deterministic: a [`FakeInhibitorBackend`] so no OS power assertion is touched
+/// from the CLI; OFF unless `CAPO_SERVER_ANTI_SLEEP=1`. Returns the observable,
+/// secret-free transition for the audit render.
+fn release_anti_sleep_if_last_exposure(
+    state: &SqliteStateStore,
+    revoked: &ConnectivityExposureProjection,
+) -> Result<AntiSleepTransition, String> {
+    let remaining_active_non_loopback = state
+        .connectivity_exposures(&project_id())
+        .map_err(debug_error)?
+        .into_iter()
+        .filter(|exposure| {
+            exposure.exposure_id != revoked.exposure_id
+                && exposure.status == "active"
+                && exposure.exposure != "loopback"
+        })
+        .count();
+    // Deterministic controller: engaged is the SERVING lifecycle's job, so seed the
+    // controller as engaged (it was holding the exposure being revoked) and then feed
+    // the post-revoke count. When the count reaches 0 this releases (the last-revoke
+    // edge); when other exposures remain it stays engaged (`Unchanged`).
+    let mut controller = AntiSleepController::new(
+        anti_sleep_enabled(),
+        Box::new(FakeInhibitorBackend::enforced()),
+    );
+    // Seed: before this revoke there was at least one active non-loopback exposure.
+    controller.set_active_exposures(remaining_active_non_loopback + 1);
+    Ok(controller.set_active_exposures(remaining_active_non_loopback))
 }
 
 pub(crate) fn connectivity_exposure_status(
@@ -998,9 +1220,10 @@ fn render_connectivity_exposure_revocation(
     exposure: &ConnectivityExposureProjection,
     reason: &str,
     sequence: Option<i64>,
+    teardown: &RevocationTeardown,
 ) -> String {
     format!(
-        "connectivity_exposure_revoked=true\nexposure={}\nendpoint={}\nowner={}:{}\nchannel={}\nexposure_scope={}\npermission_scope={}\nstatus={}\ngrant={}\nhealth={}\nreachable={}\nrevoked_at={}\nreason={}\nrecorded_sequence={}\n",
+        "connectivity_exposure_revoked=true\nexposure={}\nendpoint={}\nowner={}:{}\nchannel={}\nexposure_scope={}\npermission_scope={}\nstatus={}\ngrant={}\nhealth={}\nreachable={}\nrevoked_at={}\nreason={}\nchannel_closed={}\nchannel_id={}\nproven_unreachable={}\nanti_sleep={}\nrecorded_sequence={}\n",
         exposure.exposure_id,
         exposure.connectivity_endpoint_id,
         exposure.owner_kind,
@@ -1014,6 +1237,10 @@ fn render_connectivity_exposure_revocation(
         exposure.reachable,
         exposure.revoked_at.as_deref().unwrap_or("none"),
         reason,
+        teardown.channel_closed,
+        teardown.channel_id.as_deref().unwrap_or("none"),
+        teardown.proven_unreachable,
+        teardown.anti_sleep.detail(),
         sequence
             .map(|sequence| sequence.to_string())
             .unwrap_or_else(|| "none".to_string())

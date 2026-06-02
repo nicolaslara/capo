@@ -82,12 +82,15 @@ fn credential_patterns() -> &'static [CredentialPattern] {
             let lower = value.to_ascii_lowercase();
             lower.starts_with("bearer ") || lower.contains("authorization: bearer")
         }),
-        // Common secret prefixes (GitHub, generic `sk-`, AWS).
+        // Common secret markers (GitHub, generic `sk-`, AWS, Slack). Matched with
+        // `contains` (not `starts_with`) so a token embedded in free text — e.g. a
+        // `--reason` like "close: ghp_0123... was used" — is caught, consistent with
+        // the tailscale `contains` pattern above (defense-in-depth, not a guarantee).
         ("api_token_prefix", |value| {
             let lower = value.to_ascii_lowercase();
             ["ghp_", "github_pat_", "sk-", "akia", "xoxb-", "xoxp-"]
                 .iter()
-                .any(|prefix| lower.starts_with(prefix))
+                .any(|marker| lower.contains(marker))
         }),
         // Session-cookie style `name=<long-opaque>` for known auth cookie names.
         ("session_cookie", |value| {
@@ -232,6 +235,12 @@ mod tests {
         );
         assert_eq!(
             matched_credential_pattern("ghp_0123456789abcdef"),
+            Some("api_token_prefix")
+        );
+        // A token EMBEDDED in free text is caught (the `contains` semantics, not
+        // `starts_with`): a `--reason` value carrying a leaked PAT mid-string fails.
+        assert_eq!(
+            matched_credential_pattern("close: ghp_0123456789abcdef was used"),
             Some("api_token_prefix")
         );
         assert_eq!(

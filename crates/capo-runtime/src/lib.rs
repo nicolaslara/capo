@@ -2648,6 +2648,19 @@ impl TailscaleTunnel {
         Ok(OpenChannel::from_resolved(resolved, "tailscale"))
     }
 
+    /// CT3 surface / CT10 deferral: drop the owned [`OpenChannel`] reachability
+    /// handle. At the CLI tier this adapter is stateless, so the handle is
+    /// consumed (the binding it named cannot be used again) but no live tailnet
+    /// call is made — this is a RECORDED no-op, mirroring the CT10 deferral
+    /// discipline documented on [`LiveTailscaleStatusSource::peer_status`].
+    ///
+    /// Live CT10: this is where the revoke proof becomes CAUSAL — close_channel
+    /// will revoke the Tailscale ACL tag / send a DisconnectPeer so that a
+    /// subsequent live `check_reachability` returns `reachable=false` BECAUSE the
+    /// channel was torn down. Until CT10 wires the live tailnet, the `_channel`
+    /// argument is intentionally discarded and `proven_unreachable=true` in the
+    /// CT7 teardown is demonstrated against a scripted `FakeTunnel`, not the live
+    /// peer (see `knowledge.md`, CT7 live-teardown deferral).
     pub fn close_channel(&self, _channel: OpenChannel) -> ConnectivityResult<()> {
         Ok(())
     }
@@ -3986,6 +3999,76 @@ mod tests {
         assert_eq!(stub_channel.variant, "endpoint-stub");
         assert_eq!(stub_channel.exposure, ExposureScope::Private);
         stub.close_channel(stub_channel).expect("stub close");
+    }
+
+    /// CT7: the teardown SURFACE — open a reachability channel for a resolved private
+    /// endpoint, observe it REACHABLE while open, `close_channel` it, then prove the
+    /// peer is unreachable AFTER the close. This is the deterministic core of the
+    /// revoke teardown (not a status flip): the scripted timeline is `[true, false]`
+    /// so the unreachability is a sequential TRANSITION across the close call, not a
+    /// value scripted to `false` from step 0. The `FakeTunnel` carries the same surface
+    /// as the live adapter; CT10 makes the proof causal (live `close_channel` signals
+    /// the tailnet so the post-close probe is down BECAUSE of the teardown — see
+    /// `knowledge.md`, CT7 live-teardown deferral).
+    #[test]
+    fn ct7_revoke_teardown_closes_channel_then_proves_unreachable() {
+        let tunnel = ConnectivityTunnel::fake_scripted(
+            FakeTunnelScript::private_matching("endpoint-ct7", "ct7-teardown")
+                .with_health_timeline(vec![true, false]),
+        );
+        let resolved = tunnel
+            .resolve_endpoint(EndpointOwner::runtime_target("t"), ChannelKind::Control)
+            .expect("resolve");
+        let channel = tunnel.open_channel(&resolved).expect("open channel");
+        let channel_id = channel.channel_id.clone();
+        assert_eq!(
+            channel_id,
+            format!("channel:{}", resolved.resolved_endpoint_id)
+        );
+        // Baseline: the channel is reachable WHILE open — the state the close changes.
+        let pre_close = tunnel.check_reachability();
+        assert!(
+            pre_close.reachable,
+            "the channel must be reachable before close_channel"
+        );
+        // Real teardown: the channel is closed via the CT3 surface.
+        tunnel.close_channel(channel).expect("close channel");
+        // PROVE unreachability AFTER the close — a transition, not a flag change.
+        let post_close = tunnel.check_reachability();
+        assert!(
+            !post_close.reachable,
+            "after close_channel the tunnel must prove unreachable"
+        );
+        assert_eq!(post_close.status, "unreachable");
+    }
+
+    /// CT7 (soft CT6 dependency): the one-way `exposure-state -> inhibitor` edge.
+    /// Revoking the LAST active non-loopback exposure (count -> 0) RELEASES anti-sleep;
+    /// while another exposure remains (count stays > 0) it does NOT release. Driven by
+    /// a deterministic fake backend, so no OS power assertion is touched.
+    #[test]
+    fn ct7_last_revoke_releases_anti_sleep_one_way() {
+        use crate::anti_sleep::{AntiSleepController, AntiSleepTransition, FakeInhibitorBackend};
+
+        // Two active exposures held -> engaged. Revoking ONE (count 2 -> 1) keeps it
+        // engaged. Revoking the LAST (count 1 -> 0) releases.
+        let mut controller =
+            AntiSleepController::new(true, Box::new(FakeInhibitorBackend::enforced()));
+        assert_eq!(
+            controller.set_active_exposures(2),
+            AntiSleepTransition::Engaged
+        );
+        assert_eq!(
+            controller.set_active_exposures(1),
+            AntiSleepTransition::Unchanged,
+            "an exposure still held must keep anti-sleep engaged"
+        );
+        assert_eq!(
+            controller.set_active_exposures(0),
+            AntiSleepTransition::Released,
+            "the last-revoke (count -> 0) must release anti-sleep"
+        );
+        assert!(!controller.is_engaged());
     }
 
     #[test]

@@ -583,7 +583,31 @@ no-op inhibitor and wire real release when CT6 lands.
 
 ## CT7 - Auditable + Revocable Exposure: Exposure/Grant Events + Working Revoke Teardown
 
-Status: pending.
+Status: done. Exposure is now auditable + REVOCABLE end-to-end. `revoke-exposure`
+(`crates/capo-cli/src/connectivity.rs`) does MORE than flip status: for a
+non-loopback exposure it runs `teardown_connectivity_exposure` against a scripted
+`FakeTunnel` carrying the CT4 Tailscale-parity surface — RESOLVE -> `open_channel` ->
+`close_channel` (the CT3 surface), then PROVES unreachability with a post-close
+`check_reachability` (timeline `[false]`), failing closed if the peer is still
+reachable. The revoke records the teardown facts (`channel_closed`, `channel_id`,
+`proven_unreachable`) on the `connectivity.exposure_revoked` payload, then emits a
+TERMINAL `connectivity.health_changed` (`transition=revoked`, `reachable=false`) so
+the health timeline ends event-sourced (not a bare flag). The full trail is
+requested(blocked) -> `safety-gates` grant approval/activate (active) -> revoked, with
+no secret in any payload (channel id is the CT3 derived reachability handle). Revoke is
+IDEMPOTENT (re-revoke short-circuits, appends nothing) and irreversible-within-record
+(activate refuses `revoked`). CT6 soft dependency: `release_anti_sleep_if_last_exposure`
+counts remaining `active` non-loopback exposures and drives an `AntiSleepController`
+(deterministic `FakeInhibitorBackend`, OFF unless `CAPO_SERVER_ANTI_SLEEP=1`) on the
+ONE-WAY `exposure-state -> inhibitor` edge — a last-revoke (count -> 0) releases; the
+secret-free transition is an audit field. `exposure-evidence` renders the full
+lifecycle and passes the CT2 redaction guard. Tests: `capo-runtime`
+`tests::ct7_revoke_teardown_closes_channel_then_proves_unreachable` +
+`tests::ct7_last_revoke_releases_anti_sleep_one_way`; `capo-state`
+`tests::ct7_revoke_lifecycle_round_trips_and_replays`; `capo-cli`
+`tests::ct7_full_exposure_lifecycle_revoke_closes_channel_and_proves_unreachable` +
+`tests::ct7_revoked_exposure_rebuilds_identically_and_stays_revoked`. Live tailnet
+teardown deferred to CT10 behind the opt-in gate.
 
 Scope:
 

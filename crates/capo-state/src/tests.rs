@@ -3153,6 +3153,131 @@ fn ct5_connectivity_health_timeline_round_trips_and_replays() {
     );
 }
 
+/// CT7: the revoke lifecycle is event-sourced and replay-stable. An `active`
+/// exposure, then a `ConnectivityExposureRevoked` + a terminal
+/// `ConnectivityHealthChanged` (reachable=false), rebuild IDENTICALLY from the log
+/// alone, and the revoked exposure STAYS revoked + unreachable after a restart.
+#[test]
+fn ct7_revoke_lifecycle_round_trips_and_replays() {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("capo-state-ct7-revoke-{nanos}"));
+    let project_id = ProjectId::new("project-capo");
+    let exposure_id = "connectivity-exposure-ct7";
+
+    let base = ConnectivityExposureProjection {
+        exposure_id: exposure_id.to_string(),
+        project_id: project_id.clone(),
+        connectivity_endpoint_id: "endpoint-tailnet-ct7".to_string(),
+        owner_kind: "runtime_target".to_string(),
+        owner_id: "remote-target-ct7".to_string(),
+        channel_kind: "control".to_string(),
+        exposure: "private".to_string(),
+        permission_scope: "network:connect:private_tunnel".to_string(),
+        status: "active".to_string(),
+        capability_grant_id: Some("grant-ct7".to_string()),
+        health_status: "available".to_string(),
+        reachable: true,
+        revoked_at: None,
+        auth_ref: None,
+        identity_ref: None,
+        identity_fingerprint: Some("tsnode:sha256:ct7".to_string()),
+        expires_at: None,
+        last_heartbeat_at: Some("heartbeat-ms:0".to_string()),
+        updated_sequence: 0,
+    };
+
+    {
+        let store = SqliteStateStore::open(&root).expect("open state store");
+        // active.
+        let mut active_event = NewEvent::new(
+            "event-connectivity-exposure-ct7-active",
+            EventKind::ConnectivityExposureChanged,
+            "test",
+        );
+        active_event.project_id = Some(project_id.clone());
+        active_event.item_id = Some(exposure_id.to_string());
+        active_event.payload_json =
+            format!("{{\"exposure_id\":\"{exposure_id}\",\"status\":\"active\"}}");
+        store
+            .append_event(
+                active_event,
+                &[ProjectionRecord::ConnectivityExposure(base.clone())],
+            )
+            .expect("append active");
+
+        // revoked: status flip + the teardown facts.
+        let revoked = ConnectivityExposureProjection {
+            status: "revoked".to_string(),
+            health_status: "disabled".to_string(),
+            reachable: false,
+            revoked_at: Some("unix:1000".to_string()),
+            ..base.clone()
+        };
+        let mut revoke_event = NewEvent::new(
+            "event-connectivity-exposure-ct7-revoked",
+            EventKind::ConnectivityExposureRevoked,
+            "test",
+        );
+        revoke_event.project_id = Some(project_id.clone());
+        revoke_event.item_id = Some(exposure_id.to_string());
+        revoke_event.payload_json = format!(
+            "{{\"exposure_id\":\"{exposure_id}\",\"status\":\"revoked\",\"channel_closed\":true,\"proven_unreachable\":true,\"revoked_at\":\"unix:1000\"}}"
+        );
+        store
+            .append_event(
+                revoke_event,
+                &[ProjectionRecord::ConnectivityExposure(revoked.clone())],
+            )
+            .expect("append revoked");
+
+        // terminal health_changed (reachable=false).
+        let mut terminal_health = NewEvent::new(
+            "event-connectivity-health-ct7-revoked",
+            EventKind::ConnectivityHealthChanged,
+            "test",
+        );
+        terminal_health.project_id = Some(project_id.clone());
+        terminal_health.item_id = Some(exposure_id.to_string());
+        terminal_health.payload_json = format!(
+            "{{\"exposure_id\":\"{exposure_id}\",\"transition\":\"revoked\",\"reachable\":false}}"
+        );
+        store
+            .append_event(
+                terminal_health,
+                &[ProjectionRecord::ConnectivityExposure(revoked.clone())],
+            )
+            .expect("append terminal health");
+
+        let stored = store
+            .connectivity_exposures(&project_id)
+            .expect("exposures")
+            .pop()
+            .expect("exposure row");
+        assert_eq!(stored.status, "revoked");
+        assert!(!stored.reachable);
+        assert_eq!(stored.health_status, "disabled");
+    }
+
+    // Restart: rebuild from the log alone. The revoked exposure stays revoked.
+    let reopened = SqliteStateStore::open(&root).expect("reopen state store");
+    reopened.rebuild_projections().expect("rebuild projections");
+    let rebuilt = reopened
+        .connectivity_exposures(&project_id)
+        .expect("rebuilt exposures")
+        .pop()
+        .expect("rebuilt exposure row");
+    assert_eq!(
+        rebuilt.status, "revoked",
+        "CT7: a revoked exposure must stay revoked after restart"
+    );
+    assert!(!rebuilt.reachable);
+    assert_eq!(rebuilt.health_status, "disabled");
+    assert_eq!(rebuilt.revoked_at.as_deref(), Some("unix:1000"));
+}
+
 #[test]
 fn adapter_readiness_is_persisted_and_rebuilt() {
     let store = temp_store("adapter-readiness-rebuild");

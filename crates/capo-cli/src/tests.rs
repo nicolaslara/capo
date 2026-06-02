@@ -5927,6 +5927,517 @@ fn ct5_exposure_heartbeat_steady_tail_agrees_with_exposure_status() {
     );
 }
 
+/// CT7: the full auditable + revocable lifecycle on a scripted private exposure:
+/// requested(blocked) -> grant -> active -> revoke. The revoke does MORE than flip a
+/// status: it CLOSES the resolved channel (the CT3 surface), PROVES unreachability
+/// (a post-close `check_reachability`, not just a flag), emits a terminal
+/// `connectivity.health_changed` (reachable=false), and the evidence artifact renders
+/// the full lifecycle.
+#[test]
+fn ct7_full_exposure_lifecycle_revoke_closes_channel_and_proves_unreachable() {
+    let state_root = temp_root("cli-ct7-lifecycle");
+    run_cli(vec![
+        "runtime".to_string(),
+        "target".to_string(),
+        "register".to_string(),
+        "--target".to_string(),
+        "remote-target-ct7".to_string(),
+        "--name".to_string(),
+        "remote target ct7".to_string(),
+        "--runner".to_string(),
+        "remote-process".to_string(),
+        "--workspace".to_string(),
+        "/tmp/capo-ct7-workspace".to_string(),
+        "--artifacts".to_string(),
+        "/tmp/capo-ct7-artifacts".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct7-1".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("register runtime target");
+
+    // requested -> blocked pending permission.
+    let planned = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct7-1".to_string(),
+        "--owner-kind".to_string(),
+        "runtime_target".to_string(),
+        "--owner-id".to_string(),
+        "remote-target-ct7".to_string(),
+        "--channel".to_string(),
+        "control".to_string(),
+        "--exposure".to_string(),
+        "private".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("record private exposure");
+    assert!(planned.contains("status=blocked_pending_permission"));
+    let exposure_id = output_value(&planned, "exposure");
+
+    // grant: request approval -> allow -> activate.
+    run_cli(vec![
+        "connectivity".to_string(),
+        "request-approval".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--approval".to_string(),
+        "approval-ct7".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("request approval");
+    run_cli(vec![
+        "permission".to_string(),
+        "decide".to_string(),
+        "--approval".to_string(),
+        "approval-ct7".to_string(),
+        "--decision".to_string(),
+        "allow_once".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("allow approval");
+    let activated = run_cli(vec![
+        "connectivity".to_string(),
+        "activate-exposure".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("activate exposure");
+    assert!(activated.contains("status=active"));
+    let grant_id = output_value(&activated, "grant");
+    assert_ne!(grant_id, "none", "an active exposure carries a grant id");
+
+    // Drive a heartbeat BEFORE the revoke so the lifecycle carries a real
+    // `last_heartbeat_at` (CT5) that the evidence + status must surface. The
+    // timeline `true,false` produces a transition on the SECOND beat (Initial@0 ->
+    // Lost@15000), so the persisted (event-sourced last-transition) instant is
+    // `heartbeat-ms:15000`.
+    let heartbeat = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-heartbeat".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--fake-timeline".to_string(),
+        "true,false".to_string(),
+        "--start-ms".to_string(),
+        "0".to_string(),
+        "--step-ms".to_string(),
+        "15000".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("run heartbeat before revoke");
+    assert!(heartbeat.contains("last_heartbeat_at=heartbeat-ms:15000"));
+
+    // revoke: a REAL teardown.
+    let revoked = run_cli(vec![
+        "connectivity".to_string(),
+        "revoke-exposure".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--reason".to_string(),
+        "operator closed the private control surface".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("revoke exposure");
+    assert!(revoked.contains("status=revoked"));
+    assert!(revoked.contains("health=disabled"));
+    assert!(revoked.contains("reachable=false"));
+    // CT7: the channel was really closed (CT3 surface) and unreachability proven —
+    // not merely a status flip.
+    assert!(
+        revoked.contains("channel_closed=true"),
+        "revoke must close the channel: {revoked}"
+    );
+    assert!(
+        revoked.contains("channel_id=channel:"),
+        "revoke must record the closed channel handle: {revoked}"
+    );
+    assert!(
+        revoked.contains("proven_unreachable=true"),
+        "revoke must prove unreachability: {revoked}"
+    );
+    // CT6 soft dependency: the last active non-loopback exposure was revoked; with
+    // anti-sleep OFF by default the transition is `unchanged` (no assertion was held).
+    assert!(revoked.contains("anti_sleep=unchanged"));
+
+    // The terminal health_changed (reachable=false) is in the event log.
+    let store = SqliteStateStore::open(&state_root).expect("state");
+    let health_events: Vec<_> = store
+        .events_after(0, 10_000)
+        .expect("events")
+        .into_iter()
+        .filter(|event| event.kind == EventKind::ConnectivityHealthChanged.as_str())
+        .collect();
+    assert!(
+        health_events.iter().any(
+            |event| event.payload_json.contains("\"transition\":\"revoked\"")
+                && event.payload_json.contains("\"reachable\":false")
+        ),
+        "a terminal revoked health_changed (reachable=false) must be recorded"
+    );
+
+    // A revoked exposure cannot be reactivated without a new exposure + grant.
+    let reactivate = run_cli(vec![
+        "connectivity".to_string(),
+        "activate-exposure".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .unwrap_err();
+    assert!(reactivate.contains("connectivity exposure is revoked"));
+
+    // Revocation is idempotent: a re-revoke short-circuits (no teardown, no events).
+    let before = SqliteStateStore::open(&state_root)
+        .expect("state")
+        .last_sequence()
+        .expect("seq before re-revoke");
+    let re_revoke = run_cli(vec![
+        "connectivity".to_string(),
+        "revoke-exposure".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("re-revoke");
+    assert!(re_revoke.contains("status=revoked"));
+    assert!(re_revoke.contains("channel_closed=false"));
+    assert_eq!(
+        SqliteStateStore::open(&state_root)
+            .expect("state")
+            .last_sequence()
+            .expect("seq after re-revoke"),
+        before,
+        "a re-revoke must not append any new event"
+    );
+
+    // exposure-status --latest renders the full lifecycle tail (revoked, with grant
+    // id, the heartbeat instant, and the revoke timestamp) — the audit surface is
+    // queryable after teardown.
+    let status_after_revoke = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-status".to_string(),
+        "--latest".to_string(),
+        "--owner-kind".to_string(),
+        "runtime_target".to_string(),
+        "--owner-id".to_string(),
+        "remote-target-ct7".to_string(),
+        "--channel".to_string(),
+        "control".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("exposure status after revoke");
+    assert!(status_after_revoke.contains("status=revoked"));
+    assert!(
+        status_after_revoke.contains(&format!("grant={grant_id}")),
+        "status must carry the grant id: {status_after_revoke}"
+    );
+    assert!(
+        status_after_revoke.contains("last_heartbeat_at=heartbeat-ms:15000"),
+        "status must carry the pre-revoke heartbeat instant: {status_after_revoke}"
+    );
+    assert!(
+        !output_value(&status_after_revoke, "revoked_at").is_empty()
+            && output_value(&status_after_revoke, "revoked_at") != "none",
+        "status must carry the revoke timestamp: {status_after_revoke}"
+    );
+
+    // Evidence renders the full lifecycle (revoked, unreachable) WITH the grant id,
+    // the real heartbeat instant, and the revoke timestamp, and passes the CT2
+    // redaction guard.
+    let evidence_dir = temp_root("cli-ct7-evidence");
+    let evidence = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-evidence".to_string(),
+        "--exposure".to_string(),
+        exposure_id,
+        "--out".to_string(),
+        evidence_dir.display().to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("export evidence");
+    let evidence_path = output_value(&evidence, "path");
+    let markdown = fs::read_to_string(&evidence_path).expect("read evidence");
+    assert!(markdown.contains("- Status: `revoked`"));
+    assert!(markdown.contains("- Reachable: `false`"));
+    assert!(
+        markdown.contains("- Last heartbeat: `heartbeat-ms:15000`"),
+        "evidence must render the real pre-revoke heartbeat instant: {markdown}"
+    );
+    assert!(
+        markdown.contains(&format!("- Linked grant: `{grant_id}`")),
+        "evidence must render the grant id: {markdown}"
+    );
+    assert!(
+        !markdown.contains("- Revoked at: `none`"),
+        "evidence must render the revoke timestamp: {markdown}"
+    );
+    // CT2: the rendered evidence artifact passes the emitted-surface redaction guard.
+    assert_eq!(
+        capo_state::scan_emitted_surface(&markdown),
+        None,
+        "CT7 evidence must pass the CT2 guard"
+    );
+}
+
+/// CT7: revoke STOPS the heartbeat (CT5). The AC says a revoke "stops the
+/// heartbeat"; this proves it end-to-end at the CLI tier: a heartbeat runs while
+/// the exposure is active, then after `revoke-exposure` a fresh `exposure-heartbeat`
+/// is REFUSED with "revoked; no heartbeat" — the revoked exposure can no longer be
+/// probed, so the loop cannot be (re)started against it.
+#[test]
+fn ct7_revoke_stops_the_heartbeat() {
+    let state_root = temp_root("cli-ct7-hb-stop");
+    run_cli(vec![
+        "runtime".to_string(),
+        "target".to_string(),
+        "register".to_string(),
+        "--target".to_string(),
+        "remote-target-ct7hb".to_string(),
+        "--name".to_string(),
+        "remote target ct7hb".to_string(),
+        "--runner".to_string(),
+        "remote-process".to_string(),
+        "--workspace".to_string(),
+        "/tmp/capo-ct7hb-workspace".to_string(),
+        "--artifacts".to_string(),
+        "/tmp/capo-ct7hb-artifacts".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct7hb-1".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("register runtime target");
+    let planned = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct7hb-1".to_string(),
+        "--owner-kind".to_string(),
+        "runtime_target".to_string(),
+        "--owner-id".to_string(),
+        "remote-target-ct7hb".to_string(),
+        "--channel".to_string(),
+        "control".to_string(),
+        "--exposure".to_string(),
+        "private".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("record private exposure");
+    let exposure_id = output_value(&planned, "exposure");
+    run_cli(vec![
+        "connectivity".to_string(),
+        "request-approval".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--approval".to_string(),
+        "approval-ct7hb".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("request approval");
+    run_cli(vec![
+        "permission".to_string(),
+        "decide".to_string(),
+        "--approval".to_string(),
+        "approval-ct7hb".to_string(),
+        "--decision".to_string(),
+        "allow_once".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("allow approval");
+    run_cli(vec![
+        "connectivity".to_string(),
+        "activate-exposure".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("activate exposure");
+
+    // The heartbeat runs while active.
+    let heartbeat = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-heartbeat".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--fake-timeline".to_string(),
+        "true,true".to_string(),
+        "--start-ms".to_string(),
+        "0".to_string(),
+        "--step-ms".to_string(),
+        "15000".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("heartbeat while active");
+    assert!(heartbeat.contains("connectivity_exposure_heartbeat=true"));
+
+    // Revoke.
+    run_cli(vec![
+        "connectivity".to_string(),
+        "revoke-exposure".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("revoke exposure");
+
+    // After revoke, the heartbeat is REFUSED — the loop cannot run against a revoked
+    // exposure. This is the CT5-stop side of the CT7 acceptance criterion.
+    let stopped = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-heartbeat".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--fake-timeline".to_string(),
+        "true,true".to_string(),
+        "--start-ms".to_string(),
+        "0".to_string(),
+        "--step-ms".to_string(),
+        "15000".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .unwrap_err();
+    assert!(
+        stopped.contains("revoked; no heartbeat"),
+        "a revoked exposure must refuse the heartbeat: {stopped}"
+    );
+}
+
+/// CT7 restart/replay: the exposure lifecycle (requested -> active -> revoked)
+/// rebuilds IDENTICALLY from the event log alone, and a revoked exposure STAYS
+/// revoked after a restart.
+#[test]
+fn ct7_revoked_exposure_rebuilds_identically_and_stays_revoked() {
+    let state_root = temp_root("cli-ct7-replay");
+    run_cli(vec![
+        "runtime".to_string(),
+        "target".to_string(),
+        "register".to_string(),
+        "--target".to_string(),
+        "remote-target-ct7r".to_string(),
+        "--name".to_string(),
+        "remote target ct7r".to_string(),
+        "--runner".to_string(),
+        "remote-process".to_string(),
+        "--workspace".to_string(),
+        "/tmp/capo-ct7r-workspace".to_string(),
+        "--artifacts".to_string(),
+        "/tmp/capo-ct7r-artifacts".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct7r-1".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("register runtime target");
+    let planned = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct7r-1".to_string(),
+        "--owner-kind".to_string(),
+        "runtime_target".to_string(),
+        "--owner-id".to_string(),
+        "remote-target-ct7r".to_string(),
+        "--channel".to_string(),
+        "control".to_string(),
+        "--exposure".to_string(),
+        "private".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("record exposure");
+    let exposure_id = output_value(&planned, "exposure");
+    run_cli(vec![
+        "connectivity".to_string(),
+        "request-approval".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--approval".to_string(),
+        "approval-ct7r".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("request approval");
+    run_cli(vec![
+        "permission".to_string(),
+        "decide".to_string(),
+        "--approval".to_string(),
+        "approval-ct7r".to_string(),
+        "--decision".to_string(),
+        "allow_once".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("allow approval");
+    run_cli(vec![
+        "connectivity".to_string(),
+        "activate-exposure".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("activate");
+    run_cli(vec![
+        "connectivity".to_string(),
+        "revoke-exposure".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("revoke");
+
+    let store = SqliteStateStore::open(&state_root).expect("state");
+    let before = store
+        .connectivity_exposures(&project_id())
+        .expect("exposures")
+        .into_iter()
+        .find(|exposure| exposure.exposure_id == exposure_id)
+        .expect("exposure row");
+    assert_eq!(before.status, "revoked");
+
+    // Restart: rebuild from the log alone.
+    store.rebuild_projections().expect("rebuild projections");
+    let after = store
+        .connectivity_exposures(&project_id())
+        .expect("rebuilt exposures")
+        .into_iter()
+        .find(|exposure| exposure.exposure_id == exposure_id)
+        .expect("rebuilt exposure row");
+    assert_eq!(
+        after.status, "revoked",
+        "a revoked exposure must stay revoked after restart"
+    );
+    assert_eq!(after.health_status, before.health_status);
+    assert_eq!(after.reachable, before.reachable);
+    assert_eq!(after.revoked_at, before.revoked_at);
+    assert_eq!(after.capability_grant_id, before.capability_grant_id);
+}
+
 #[test]
 fn adapter_fixture_replay_cli_exports_evidence_without_raw_provider_text() {
     let state_root = temp_root("cli-adapter-replay-state");

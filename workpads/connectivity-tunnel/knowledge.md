@@ -338,6 +338,24 @@ implement it coherently so the enum stays exhaustive.
 - Revocation is idempotent and a revoked exposure needs a fresh exposure + grant to
   come back. This satisfies the AGENTS.md "auditable and revocable" safety boundary
   as a checkable criterion, not self-attestation.
+- CT7 live-teardown deferral (the honest scope of `proven_unreachable=true`): at the
+  CLI tier the teardown proof runs against a scripted `FakeTunnel`, not the live
+  tailnet. `TailscaleTunnel::close_channel` is a RECORDED no-op (it consumes the
+  `OpenChannel` handle but makes no tailnet call), documented inline the same way
+  `LiveTailscaleStatusSource::peer_status` documents its CT10 deferral. The teardown
+  fake uses a `[true, false]` health timeline and probes `check_reachability` ONCE
+  before the close (asserting reachable) and ONCE after (asserting unreachable), so
+  the unreachability is a sequential TRANSITION attributable to the close call rather
+  than a value scripted to `false` from step 0. The proof becomes CAUSAL at CT10,
+  when the live `close_channel` signals the tailnet (revoke ACL tag / DisconnectPeer)
+  so the post-close probe is down BECAUSE the channel was torn down. Until then,
+  `proven_unreachable=true` attests the fake-tunnel transition + the recorded
+  close, not a live-peer reachability change.
+- CT7 "stops the heartbeat" (CT5) is enforced by the revoke state edge and proven
+  end-to-end: `connectivity_exposure_heartbeat` refuses a revoked exposure with
+  "connectivity exposure is revoked; no heartbeat", so the loop cannot be
+  (re)started against it. The CLI test `ct7_revoke_stops_the_heartbeat` drives
+  active heartbeat -> revoke -> refused heartbeat.
 
 ## Funnel / Public Out Of Scope — With A Committed Expiry Sweep
 
