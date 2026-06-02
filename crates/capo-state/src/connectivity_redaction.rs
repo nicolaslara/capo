@@ -65,17 +65,16 @@ type CredentialPattern = (&'static str, fn(&str) -> bool);
 /// cookies); the list is the defense-in-depth net, not the universal guarantee.
 fn credential_patterns() -> &'static [CredentialPattern] {
     &[
-        // Tailscale authkeys: `tskey-auth-...`, `tskey-...`.
+        // Tailscale authkeys, matched by their real prefixes only:
+        // `tskey-auth-...`, `tskey-client-...`, `tskey-ephemeral-...`. The bare
+        // `tskey-<8+>` catch-all is intentionally NOT used: it would falsely flag a
+        // legitimate node name that merely starts with `tskey-`, and these three
+        // prefixes already cover every real authkey shape.
         ("tailscale_authkey", |value| {
             let lower = value.to_ascii_lowercase();
-            lower.contains("tskey-auth-") || lower.contains("tskey-client-") || {
-                // `tskey-<base>` with a long opaque tail.
-                if let Some(rest) = lower.strip_prefix("tskey-") {
-                    rest.len() >= 8
-                } else {
-                    false
-                }
-            }
+            lower.contains("tskey-auth-")
+                || lower.contains("tskey-client-")
+                || lower.contains("tskey-ephemeral-")
         }),
         // OAuth/bearer style tokens explicitly labelled.
         ("bearer_token", |value| {

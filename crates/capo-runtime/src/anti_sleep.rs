@@ -445,14 +445,17 @@ mod macos_backend {
     /// `keeping_awake()` stays false and the status records the deferral rather than
     /// a false `Enforced` claim. It models the vendored codex `sleep-inhibitor` IOKit
     /// assertion shape and explicitly does NOT spawn `caffeinate`.
+    ///
+    /// No `held` flag is tracked here: until the IOKit FFI is wired there is no
+    /// assertion id to bookkeep, and a `held` flag that no callee reads would be
+    /// incoherent dead state that contradicts the `Deferred` capability. The
+    /// eventual live implementation will store the real `IOPMAssertionID` instead.
     #[derive(Debug, Default)]
-    pub struct MacosPowerAssertion {
-        held: bool,
-    }
+    pub struct MacosPowerAssertion;
 
     impl MacosPowerAssertion {
         pub fn new() -> Self {
-            Self::default()
+            Self
         }
     }
 
@@ -460,13 +463,12 @@ mod macos_backend {
         fn acquire(&mut self) {
             // Live CT10: create an IOKit PreventUserIdleSystemSleep assertion here and
             // flip capability() to Enforced. NEVER spawn `caffeinate`. Until then this
-            // is a recorded no-op so no false enforcement is claimed.
-            self.held = true;
+            // is a genuine no-op so no false enforcement is claimed and no dead `held`
+            // state is tracked.
         }
 
         fn release(&mut self) {
             // Live CT10: release the held IOKit assertion id here.
-            self.held = false;
         }
 
         fn capability(&self) -> InhibitorCapability {
@@ -486,14 +488,18 @@ mod linux_backend {
     /// never reaches here, so no child process is spawned in unit tests. Until the
     /// child is wired in CT10 this reports `Deferred` (not `Enforced`): no process is
     /// held, so `keeping_awake()` stays false and no false enforcement is claimed.
+    ///
+    /// No `held` flag is tracked here: until the `systemd-inhibit` child is wired
+    /// there is no process handle to bookkeep, and a `held` flag that no callee
+    /// reads would be incoherent dead state that contradicts the `Deferred`
+    /// capability. The eventual live implementation will store the real child
+    /// process handle instead.
     #[derive(Debug, Default)]
-    pub struct SystemdInhibit {
-        held: bool,
-    }
+    pub struct SystemdInhibit;
 
     impl SystemdInhibit {
         pub fn new() -> Self {
-            Self::default()
+            Self
         }
     }
 
@@ -501,13 +507,12 @@ mod linux_backend {
         fn acquire(&mut self) {
             // Live CT10: spawn `systemd-inhibit --what=idle:sleep ... sleep infinity`
             // (or `gnome-session-inhibit`), hold its handle, and flip capability() to
-            // Enforced. Until then this is a recorded no-op (no spawned process).
-            self.held = true;
+            // Enforced. Until then this is a genuine no-op (no spawned process) and no
+            // dead `held` state is tracked.
         }
 
         fn release(&mut self) {
             // Live CT10: kill the held inhibitor child here.
-            self.held = false;
         }
 
         fn capability(&self) -> InhibitorCapability {

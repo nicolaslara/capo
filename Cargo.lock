@@ -180,6 +180,7 @@ name = "capo-runtime"
 version = "0.1.0"
 dependencies = [
  "capo-core",
+ "serde_json",
  "sha2",
  "tokio",
 ]

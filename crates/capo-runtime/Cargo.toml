@@ -17,6 +17,7 @@ tokio = { workspace = true, features = [
     "sync",
 ] }
 sha2 = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time", "io-util"] }
