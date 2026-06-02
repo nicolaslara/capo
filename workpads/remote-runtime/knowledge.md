@@ -41,6 +41,29 @@ execution and controller state (an explicit AGENTS.md safety-boundary rule), and
 means `remote-runtime` DEPENDS ON `connectivity-tunnel` for the channel while
 remaining the sole owner of what runs over it.
 
+`remote-runtime` builds on the existing local runtime substrate, named here as the
+triple `(real-turn-loop confinement + LocalProcessRunner + depth sandbox/worktree)`:
+the `real-turn-loop` workspace-confinement + append-first start-sequence contract,
+the `LocalProcessRunner` contract this remote runner mirrors method-for-method
+(`crates/capo-runtime/src/lib.rs`, `async_runner.rs`), and the `depth` DP7 OS
+sandbox tier + DP8 worktree primitive (`sandbox.rs` / `worktree.rs`) lifted onto
+the remote host. The remote runner reuses all three; it re-authors none of them.
+
+## Per-Task Prerequisites
+
+The full up-front dependency graph for RR1-RR8 (consolidated here so an implementer
+sees it before starting any task; the per-task `Dependencies:` lines in `tasks.md`
+mirror this verbatim):
+
+- RR1-RR2 (process lifecycle + reattach) and RR4 (stream/stdin) need a RESOLVED
+  CHANNEL from `connectivity-tunnel` plus the local runtime substrate
+  (`real-turn-loop` confinement + `LocalProcessRunner` + `depth` sandbox/worktree).
+- RR3 (git materialization) needs RR1 + the `depth` DP8 worktree primitive.
+- RR5 (sandbox + worktree on remote) needs RR3 + `depth` DP7/DP8 + `safety-gates`.
+- RR6 (crash-safe + recovery) needs RR1-RR4 + `safety-gates` checkpoint/recovery.
+- RR7 (determinism consolidation) needs RR1-RR6.
+- RR8 (live smoke) needs RR1-RR7 green and a real SSH host.
+
 ## Why The Existing RemoteProcessRunner Is A Stub, Not A Remote Runner
 
 `crates/capo-runtime/src/lib.rs:1595-1734` ships `RemoteProcessRunner` today, but
@@ -127,6 +150,13 @@ A remote runner is a remote-control capability and is treated as such:
 - The agent's subscription credential (Codex/Claude) is a PRIVILEGED CONNECTOR carried
   by HANDLE (`auth_ref`), never read, stored raw, or logged on the remote; channel auth
   belongs to `connectivity-tunnel` and is also handle-only.
+- Channel auth never reaches the runner (it is handle-only in `connectivity-tunnel`),
+  which satisfies the "channel auth passes redaction before persistence" requirement
+  by the STRONGER guarantee that no raw channel credential ever exists in the runner
+  to redact — there is nothing to scrub because nothing is admitted. Redaction is
+  therefore enforced for the two surfaces that DO carry potentially-sensitive bytes:
+  remote stdout/stderr (via `RedactionPolicy` at the remote boundary) and the git
+  transport URL (URLs with embedded secrets are never written to an artifact/event).
 - No API keys, OAuth/subscription tokens, cookies, session files, git-transport URLs
   with embedded secrets, or transcripts-with-secrets are ever written to a
   remote-runtime artifact or event; the credential scan runs before persistence.

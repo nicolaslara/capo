@@ -77,7 +77,7 @@ Planned. All tasks pending.
 
 ## RR0 - Workpad, Routing, Scope, Per-Task Prerequisite + Verification Invariant
 
-Status: pending.
+Status: complete.
 
 Scope: Establish the workpad, its place in the sequence, the runner/channel
 separation, the injected git-sync decision, and the verification invariant.
@@ -97,7 +97,11 @@ Acceptance criteria:
 - List the boundaries this workpad owns vs. defers (as above), naming the existing
   stub `RemoteProcessRunner` (`lib.rs:1595`) and its `RemoteProcess` control
   fall-through to `FakeRuntimeRunner` (`lib.rs:94-118`) as the things being
-  replaced, and the `connectivity-tunnel` workpad as the channel provider.
+  replaced, and the `connectivity-tunnel` workpad as the channel provider. (Line
+  numbers observed 2026-06-02 against `crates/capo-runtime/src/lib.rs`; they are an
+  anchor, not a contract — RR1 MUST re-locate the stub def, the `RemoteProcess`
+  control fall-through, and the local-status `health` by symbol before accepting any
+  drifted line number as authoritative.)
 - Record the per-task prerequisites: RR1-RR2 (process lifecycle + reattach) and
   RR4 (stream/stdin) need a resolved channel from `connectivity-tunnel` plus the
   local runtime substrate; RR3 (git materialization) needs RR1 + the `depth` DP8
@@ -233,8 +237,10 @@ Verification:
   test proves recovered projections rebuild identically.
 - Focused `cargo test -p capo-runtime -p capo-server`. `cargo fmt`. `git diff --check`.
 
-Dependencies: RR1, `safety-gates` (restart recovery + checkpoint substrate).
-Cross-workpad: `connectivity-tunnel` (re-resolve + reachability health).
+Dependencies: RR1, `connectivity-tunnel` (resolved channel, re-resolve on
+restart), `safety-gates` (restart recovery + checkpoint substrate).
+Cross-workpad: `connectivity-tunnel` (resolved channel + re-resolve + reachability
+health).
 
 ## RR3 - Git-Based Remote Workspace Materialization (push/fetch + worktree the commit)
 
