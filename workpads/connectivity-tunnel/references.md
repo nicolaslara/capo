@@ -155,7 +155,8 @@ reflect 2026-06-02.
     `SleepInhibitor { enabled, turn_running, platform }` with
     `set_turn_running(bool)`/`release()`; `lib.rs:4` states it "Uses native IOKit
     power assertions instead of spawning `caffeinate`" — so the CT6 macOS path is
-    IOKit assertions, NOT `caffeinate` (at most a last-resort fallback). Platform
+    IOKit assertions with NO `caffeinate` invocation (the model crate has no
+    `caffeinate` path at all). Platform
     backends are `macos.rs` (IOKit power assertions via `iokit_bindings.rs`),
     `linux_inhibitor.rs` (`systemd-inhibit`/`gnome-session-inhibit`),
     `windows_inhibitor.rs` (`PowerCreateRequest`/`PowerSetRequest`), and `dummy.rs`

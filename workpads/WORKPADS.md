@@ -727,7 +727,7 @@ workpads/architecture/boundaries.md
 
 **Quick nav:**
 
-- `tasks.md` CT0 (incl. the new `distributed-topology` gate) through the live Tailscale path.
+- `tasks.md` CT0 (incl. the new `distributed-topology` gate) through the live Tailscale path. CT0 DEFINES the `distributed-topology` gate — passing it proves the Capo server is reachable by clients and runtime targets across devices via an auditable, revocable tunnel (gate meaning registered in the `## distributed-topology` section above).
 - `knowledge.md` exposure policy, credential-handle model, and health/reconnect design.
 - `references.md` Tailscale + local exposure-lifecycle source links.
 
@@ -779,6 +779,8 @@ workpads/real-turn-loop/knowledge.md
 ## distributed-topology
 
 **Status:** Planned. New highest-priority work (registered 2026-06-02). Capstone of the connectivity chain: depends on connectivity-tunnel and remote-runtime. Hard do-not-start gate (DT0) — must not start until its substrate has actually landed in-tree.
+
+**Gate meaning (when the `distributed-topology` gate passes):** the Capo server is reachable by clients and runtime targets across devices via an auditable, revocable tunnel. This is the named gate DEFINED and registered by `connectivity-tunnel` CT0 (it did not exist in-tree before; `remote-runtime` is a feature workpad file, NOT a gate, and is never used as a gate). The connectivity-tunnel workpad delivers the reachability half of this gate (`ConnectivityTunnel`/`TailscaleTunnel`, `ExposurePolicy`, auditable + revocable exposure); the remote-runtime and distributed-topology workpads complete and prove it end-to-end across three roles on different devices.
 
 **Prerequisites:** connectivity-tunnel (`ConnectivityTunnel`/`TailscaleTunnel`, exposure lifecycle), remote-runtime (`RemoteProcessRunner`), and the `Subscribe { session_id, from_sequence }` event tail + `EventStream` watermark + `subscribe_tcp`/`SubscribeStream` resume cursor from streaming-transport. None are all present today; DT0 records the gate with concrete completion signals.
 

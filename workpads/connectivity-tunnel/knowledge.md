@@ -153,11 +153,15 @@ lifecycle from scratch.
 
 ## Auth By Handle (Never Raw, Never Logged) — Architecture First, Regex Second
 
-- The PRIMARY guarantee is ARCHITECTURAL: credentials/identity are referenced by
-  HANDLE only (`auth_ref`, `identity_ref`); the raw value is resolved ONLY inside
-  the adapter at connect time and is STRUCTURALLY never returned to the controller
-  (no controller-facing type carries a field that holds the secret), never stored,
-  never logged. A test that "a planted authkey never appears" only proves the
+- The PRIMARY guarantee is ARCHITECTURAL CONFINEMENT (a design-level structural
+  commitment, NOT a Rust type-system/compile-time guarantee — the handle fields are
+  `Option<String>`, so the compiler does not prevent a raw value being placed in
+  one; that is why the fail-closed pattern guard exists): credentials/identity are
+  referenced by HANDLE only (`auth_ref`, `identity_ref`); the raw value is resolved
+  ONLY inside the adapter at connect time and is STRUCTURALLY never returned to the
+  controller (no controller-facing type carries a field that holds the secret),
+  never stored, never logged. A test that "a planted authkey never appears" only
+  proves the
   planted PATTERNS are caught; it cannot prove an arbitrary credential is never
   emitted, so the never-logged guarantee must rest on confinement, not regex
   coverage. (CLAUDE/AGENTS: do not claim what you cannot enforce.)
@@ -207,9 +211,13 @@ codec and the exposure projection and must be replay-stable. Because they touch 
 CT3 adds `open_channel`/`close_channel` to the `ConnectivityTunnel` enum + every
 implementing tunnel, because the in-tree surface has no channel concept and CT7's
 revoke teardown ("close the resolved channel") is otherwise unimplementable. The
-channel is a REACHABILITY handle, never a process handle and never a `RuntimeRunner`
-coupling. `LocalLoopback`/`EndpointStub`/`Fake` implement it coherently so the enum
-stays exhaustive.
+signatures are `open_channel(resolved_endpoint) -> ConnectivityResult<OpenChannel>`
+and `close_channel(channel: OpenChannel) -> ConnectivityResult<()>`. CT3 OWNS this
+naming: `runtime-tunnel.md` sketched a tentative `ChannelRef` with an unspecified
+`close_channel` signature; CT3 resolves that drift to the owned `OpenChannel` type
++ the signatures above. The channel is a REACHABILITY handle, never a process
+handle and never a `RuntimeRunner` coupling. `LocalLoopback`/`EndpointStub`/`Fake`
+implement it coherently so the enum stays exhaustive.
 
 ## Tunnel Health, Heartbeat, Reconnect — With An Injectable Clock
 
@@ -233,8 +241,11 @@ stays exhaustive.
 ## Anti-Sleep (Separate Lifecycle Concern, One-Way Coupling)
 
 - Opt-in (`CAPO_SERVER_ANTI_SLEEP=1`), OFF by default. macOS IOKit power assertion
-  (NOT spawning `caffeinate` — `caffeinate` is at most a last-resort fallback),
-  Linux `systemd-inhibit`/`gnome-session-inhibit`, no-op elsewhere — modeled on the
+  — the single rule is IOKit power assertions with NO `caffeinate` invocation
+  (the vendored codex `sleep-inhibitor` model has no `caffeinate` path at all; any
+  IOKit escape hatch must be opt-in behind a documented, explicitly-named
+  condition, never an implied default fallback). Linux
+  `systemd-inhibit`/`gnome-session-inhibit`, no-op elsewhere — modeled on the
   vendored codex `sleep-inhibitor` crate, whose `lib.rs` states it "Uses native
   IOKit power assertions instead of spawning `caffeinate`."
 - Bound to SERVING lifecycle (engaged while an active non-loopback exposure is
@@ -318,9 +329,7 @@ evidence.
 - What is the maximum allowed `expires_at` ceiling for a (gated) short-lived public
   exposure? (Mechanism is RESOLVED — the CT5 heartbeat/clock tick is the sweep; only
   the numeric ceiling remains, pinned at CT8.)
-- Should `ExposurePolicy` promotion itself be an audited event (e.g.
-  `connectivity.policy_changed`), or is the per-exposure `exposure_requested` trail
-  sufficient?
+- (none currently open)
 
 RESOLVED (formerly open):
 - WHO runs the heartbeat loop / WHERE the anti-sleep inhibitor lives: a named
@@ -329,3 +338,14 @@ RESOLVED (formerly open):
   be testable.
 - WHETHER `expires_at` expiry uses a heartbeat sweep or a scheduler: COMMITTED to
   the CT5 heartbeat/clock tick sweep (CT8).
+- WHETHER `ExposurePolicy` promotion is itself an audited event: RESOLVED — YES.
+  Promotion of the effective exposure ceiling (Loopback -> Private/Public) MUST
+  emit a `connectivity.policy_changed` audit event, because an operator must be
+  able to reconstruct WHY a private/public exposure became possible. The
+  per-exposure `connectivity.exposure_requested` trail records that an exposure was
+  blocked or granted, but not why the policy ceiling that permitted it changed; a
+  policy promotion without an event is not "auditable and revocable" in the
+  AGENTS.md sense. This is committed into CT1's acceptance criteria (the promotion
+  path emits `connectivity.policy_changed` carrying the old/new ceiling, the
+  opt-in source — config/flag/grant — and a timestamp, with no secret in the
+  payload). The event is replay-stable like the other connectivity event kinds.

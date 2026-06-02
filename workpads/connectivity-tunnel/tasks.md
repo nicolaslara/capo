@@ -160,6 +160,13 @@ Acceptance criteria:
 - `ExposurePolicy` resolves a requested `ExposureScope` against an effective
   ceiling whose DEFAULT is `Loopback`; promotion to `Private` or `Public`
   requires explicit opt-in (config/flag/grant), never an implicit default.
+- Promotion of the effective ceiling (Loopback -> Private/Public) is itself an
+  AUDITED event: it emits `connectivity.policy_changed` carrying the old/new
+  ceiling, the opt-in source (config/flag/grant), and a timestamp, with NO secret
+  in the payload, so an operator can reconstruct WHY a private/public exposure
+  became possible (the per-exposure `exposure_requested` trail alone does not
+  record the policy change). The event is replay-stable. (Resolved open question
+  in `knowledge.md`.)
 - A non-loopback bind/resolution is REFUSED when no `auth_ref` handle is attached
   (CT2): `ExposurePolicy::authorize(scope, auth_ref)` returns a typed refusal
   (e.g. `ConnectivityError::AuthRequired`) for `Private`/`Public` with no handle,
@@ -192,7 +199,9 @@ Verification:
 - Deterministic tests in `capo-runtime`: loopback resolves with no auth and no
   opt-in; `Private`/`Public` without `auth_ref` -> `AuthRequired` refusal;
   `Private`/`Public` with opt-in + handle -> permitted resolution but still
-  `permission_required = true` (grant still gates activation).
+  `permission_required = true` (grant still gates activation); a ceiling promotion
+  emits a `connectivity.policy_changed` event with the old/new ceiling and opt-in
+  source and no secret.
 - Deterministic `capo-server` test: loopback bind AND loopback connect succeed
   unchanged under the default (no-config) policy; a simulated non-loopback bind
   AND connect fail closed under the default policy.
@@ -233,8 +242,15 @@ Acceptance criteria:
   real credential happens ONLY inside the tunnel adapter at connect time; the
   resolved value is structurally never returned to the controller (no
   controller-facing type carries a field that holds the secret), never stored, and
-  never logged. State this as a type-level guarantee, with the pattern guard
-  below as defense-in-depth, not as the proof of "never logged."
+  never logged. State this as an ARCHITECTURAL CONFINEMENT guarantee (a
+  design-level structural commitment enforced by confinement + redaction, NOT a
+  Rust compile-time/type-system guarantee: the handle fields are `Option<String>`,
+  so the compiler does not prevent a raw value from being placed in one — that is
+  exactly why the fail-closed pattern guard below exists). The pattern guard is
+  defense-in-depth, not the proof of "never logged." (If true compile-time
+  enforcement is later desired, introduce a newtype `AuthHandleRef(String)` whose
+  constructor rejects raw-credential-pattern strings; CT2 does not specify such a
+  wrapper, so it does not claim type-level enforcement.)
 - The connectivity redaction guard is the SECONDARY net: per-field rules, not an
   "or". A credential-pattern match in a HANDLE field (`auth_ref`/`identity_ref`)
   is a BUG and FAILS CLOSED (refuse to persist), because a raw value in a handle
@@ -296,16 +312,28 @@ Acceptance criteria:
 
 - The `ConnectivityTunnel` enum + every implementing tunnel gain
   `open_channel(resolved_endpoint) -> ConnectivityResult<OpenChannel>` and
-  `close_channel(...)`, wired through every match arm. `LocalLoopback`/
-  `EndpointStub`/`Fake` implement them coherently (loopback opens a loopback
-  channel; `FakeTunnel` opens/closes a scripted channel). The channel is a
-  reachability handle, NOT a process handle and NOT a `RuntimeRunner` coupling.
+  `close_channel(channel: OpenChannel) -> ConnectivityResult<()>`, wired through
+  every match arm. `OpenChannel` is the owned reachability handle returned by
+  `open_channel` and consumed by `close_channel` (it supersedes the
+  `runtime-tunnel.md` design's tentative `ChannelRef` name; CT3 OWNS this naming —
+  the design doc's `ChannelRef`/unspecified `close_channel` signature is resolved
+  here to `OpenChannel` + the signature above). `LocalLoopback`/`EndpointStub`/
+  `Fake` implement them coherently (loopback opens a loopback channel; `FakeTunnel`
+  opens/closes a scripted channel). The channel is a reachability handle, NOT a
+  process handle and NOT a `RuntimeRunner` coupling.
 - `TailscaleTunnel` resolves a Capo-server / runtime-target endpoint to a TAILNET
   address (MagicDNS name or `100.64.0.0/10` CGNAT tailnet IP) at
   `ExposureScope::Private`, NOT loopback and NOT public; the resolved
   `ResolvedEndpoint` carries `exposure = Private`, the
   `network:connect:private_tunnel` permission scope, and
   `permission_required = true`.
+- `TailscaleTunnel::resolve_endpoint()` called with `ExposureScope::Public`
+  returns a typed `ConnectivityError` (e.g. `ScopeNotSupported`) at the adapter
+  level until CT8 installs the full Funnel/public guard — a test-covered refusal,
+  NOT a silent pass. This closes the CT3->CT8 window at the adapter layer (CT1's
+  `ExposurePolicy` and the existing grant check already gate public exposure at
+  the policy + activation layers; CT8 then replaces this stub refusal with the
+  full short-lived/audited public guard).
 - Endpoint resolution + status come through an injectable `TailscaleStatusSource`
   abstraction (modeled on the ACP `ScriptedAcpTransport`/`PipedProcessTransport`
   pattern from `depth`: a trait with a deterministic scripted implementation for
@@ -450,10 +478,13 @@ Acceptance criteria:
   `systemd-inhibit` or `gnome-session-inhibit`; no-op on unsupported platforms)
   modeled after the vendored codex `sleep-inhibitor` crate
   (`workpads/references/repos/openai-codex/codex-rs/utils/sleep-inhibitor/`), which
-  uses NATIVE IOKit power assertions, NOT spawning `caffeinate`. The macOS path is
-  IOKit power assertions; `caffeinate` is at most a last-resort fallback, not the
-  primary mechanism. Enabled ONLY behind an explicit opt-in flag/env (e.g.
-  `CAPO_SERVER_ANTI_SLEEP=1`), OFF by default.
+  uses NATIVE IOKit power assertions, NOT spawning `caffeinate`. The single rule
+  for the macOS path is IOKit power assertions; there is NO `caffeinate`
+  invocation. (If an IOKit escape hatch is ever genuinely needed — e.g. an IOKit
+  link failure — it must be opt-in behind a documented condition and explicitly
+  named, never implied as a default fallback; the vendored codex `sleep-inhibitor`
+  model has no `caffeinate` path at all.) Enabled ONLY behind an explicit opt-in
+  flag/env (e.g. `CAPO_SERVER_ANTI_SLEEP=1`), OFF by default.
 - Anti-sleep is bound to SERVING lifecycle, not to a turn or process: it engages
   while the server holds an active non-loopback exposure (or while explicitly
   requested at server start) and releases on shutdown / last-exposure-revoked. The
