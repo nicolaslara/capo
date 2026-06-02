@@ -90,6 +90,38 @@ pub fn heartbeat_label(now_ms: u64) -> String {
     format!("heartbeat-ms:{now_ms}")
 }
 
+/// CT8: a stable, replay-friendly EXPIRY instant LABEL in the SAME logical-ms domain
+/// as [`heartbeat_label`] — `expiry-ms:<logical-ms>`. A (gated) short-lived public
+/// exposure stamps this onto `ResolvedEndpoint.expires_at`; the CT5 heartbeat/clock
+/// tick is the expiry SWEEP (no separate scheduler): when [`ConnectivityClock::now_ms`]
+/// passes the parsed deadline, the next tick fires the CT7 auto-revoke. It is a bare
+/// logical instant, never a credential, so it round-trips replay-stably.
+pub fn expiry_label(at_ms: u64) -> String {
+    format!("expiry-ms:{at_ms}")
+}
+
+/// CT8: parse an [`expiry_label`] back to its logical-ms deadline. Returns `None` for
+/// any label that is not an `expiry-ms:<u64>` (so a non-expiry / open-ended
+/// `expires_at` is never mistaken for an expired deadline by the sweep).
+pub fn parse_expiry_ms(label: &str) -> Option<u64> {
+    label.strip_prefix("expiry-ms:")?.parse().ok()
+}
+
+/// CT8: the documented MAXIMUM time-to-live ceiling for a (gated) short-lived public
+/// exposure — 10 minutes. A public exposure is high-risk and default-off (CT8); when
+/// it is permitted at all (explicit `network:expose:public` grant + opt-in) it MUST
+/// be short-lived, so a requested TTL is clamped down to this ceiling. Recorded in
+/// `knowledge.md` as the resolved numeric ceiling.
+pub const PUBLIC_EXPOSURE_MAX_TTL_MS: u64 = 10 * 60 * 1_000;
+
+/// CT8: compute the clamped expiry instant for a gated public exposure: `now + ttl`,
+/// with `ttl` clamped to (1ms ..= [`PUBLIC_EXPOSURE_MAX_TTL_MS`]) so a public exposure
+/// can never be open-ended or exceed the documented short-lived ceiling.
+pub fn public_expiry_label(now_ms: u64, requested_ttl_ms: u64) -> String {
+    let ttl = requested_ttl_ms.clamp(1, PUBLIC_EXPOSURE_MAX_TTL_MS);
+    expiry_label(now_ms.saturating_add(ttl))
+}
+
 /// CT5: the bounded heartbeat cadence + stall deadline. Both are in milliseconds and
 /// validated non-zero on construction so a stalled heartbeat is a HEALTH TRANSITION,
 /// never a hang and never a zero-interval busy loop.

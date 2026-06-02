@@ -4709,12 +4709,17 @@ fn connectivity_expose_stub_records_blocked_private_exposure_without_runtime_exe
         "control".to_string(),
         "--exposure".to_string(),
         "public".to_string(),
+        // CT8: a public exposure is ALWAYS audited; `--record` is mandatory for public.
+        "--record".to_string(),
         "--state".to_string(),
         state_root.display().to_string(),
     ])
     .unwrap_err();
-    assert!(denied.contains("connectivity endpoint resolution failed"));
-    assert!(denied.contains("ChannelNotAllowed"));
+    // CT8: a `public`/Funnel exposure is refused BEFORE resolution by the
+    // public-out-of-scope guard (it never reaches the stub-tunnel ChannelNotAllowed
+    // check). The refusal is the CT8 guard, not a downstream channel error.
+    assert!(denied.contains("public/Funnel exposure is out of scope"));
+    assert!(denied.contains("block_reason=public_out_of_scope"));
 }
 
 #[test]
@@ -5812,6 +5817,9 @@ fn ct5_exposure_heartbeat_stall_past_deadline_is_a_transition() {
         exposure_id,
         "--fake-timeline".to_string(),
         "true,true".to_string(),
+        // Pin the deterministic clock anchor (the live default is wall-clock).
+        "--start-ms".to_string(),
+        "0".to_string(),
         "--step-ms".to_string(),
         "60000".to_string(),
         "--stall-deadline-ms".to_string(),
@@ -6436,6 +6444,305 @@ fn ct7_revoked_exposure_rebuilds_identically_and_stays_revoked() {
     assert_eq!(after.reachable, before.reachable);
     assert_eq!(after.revoked_at, before.revoked_at);
     assert_eq!(after.capability_grant_id, before.capability_grant_id);
+}
+
+/// CT8: a `public`/Funnel exposure in the DEFAULT profile is REFUSED + audited as a
+/// blocked `connectivity.exposure_requested` event (`block_reason =
+/// public_out_of_scope`), never a silent allow.
+#[test]
+fn ct8_public_exposure_refused_by_default_and_audited() {
+    let state_root = temp_root("cli-ct8-public-refused");
+    let refused = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct8-public".to_string(),
+        "--owner-kind".to_string(),
+        "capo_server".to_string(),
+        "--owner-id".to_string(),
+        "server-ct8".to_string(),
+        "--channel".to_string(),
+        "dashboard".to_string(),
+        "--exposure".to_string(),
+        "public".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .unwrap_err();
+    assert!(
+        refused.contains("public/Funnel exposure is out of scope"),
+        "default public exposure must be refused: {refused}"
+    );
+    assert!(refused.contains("block_reason=public_out_of_scope"));
+    assert!(refused.contains("status=blocked_pending_permission"));
+    // The refusal was RECORDED as an audited blocked exposure (not a silent failure).
+    let recorded_sequence = output_value(&refused, "recorded_sequence");
+    assert_ne!(
+        recorded_sequence, "none",
+        "the public refusal must be audited"
+    );
+    let store = SqliteStateStore::open(&state_root).expect("state");
+    let exposure = store
+        .connectivity_exposures(&project_id())
+        .expect("exposures")
+        .into_iter()
+        .find(|exposure| exposure.connectivity_endpoint_id == "endpoint-ct8-public")
+        .expect("blocked public exposure row");
+    assert_eq!(exposure.status, "blocked_pending_permission");
+    assert_eq!(exposure.exposure, "public");
+    assert_eq!(exposure.permission_scope, "network:expose:public");
+    assert!(
+        !exposure.reachable,
+        "a blocked public exposure is not reachable"
+    );
+}
+
+/// CT8: the gated short-lived public path. With the explicit `--allow-public-funnel`
+/// opt-in the exposure resolves but carries a REQUIRED short-lived `expires_at`, stays
+/// blocked until the explicit `network:expose:public` grant activates it, and then the
+/// CT5 heartbeat/clock sweep advances the fake clock past `expires_at` to fire the CT7
+/// auto-revoke (`connectivity.exposure_revoked`, proven unreachable). No secret leaks.
+#[test]
+fn ct8_gated_public_exposure_carries_expires_at_and_clock_sweep_auto_revokes() {
+    let state_root = temp_root("cli-ct8-public-gated");
+
+    // Gated opt-in: resolves, carries a short-lived expires_at, but stays blocked
+    // (the grant still gates activation). Anchor the clock at now=0 with a 30s TTL.
+    let planned = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct8-gated".to_string(),
+        "--owner-kind".to_string(),
+        "capo_server".to_string(),
+        "--owner-id".to_string(),
+        "server-ct8-gated".to_string(),
+        "--channel".to_string(),
+        "dashboard".to_string(),
+        "--exposure".to_string(),
+        "public".to_string(),
+        "--allow-public-funnel".to_string(),
+        "--public-now-ms".to_string(),
+        "0".to_string(),
+        "--public-ttl-ms".to_string(),
+        "30000".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("record gated public exposure");
+    assert!(planned.contains("connectivity_exposure_planned=true"));
+    assert!(planned.contains("exposure_scope=public"));
+    // CT8: a gated public exposure cannot reach active without the explicit grant.
+    assert!(planned.contains("status=blocked_pending_permission"));
+    let exposure_id = output_value(&planned, "exposure");
+
+    // CT8: the resolution carries a REQUIRED short-lived expires_at in the heartbeat
+    // clock's logical-ms domain (now=0 + 30s = expiry-ms:30000).
+    let store = SqliteStateStore::open(&state_root).expect("state");
+    let blocked = store
+        .connectivity_exposures(&project_id())
+        .expect("exposures")
+        .into_iter()
+        .find(|exposure| exposure.exposure_id == exposure_id)
+        .expect("gated public exposure row");
+    assert_eq!(blocked.expires_at.as_deref(), Some("expiry-ms:30000"));
+
+    // Explicit public grant: request approval -> allow -> activate.
+    run_cli(vec![
+        "connectivity".to_string(),
+        "request-approval".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--approval".to_string(),
+        "approval-ct8-public".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("request public approval");
+    run_cli(vec![
+        "permission".to_string(),
+        "decide".to_string(),
+        "--approval".to_string(),
+        "approval-ct8-public".to_string(),
+        "--decision".to_string(),
+        "allow_once".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("allow public approval");
+    let activated = run_cli(vec![
+        "connectivity".to_string(),
+        "activate-exposure".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("activate public exposure");
+    assert!(activated.contains("status=active"));
+    assert!(activated.contains("permission_scope=network:expose:public"));
+
+    // CT8: a heartbeat BEFORE the deadline does NOT auto-revoke (clock at 0..15s, the
+    // 30s deadline has not passed). The exposure stays active.
+    let before_deadline = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-heartbeat".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--fake-timeline".to_string(),
+        "true,true".to_string(),
+        "--start-ms".to_string(),
+        "0".to_string(),
+        "--step-ms".to_string(),
+        "15000".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("heartbeat before deadline");
+    assert!(before_deadline.contains("expires_at=expiry-ms:30000"));
+    assert!(
+        before_deadline.contains("expired=false"),
+        "a pre-deadline heartbeat must not auto-revoke: {before_deadline}"
+    );
+    let still_active = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-status".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("status before deadline");
+    assert!(still_active.contains("status=active"));
+
+    // CT8: the heartbeat/clock SWEEP — advance the fake clock PAST expires_at (start
+    // at 30s) so the next tick fires the CT7 teardown auto-revoke.
+    let swept = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-heartbeat".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--fake-timeline".to_string(),
+        "true".to_string(),
+        "--start-ms".to_string(),
+        "30000".to_string(),
+        "--step-ms".to_string(),
+        "15000".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("heartbeat sweep past deadline");
+    assert!(
+        swept.contains("expired=true"),
+        "the clock-swept tick past expires_at must auto-revoke: {swept}"
+    );
+    let expiry_sequence = output_value(&swept, "expiry_sequence");
+    assert_ne!(
+        expiry_sequence, "none",
+        "the auto-revoke must emit an exposure_revoked event"
+    );
+
+    // CT8 + CT7: the exposure is now revoked + unreachable (proven, not just flagged).
+    let revoked = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-status".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("status after sweep");
+    assert!(
+        revoked.contains("status=revoked"),
+        "the clock sweep must revoke the exposure: {revoked}"
+    );
+    assert!(revoked.contains("reachable=false"));
+
+    // The auto-revoke is replay-stable: a rebuild keeps it revoked.
+    store.rebuild_projections().expect("rebuild");
+    let after = store
+        .connectivity_exposures(&project_id())
+        .expect("rebuilt exposures")
+        .into_iter()
+        .find(|exposure| exposure.exposure_id == exposure_id)
+        .expect("rebuilt row");
+    assert_eq!(
+        after.status, "revoked",
+        "a clock-swept revoked public exposure stays revoked after restart"
+    );
+    assert_eq!(after.expires_at.as_deref(), Some("expiry-ms:30000"));
+}
+
+/// CT8 invariant in isolation: the `network:expose:public` grant is the ONLY key. A
+/// gated public exposure (resolved behind `--allow-public-funnel`, carrying a
+/// short-lived `expires_at`) stays `blocked_pending_permission` and CANNOT reach
+/// `active` when no grant was ever created — `activate-exposure` fails closed with a
+/// "missing allow grant" error, never a silent allow. This pins the "grant is the only
+/// key" invariant directly, separate from the full-flow happy path.
+#[test]
+fn ct8_gated_public_exposure_cannot_activate_without_grant() {
+    let state_root = temp_root("cli-ct8-public-no-grant");
+
+    let planned = run_cli(vec![
+        "connectivity".to_string(),
+        "expose-stub".to_string(),
+        "--endpoint".to_string(),
+        "endpoint-ct8-no-grant".to_string(),
+        "--owner-kind".to_string(),
+        "capo_server".to_string(),
+        "--owner-id".to_string(),
+        "server-ct8-no-grant".to_string(),
+        "--channel".to_string(),
+        "dashboard".to_string(),
+        "--exposure".to_string(),
+        "public".to_string(),
+        "--allow-public-funnel".to_string(),
+        "--public-now-ms".to_string(),
+        "0".to_string(),
+        "--public-ttl-ms".to_string(),
+        "30000".to_string(),
+        "--record".to_string(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("record gated public exposure");
+    assert!(planned.contains("status=blocked_pending_permission"));
+    assert!(planned.contains("permission_scope=network:expose:public"));
+    let exposure_id = output_value(&planned, "exposure");
+
+    // No request-approval, no decide, no grant. activate-exposure MUST fail closed:
+    // the explicit public grant is the only path to `active`.
+    let activate_err = run_cli(vec![
+        "connectivity".to_string(),
+        "activate-exposure".to_string(),
+        "--exposure".to_string(),
+        exposure_id.clone(),
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .unwrap_err();
+    assert!(
+        activate_err.contains("missing allow grant"),
+        "a gated public exposure cannot activate without the network:expose:public grant: {activate_err}"
+    );
+    assert!(activate_err.contains("network:expose:public"));
+
+    // The exposure is still blocked (never silently flipped to active).
+    let status = run_cli(vec![
+        "connectivity".to_string(),
+        "exposure-status".to_string(),
+        "--exposure".to_string(),
+        exposure_id,
+        "--state".to_string(),
+        state_root.display().to_string(),
+    ])
+    .expect("status after refused activation");
+    assert!(
+        status.contains("status=blocked_pending_permission"),
+        "the exposure stays blocked without a grant: {status}"
+    );
 }
 
 #[test]

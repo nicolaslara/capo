@@ -74,7 +74,7 @@ Usage:
   capo runtime target evidence --target TARGET_ID --out DIR [--state PATH]
   capo runtime target evidence --latest [--runner local-process|remote-process|container] [--status available|disabled|unhealthy] --out DIR [--state PATH]
   capo runtime target list [--state PATH]
-  capo connectivity expose-stub --endpoint ENDPOINT_ID --owner-kind runtime_target|capo_server --owner-id OWNER_ID --channel control|stdio|logs|dashboard|artifact --exposure loopback|private|public [--address REF] [--record] [--state PATH]
+  capo connectivity expose-stub --endpoint ENDPOINT_ID --owner-kind runtime_target|capo_server --owner-id OWNER_ID --channel control|stdio|logs|dashboard|artifact --exposure loopback|private|public [--address REF] [--auth-ref HANDLE] [--identity-ref HANDLE] [--allow-public-funnel --public-ttl-ms MS --public-now-ms MS] [--record] [--state PATH]
   capo connectivity request-approval --exposure EXPOSURE_ID [--approval APPROVAL_ID] [--state PATH]
   capo connectivity activate-exposure --exposure EXPOSURE_ID [--state PATH]
   capo connectivity revoke-exposure --exposure EXPOSURE_ID [--reason REASON] [--state PATH]

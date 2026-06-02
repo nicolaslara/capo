@@ -32,7 +32,8 @@ mod worktree;
 
 pub use connectivity_health::{
     ConnectivityClock, HealthTransition, HeartbeatConfig, HeartbeatHandle, HeartbeatMonitor,
-    HeartbeatOutcome,
+    HeartbeatOutcome, PUBLIC_EXPOSURE_MAX_TTL_MS, expiry_label, parse_expiry_ms,
+    public_expiry_label,
 };
 
 pub use async_runner::{
@@ -3753,6 +3754,65 @@ mod tests {
     }
 
     #[test]
+    fn ct8_public_expiry_label_is_short_lived_and_clock_swept() {
+        // CT8: the expiry label round-trips through the SAME logical-ms domain as the
+        // CT5 heartbeat clock, so the heartbeat/clock tick can sweep it.
+        let label = connectivity_health::expiry_label(45_000);
+        assert_eq!(label, "expiry-ms:45000");
+        assert_eq!(connectivity_health::parse_expiry_ms(&label), Some(45_000));
+        // A non-expiry label (e.g. an open-ended ISO instant) is NOT a sweepable
+        // deadline — the sweep must never mistake it for an expired one.
+        assert_eq!(
+            connectivity_health::parse_expiry_ms("2026-06-02T12:00:00Z"),
+            None
+        );
+
+        // A (gated) public exposure is SHORT-LIVED: a TTL request is clamped to the
+        // documented `PUBLIC_EXPOSURE_MAX_TTL_MS` ceiling and can never be open-ended.
+        let clamped = connectivity_health::public_expiry_label(
+            1_000,
+            connectivity_health::PUBLIC_EXPOSURE_MAX_TTL_MS * 10,
+        );
+        assert_eq!(
+            connectivity_health::parse_expiry_ms(&clamped),
+            Some(1_000 + connectivity_health::PUBLIC_EXPOSURE_MAX_TTL_MS),
+            "an over-long public TTL is clamped to the short-lived ceiling"
+        );
+        // A zero TTL is bounded away from zero (never an instantly-expired-at-now or
+        // open-ended window).
+        let zero = connectivity_health::public_expiry_label(5_000, 0);
+        assert_eq!(connectivity_health::parse_expiry_ms(&zero), Some(5_001));
+    }
+
+    #[test]
+    fn ct8_tailscale_adapter_refuses_public_until_the_gated_guard() {
+        // CT8: the Tailscale adapter NEVER serves public/Funnel — a `Public`-scope
+        // config is a typed `ScopeNotSupported` refusal at the adapter layer (the CT3
+        // stub the CT8 guard sits above). The gated short-lived public path is the
+        // prototype EndpointStub + grant, not a tailnet Funnel.
+        let mut public_config = ConnectivityEndpointConfig::tailscale("ts-pub", "capo-worker");
+        public_config.exposure = ExposureScope::Public;
+        public_config.allowed_channels = vec![ChannelKind::Dashboard];
+        let err = ConnectivityTunnel::tailscale(public_config, reachable_tailnet_source())
+            .resolve_endpoint(EndpointOwner::capo_server("dash"), ChannelKind::Dashboard)
+            .expect_err("tailscale adapter refuses public exposure");
+        assert!(matches!(
+            err,
+            ConnectivityError::ScopeNotSupported {
+                requested: ExposureScope::Public,
+                supported: ExposureScope::Private,
+                ..
+            }
+        ));
+
+        // And the public permission scope is the only path the grant engine accepts.
+        assert_eq!(
+            ExposureScope::Public.permission_scope(),
+            "network:expose:public"
+        );
+    }
+
+    #[test]
     fn ct2_endpoint_config_and_resolved_endpoint_carry_opaque_handles_only() {
         // CT2: the schema additions are opaque pointers/derived values, set via the
         // builder, and normalized so an empty flag does not masquerade as present.
@@ -3860,9 +3920,12 @@ mod tests {
     }
 
     #[test]
-    fn ct3_tailscale_public_scope_is_a_typed_adapter_refusal_until_ct8() {
-        // A Public-scope tailscale config is refused at the adapter layer with a
-        // typed ScopeNotSupported — closing the CT3->CT8 window, never a silent pass.
+    fn ct3_tailscale_public_scope_is_a_typed_adapter_refusal() {
+        // The Tailscale adapter ALWAYS refuses Public at the adapter layer with a typed
+        // ScopeNotSupported, never a silent pass. This refusal is PERMANENT: CT8 did NOT
+        // open a tailnet Funnel path — the gated short-lived public prototype rides the
+        // EndpointStub + `network:expose:public` grant, not the Tailscale Funnel. So the
+        // tailnet adapter refusing Public is the final, intended behavior.
         let mut config = ConnectivityEndpointConfig::tailscale("ts-public", "capo-worker");
         config.exposure = ExposureScope::Public;
         config.allowed_channels = vec![ChannelKind::Dashboard];
@@ -3870,7 +3933,9 @@ mod tests {
 
         let err = tunnel
             .resolve_endpoint(EndpointOwner::capo_server("dash"), ChannelKind::Dashboard)
-            .expect_err("public tailscale resolution is refused until CT8");
+            .expect_err(
+                "tailscale adapter always refuses public: the gated prototype path uses EndpointStub, not the tailnet Funnel",
+            );
         assert_eq!(
             err,
             ConnectivityError::ScopeNotSupported {

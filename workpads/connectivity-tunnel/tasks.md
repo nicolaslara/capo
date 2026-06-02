@@ -662,7 +662,56 @@ core teardown. Consumes the existing `safety-gates` grant lifecycle.
 
 ## CT8 - Funnel / Public Exposure Stays Out Of Scope: Permission-Required, Clock-Swept Short-Lived, Audited Guard
 
-Status: pending.
+Status: done. Funnel/public exposure is an ENFORCED guard, not just docs. A `public`
+exposure on `expose-stub` is REFUSED by default and, when `--record`, AUDITED as a
+blocked `connectivity.exposure_requested` event (`block_reason = public_out_of_scope`,
+scope `network:expose:public`, status `blocked_pending_permission`) via
+`record_blocked_public_out_of_scope` — never a silent allow. The Tailscale adapter
+independently refuses Public with the CT3 `ScopeNotSupported` (the gated path is the
+prototype EndpointStub + grant, not a tailnet Funnel). The gated short-lived path is
+behind the EXPLICIT, separately-named `--allow-public-funnel` opt-in: the resolution
+then carries a REQUIRED `expires_at` = `public_expiry_label(now, ttl)`
+(`crates/capo-runtime/src/connectivity_health.rs`), CLAMPED to (1ms ..=
+`PUBLIC_EXPOSURE_MAX_TTL_MS` = 10min) so it can never be open-ended, in the SAME
+logical-ms domain (`expiry-ms:<ms>`) as the CT5 heartbeat clock. It still cannot reach
+`active` without the explicit `network:expose:public` grant (the `ExposurePolicy`
+loopback ceiling keeps it `blocked_pending_permission` until the grant activates it).
+EXPIRY is enforced by the CT5 heartbeat/clock tick SWEEP (no separate scheduler):
+`connectivity_exposure_heartbeat` parses `expires_at` and, when
+`clock.now_ms() >= deadline`, fires the CT7 teardown auto-revoke via the shared
+`perform_connectivity_revoke` (`revoke_kind = expired`) — emitting
+`connectivity.exposure_revoked` + the terminal `connectivity.health_changed`, proving
+unreachability. Tests: `capo-runtime` `tests::ct8_public_expiry_label_is_short_lived_and_clock_swept`
++ `tests::ct8_tailscale_adapter_refuses_public_until_the_gated_guard`; `capo-cli`
+`tests::ct8_public_exposure_refused_by_default_and_audited` +
+`tests::ct8_gated_public_exposure_carries_expires_at_and_clock_sweep_auto_revokes`
+(refused+audited; gated -> expires_at -> grant -> active -> pre-deadline no-revoke ->
+clock-swept auto-revoke -> replay-stable revoked) +
+`tests::ct8_gated_public_exposure_cannot_activate_without_grant` (the
+`network:expose:public` grant is the ONLY key — activate fails closed with "missing
+allow grant" when no grant exists). Live Funnel is NOT built beyond this guard + the
+gated short-lived path.
+
+CT8 deferrals/operational notes (post-adversarial-review):
+
+- The clock-swept expiry sweep is CLI-DRIVEN and fake-only in this workpad: there is
+  NO autonomous server-side heartbeat/sweep async loop yet. `exposure-heartbeat`
+  (mandatory `--fake-timeline`) is the deterministic driver that advances the clock
+  past `expires_at` and fires the auto-revoke. A live server-side heartbeat loop that
+  drives the sweep autonomously is the LIVE path, deferred to CT10 (paired with the
+  CT5 live-path note). Until then, the sweep is exercised through the deterministic CLI.
+- Live clock anchoring is self-anchoring on the live path: `--public-now-ms`
+  (expose-stub) and `--start-ms` (exposure-heartbeat) default to REAL wall-clock ms
+  (`wall_clock_ms()`) when omitted, so a live operator gets a correct real-time expiry
+  window WITHOUT manually coordinating the two anchors. Tests pass explicit zero-anchored
+  values for determinism; only the un-anchored live path consults wall time.
+- `--record` is MANDATORY for `--exposure public` (both the default refusal and the
+  gated path): audit is the point, not an option, so a public exposure can never be
+  silently un-audited.
+- The CT8 auto-revoke teardown reuses the CT7 teardown path, so the same CT7
+  live-teardown deferral applies: `proven_unreachable=true` is FAKE-TUNNEL attested
+  (the teardown runs a scripted `FakeTunnel` `[true,false]` timeline, not the original
+  public EndpointStub channel). CT10 makes the proof causal over the real channel.
 
 Scope:
 

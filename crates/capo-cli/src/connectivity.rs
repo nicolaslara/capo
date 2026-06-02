@@ -18,6 +18,20 @@ use crate::cli_surface::{ParsedArgs, has_flag, optional_arg, required_arg};
 use crate::permission::scope_values;
 use crate::{debug_error, escape_json, project_id, stable_cli_hash, state};
 
+/// CT8 live clock anchor: real wall-clock milliseconds since the Unix epoch, used as
+/// the DEFAULT anchor for the short-lived public-exposure expiry window (`--public-now-ms`)
+/// and the heartbeat sweep (`--start-ms`) when an operator does not supply an explicit,
+/// deterministic value. Tests always pass explicit values so they remain replay-stable
+/// and never depend on wall time; only the un-anchored live path consults this. This is
+/// the bare logical-ms domain shared by `expiry-ms:`/`heartbeat-ms:` labels, never a
+/// credential.
+fn wall_clock_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|delta| u64::try_from(delta.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 pub(crate) fn expose_connectivity_stub(
     parsed: &ParsedArgs,
     args: &[String],
@@ -42,6 +56,30 @@ pub(crate) fn expose_connectivity_stub(
     // (never a silent connect). It has NO effect on loopback/public scopes.
     let fake_observed_device =
         optional_arg(args, "--fake-observed-device").filter(|value| !value.is_empty());
+    // CT8: Funnel/public exposure is OUT OF SCOPE by default. A `public` exposure is
+    // REFUSED + audited unless the operator passes the EXPLICIT, separately-named
+    // opt-in `--allow-public-funnel`. Even then it is SHORT-LIVED: the resolution
+    // carries a REQUIRED `expires_at` (clamped to the documented
+    // `PUBLIC_EXPOSURE_MAX_TTL_MS` ceiling) that the CT5 heartbeat/clock tick sweeps
+    // to fire the CT7 auto-revoke. `--public-ttl-ms`/`--public-now-ms` size + anchor
+    // that short-lived window deterministically for the gated path.
+    let allow_public_funnel = has_flag(args, "--allow-public-funnel");
+    let public_ttl_ms: u64 = optional_arg(args, "--public-ttl-ms")
+        .map(|value| value.parse())
+        .transpose()
+        .map_err(|error| format!("invalid --public-ttl-ms: {error}"))?
+        .unwrap_or(capo_runtime::PUBLIC_EXPOSURE_MAX_TTL_MS);
+    // CT8 clock domain: `--public-now-ms` anchors the short-lived window. Tests pass an
+    // explicit zero-anchored value for determinism; a LIVE operator who omits it gets a
+    // self-anchoring REAL wall-clock anchor (`wall_clock_ms()`), NOT epoch-zero, so the
+    // expiry window is correct relative to real time without manual coordination. The
+    // heartbeat sweep's `--start-ms` defaults the same way (see
+    // `connectivity_exposure_heartbeat`), keeping the two clocks in the same domain.
+    let public_now_ms: u64 = optional_arg(args, "--public-now-ms")
+        .map(|value| value.parse())
+        .transpose()
+        .map_err(|error| format!("invalid --public-now-ms: {error}"))?
+        .unwrap_or_else(wall_clock_ms);
     if let Some(unknown) = args.iter().find(|arg| {
         arg.starts_with("--")
             && !matches!(
@@ -56,10 +94,40 @@ pub(crate) fn expose_connectivity_stub(
                     | "--identity-ref"
                     | "--record"
                     | "--fake-observed-device"
+                    | "--allow-public-funnel"
+                    | "--public-ttl-ms"
+                    | "--public-now-ms"
             )
     }) {
         return Err(format!(
             "unknown connectivity expose-stub option: {unknown}"
+        ));
+    }
+
+    // CT8: a `public` exposure is ALWAYS audited — audit is the point, not an option.
+    // Per the CT8 acceptance criterion ("the refusal is an audited
+    // `connectivity.exposure_requested` -> blocked event, never a silent allow") the
+    // blocked/gated public trail must reach the event log, so `--record` is MANDATORY
+    // for `--exposure public` (both the default refusal and the gated short-lived path).
+    // This prevents a silent (un-audited) public refusal.
+    if exposure == ExposureScope::Public && !record {
+        return Err(
+            "connectivity public exposure must be audited: pass --record so the blocked/gated `connectivity.exposure_requested` event is written (audit is mandatory for public, not optional)".to_string(),
+        );
+    }
+
+    // CT8: refuse a `public`/Funnel exposure in the default/prototype profile. The
+    // refusal is NOT a silent failure: it is ALWAYS an AUDITED blocked
+    // `connectivity.exposure_requested` event (`block_reason = public_out_of_scope`,
+    // `--record` mandated above), never a silent allow. Only the explicit
+    // `--allow-public-funnel` opt-in proceeds (and then only as the short-lived,
+    // audited, grant-gated path below).
+    if exposure == ExposureScope::Public && !allow_public_funnel {
+        let owner = endpoint_owner(&owner_kind, &owner_id)?;
+        let recorded_sequence =
+            record_blocked_public_out_of_scope(parsed, &endpoint_id, &owner, channel)?;
+        return Err(format!(
+            "connectivity public/Funnel exposure is out of scope (permission-required, short-lived, audited); pass --allow-public-funnel for the gated short-lived path\nstatus=blocked_pending_permission\nblock_reason=public_out_of_scope\nrecorded=true\nrecorded_sequence={recorded_sequence}"
         ));
     }
 
@@ -124,6 +192,17 @@ pub(crate) fn expose_connectivity_stub(
                 "connectivity endpoint resolution failed: {error:?}"
             ));
         }
+    };
+    // CT8: a (gated) public exposure MUST be short-lived. Stamp the REQUIRED
+    // `expires_at` — a clamped logical-ms deadline in the SAME domain as the CT5
+    // heartbeat clock — so the heartbeat/clock tick sweep can auto-revoke it past the
+    // deadline. Never open-ended: `public_expiry_label` clamps the TTL to the
+    // documented `PUBLIC_EXPOSURE_MAX_TTL_MS` ceiling.
+    let resolved = if resolved.exposure == ExposureScope::Public {
+        let expires_at = capo_runtime::public_expiry_label(public_now_ms, public_ttl_ms);
+        resolved.with_expires_at(Some(expires_at))
+    } else {
+        resolved
     };
     // CT1: route the exposure through the explicit `ExposurePolicy`. With no
     // opt-in promotion and no `auth_ref` handle (CT2 adds the handle), the
@@ -392,6 +471,93 @@ fn record_blocked_identity_mismatch(
         .map_err(debug_error)
 }
 
+/// CT8: record a `public`/Funnel exposure refusal as an AUDITABLE blocked exposure.
+///
+/// Funnel/public exposure is OUT OF SCOPE in the default/prototype profile; the
+/// refusal must never be a SILENT failure (invisible in the audit log). This appends
+/// a `ConnectivityExposureRequested` event with `status = blocked_pending_permission`
+/// and `block_reason = public_out_of_scope`, carrying the `network:expose:public`
+/// permission scope so an operator can reconstruct WHY the exposure was blocked. No
+/// secret is in the payload; it is scanned by the CT2 emitted-surface guard.
+fn record_blocked_public_out_of_scope(
+    parsed: &ParsedArgs,
+    endpoint_id: &str,
+    owner: &EndpointOwner,
+    channel: ChannelKind,
+) -> Result<i64, String> {
+    let exposure_scope = ExposureScope::Public;
+    let permission_scope = exposure_scope.permission_scope().to_string();
+    let exposure = ConnectivityExposureProjection {
+        exposure_id: format!(
+            "connectivity-exposure-{}",
+            stable_cli_hash(&format!(
+                "{}:{}",
+                endpoint_id,
+                exposure_scope_str(exposure_scope)
+            ))
+        ),
+        project_id: project_id(),
+        connectivity_endpoint_id: endpoint_id.to_string(),
+        owner_kind: owner.owner_kind.clone(),
+        owner_id: owner.owner_id.clone(),
+        channel_kind: channel_kind_str(channel).to_string(),
+        exposure: exposure_scope_str(exposure_scope).to_string(),
+        permission_scope: permission_scope.clone(),
+        status: "blocked_pending_permission".to_string(),
+        capability_grant_id: None,
+        health_status: "unreachable".to_string(),
+        reachable: false,
+        revoked_at: None,
+        auth_ref: None,
+        identity_ref: None,
+        identity_fingerprint: None,
+        expires_at: None,
+        last_heartbeat_at: None,
+        updated_sequence: 0,
+    };
+    ensure_runtime_target_owner_exists(parsed, &exposure)?;
+    let mut event = NewEvent::new(
+        format!(
+            "event-connectivity-exposure-{}",
+            stable_cli_hash(&exposure.exposure_id)
+        ),
+        EventKind::ConnectivityExposureRequested,
+        "capo-cli",
+    );
+    event.project_id = Some(exposure.project_id.clone());
+    event.item_id = Some(exposure.exposure_id.clone());
+    event.payload_json = format!(
+        "{{\"exposure_id\":\"{}\",\"endpoint_id\":\"{}\",\"owner_kind\":\"{}\",\"owner_id\":\"{}\",\"channel\":\"{}\",\"exposure\":\"{}\",\"permission_scope\":\"{}\",\"status\":\"blocked_pending_permission\",\"block_reason\":\"public_out_of_scope\"}}",
+        escape_json(&exposure.exposure_id),
+        escape_json(&exposure.connectivity_endpoint_id),
+        escape_json(&exposure.owner_kind),
+        escape_json(&exposure.owner_id),
+        escape_json(&exposure.channel_kind),
+        escape_json(&exposure.exposure),
+        escape_json(&exposure.permission_scope),
+    );
+    event.idempotency_key = Some(format!(
+        "connectivity-exposure-public-out-of-scope:{}:{}:{}:{}:{}",
+        exposure.project_id,
+        exposure.connectivity_endpoint_id,
+        exposure.owner_kind,
+        exposure.owner_id,
+        exposure.channel_kind
+    ));
+    if let Err(pattern) = capo_state::assert_connectivity_event_safe(&event.payload_json) {
+        return Err(format!(
+            "connectivity event payload marked Safe but leaked a `{pattern}` credential pattern; refusing to persist"
+        ));
+    }
+    event.redaction_state = RedactionState::Safe;
+    state(parsed)?
+        .append_event(
+            event,
+            &[ProjectionRecord::ConnectivityExposure(exposure.clone())],
+        )
+        .map_err(debug_error)
+}
+
 fn ensure_runtime_target_owner_exists(
     parsed: &ParsedArgs,
     exposure: &ConnectivityExposureProjection,
@@ -615,11 +781,16 @@ pub(crate) fn connectivity_exposure_heartbeat(
     let exposure_id = required_arg(args, "--exposure")?;
     // Deterministic seam: a comma-separated reachable timeline (e.g. `true,false,true`).
     let timeline_raw = required_arg(args, "--fake-timeline")?;
+    // CT8 clock domain: `--start-ms` anchors the heartbeat/expiry-sweep clock. Tests pass
+    // an explicit zero-anchored value for determinism; a LIVE operator who omits it gets a
+    // self-anchoring REAL wall-clock anchor (the SAME domain `expose-stub`'s
+    // `--public-now-ms` defaults to), so the sweep's `clock.now_ms() >= expires_at`
+    // comparison is correct against real time without manual coordination.
     let start_ms: u64 = optional_arg(args, "--start-ms")
         .map(|value| value.parse())
         .transpose()
         .map_err(|error| format!("invalid --start-ms: {error}"))?
-        .unwrap_or(0);
+        .unwrap_or_else(wall_clock_ms);
     let step_ms: u64 = optional_arg(args, "--step-ms")
         .map(|value| value.parse())
         .transpose()
@@ -725,8 +896,33 @@ pub(crate) fn connectivity_exposure_heartbeat(
         }
     }
 
+    // CT8: the heartbeat/clock tick is the EXPIRY SWEEP for a (gated) short-lived
+    // public exposure — no separate scheduler. When the injectable clock passes the
+    // resolved `expires_at` deadline, the next tick fires the CT7 teardown auto-revoke
+    // (`connectivity.exposure_revoked`). This runs ONLY for a still-active exposure
+    // carrying an `expiry-ms:` deadline; an open-ended private/loopback exposure (or a
+    // non-`expiry-ms:` label) is never swept.
+    let mut expired = false;
+    let mut expiry_sequence: Option<i64> = None;
+    if current.status == "active"
+        && let Some(deadline_ms) = current
+            .expires_at
+            .as_deref()
+            .and_then(capo_runtime::parse_expiry_ms)
+        && clock.now_ms() >= deadline_ms
+    {
+        expired = true;
+        let (_revoked, sequence, _teardown) = perform_connectivity_revoke(
+            &state,
+            &current,
+            "public exposure expired (clock-swept auto-revoke)",
+            "expired",
+        )?;
+        expiry_sequence = Some(sequence);
+    }
+
     Ok(format!(
-        "connectivity_exposure_heartbeat=true\nexposure={}\nendpoint={}\nbeats={}\nhealth={}\nreachable={}\nlast_heartbeat_at={}\nlast_probe_at={}\ntransitions={}\nlast_sequence={}\n",
+        "connectivity_exposure_heartbeat=true\nexposure={}\nendpoint={}\nbeats={}\nhealth={}\nreachable={}\nlast_heartbeat_at={}\nlast_probe_at={}\ntransitions={}\nlast_sequence={}\nexpires_at={}\nexpired={}\nexpiry_sequence={}\n",
         current.exposure_id,
         current.connectivity_endpoint_id,
         timeline.len(),
@@ -740,6 +936,11 @@ pub(crate) fn connectivity_exposure_heartbeat(
             transitions.join(",")
         },
         last_sequence
+            .map(|sequence| sequence.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        current.expires_at.as_deref().unwrap_or("none"),
+        expired,
+        expiry_sequence
             .map(|sequence| sequence.to_string())
             .unwrap_or_else(|| "none".to_string())
     ))
@@ -832,13 +1033,34 @@ pub(crate) fn revoke_connectivity_exposure(
         ));
     }
 
-    // CT7: a real teardown, not merely a status flip. For a non-loopback exposure we
-    // exercise the CT3 channel surface — resolve, `open_channel`, then `close_channel`
-    // — and PROVE unreachability with a post-close `check_reachability`, all driven by
-    // a scripted `FakeTunnel` carrying the SAME surface as the live Tailscale adapter
-    // (CT4 parity), with no live tailnet and no real network. A loopback exposure has
-    // no channel to tear down, so the teardown is recorded as not-applicable.
-    let teardown = teardown_connectivity_exposure(&exposure)?;
+    let (revoked, sequence, teardown) =
+        perform_connectivity_revoke(&state, &exposure, &reason, "operator")?;
+    Ok(render_connectivity_exposure_revocation(
+        &revoked,
+        &reason,
+        Some(sequence),
+        &teardown,
+    ))
+}
+
+/// CT7/CT8: the shared revoke CORE — a REAL teardown, not merely a status flip.
+///
+/// For a non-loopback exposure this exercises the CT3 channel surface (resolve ->
+/// `open_channel` -> `close_channel`) and PROVES unreachability via a post-close
+/// `check_reachability`, all on a scripted `FakeTunnel` (CT4 parity), then emits
+/// `connectivity.exposure_revoked` + a terminal `connectivity.health_changed`
+/// (reachable=false) and releases anti-sleep if this retired the LAST active
+/// non-loopback exposure (CT6 one-way edge). `revoke_kind` is a secret-free
+/// provenance label recorded in the payload (`operator` for the CLI revoke,
+/// `expired` for the CT8 clock-swept auto-revoke). Returns the revoked projection,
+/// the revoke event sequence, and the teardown facts for the CLI render.
+fn perform_connectivity_revoke(
+    state: &SqliteStateStore,
+    exposure: &ConnectivityExposureProjection,
+    reason: &str,
+    revoke_kind: &str,
+) -> Result<(ConnectivityExposureProjection, i64, RevocationTeardown), String> {
+    let teardown = teardown_connectivity_exposure(exposure)?;
 
     let revoked_at = unix_timestamp_label()?;
     let revoked = ConnectivityExposureProjection {
@@ -862,11 +1084,13 @@ pub(crate) fn revoke_connectivity_exposure(
     // CT7: the revoke event records the teardown facts (channel closed, proven
     // unreachable) so the audit trail shows the exposure was REALLY torn down — not
     // just that a status flag changed. No secret in the payload (channel id is a
-    // derived reachability handle, never a credential).
+    // derived reachability handle, never a credential). CT8: `revoke_kind` names
+    // WHETHER this was an operator revoke or the clock-swept expiry auto-revoke.
     event.payload_json = format!(
-        "{{\"exposure_id\":\"{}\",\"status\":\"revoked\",\"reason\":\"{}\",\"revoked_at\":\"{}\",\"channel_closed\":{},\"channel_id\":{},\"proven_unreachable\":{}}}",
+        "{{\"exposure_id\":\"{}\",\"status\":\"revoked\",\"reason\":\"{}\",\"revoke_kind\":\"{}\",\"revoked_at\":\"{}\",\"channel_closed\":{},\"channel_id\":{},\"proven_unreachable\":{}}}",
         escape_json(&revoked.exposure_id),
-        escape_json(&reason),
+        escape_json(reason),
+        escape_json(revoke_kind),
         escape_json(&revoked_at),
         teardown.channel_closed,
         json_opt_string(teardown.channel_id.as_deref()),
@@ -876,8 +1100,8 @@ pub(crate) fn revoke_connectivity_exposure(
         "connectivity-exposure-revoke:{}:{}",
         revoked.project_id, revoked.exposure_id
     ));
-    // CT2 emitted-surface guard: the `reason` free text was scrubbed above, but make
-    // the `Safe` marker MEAN something by scanning the fully-built payload for any
+    // CT2 emitted-surface guard: the `reason` free text was scrubbed by the caller, but
+    // make the `Safe` marker MEAN something by scanning the fully-built payload for any
     // leaked credential pattern before persisting, mirroring the expose-stub path.
     if let Err(pattern) = capo_state::assert_connectivity_event_safe(&event.payload_json) {
         return Err(format!(
@@ -898,7 +1122,7 @@ pub(crate) fn revoke_connectivity_exposure(
     // bare projection flag. Only for a non-loopback exposure that had a torn-down
     // channel (a loopback exposure has no tunnel health timeline).
     if teardown.channel_closed {
-        append_revoke_health_changed(&state, &revoked, &revoked_at)?;
+        append_revoke_health_changed(state, &revoked, &revoked_at)?;
     }
 
     // CT7 (soft CT6 dependency): if this was the LAST active non-loopback exposure,
@@ -907,13 +1131,12 @@ pub(crate) fn revoke_connectivity_exposure(
     // controller's `set_active_exposures`. The controller is deterministic here (a
     // fake backend), OFF unless `CAPO_SERVER_ANTI_SLEEP=1`, and its transition is an
     // observable audit field — the inhibitor never reads exposure state back.
-    let anti_sleep = release_anti_sleep_if_last_exposure(&state, &revoked)?;
+    let anti_sleep = release_anti_sleep_if_last_exposure(state, &revoked)?;
 
-    Ok(render_connectivity_exposure_revocation(
-        &revoked,
-        &reason,
-        Some(sequence),
-        &RevocationTeardown {
+    Ok((
+        revoked,
+        sequence,
+        RevocationTeardown {
             anti_sleep,
             ..teardown
         },

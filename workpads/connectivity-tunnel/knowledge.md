@@ -369,6 +369,32 @@ implement it coherently so the enum stays exhaustive.
   triggers auto-revoke. This resolves the prior open question and adds a CT5
   dependency to CT8. Funnel itself is not built beyond this guard + the gated
   short-lived path.
+- The sweep is CLI-DRIVEN and fake-only in this workpad: there is NO autonomous
+  server-side heartbeat/sweep async loop yet. `exposure-heartbeat` (mandatory
+  `--fake-timeline`) is the deterministic driver that advances the clock and fires the
+  auto-revoke. The autonomous server-side heartbeat loop that drives the sweep without
+  a CLI invocation is the LIVE path, deferred to CT10 (same deferral as the CT5
+  live-heartbeat note). Operators must understand that, until CT10, the expiry sweep
+  only fires when the heartbeat command runs.
+- Live clock anchoring is self-anchoring: `expose-stub --public-now-ms` and
+  `exposure-heartbeat --start-ms` DEFAULT to real wall-clock ms (`wall_clock_ms()`,
+  `SystemTime::now()` since the epoch) when omitted, so a live operator gets a correct
+  real-time expiry window without manually coordinating the two anchors. Tests pass
+  explicit zero-anchored values for replay-stable determinism; only the un-anchored
+  live path consults wall time. Both flags live in the SAME logical-ms domain as the
+  `expiry-ms:`/`heartbeat-ms:` labels.
+- `--record` is MANDATORY for `--exposure public` (both the default refusal and the
+  gated short-lived path). Audit is the point, not an option: a public exposure can
+  never be silently un-audited; the CLI fails closed if `--record` is omitted.
+- The CT8 auto-revoke teardown reuses the CT7 teardown path, so the CT7 live-teardown
+  deferral applies UNCHANGED to the CT8 auto-revoke: `proven_unreachable=true` is
+  FAKE-TUNNEL attested (a scripted `FakeTunnel` `[true,false]` timeline), NOT the
+  original public EndpointStub channel becoming unreachable. CT10 makes the proof
+  causal over the real channel.
+- The `TailscaleTunnel` adapter refuses `Public` PERMANENTLY (typed
+  `ScopeNotSupported`): CT8 did NOT open a tailnet Funnel path. The gated short-lived
+  public prototype rides the `EndpointStub` + `network:expose:public` grant, not the
+  tailnet Funnel. So the tailnet adapter refusing Public is final, intended behavior.
 
 ## Verification Discipline
 
@@ -412,10 +438,19 @@ evidence.
 - RESOLVED (CT5): heartbeat cadence default 15s, stall deadline default 45s (3
   missed beats), both bounded away from zero; per-endpoint configurable via the
   `exposure-heartbeat --step-ms`/`--stall-deadline-ms` flags.
-- What is the maximum allowed `expires_at` ceiling for a (gated) short-lived public
-  exposure? (Mechanism is RESOLVED — the CT5 heartbeat/clock tick is the sweep; only
-  the numeric ceiling remains, pinned at CT8.)
 - (none currently open)
+
+RESOLVED (CT8): the maximum `expires_at` ceiling for a (gated) short-lived public
+exposure is `PUBLIC_EXPOSURE_MAX_TTL_MS = 10 minutes`
+(`capo-runtime::connectivity_health`). A requested TTL is CLAMPED to (1ms ..= 10min)
+via `public_expiry_label(now_ms, ttl_ms)`, so a public exposure can never be
+open-ended or exceed the short-lived ceiling. The deadline is encoded as an
+`expiry-ms:<logical-ms>` label in the SAME clock domain as the CT5 heartbeat
+(`heartbeat-ms:`), and the heartbeat/clock tick is the expiry SWEEP: when
+`ConnectivityClock::now_ms() >= parse_expiry_ms(expires_at)`, the next
+`exposure-heartbeat` tick fires the CT7 teardown auto-revoke
+(`connectivity.exposure_revoked`, `revoke_kind = expired`), proven unreachable. There
+is NO separate scheduler.
 
 RESOLVED (formerly open):
 - WHO runs the heartbeat loop / WHERE the anti-sleep inhibitor lives: a named
