@@ -1018,6 +1018,186 @@ fn acp_local_launch_plan_is_subscription_safe_and_confined() {
     assert_eq!(plan.artifact_root, artifacts);
 }
 
+#[test]
+fn claude_launch_plans_carry_no_secret_like_env_allowlist_entries() {
+    // CS1 connector policy: BOTH Claude launch profiles must carry an
+    // env_allowlist that contains NONE of ANTHROPIC_API_KEY /
+    // ANTHROPIC_AUTH_TOKEN, nor any name matching TOKEN/KEY/SECRET/COOKIE, so the
+    // runtime's `env_clear()` spawn can never leak the connector credentials.
+    // (Mirrors the Codex `env_allowlist` shape asserted elsewhere in this file.)
+    let workspace = temp_root("claude-allowlist-workspace");
+    let artifacts = temp_root("claude-allowlist-artifacts");
+    for plan in [
+        ClaudeCodeAdapter::local_launch_plan(workspace.clone(), artifacts.clone(), "hello"),
+        ClaudeCodeAdapter::local_workspace_write_launch_plan(
+            workspace.clone(),
+            artifacts.clone(),
+            "hello",
+        ),
+    ] {
+        for name in &plan.env_allowlist {
+            let upper = name.to_ascii_uppercase();
+            assert_ne!(upper, "ANTHROPIC_API_KEY");
+            assert_ne!(upper, "ANTHROPIC_AUTH_TOKEN");
+            assert!(
+                !(upper.contains("TOKEN")
+                    || upper.contains("KEY")
+                    || upper.contains("SECRET")
+                    || upper.contains("COOKIE")),
+                "Claude launch env allowlist must not contain secret-like name: {name}"
+            );
+        }
+        // Sanity: the allowlist is non-empty and the subscription-safe assertion
+        // accepts the unmodified plan.
+        assert!(!plan.env_allowlist.is_empty());
+        plan.assert_subscription_safe().unwrap();
+    }
+}
+
+#[test]
+fn claude_workspace_write_plan_assert_subscription_safe_is_load_bearing() {
+    // CS1: the workspace-write plan is subscription-safe as built, and injecting
+    // an ANTHROPIC_AUTH_TOKEN allowlist entry makes the assertion fail closed --
+    // so the assertion is load-bearing, not decorative.
+    let workspace = temp_root("claude-assert-workspace");
+    let artifacts = temp_root("claude-assert-artifacts");
+    let mut plan = ClaudeCodeAdapter::local_workspace_write_launch_plan(
+        workspace,
+        artifacts,
+        "Apply the requested edit.",
+    );
+    plan.assert_subscription_safe().unwrap();
+
+    plan.env_allowlist.push("ANTHROPIC_AUTH_TOKEN".to_string());
+    let error = plan
+        .assert_subscription_safe()
+        .expect_err("an ANTHROPIC_AUTH_TOKEN allowlist entry must fail closed");
+    assert!(
+        error.contains("env allowlist"),
+        "the failure must name the env allowlist, got: {error}"
+    );
+}
+
+#[test]
+fn claude_spawned_stub_does_not_inherit_anthropic_connector_env() {
+    use capo_runtime::{LocalProcessRequest, LocalProcessRunner};
+    use std::collections::HashMap;
+
+    // CS1 end-to-end scrub: even when BOTH ANTHROPIC_API_KEY and
+    // ANTHROPIC_AUTH_TOKEN are set in the PARENT process env, a Claude launch
+    // plan spawned through the runtime (which `env_clear()`s and then re-adds
+    // only the allowlist) must NOT pass them to the child. We prove this by
+    // running a stub that prints its visible environment and asserting neither
+    // name appears.
+    let workspace = temp_root("claude-scrub-workspace");
+    let artifacts = temp_root("claude-scrub-artifacts");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&artifacts).unwrap();
+
+    // Write an executable stub that prints its environment.
+    let stub = workspace.join("print-env.sh");
+    fs::write(&stub, "#!/bin/sh\nenv\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&stub).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&stub, perms).unwrap();
+    }
+
+    let plan = ClaudeCodeAdapter::local_workspace_write_launch_plan(
+        workspace.clone(),
+        artifacts,
+        "ignored",
+    );
+    let runner = LocalProcessRunner::new(plan.runtime_config());
+
+    // Set the connector creds in the PARENT env, then spawn the stub.
+    unsafe {
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-should-not-leak");
+        std::env::set_var("ANTHROPIC_AUTH_TOKEN", "bearer-should-not-leak");
+    }
+    let request = LocalProcessRequest {
+        run_id: RunId::new("run-claude-scrub"),
+        turn_id: None,
+        program: stub.to_string_lossy().to_string(),
+        argv: Vec::new(),
+        cwd: workspace,
+        env: HashMap::new(),
+    };
+    let outcome = runner.start_process(request);
+    unsafe {
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+    }
+    let outcome = outcome.unwrap();
+    let printed = fs::read_to_string(&outcome.stdout.path).unwrap();
+    assert!(
+        !printed.contains("ANTHROPIC_API_KEY"),
+        "ANTHROPIC_API_KEY must be scrubbed from the spawned env, got:\n{printed}"
+    );
+    assert!(
+        !printed.contains("ANTHROPIC_AUTH_TOKEN"),
+        "ANTHROPIC_AUTH_TOKEN must be scrubbed from the spawned env, got:\n{printed}"
+    );
+    assert!(
+        !printed.contains("should-not-leak"),
+        "no connector credential value may reach the child env"
+    );
+}
+
+#[test]
+fn claude_live_one_shot_refuses_tampered_secret_arg_before_spawn() {
+    // CS1: `run_one_shot` asserts `assert_subscription_safe()` BEFORE spawn, so a
+    // launch plan whose argv carries a secret-like marker is refused before any
+    // process starts. We exercise the assertion directly on the workspace-write
+    // plan the live chat adapter drives (claude_live.rs:158/174) with a tampered
+    // argv.
+    let workspace = temp_root("claude-tamper-workspace");
+    let artifacts = temp_root("claude-tamper-artifacts");
+    let mut plan = ClaudeCodeAdapter::local_workspace_write_launch_plan(
+        workspace,
+        artifacts,
+        "Apply the requested edit.",
+    );
+    plan.assert_subscription_safe().unwrap();
+    plan.argv
+        .push("Authorization: bearer sk-ant-leaked-token".to_string());
+    let error = plan
+        .assert_subscription_safe()
+        .expect_err("a secret-like argv marker must be refused before spawn");
+    assert!(
+        error.contains("argv"),
+        "the failure must name the argv, got: {error}"
+    );
+}
+
+#[test]
+fn sensitive_marker_scan_flags_auth_token_values() {
+    // CS1 secondary-scan hardening: close the gap where an auth_token /
+    // anthropic_auth_token bearer value (no `sk-` shape) slipped past the stdout
+    // scan. A line carrying such a value must now be flagged.
+    let root = temp_root("auth-token-scan");
+    fs::create_dir_all(&root).unwrap();
+
+    let auth_token = root.join("auth-token.txt");
+    fs::write(&auth_token, "ANTHROPIC_AUTH_TOKEN=bearer-abc123def456\n").unwrap();
+    let lowered = root.join("auth-token-lower.txt");
+    fs::write(&lowered, "auth_token: some-opaque-bearer-value\n").unwrap();
+
+    let token_error = scan_artifacts_for_sensitive_markers([&auth_token]).unwrap_err();
+    assert!(matches!(
+        token_error,
+        LocalAdapterSmokeError::SensitiveArtifact { marker, .. }
+            if marker == "anthropic_auth_token"
+    ));
+    let lower_error = scan_artifacts_for_sensitive_markers([&lowered]).unwrap_err();
+    assert!(matches!(
+        lower_error,
+        LocalAdapterSmokeError::SensitiveArtifact { marker, .. } if marker == "auth_token"
+    ));
+}
+
 fn temp_root(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

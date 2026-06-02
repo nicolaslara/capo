@@ -104,16 +104,49 @@ The `claude` subscription CLI is a PRIVILEGED CONNECTOR, not an ordinary API key
   keyword, and an `ANTHROPIC_AUTH_TOKEN` value has no `sk-` prefix shape -- so if such
   a bearer/session token value ever appeared in stdout, the scan would miss it. The
   env-clear allowlist is why this gap is not a live leak (the token is never handed to
-  the process), but the scan does NOT cover all bearer/session token value formats.
-  CS1 closes this by adding `auth_token` / `anthropic_auth_token` (and any other
-  bearer keyword) to the `sensitive_marker` keyword list; until then the connector
-  policy's "raw output is scrubbed" claim holds for API-key shapes and the listed
-  keywords ONLY, not for arbitrary auth-token values.
+  the process), but the scan did NOT cover all bearer/session token value formats.
+  CS1 CLOSED this by adding `auth_token` / `anthropic_auth_token` to the
+  `sensitive_marker` keyword list (`local_subscription.rs`), with the deterministic
+  `sensitive_marker_scan_flags_auth_token_values` test asserting an
+  `ANTHROPIC_AUTH_TOKEN`/`auth_token`-style value in stdout is now flagged. The
+  env-clear allowlist remains the PRIMARY defense; this hardens the secondary scan.
 - The connector records auth MODE only (e.g. `user_local_subscription`), never
   credential material. CS1's allowlist test + the spawned-stub env-scrub test are
   the load-bearing checks for this; no connector record/event carries a credential
   field (if any connector record is emitted on a Claude launch, a CS1 assertion
   confirms it contains no credential value).
+
+## CS1 Status (Landed)
+
+CS1 hardened and TESTED the connector policy so it is a checkable acceptance
+criterion rather than a code comment. The subscription is referenced by HANDLE
+only -- the operator's local `claude` login (the `~/.claude` session the CLI
+manages). Capo never reads, copies, or logs that credential material; it only
+spawns `claude` as the logged-in user. The redaction rules
+(`local_adapter_redaction_rules`) + the `scan_artifacts_for_sensitive_markers`
+scan are the SECONDARY retention defense on stdout; the env allowlist +
+`env_clear()` is the PRIMARY defense. The load-bearing CS1 tests live in
+`crates/capo-adapters/src/tests.rs`:
+
+- `claude_launch_plans_carry_no_secret_like_env_allowlist_entries`: BOTH Claude
+  launch plans (`local_launch_plan` + `local_workspace_write_launch_plan`) carry an
+  env_allowlist with NONE of `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` nor any
+  TOKEN/KEY/SECRET/COOKIE name.
+- `claude_workspace_write_plan_assert_subscription_safe_is_load_bearing`: the plan
+  is `Ok` as built; injecting an `ANTHROPIC_AUTH_TOKEN` allowlist entry makes
+  `assert_subscription_safe()` return `Err` (fail-closed).
+- `claude_spawned_stub_does_not_inherit_anthropic_connector_env`: a stub spawned
+  through `LocalProcessRunner` does NOT receive `ANTHROPIC_API_KEY` /
+  `ANTHROPIC_AUTH_TOKEN` even when both are set in the parent env (the `env_clear()`
+  + allowlist scrub is enforced end-to-end).
+- `claude_live_one_shot_refuses_tampered_secret_arg_before_spawn`: a tampered
+  workspace-write plan (the one `run_one_shot` drives, asserting subscription-safe
+  before spawn at `claude_live.rs:174`) with a secret-like argv is refused before
+  any process starts.
+- `sensitive_marker_scan_flags_auth_token_values`: the closed scan gap (above).
+
+No connector record/event carries a credential field; the connector records auth
+MODE only (`user_local_subscription`).
 
 ## Two Claude Launch Profiles (Precise Facts)
 
