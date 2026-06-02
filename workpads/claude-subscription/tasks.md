@@ -281,8 +281,15 @@ Dependencies: CS0, CS1. Intra-workpad: feeds CS5/CS6.
 
 ## CS3 - stream-json Parsing Into The Loop's Existing Ingestion Route
 
-Status: pending (parser landed under DP4; this task PROVES loop-route reuse + usage
-mapping with assertions; the parity guard test already exists and is KEPT).
+Status: LANDED. The parser landed under DP4; CS3 PROVED loop-route reuse + usage
+mapping with deterministic assertions. The parity guard
+(`claude_normalized_events_match_codex_trait_seam_shape`) and the usage/session-ref
+test (`claude_turn_completed_carries_usage_tokens_and_session_ref`) are KEPT in
+`crates/capo-adapters/src/claude_live.rs`; the NEW capo-server loop-route proof
+(`crates/capo-server/src/tests/claude_loop_route.rs::claude_turn_lands_same_read_model_row_shape_as_codex_through_shared_ingestion_route`)
+feeds Claude + Codex fixtures through the SAME ungated `ReplayAdapterFixture` ->
+`parse_adapter_events` -> `apply_normalized_adapter_events_with_turn` route and
+asserts identical projected read-model row shapes. No live provider.
 
 Prerequisite: `real-turn-loop` + `tools-aci`; CS2.
 

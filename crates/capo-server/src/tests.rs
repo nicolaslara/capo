@@ -15,6 +15,7 @@ use crate::{
 };
 
 mod claude_chat;
+mod claude_loop_route;
 mod codex_chat;
 mod codex_workspace_write;
 mod contract;

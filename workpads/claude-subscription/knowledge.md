@@ -187,6 +187,46 @@ mutation across the gated tests in the module; the `GateGuard` Drop guard restor
 the prior gate env on unwind so a mid-test failure cannot leak gate env into other
 tests in the binary. Live write/chat remain deferred to CS6.
 
+## CS3 Status (Landed)
+
+CS3 PROVED loop-route reuse + usage mapping with deterministic assertions (no
+live provider). Claude `stream-json` normalizes through the SAME
+`parse_adapter_events("claude_code", ..)` ->
+`apply_normalized_adapter_events_with_turn` route the loop already uses, never a
+parallel Claude-only route, and a Claude turn lands as the SAME projected
+read-model row SHAPE a Codex turn produces. The load-bearing CS3 tests:
+
+- `crates/capo-adapters/src/claude_live.rs::claude_normalized_events_match_codex_trait_seam_shape`
+  (KEPT, parity guard): the ordered `NormalizedAdapterEvent` KINDS for a
+  representative Claude `stream-json` turn (`system` -> `assistant` -> `tool_use`
+  -> `result`) equal the Codex JSONL kinds for the same logical turn
+  (`adapter.session_started`, `adapter.item_completed`,
+  `adapter.tool_call_started`, `adapter.turn_completed`).
+- `crates/capo-adapters/src/claude_live.rs::claude_turn_completed_carries_usage_tokens_and_session_ref`
+  (KEPT): the Claude `external_session_ref` derives from the Claude `session-id`
+  (`claude-sess-1`) and `adapter.turn_completed` carries `input_tokens`/
+  `output_tokens` from the Claude `usage` block.
+- `crates/capo-server/src/tests/claude_loop_route.rs::claude_turn_lands_same_read_model_row_shape_as_codex_through_shared_ingestion_route`
+  (NEW, mirrors the DP1 ACP loop-route proof): drives BOTH a Claude
+  `stream-json` fixture and a Codex JSONL fixture through the SAME ungated
+  production write path (`ServerCommand::ReplayAdapterFixture` ->
+  `parse_adapter_events(<adapter>, ..)` ->
+  `apply_normalized_adapter_events_with_turn`) and asserts the projected
+  read-model row SHAPE is identical: one completed turn, an assistant summary,
+  exactly one OBSERVED-ONLY tool result distinct from the agent's claim, a
+  recorded tool call, the `session.summary_updated` + `tool.observation_recorded`
+  events, and equal replay tool/summary/turn ingestion counts. The
+  `ReplayAdapterFixture` route is provider-agnostic and ungated (the dispatch
+  live-execution gate that CS5 unblocks is a SEPARATE path), so the test does not
+  depend on CS5.
+
+Retention note observed in CS3: the loop projects the assistant claim into a
+session summary as a CONTENT-HASHED anchor (e.g.
+`Adapter claude_code assistant observed content_hash=fnv1a64:...`), not the raw
+assistant text -- the connector retention policy (raw `stream-json` is
+content-hashed/redacted before retention, never rendered). This is identical to
+the Codex projection shape; Claude introduces no new ingestion vocabulary.
+
 ## Two Claude Launch Profiles (Precise Facts)
 
 There are TWO distinct Claude launch plans in
