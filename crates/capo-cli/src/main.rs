@@ -22,6 +22,7 @@ mod operator_control;
 mod permission;
 mod project_memory;
 mod project_memory_flow;
+mod role_config;
 mod runtime_target;
 mod runtime_target_evidence;
 mod server_client;
@@ -65,6 +66,7 @@ use project_memory::{
     next_project_memory_task, plan_next_project_memory_task, propose_project_memory_update,
     start_next_project_memory_task,
 };
+use role_config::{role_client, role_runner, role_server};
 use runtime_target::{
     list_runtime_targets, register_runtime_target, runtime_target_readiness, runtime_target_status,
     set_runtime_target_status,
@@ -323,6 +325,19 @@ fn run_cli(raw_args: Vec<String>) -> Result<String, String> {
         [area, command, action] if area == "runtime" && command == "target" && action == "list" => {
             list_runtime_targets(&parsed)
         }
+        [area, command, rest @ ..] if area == "role" && command == "server" => {
+            role_server(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "role" && command == "runner" => {
+            role_runner(&parsed, rest)
+        }
+        [area, command, rest @ ..] if area == "role" && command == "client" => {
+            role_client(&parsed, rest)
+        }
+        [area, role, ..] if area == "role" => Err(role_config::RoleKind::parse(role)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| format!("role {role} requires a subcommand"))),
         [area, command, rest @ ..] if area == "connectivity" && command == "expose-stub" => {
             expose_connectivity_stub(&parsed, rest)
         }

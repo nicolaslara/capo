@@ -6,6 +6,8 @@ mod dispatch;
 mod live;
 #[path = "server_transport/replay.rs"]
 mod replay;
+#[path = "server_transport/role_topology.rs"]
+mod role_topology;
 #[path = "server_transport/stream.rs"]
 mod stream;
 #[path = "server_transport/support.rs"]

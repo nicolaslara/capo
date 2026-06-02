@@ -366,6 +366,73 @@ impl CapoServer {
                     }),
                 )
             }
+            ServerCommand::RegisterRuntimeTarget {
+                runtime_target_id,
+                name,
+                runner_kind,
+                workspace_root,
+                artifact_root,
+                default_cwd,
+                capability_profile_id,
+                connectivity_endpoint_id,
+                status,
+            } => {
+                // DT1 (DT-D1): the runner ANNOUNCED over this transport; the
+                // server (single writer) appends `runtime.target_registered`. The
+                // endpoint is carried by handle only -- no raw address/credential
+                // ever reaches the log. Idempotent on the target id, so a
+                // re-announce on reconnect does not duplicate the target.
+                let (target, sequence) = self
+                    .controller
+                    .register_runtime_target(
+                        &runtime_target_id,
+                        &name,
+                        &runner_kind,
+                        &workspace_root,
+                        &artifact_root,
+                        &default_cwd,
+                        &capability_profile_id,
+                        connectivity_endpoint_id.as_deref(),
+                        &status,
+                    )
+                    .map_err(ServerError::State)?;
+                let command_hash = command_identity_hash(format!(
+                    "register_runtime_target:{runtime_target_id}:{runner_kind}"
+                ));
+                let command = self.command_envelope(
+                    &request_id,
+                    &origin,
+                    &command_hash,
+                    CommandTarget::Project(self.project_id.clone()),
+                    CommandIntent::RegisterAgent,
+                    Some(target.name.clone()),
+                );
+                self.record_server_request_handled(
+                    &command,
+                    &origin,
+                    "register_runtime_target",
+                    None,
+                    Some(serde_json::json!({
+                        "runtime_target_id": target.runtime_target_id,
+                        "runner_kind": target.runner_kind,
+                        "connectivity_endpoint_id": target.connectivity_endpoint_id,
+                        "announce_source": "runner_jsonrpc",
+                    })),
+                )
+                .map_err(ServerError::State)?;
+                self.response(
+                    request_id,
+                    origin,
+                    ServerResponsePayload::RuntimeTargetRegistered(ServerRuntimeTargetSummary {
+                        runtime_target_id: target.runtime_target_id,
+                        name: target.name,
+                        runner_kind: target.runner_kind,
+                        status: target.status,
+                        connectivity_endpoint_id: target.connectivity_endpoint_id,
+                        sequence,
+                    }),
+                )
+            }
             ServerCommand::SendTask {
                 agent_name,
                 goal,

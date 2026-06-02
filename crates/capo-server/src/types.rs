@@ -166,6 +166,35 @@ pub enum ServerCommand {
     AgentStatus {
         agent_name: String,
     },
+    /// DT1 (DT-D1): a remote runner ANNOUNCES itself to the server over the
+    /// existing JSON-RPC command transport, and the server -- the single
+    /// authoritative writer -- appends `runtime.target_registered` to the log.
+    ///
+    /// This is the runner<->server channel decision made concrete: the runner is
+    /// "a special client that owns processes" and reuses this transport rather
+    /// than a second bridge. It closes the in-tree gap that
+    /// `runtime.target_registered` was previously only a LOCAL CLI store write
+    /// (`crates/capo-cli/src/runtime_target.rs`): the runner can be on a different
+    /// device and still has the server own the append.
+    ///
+    /// `connectivity_endpoint_id` references the runner's reachability endpoint by
+    /// HANDLE; no raw address+credential is ever inlined here (the resolution of a
+    /// handle to a real endpoint is the tunnel's job at connect time). A runner
+    /// that names no endpoint is still valid for an all-local loopback target; the
+    /// distributed path resolves the handle through `ConnectivityTunnel`.
+    RegisterRuntimeTarget {
+        runtime_target_id: String,
+        name: String,
+        /// `local-process` / `remote-process` / `container` (validated by the CLI
+        /// role surface before the announce is sent).
+        runner_kind: String,
+        workspace_root: String,
+        artifact_root: String,
+        default_cwd: String,
+        capability_profile_id: String,
+        connectivity_endpoint_id: Option<String>,
+        status: String,
+    },
     Dashboard {
         recent_event_limit: usize,
     },
@@ -834,6 +863,11 @@ pub enum ServerResponsePayload {
     TaskSent(TaskRunSummary),
     Agents(Vec<AgentSummary>),
     AgentStatus(AgentSummary),
+    /// DT1: the server-appended outcome of a runner's `RegisterRuntimeTarget`
+    /// announce -- the registered runtime target plus the sequence at which the
+    /// server (single writer) appended `runtime.target_registered`. A tailing
+    /// client sees that same server-appended event in its `Subscribe` tail.
+    RuntimeTargetRegistered(ServerRuntimeTargetSummary),
     Dashboard(ServerDashboardSnapshot),
     SessionStarted(TaskRunSummary),
     AdapterFixtureReplayed(AdapterReplaySummary),
@@ -871,6 +905,20 @@ pub enum ServerResponsePayload {
     /// enabled, the `DispatchTurn` summary of the ONE follow-on turn driven through
     /// the production path. `dispatched` is `Some` iff exactly one turn was driven.
     ContinuationEvaluated(ContinuationEvaluatedSummary),
+}
+
+/// DT1: the server-side summary of a runner's announced runtime target. The
+/// `sequence` is where the server (single authoritative writer) appended
+/// `runtime.target_registered`; `connectivity_endpoint_id` is the runner's
+/// reachability handle (never a raw address+credential).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServerRuntimeTargetSummary {
+    pub runtime_target_id: String,
+    pub name: String,
+    pub runner_kind: String,
+    pub status: String,
+    pub connectivity_endpoint_id: Option<String>,
+    pub sequence: i64,
 }
 
 /// AI5: the wire outcome of [`ServerCommand::ContinueGoal`]. The decision/reason is
@@ -1331,6 +1379,11 @@ fn default_request_id(command: &ServerCommand) -> String {
         ServerCommand::ListAgents => "server-agent-list".to_string(),
         ServerCommand::AgentStatus { agent_name } => {
             format!("server-agent-status-{}", slug(agent_name))
+        }
+        ServerCommand::RegisterRuntimeTarget {
+            runtime_target_id, ..
+        } => {
+            format!("server-runtime-target-register-{}", slug(runtime_target_id))
         }
         ServerCommand::Dashboard { .. } => "server-dashboard".to_string(),
         ServerCommand::StartSession {

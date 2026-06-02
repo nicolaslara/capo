@@ -426,7 +426,29 @@ Dependencies: DT0, DT-pre-A. Cross-workpad: `remote-runtime` (loopback runner),
 
 ## DT1 - Three-Role Configuration And CLI Surface (server / runner / client)
 
-Status: pending.
+Status: done. Typed three-role config surface (`crates/capo-cli/src/role_config.rs`)
+with exactly `server` / `runner` / `client`, peers named by handle
+(`--*-endpoint` id resolved through `ConnectivityTunnel`, or a loopback
+`--*-addr`; inlined `user:pass@` credentials rejected). Up-front typed
+`RoleConfigError` validation (a runner/client with no server endpoint is rejected
+before any socket). The DT-D1 announce path is real JSON-RPC: `capo role runner`
+sends `RegisterRuntimeTarget` over `send_tcp` to the live server, which (single
+writer) appends `runtime.target_registered`; idempotent on
+`runtime-target:{project}:{target}`. Non-loopback exposure is
+`blocked_pending_permission` until the DT5 grant. Decisions from the adversarial
+review: (1) the announce has NO in-process fallback -- a dead server fails loudly
+(`ConnectionRefused` -> actionable error), so `announce_source=runner_jsonrpc` is
+never a lie; (6) `--connect` that disagrees with a loopback `--server-addr` is
+rejected up front (the two flags have distinct documented roles: resolution vs
+tunnel-local dial). Tests landed (`crates/capo-cli/tests/server_transport/role_topology.rs`):
+the three-process-over-loopback announce/tail test now uses a DISTINCT runner
+state root and asserts the runner wrote NO local store (proving the announce rode
+TCP), plus a `capo role client` subprocess reporting
+`server_tail_reachability=reachable`; a dead-server loud-failure test; a
+`--connect`/`--server-addr` mismatch rejection test; and an idempotent
+re-announce test (same sequence, single tail occurrence). Residual: the
+non-loopback dial itself rides the DT5-granted tunnel (DT5); the all-local
+default-inertness regression is proven by DT6.
 
 Prerequisite: `streaming-transport` (server listener + `subscribe_tcp` client
 seam) + DT0's DT-D1 resolution (runner<->server channel = reuse JSON-RPC).

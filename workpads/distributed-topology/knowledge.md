@@ -48,15 +48,30 @@ LANDED on this branch. Current in-tree reality:
   `ExposurePolicy::loopback_default().authorize_socket(..)` (CT1), not a hand-rolled
   unconditional `is_loopback()`; the grant-gated non-loopback branch is the DT5 seam.
 
+DT1 DONE: the runner->server ANNOUNCE path is now real JSON-RPC, not a local
+store write. `capo role runner` sends `RegisterRuntimeTarget` over `send_tcp` to
+the live server, which (single writer) appends `runtime.target_registered`,
+idempotent on `runtime-target:{project}:{target}`. Decisions forced by the
+adversarial review: the announce has NO in-process fallback (a dead server fails
+loudly with `ConnectionRefused` -> actionable error, so
+`announce_source=runner_jsonrpc` can never be a false label); and a `--connect`
+that disagrees with a loopback `--server-addr` is rejected up front (the two
+flags have distinct, documented roles -- endpoint resolution vs tunnel-local
+dial). Tests: a three-process-over-loopback announce/tail test using a DISTINCT
+runner state root that asserts the runner wrote no local store (proving the
+announce rode TCP) plus a `capo role client` subprocess; a dead-server
+loud-failure test; a `--connect`/`--server-addr` mismatch test; an idempotent
+re-announce test (same sequence, single tail occurrence).
+
 Still missing (still owned by DT/DT-pre tasks): the `ConnectivityTunnel::Ssh`
-reachability variant if the DT track needs one (unowned upstream -- DT-pre-A); the
-runner->server ANNOUNCE path (`runtime.target_registered` is still a local CLI store
-write -- DT1); runner-side redaction-before-transit and env scrub (DT3/DT5); the
-buffered-event runner spool + idempotent replay (DT4b); `ConnectivityTunnel`-backed
-endpoint resolution into the runner attach (DT1/DT3, vs. RR8's direct
-`SshRemoteConfig`); and the reconnect-leg auditability decision (today only a
-`channel_closed` payload boolean, not discrete `ConnectivityChannelOpened/Closed`
-event kinds).
+reachability variant if the DT track needs one (unowned upstream -- DT-pre-A);
+runner-side redaction-before-transit and env scrub (DT3/DT5); the
+buffered-event runner spool + idempotent replay (DT4b); the actual non-loopback
+dial riding the `ConnectivityTunnel`-backed (DT5-granted) endpoint into the
+runner attach (DT3/DT5, vs. RR8's direct `SshRemoteConfig`; DT1 resolves the
+endpoint and blocks-pending-permission but does not yet open the granted tunnel);
+and the reconnect-leg auditability decision (today only a `channel_closed`
+payload boolean, not discrete `ConnectivityChannelOpened/Closed` event kinds).
 
 Two consequences, both recorded as decisions:
 

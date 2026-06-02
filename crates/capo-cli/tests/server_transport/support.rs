@@ -167,6 +167,25 @@ pub(crate) fn capo_with_env_and_stdin<const N: usize, const M: usize>(
     String::from_utf8(output.stdout).expect("utf8 stdout")
 }
 
+/// Run `capo` expecting a NON-zero exit, returning combined stdout+stderr. Used
+/// by the DT1 role-config validation tests where a missing/invalid role config
+/// must be rejected before any connection is attempted.
+pub(crate) fn capo_failure<const N: usize>(args: [&str; N]) -> String {
+    let output = Command::new(capo_bin())
+        .args(args)
+        .output()
+        .expect("run capo");
+    assert!(
+        !output.status.success(),
+        "expected capo to fail but it succeeded: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    combined
+}
+
 pub(crate) fn capo_bin() -> &'static str {
     env!("CARGO_BIN_EXE_capo")
 }

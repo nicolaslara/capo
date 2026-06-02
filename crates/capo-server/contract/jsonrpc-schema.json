@@ -265,7 +265,8 @@
             "goal_reviews",
             "goal_risks",
             "goal_report",
-            "continue_goal"
+            "continue_goal",
+            "register_runtime_target"
           ],
           "type": "string"
         },
@@ -340,7 +341,8 @@
                     "goal_reports",
                     "goal_timeline",
                     "goal_report",
-                    "continuation_evaluated"
+                    "continuation_evaluated",
+                    "runtime_target_registered"
                   ],
                   "type": "string"
                 }

@@ -23,8 +23,8 @@ use capo_runtime::{FakeRuntimeStartRequest, LocalProcessRunner, RuntimeRunner};
 use capo_state::{
     AgentProjection, ArtifactRecord, EventKind, EventRecord, NewEvent, ProjectProjection,
     ProjectedTurnOutcome, ProjectionRecord, RedactionState, RunProjection, RunReapKind,
-    RunReapObservation, RunRecoveryKind, RunRecoveryObservation, SessionProjection,
-    SqliteStateStore, StateError, StateResult, TaskProjection,
+    RunReapObservation, RunRecoveryKind, RunRecoveryObservation, RuntimeTargetProjection,
+    SessionProjection, SqliteStateStore, StateError, StateResult, TaskProjection,
 };
 use capo_tools::{
     FakeToolRequest, PermissionDecision, PermissionPolicy, PermissionRequest, ToolExposure,
@@ -531,6 +531,80 @@ impl FakeBoundaryController {
             agent_id,
             agent_name: agent_name.to_string(),
         })
+    }
+
+    /// DT1 (DT-D1): append `runtime.target_registered` for a runtime target a
+    /// remote runner ANNOUNCED over the JSON-RPC transport. The server -- the
+    /// single authoritative writer -- owns this append; the runner is a
+    /// non-authoritative client that owns processes, not state. This is the
+    /// server-side counterpart to the (now legacy) local CLI store write in
+    /// `crates/capo-cli/src/runtime_target.rs`: same event/projection, but the
+    /// append is driven by the server on the runner's behalf, so a runner on a
+    /// different device still has the server own the log entry.
+    ///
+    /// `connectivity_endpoint_id` is carried as a HANDLE only; no raw address or
+    /// credential is part of the payload. The append is idempotent on
+    /// `(project, runtime_target_id)`, so a re-announce (e.g. after a reconnect)
+    /// does not create a duplicate target.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_runtime_target(
+        &self,
+        runtime_target_id: &str,
+        name: &str,
+        runner_kind: &str,
+        workspace_root: &str,
+        artifact_root: &str,
+        default_cwd: &str,
+        capability_profile_id: &str,
+        connectivity_endpoint_id: Option<&str>,
+        status: &str,
+    ) -> StateResult<(RuntimeTargetProjection, i64)> {
+        let target = RuntimeTargetProjection {
+            runtime_target_id: runtime_target_id.to_string(),
+            project_id: self.project_id.clone(),
+            name: name.to_string(),
+            runner_kind: runner_kind.to_string(),
+            workspace_root: workspace_root.to_string(),
+            artifact_root: artifact_root.to_string(),
+            default_cwd: default_cwd.to_string(),
+            capability_profile_id: capability_profile_id.to_string(),
+            connectivity_endpoint_id: connectivity_endpoint_id.map(ToString::to_string),
+            status: status.to_string(),
+            updated_sequence: 0,
+        };
+        let mut new_event = event(
+            &format!("event-runtime-target-{}", slug(&target.runtime_target_id)),
+            EventKind::RuntimeTargetRegistered,
+            &self.project_id,
+        )
+        .with_item(target.runtime_target_id.clone())
+        .with_payload(
+            serde_json::json!({
+                "runtime_target_id": target.runtime_target_id,
+                "name": target.name,
+                "runner_kind": target.runner_kind,
+                "workspace_root": target.workspace_root,
+                "artifact_root": target.artifact_root,
+                "default_cwd": target.default_cwd,
+                "capability_profile_id": target.capability_profile_id,
+                "connectivity_endpoint_id": target.connectivity_endpoint_id,
+                "status": target.status,
+                "announce_source": "runner_jsonrpc",
+                "provider_cli_executed": false,
+                "tunnel_opened": false,
+            })
+            .to_string(),
+        );
+        new_event.idempotency_key = Some(format!(
+            "runtime-target:{}:{}",
+            self.project_id, target.runtime_target_id
+        ));
+        new_event.redaction_state = RedactionState::Safe;
+        let sequence = self.state.append_event(
+            new_event,
+            &[ProjectionRecord::RuntimeTarget(target.clone())],
+        )?;
+        Ok((target, sequence))
     }
 
     pub fn registration_for_agent_name(

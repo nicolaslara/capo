@@ -354,6 +354,46 @@ pub(crate) fn server_recover(parsed: &ParsedArgs, args: &[String]) -> Result<Str
     ))
 }
 
+/// DT1 (DT-D1): send a runner's `RegisterRuntimeTarget` announce to the server
+/// over the existing JSON-RPC command transport and return the server's typed
+/// response. The runner is "a special client that owns processes": it reuses
+/// `send_tcp` (no second bridge), and the SERVER -- the single writer -- appends
+/// `runtime.target_registered`. `connect_addr` is the resolved (loopback or
+/// DT5-granted-tunnel) control address; it is loopback-validated here exactly
+/// like every other client dial.
+///
+/// The announce REQUIRES a live server over the real transport. There is NO
+/// in-process fallback (review finding 1): the DT-D1 semantic is "the runner
+/// announces over the existing JSON-RPC command transport," and that correctness
+/// depends on the server being the single writer reached over a real socket. A
+/// `ConnectionRefused` therefore fails loudly with an actionable error rather
+/// than silently writing in-process and mislabeling the announce as
+/// `runner_jsonrpc`. The unused `_parsed` is retained for signature parity with
+/// the rest of the server-client surface.
+pub(crate) fn server_role_announce_runtime_target(
+    _parsed: &ParsedArgs,
+    args: &[String],
+    connect_addr: &str,
+    command: ServerCommand,
+) -> Result<ServerResponsePayload, String> {
+    require_loopback_address(connect_addr)?;
+    // Reuse the shared request builder (request-id/client/actor flags) so the
+    // announce carries the same origin metadata as any other command.
+    let request = request(args, "server-runtime-target-register", command)?;
+    let response = match send_tcp(connect_addr, &request) {
+        Ok(response) => response,
+        Err(capo_server::TransportError::Io(io))
+            if io.kind() == std::io::ErrorKind::ConnectionRefused =>
+        {
+            return Err(format!(
+                "runner: server at {connect_addr} refused connection -- is the server process running? Announce requires a live server over the JSON-RPC transport (DT-D1); there is no in-process fallback for the announce path"
+            ));
+        }
+        Err(other) => return Err(debug_error(other)),
+    };
+    Ok(response.payload)
+}
+
 pub(super) fn read_bounded_fixture(path: &PathBuf) -> Result<String, String> {
     if let Ok(metadata) = fs::metadata(path)
         && metadata.len() > MAX_ADAPTER_FIXTURE_BYTES

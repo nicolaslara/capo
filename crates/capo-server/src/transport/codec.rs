@@ -96,6 +96,28 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             "name": name,
             "adapter": adapter,
         }),
+        ServerCommand::RegisterRuntimeTarget {
+            runtime_target_id,
+            name,
+            runner_kind,
+            workspace_root,
+            artifact_root,
+            default_cwd,
+            capability_profile_id,
+            connectivity_endpoint_id,
+            status,
+        } => json!({
+            "type": "register_runtime_target",
+            "runtime_target_id": runtime_target_id,
+            "name": name,
+            "runner_kind": runner_kind,
+            "workspace_root": workspace_root,
+            "artifact_root": artifact_root,
+            "default_cwd": default_cwd,
+            "capability_profile_id": capability_profile_id,
+            "connectivity_endpoint_id": connectivity_endpoint_id,
+            "status": status,
+        }),
         ServerCommand::SendTask {
             agent_name,
             goal,
@@ -541,6 +563,17 @@ pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
             // fake chat adapter, so a missing field never binds Codex by surprise.
             adapter: optional_string(value, "adapter")?.unwrap_or_else(|| "fake".to_string()),
         }),
+        "register_runtime_target" => Ok(ServerCommand::RegisterRuntimeTarget {
+            runtime_target_id: required_string(value, "runtime_target_id")?,
+            name: required_string(value, "name")?,
+            runner_kind: required_string(value, "runner_kind")?,
+            workspace_root: required_string(value, "workspace_root")?,
+            artifact_root: required_string(value, "artifact_root")?,
+            default_cwd: required_string(value, "default_cwd")?,
+            capability_profile_id: required_string(value, "capability_profile_id")?,
+            connectivity_endpoint_id: optional_string(value, "connectivity_endpoint_id")?,
+            status: required_string(value, "status")?,
+        }),
         "send_task" => Ok(ServerCommand::SendTask {
             agent_name: required_string(value, "agent_name")?,
             goal: required_string(value, "goal")?,
@@ -766,6 +799,15 @@ pub(super) fn encode_payload(payload: &ServerResponsePayload) -> Value {
         ServerResponsePayload::AgentStatus(agent) => json!({
             "type": "agent_status",
             "agent": encode_agent(agent),
+        }),
+        ServerResponsePayload::RuntimeTargetRegistered(target) => json!({
+            "type": "runtime_target_registered",
+            "runtime_target_id": target.runtime_target_id,
+            "name": target.name,
+            "runner_kind": target.runner_kind,
+            "status": target.status,
+            "connectivity_endpoint_id": target.connectivity_endpoint_id,
+            "sequence": target.sequence,
         }),
         ServerResponsePayload::Dashboard(snapshot) => json!({
             "type": "dashboard",
@@ -1125,6 +1167,16 @@ pub(super) fn decode_payload(value: &Value) -> TransportResult<ServerResponsePay
         "agent_status" => Ok(ServerResponsePayload::AgentStatus(decode_agent(
             required_value(value, "agent")?,
         )?)),
+        "runtime_target_registered" => Ok(ServerResponsePayload::RuntimeTargetRegistered(
+            crate::ServerRuntimeTargetSummary {
+                runtime_target_id: required_string(value, "runtime_target_id")?,
+                name: required_string(value, "name")?,
+                runner_kind: required_string(value, "runner_kind")?,
+                status: required_string(value, "status")?,
+                connectivity_endpoint_id: optional_string(value, "connectivity_endpoint_id")?,
+                sequence: required_i64(value, "sequence")?,
+            },
+        )),
         "dashboard" => Ok(ServerResponsePayload::Dashboard(
             crate::ServerDashboardSnapshot {
                 project_id: ProjectId::new(required_string(value, "project_id")?),

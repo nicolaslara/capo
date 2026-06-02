@@ -267,6 +267,7 @@ fn schema_enumerations_cover_every_wire_variant() {
             ServerCommand::GoalRisks { .. } => "goal_risks",
             ServerCommand::GoalReport { .. } => "goal_report",
             ServerCommand::ContinueGoal { .. } => "continue_goal",
+            ServerCommand::RegisterRuntimeTarget { .. } => "register_runtime_target",
         }
     }
 
@@ -293,6 +294,7 @@ fn schema_enumerations_cover_every_wire_variant() {
             ServerResponsePayload::GoalTimeline(_) => "goal_timeline",
             ServerResponsePayload::GoalReport(_) => "goal_report",
             ServerResponsePayload::ContinuationEvaluated(_) => "continuation_evaluated",
+            ServerResponsePayload::RuntimeTargetRegistered(_) => "runtime_target_registered",
         }
     }
 

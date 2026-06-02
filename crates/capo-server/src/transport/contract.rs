@@ -521,6 +521,7 @@ fn command_methods() -> Vec<&'static str> {
         "goal_risks",
         "goal_report",
         "continue_goal",
+        "register_runtime_target",
     ]
 }
 
@@ -548,6 +549,7 @@ fn payload_types() -> Vec<&'static str> {
         "goal_timeline",
         "goal_report",
         "continuation_evaluated",
+        "runtime_target_registered",
     ]
 }
 
