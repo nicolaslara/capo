@@ -198,6 +198,13 @@ Acceptance criteria:
 - `knowledge.md` records that the subscription is referenced by handle (the local
   `claude` login), that Capo never reads `~/.claude` credential material, and that
   the redaction rules + sensitive-marker scan are the retention defense on stdout.
+- Close the `sensitive_marker` scan gap (verified `local_subscription.rs:488-521`):
+  the scanner does not recognize `auth_token` / `anthropic_auth_token` keyword
+  substrings and an `ANTHROPIC_AUTH_TOKEN` value has no `sk-` shape, so a bearer
+  token value in stdout would not be caught. Add `auth_token` / `anthropic_auth_token`
+  (and any other bearer keyword) to the keyword list, with a deterministic test that
+  a line containing an `auth_token`-style value is flagged by `sensitive_marker`. The
+  env-clear allowlist remains the primary defense; this hardens the secondary scan.
 
 Verification:
 
@@ -498,6 +505,19 @@ Acceptance criteria:
 - Every smoke strips secrets: artifacts pass `scan_artifacts_for_sensitive_markers`;
   the agent stderr is scanned for token markers; raw `stream-json` is redacted /
   content-hashed before retention; a leaked-marker artifact is dropped.
+- STRENGTHEN the already-landed `claude_live_chat_smoke` (`claude_chat.rs:289`),
+  which today asserts only the STATIC `external_session_ref` and `!summary.is_empty()`
+  (a liveness ping, not a shape check): the extended smoke MUST assert the SAME
+  `TurnOutput` shape the always-on stub test pins AND run a smoke-level
+  `scan_artifacts_for_sensitive_markers`, so the paired-deterministic-assertion
+  invariant actually holds (it does not for the landed smoke as written).
+- Process-global env safety: the gate-toggling tests
+  (`open_live_gate`/`close_live_gate`/`set_claude_bin`/`clear_claude_bin`) must
+  restore env on PANIC, not only on the happy path. Use a Drop guard (a struct whose
+  `Drop` impl resets the gate/bin env) rather than a manual close at the end of the
+  test body, so a mid-test assertion failure cannot leak gate env into other tests in
+  the same binary (the `CLAUDE_CHAT_ENV_LOCK` mutex serializes but does not restore
+  env on unwind).
 - A review note in `knowledge.md` records architecture fit (Claude rides the same
   `AgentAdapter` trait, the same chat route, and the same dispatch executor as
   Codex; no new ingestion vocabulary; connector stays scrub-only; the dispatch

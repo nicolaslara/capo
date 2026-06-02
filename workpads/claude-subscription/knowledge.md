@@ -64,6 +64,14 @@ Two gates exist and they are DIFFERENT:
   re-architect the safety floor and is a Non-Goal; if it is ever wanted it belongs
   to `safety-gates`, not here.
 
+NAMING CAUTION (load-bearing): the env var name `CAPO_SERVER_RUN_CODEX_LIVE` is read
+by TWO independent code paths for DIFFERENT purposes -- the Codex CHAT one-shot gate
+(`codex_live.rs::CODEX_LIVE_RUN_OPT_IN_ENV`) and the provider-agnostic DISPATCH
+write-mode gate (`safety_floor.rs::LIVE_WRITE_OPT_IN_ENV`). They happen to share the
+string but are independent reads. Any future rename of `LIVE_WRITE_OPT_IN_ENV` must
+NOT silently break the Codex chat gate (and vice versa); CS5/CS6 implementers must
+treat the two as distinct seams that currently alias the same env name.
+
 ## Connector Policy (Injected Decision)
 
 The `claude` subscription CLI is a PRIVILEGED CONNECTOR, not an ordinary API key.
@@ -80,10 +88,27 @@ The `claude` subscription CLI is a PRIVILEGED CONNECTOR, not an ordinary API key
   carries a secret-like marker, and it is asserted on every Claude launch plan
   before spawn (verified `claude_live.rs:174`).
 - Never log API keys, OAuth/subscription tokens, cookies, session files, or
-  transcripts-with-secrets. Raw `stream-json` is content-hashed / redacted before
-  retention (`local_adapter_redaction_rules` + `scan_artifacts_for_sensitive_markers`);
-  a leaked-marker artifact is dropped. Connector concerns stay separate from agent
+  transcripts-with-secrets. The PRIMARY (and most reliable) defense is the env
+  allowlist + `env_clear()` above: the token values are never PASSED to the spawned
+  process, so they cannot appear in its output. Raw `stream-json` is content-hashed /
+  redacted before retention as a SECONDARY retention defense
+  (`local_adapter_redaction_rules` + `scan_artifacts_for_sensitive_markers`); a
+  leaked-marker artifact is dropped. Connector concerns stay separate from agent
   execution and controller state.
+- KNOWN GAP in the secondary scan (verified in `local_subscription.rs::sensitive_marker`,
+  lines 488-521): the scanner catches known API-key SHAPES (`sk-proj-`, `sk-ant-`,
+  `sk-live-`, `sk_test_`, `sk-svcacct-`, legacy `sk-`) and explicit KEYWORD
+  substrings (`authorization:`, `cookie:`, `set-cookie:`, `session_token`,
+  `access_token`, `refresh_token`, `oauth`, `api_key`, `anthropic_api_key`,
+  `openai_api_key`). It does NOT recognize `auth_token` / `anthropic_auth_token` as a
+  keyword, and an `ANTHROPIC_AUTH_TOKEN` value has no `sk-` prefix shape -- so if such
+  a bearer/session token value ever appeared in stdout, the scan would miss it. The
+  env-clear allowlist is why this gap is not a live leak (the token is never handed to
+  the process), but the scan does NOT cover all bearer/session token value formats.
+  CS1 closes this by adding `auth_token` / `anthropic_auth_token` (and any other
+  bearer keyword) to the `sensitive_marker` keyword list; until then the connector
+  policy's "raw output is scrubbed" claim holds for API-key shapes and the listed
+  keywords ONLY, not for arbitrary auth-token values.
 - The connector records auth MODE only (e.g. `user_local_subscription`), never
   credential material. CS1's allowlist test + the spawned-stub env-scrub test are
   the load-bearing checks for this; no connector record/event carries a credential
@@ -156,30 +181,36 @@ adapter, not a Claude-specific channel.
 
 ## Unblock To Parity
 
-Three gaps currently keep Claude below parity; all are closed behind the shared
-preflight + the existing provider-agnostic write-mode gate, fail-closed when off:
+Three gaps remain OPEN in-tree today; CS5 closes all three, behind the shared
+preflight + the existing provider-agnostic write-mode gate, fail-closed when off.
+Each bullet states the CURRENT (still-Codex-only) reality first, then what CS5 WILL
+change -- nothing below has been done yet:
 
-- CLI chat seam: `require_chat_adapter_arg` (`server_client.rs:527`) is widened to
-  accept `claude` (today only `fake`/`codex`), reaching the server's already-wired
-  `RealChatBinding::Claude` / `claude_handle`. (`require_adapter_arg` /
-  `require_live_provider_adapter_arg`, lines 537/547, already accept `claude`.)
-- Dispatch blocker allow-list: `live_execution_blockers` (`live_provider.rs:551`)
-  is widened from the hard `adapter_kind != "codex_exec"` block to an
+- CLI chat seam: TODAY `require_chat_adapter_arg` (`server_client.rs:527`) accepts
+  only `fake`/`codex` and REJECTS `claude` (verified: the match arm rejects with
+  "supports `fake` (default) or `codex`"). CS5 WILL widen it to accept `claude`,
+  reaching the server's already-wired `RealChatBinding::Claude` / `claude_handle`.
+  (`require_adapter_arg` / `require_live_provider_adapter_arg`, lines 537/547,
+  already accept `claude`.)
+- Dispatch blocker allow-list: TODAY `live_execution_blockers`
+  (`live_provider.rs:551`) still has the literal `if plan.adapter_kind !=
+  "codex_exec"` hard block, so a Claude dispatch IS blocked. CS5 WILL widen it to an
   ENABLED-providers allow-list (`{codex_exec, claude_code}`). The preflight already
   stamps `adapter_kind == "claude_code"` for a Claude dispatch (via `adapter_label`,
-  line 87; only `acp` is rejected at line 88), so the allow-list is exercised on a
-  real Claude plan. An un-enabled adapter (e.g. `acp`) still blocks, so the unblock
-  is provider-scoped, not blanket.
-- Dispatch spawn arm: `run_live_provider_local`'s spawn arm (lines 464-489) is
-  Codex-shaped -- it unconditionally builds `CodexExecAdapter` plans and has a
-  Codex-only override (`codex_program_override` field, `CAPO_CODEX_BIN`). CS5
-  branches the plan builder on `adapter_kind` so a `claude_code` dispatch builds
+  line 87; only `acp` is rejected at line 88), so once widened the allow-list is
+  exercised on a real Claude plan. An un-enabled adapter (e.g. `acp`) will still
+  block, so the unblock is provider-scoped, not blanket.
+- Dispatch spawn arm: TODAY `run_live_provider_local`'s spawn arm (lines 464-489) is
+  Codex-shaped -- it unconditionally builds `CodexExecAdapter` plans, with NO Claude
+  branch, and has only a Codex override (`codex_program_override` field,
+  `CAPO_CODEX_BIN`). CS5 WILL branch the plan builder on `adapter_kind` so a
+  `claude_code` dispatch builds
   `ClaudeCodeAdapter::local_workspace_write_launch_plan` (write) /
-  `local_launch_plan` (dry-run), asserts subscription-safe, runs through the SAME
+  `local_launch_plan` (dry-run), assert subscription-safe, run through the SAME
   `LocalProcessRunner` + `confine_and_checkpoint_for_write` +
   `scan_artifacts_for_sensitive_markers` + `apply_normalized_adapter_events_with_turn`
   structure the Codex arm uses (those floor/scan/ingest steps are
-  provider-agnostic), and adds a NEW `claude_program_override` field +
+  provider-agnostic), and add a NEW `claude_program_override` field +
   `CAPO_CLAUDE_BIN` dispatch threading (mirroring the Codex override). This dispatch
   `CAPO_CLAUDE_BIN` is DISTINCT from the chat-side `CAPO_CLAUDE_BIN` in
   `claude_live.rs`: they are two separate seams on two separate code paths. Without
@@ -198,10 +229,25 @@ Deterministic-tests-before-live holds across every task: env-scrub, `try_send_tu
 stub, `stream-json` normalization, observed tool-result + the no-injection
 negative, the CLI seam, and the dispatch executor (both the mock-output ingestion
 AND the stub-binary spawn arm) all have deterministic coverage (stub binary or
-`mock_provider_output_jsonl`) BEFORE any live `claude` runs. Every live smoke is
-paired with a deterministic assertion of the identical shape, stays `#[ignore]`
+`mock_provider_output_jsonl`) BEFORE any live `claude` runs. Every live smoke is to
+be paired with a deterministic assertion of the identical shape, stays `#[ignore]`
 behind its documented gates, and skips cleanly when the gate is off or `claude` is
 absent. Secrets are stripped from all evidence.
+
+Caveat on the already-landed chat smoke (verified, not yet remediated): the
+DP4-landed `claude_live_chat_smoke` (`claude_chat.rs:289`) currently asserts only
+`run_refs.external_session_ref == "claude-live-session-claude-live"` (a STATIC
+string `open_session()` returns unconditionally as
+`format!("claude-live-session-{}", request.agent_name)`, proving only registration
+succeeded) and `!summary.is_empty()` (passes for a single character). This is
+effectively a liveness ping, NOT the paired deterministic SHAPE assertion the
+invariant requires: there is no `TurnOutput`-shape check (status/`tool_name`/
+confidence) and no smoke-level `scan_artifacts_for_sensitive_markers` call (the scan
+runs inside `run_one_shot`, which is correct, but the smoke cannot confirm it ran).
+So the paired-assertion invariant does NOT yet hold for the landed chat smoke. CS6
+MUST strengthen `claude_live_chat_smoke` to assert the SAME `TurnOutput` shape its
+always-on stub test pins (and a smoke-level secret scan) so the pairing is real.
+Until CS6 lands, treat the landed smoke as a liveness probe only.
 
 ## Non-Goals
 
