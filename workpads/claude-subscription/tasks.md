@@ -218,8 +218,13 @@ Dependencies: CS0. Intra-workpad: feeds CS2/CS5.
 
 ## CS2 - Real send_turn: Chat One-Shot + Workspace-Write Profile (Mirror The Codex Chat Path)
 
-Status: pending (chat one-shot largely landed under DP4; this task pins parity and
-the profile facts with assertions).
+Status: LANDED. Chat one-shot largely landed under DP4; CS2 pinned parity and the
+profile facts with deterministic assertions in
+`crates/capo-adapters/src/claude_live.rs`
+(`claude_try_send_turn_stub_matches_codex_turn_output_reduction`,
+`claude_launch_profiles_pin_exact_argv`, and the KEPT gate-off
+`claude_send_turn_fails_closed_fast_when_gate_off`), plus the test-only
+`codex_live::turn_output_from_events_for_test` parity helper. No live provider.
 
 Prerequisite: `real-turn-loop` + `tools-aci`; CS1.
 

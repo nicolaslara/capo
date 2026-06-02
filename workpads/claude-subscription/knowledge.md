@@ -148,6 +148,45 @@ scan are the SECONDARY retention defense on stdout; the env allowlist +
 No connector record/event carries a credential field; the connector records auth
 MODE only (`user_local_subscription`).
 
+## CS2 Status (Landed)
+
+CS2 confirmed and HARDENED the real Claude `send_turn` so the chat path mirrors
+the Codex chat path exactly, pinning parity and the launch-profile facts with
+deterministic assertions (no live provider). The chat one-shot
+(`ClaudeCodeLiveAdapter::try_send_turn` -> `run_one_shot` ->
+`local_workspace_write_launch_plan` -> `parse_stream_json` ->
+`turn_output_from_events` -> `TurnOutput`) already existed under DP4; CS2 added the
+missing deterministic coverage. The load-bearing CS2 tests live in
+`crates/capo-adapters/src/claude_live.rs`:
+
+- `claude_try_send_turn_stub_matches_codex_turn_output_reduction`: drives
+  `try_send_turn` with the gates ON (via a `GateGuard` Drop guard that restores env
+  even on panic) through a pinned absolute-path POSIX stub spawned by
+  `LocalProcessRunner`, and asserts the reduced `TurnOutput` (summary = last item
+  content `applied the workspace edit`, status = `result.subtype` `success`,
+  `tool_name` = `Edit`, `external_session_ref` = Claude `session-id`
+  `claude-sess-1`, `confidence = 80`) equals the Codex `turn_output_from_events`
+  reduction for the same logical turn (asserted via the test-only
+  `codex_live::turn_output_from_events_for_test`).
+- `claude_send_turn_fails_closed_fast_when_gate_off` (KEPT from DP4, annotated as
+  CS2): with neither gate set, `try_send_turn` returns `GateClosed { missing_env:
+  [PREFLIGHT, RUN_CLAUDE_LIVE] }` immediately and spawns nothing (the override
+  points at a nonexistent binary), and the infallible `send_turn` shim surfaces a
+  `blocked` turn with `confidence: 0`.
+- `claude_launch_profiles_pin_exact_argv`: pins the EXACT argv of the
+  `local_workspace_write_launch_plan` profile the live chat adapter invokes
+  (`-p --output-format stream-json --verbose --permission-mode acceptEdits
+  --no-session-persistence --disable-slash-commands --mcp-config /dev/null
+  --strict-mcp-config --add-dir <ws> <prompt>`) AND asserts the SEPARATE
+  read-bounded `local_launch_plan` profile (`--permission-mode plan --tools ""
+  --disallowedTools *`, NO `--add-dir`) is distinct, so the two are never
+  conflated.
+
+The reused `CLAUDE_LIVE_ENV_LOCK` mutex serializes the process-global env-gate
+mutation across the gated tests in the module; the `GateGuard` Drop guard restores
+the prior gate env on unwind so a mid-test failure cannot leak gate env into other
+tests in the binary. Live write/chat remain deferred to CS6.
+
 ## Two Claude Launch Profiles (Precise Facts)
 
 There are TWO distinct Claude launch plans in

@@ -396,3 +396,21 @@ fn turn_output_from_events(
         tool_name,
     }
 }
+
+/// Test-only re-export of the Codex chat reduction so the Claude adapter's CS2
+/// parity test can assert its `TurnOutput` shape equals the Codex reduction for
+/// the same logical turn. Takes a fallback `external_session_ref` string so the
+/// caller need not construct a full `AdapterSession`.
+#[cfg(test)]
+pub(crate) fn turn_output_from_events_for_test(
+    fallback_session_ref: &str,
+    request: &TurnRequest,
+    events: &[NormalizedAdapterEvent],
+) -> TurnOutput {
+    let session = AdapterSession {
+        session_id: SessionId::new("codex-parity"),
+        external_session_ref: fallback_session_ref.to_string(),
+        adapter_capability: "codex-live-chat-one-shot".to_string(),
+    };
+    turn_output_from_events(&session, request, events)
+}
