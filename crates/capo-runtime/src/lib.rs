@@ -449,6 +449,59 @@ impl RedactionPolicy {
 /// component scrubbed even if the token itself is short. Ordinary prose words,
 /// file paths, hex digests / git SHAs, and dashed UUIDs are excluded so the scan
 /// does not blank out useful command output.
+/// DT5 (resolving review finding 11): the privileged-connector environment
+/// variables that must NEVER cross to a remote runner's spawned agent process.
+///
+/// A subscription-backed agent (Codex/Claude) is a PRIVILEGED CONNECTOR, not an
+/// ordinary API key: the controller references its credential by `auth_ref` /
+/// `identity_ref` HANDLE and resolves the real secret in a confined adapter. When
+/// the spawn happens on a REMOTE runner device the server-side adapter scrub cannot
+/// reach it, so the runner's own spawn path must drop these vars before launch —
+/// the controller never lets a provider session credential ride the runner env.
+/// This is the exact name set so a seeded credential under any of these is dropped.
+pub const PRIVILEGED_CONNECTOR_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_SESSION_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "CODEX_AUTH_TOKEN",
+    "CAPO_CONNECTOR_TOKEN",
+];
+
+/// DT5 runner-side env scrub (review finding 11): drop every privileged-connector
+/// variable from a launch env map, returning the scrubbed map plus the names that
+/// were dropped (for an audit detail, never the values).
+///
+/// The match is case-insensitive on the variable NAME so a `anthropic_api_key`
+/// alias cannot smuggle a session credential past the scrub. As a defense-in-depth
+/// SECOND net, any REMAINING var whose VALUE is credential-shaped is also dropped,
+/// so an operator-named connector var the static list does not know about still
+/// cannot ride the runner env. Values are NEVER returned or logged — only names.
+pub fn scrub_privileged_connector_env(
+    env: HashMap<String, String>,
+) -> (HashMap<String, String>, Vec<String>) {
+    let mut dropped = Vec::new();
+    let scrubbed = env
+        .into_iter()
+        .filter(|(name, value)| {
+            let by_name = PRIVILEGED_CONNECTOR_ENV_VARS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(name));
+            // Defense in depth: drop a credential-shaped value under any name.
+            let by_value_shape = scan_credential_shapes(value).1;
+            if by_name || by_value_shape {
+                dropped.push(name.clone());
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    dropped.sort();
+    (scrubbed, dropped)
+}
+
 pub(crate) fn scan_credential_shapes(text: &str) -> (String, bool) {
     let mut out = String::with_capacity(text.len());
     let mut redacted = false;
@@ -4236,11 +4289,22 @@ impl RemoteProcessRunner {
     /// NOT the local `external_pid`/`boot_id` path.
     pub fn start_process(
         &self,
-        request: LocalProcessRequest,
+        mut request: LocalProcessRequest,
     ) -> RuntimeResult<LocalProcessOutcome> {
         // RR6 safety boundary: a revoked remote-control grant forbids any new
         // execution. The runner cannot re-establish a launch without a fresh grant.
         self.ensure_control_granted()?;
+
+        // DT5 (review finding 11): the privileged-connector env scrub runs on the
+        // RUNNER-SIDE spawn path, where the server-side adapter scrub cannot reach.
+        // The subscription-backed agent is referenced by HANDLE; its provider
+        // session credentials (`ANTHROPIC_*`, the connector token, ...) are dropped
+        // from the launch env before it crosses to the spawned process, so no key
+        // ever rides the runner env. The audit detail records only the dropped NAMES
+        // (count + names), never a value.
+        let (scrubbed_env, dropped_connector_vars) =
+            scrub_privileged_connector_env(std::mem::take(&mut request.env));
+        request.env = scrubbed_env;
 
         let run_id = request.run_id.clone();
         let idempotency_key = run_id.to_string();
@@ -4285,6 +4349,23 @@ impl RemoteProcessRunner {
             status: "resolved".to_string(),
             detail: format!("fingerprint={fingerprint}"),
         });
+
+        // DT5: audit the runner-side connector env scrub under its DEDICATED kind
+        // (`runtime.connector_env_scrubbed`), NOT `runtime.remote_target_resolved`
+        // (which is the identity-verification fact). The detail names ONLY the
+        // dropped variable names (a count + the names), never a value, so the scrub
+        // is auditable from the trail without leaking a credential.
+        if !dropped_connector_vars.is_empty() {
+            events.push(RuntimeEvent {
+                kind: EventKind::RuntimeConnectorEnvScrubbed.as_str().to_string(),
+                status: "env_scrubbed".to_string(),
+                detail: format!(
+                    "connector_env_scrubbed count={} names={}",
+                    dropped_connector_vars.len(),
+                    dropped_connector_vars.join(",")
+                ),
+            });
+        }
 
         // 3. launch over the channel; the transport actually runs the program.
         let launch = match self.config.transport.launch(&request) {
@@ -6839,6 +6920,155 @@ impl ExposurePolicy {
     }
 }
 
+/// DT5: the proof that an ACTIVE, grant-backed `ConnectivityExposure` authorizes a
+/// non-loopback server bind (or remote-control channel).
+///
+/// This is the conditional-bind capability that resolving review finding 12
+/// requires: the transport's bind path is loopback-only by DEFAULT (hard
+/// rejection, byte-for-byte the prior behavior), and a non-loopback bind is
+/// permitted ONLY when one of these grants is presented. It is constructed from an
+/// exposure projection's audited fields by the CLI/server build path AFTER the
+/// `expose-stub -> request-approval -> activate` flow has recorded an `active`
+/// exposure with a matching allow grant — never fabricated at the transport layer.
+///
+/// It carries ONLY handles + a provenance label (the activated `exposure_id`, the
+/// `capability_grant_id`, the `permission_scope`, and the opaque `auth_ref`
+/// handle). It NEVER carries a raw credential: `auth_ref` is the same opaque
+/// pointer (`keychain:...`) the exposure stored, so threading the grant through the
+/// bind cannot leak a secret. Constructing one against an exposure whose status is
+/// not `active` is refused, so a `blocked_pending_permission` or `revoked` exposure
+/// can never authorize a bind.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExposureBindGrant {
+    exposure_id: String,
+    capability_grant_id: String,
+    permission_scope: String,
+    auth_ref: String,
+    scope: ExposureScope,
+}
+
+impl ExposureBindGrant {
+    /// Build a bind grant from an ACTIVE exposure's audited fields.
+    ///
+    /// `status` must be `"active"` and a non-empty `capability_grant_id` must be
+    /// present (the activation recorded the matching allow grant). `auth_ref` is the
+    /// opaque handle the exposure stored. A `loopback` scope never needs a grant, so
+    /// it is rejected here as a misuse (the loopback default authorizes itself); a
+    /// non-active status, a missing grant id, or a missing/raw auth handle fails
+    /// closed with a typed error so a non-active exposure can never authorize a bind.
+    pub fn from_active_exposure(
+        exposure_id: impl Into<String>,
+        status: &str,
+        capability_grant_id: Option<&str>,
+        permission_scope: impl Into<String>,
+        auth_ref: Option<&str>,
+        scope: ExposureScope,
+    ) -> ConnectivityResult<Self> {
+        if matches!(scope, ExposureScope::Loopback) {
+            // The loopback default authorizes itself; a grant for it is a misuse.
+            return Err(ConnectivityError::ScopeExceedsCeiling {
+                requested: ExposureScope::Loopback,
+                ceiling: ExposureScope::Loopback,
+            });
+        }
+        if status != "active" {
+            // A blocked/revoked exposure can never authorize a bind: fail closed.
+            return Err(ConnectivityError::AuthRequired { scope });
+        }
+        let capability_grant_id = capability_grant_id
+            .filter(|value| !value.is_empty())
+            .ok_or(ConnectivityError::AuthRequired { scope })?;
+        let auth_ref = auth_ref
+            .filter(|value| !value.is_empty())
+            .ok_or(ConnectivityError::AuthRequired { scope })?;
+        // Defense-in-depth: a RAW credential in the handle field is a bug, not
+        // something to thread through the bind. Fail closed if the handle looks raw.
+        if scan_credential_shapes(auth_ref).1 {
+            return Err(ConnectivityError::AuthRequired { scope });
+        }
+        Ok(Self {
+            exposure_id: exposure_id.into(),
+            capability_grant_id: capability_grant_id.to_string(),
+            permission_scope: permission_scope.into(),
+            auth_ref: auth_ref.to_string(),
+            scope,
+        })
+    }
+
+    /// The activated exposure this grant proves (a HANDLE, for the audit trail).
+    pub fn exposure_id(&self) -> &str {
+        &self.exposure_id
+    }
+
+    /// The matching allow grant id recorded at activation (a HANDLE).
+    pub fn capability_grant_id(&self) -> &str {
+        &self.capability_grant_id
+    }
+
+    /// The permission scope the grant covers (a provenance label, never a secret).
+    pub fn permission_scope(&self) -> &str {
+        &self.permission_scope
+    }
+
+    /// The promoted [`ExposurePolicy`] this grant authorizes: the ceiling is raised
+    /// to the granted scope with the grant id as the audited opt-in provenance. The
+    /// transport bind/connect guard consults the promoted policy (with the grant's
+    /// `auth_ref` handle) instead of the default loopback-only policy.
+    pub fn promoted_policy(&self, changed_at: impl Into<String>) -> ExposurePolicy {
+        let (policy, _event) = ExposurePolicy::loopback_default().promote(
+            self.scope,
+            format!("grant:{}", self.capability_grant_id),
+            changed_at,
+        );
+        policy
+    }
+
+    /// DT5 conditional bind: authorize a server bind / connect on `is_loopback`
+    /// under this grant. A loopback address always passes; a non-loopback address
+    /// passes ONLY because this grant promoted the ceiling AND carries an `auth_ref`
+    /// handle. The DEFAULT (no grant) path is the unchanged hard rejection in
+    /// [`authorize_server_bind`].
+    pub fn authorize_socket(&self, is_loopback: bool) -> ConnectivityResult<()> {
+        self.promoted_policy("bind")
+            .authorize_socket(is_loopback, Some(&self.auth_ref))
+    }
+
+    /// The scope this grant authorizes (a HANDLE-only provenance label).
+    pub fn scope(&self) -> ExposureScope {
+        self.scope
+    }
+
+    /// DT5 runner control channel gate: does this active grant cover a resolved
+    /// `exposure`? The grant's promoted ceiling must be at least the resolved
+    /// exposure's scope (`Loopback <= Private <= Public`). A `Private` grant covers a
+    /// `Private` runner control channel but NOT a `Public` one; any grant covers a
+    /// loopback resolution (which needs no grant anyway). This is the symmetric
+    /// counterpart of [`Self::authorize_socket`] for the runner-attach side.
+    pub fn covers_exposure(&self, exposure: ExposureScope) -> bool {
+        exposure.rank() <= self.scope.rank()
+    }
+}
+
+/// DT5 conditional non-loopback bind (resolving review finding 12).
+///
+/// The server listener's bind guard. With NO grant (`None`, the all-local default)
+/// this is the loopback-only policy's hard rejection, byte-for-byte the prior
+/// behavior — a non-loopback bind fails closed. With an ACTIVE
+/// [`ExposureBindGrant`] a non-loopback bind is permitted, gated on the grant's
+/// promoted ceiling + `auth_ref` handle. Both branches are exercised by the DT5
+/// deterministic tests (granted -> bind allowed; no grant -> bind refused).
+pub fn authorize_server_bind(
+    is_loopback: bool,
+    grant: Option<&ExposureBindGrant>,
+) -> ConnectivityResult<()> {
+    match grant {
+        // No grant: preserve today's hard loopback-only rejection exactly.
+        None => ExposurePolicy::loopback_default().authorize_socket(is_loopback, None),
+        // Active grant: the promoted, handle-backed authorization.
+        Some(grant) => grant.authorize_socket(is_loopback),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChannelKind {
     Control,
@@ -7523,6 +7753,231 @@ mod tests {
         assert_eq!(
             promoted.authorize_socket(false, Some("keychain:capo/authkey")),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn dt5_authorize_server_bind_rejects_non_loopback_without_a_grant_and_allows_with_one() {
+        // DT5 conditional bind (review finding 12). DEFAULT (no grant): loopback
+        // passes, a non-loopback bind FAILS CLOSED — byte-for-byte the prior
+        // loopback-only enforcement.
+        assert_eq!(authorize_server_bind(true, None), Ok(()));
+        assert_eq!(
+            authorize_server_bind(false, None),
+            Err(ConnectivityError::AuthRequired {
+                scope: ExposureScope::Private,
+            }),
+            "the default (no grant) path must hard-reject a non-loopback bind"
+        );
+
+        // With an ACTIVE grant built from an audited exposure, a non-loopback bind
+        // is permitted (promoted ceiling + auth_ref handle). Loopback still passes.
+        let grant = ExposureBindGrant::from_active_exposure(
+            "connectivity-exposure-dt5",
+            "active",
+            Some("grant-approval-dt5"),
+            "network:connect:private_tunnel",
+            Some("keychain:capo/dt5-bind-handle"),
+            ExposureScope::Private,
+        )
+        .expect("an active exposure with a grant + handle builds a bind grant");
+        assert_eq!(authorize_server_bind(true, Some(&grant)), Ok(()));
+        assert_eq!(
+            authorize_server_bind(false, Some(&grant)),
+            Ok(()),
+            "an active grant authorizes a non-loopback bind"
+        );
+        assert_eq!(grant.permission_scope(), "network:connect:private_tunnel");
+        assert_eq!(grant.capability_grant_id(), "grant-approval-dt5");
+    }
+
+    #[test]
+    fn dt5_exposure_bind_grant_refuses_to_build_from_a_non_active_or_handleless_exposure() {
+        // A blocked-pending-permission exposure can NEVER authorize a bind.
+        assert_eq!(
+            ExposureBindGrant::from_active_exposure(
+                "connectivity-exposure-dt5",
+                "blocked_pending_permission",
+                Some("grant-approval-dt5"),
+                "network:connect:private_tunnel",
+                Some("keychain:capo/dt5-bind-handle"),
+                ExposureScope::Private,
+            ),
+            Err(ConnectivityError::AuthRequired {
+                scope: ExposureScope::Private,
+            })
+        );
+        // A revoked exposure can never authorize a bind.
+        assert!(
+            ExposureBindGrant::from_active_exposure(
+                "connectivity-exposure-dt5",
+                "revoked",
+                Some("grant-approval-dt5"),
+                "network:connect:private_tunnel",
+                Some("keychain:capo/dt5-bind-handle"),
+                ExposureScope::Private,
+            )
+            .is_err()
+        );
+        // An active exposure with NO grant id fails closed.
+        assert!(
+            ExposureBindGrant::from_active_exposure(
+                "connectivity-exposure-dt5",
+                "active",
+                None,
+                "network:connect:private_tunnel",
+                Some("keychain:capo/dt5-bind-handle"),
+                ExposureScope::Private,
+            )
+            .is_err()
+        );
+        // An active exposure with NO auth_ref handle fails closed.
+        assert!(
+            ExposureBindGrant::from_active_exposure(
+                "connectivity-exposure-dt5",
+                "active",
+                Some("grant-approval-dt5"),
+                "network:connect:private_tunnel",
+                None,
+                ExposureScope::Private,
+            )
+            .is_err()
+        );
+        // A RAW credential in the auth_ref handle field fails closed (a handle must
+        // be an opaque pointer, never a raw key).
+        assert!(
+            ExposureBindGrant::from_active_exposure(
+                "connectivity-exposure-dt5",
+                "active",
+                Some("grant-approval-dt5"),
+                "network:connect:private_tunnel",
+                Some("sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+                ExposureScope::Private,
+            )
+            .is_err(),
+            "a raw credential in the handle field must be refused"
+        );
+    }
+
+    #[test]
+    fn dt5_scrub_privileged_connector_env_drops_known_vars_and_credential_shaped_values() {
+        let mut env = HashMap::new();
+        env.insert(
+            "ANTHROPIC_API_KEY".to_string(),
+            "sk-ant-SEEDEDSECRETSEEDEDSECRET".to_string(),
+        );
+        env.insert(
+            "CAPO_CONNECTOR_TOKEN".to_string(),
+            "oauth-token-SEEDEDSEEDED".to_string(),
+        );
+        // A case-variant alias still gets dropped by the name match.
+        env.insert("anthropic_auth_token".to_string(), "tokenvalue".to_string());
+        // An UNLISTED var whose VALUE is credential-shaped is dropped by the
+        // defense-in-depth value scan.
+        env.insert(
+            "MY_CUSTOM_CONNECTOR".to_string(),
+            "AKIA0123456789ABCDEFGHIJKLMNOPQRSTUV".to_string(),
+        );
+        // A benign var SURVIVES.
+        env.insert("PATH".to_string(), "/usr/bin".to_string());
+
+        let (scrubbed, dropped) = scrub_privileged_connector_env(env);
+        assert_eq!(
+            scrubbed.get("PATH").map(String::as_str),
+            Some("/usr/bin"),
+            "a benign var survives the scrub"
+        );
+        assert!(!scrubbed.contains_key("ANTHROPIC_API_KEY"));
+        assert!(!scrubbed.contains_key("CAPO_CONNECTOR_TOKEN"));
+        assert!(!scrubbed.contains_key("anthropic_auth_token"));
+        assert!(!scrubbed.contains_key("MY_CUSTOM_CONNECTOR"));
+        // The dropped NAMES are reported (for an audit detail), never the values.
+        assert!(dropped.contains(&"ANTHROPIC_API_KEY".to_string()));
+        assert!(dropped.contains(&"CAPO_CONNECTOR_TOKEN".to_string()));
+        assert!(dropped.contains(&"MY_CUSTOM_CONNECTOR".to_string()));
+        // No value ever leaks into the dropped-names list.
+        for name in &dropped {
+            assert!(!name.contains("sk-ant-"), "dropped list carries names only");
+            assert!(!name.contains("oauth-token-"));
+        }
+    }
+
+    #[test]
+    fn dt5_runner_side_spawn_scrubs_privileged_connector_env_before_launch() {
+        // DT5 runner-side env scrub (review finding 11): the privileged-connector
+        // env vars are dropped on the RUNNER spawn path BEFORE the launch crosses to
+        // the spawned process. We assert against the env the TRANSPORT was actually
+        // asked to launch (`last_launched_request`), proving the scrub reached the
+        // real spawn boundary, not just a pure helper.
+        let workspace = temp_root("dt5-scrub-workspace");
+        let artifacts = temp_root("dt5-scrub-artifacts");
+        fs::create_dir_all(&workspace).unwrap();
+        let channel = OpenChannel::for_test("dt5-target", "dt5-endpoint", "dt5-fp");
+        let fake =
+            FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts.clone());
+        let runner = RemoteProcessRunner::new(RemoteProcessConfig::with_transport(
+            channel,
+            RemoteChannel::Fake(fake.clone()),
+        ));
+
+        let mut env = HashMap::new();
+        env.insert(
+            "ANTHROPIC_API_KEY".to_string(),
+            "sk-ant-SEEDEDSECRETSEEDEDSECRET".to_string(),
+        );
+        env.insert(
+            "CAPO_CONNECTOR_TOKEN".to_string(),
+            "oauth-token-SEEDEDSEEDED".to_string(),
+        );
+        let outcome = runner
+            .start_process(LocalProcessRequest {
+                run_id: RunId::new("dt5-scrub-run"),
+                turn_id: None,
+                program: "/bin/sh".to_string(),
+                argv: vec!["-c".to_string(), "printf scrub-ok".to_string()],
+                cwd: workspace,
+                env,
+            })
+            .expect("the scrubbed launch succeeds (no DisallowedEnvOverride)");
+        assert_eq!(outcome.process.status, "exited");
+
+        // The transport's launched env carries NO privileged-connector var and NO
+        // seeded credential marker.
+        let launched = fake
+            .last_launched_request()
+            .expect("the transport recorded the launched request");
+        assert!(
+            !launched.env.contains_key("ANTHROPIC_API_KEY"),
+            "ANTHROPIC_API_KEY must be scrubbed before launch: {:?}",
+            launched.env.keys().collect::<Vec<_>>()
+        );
+        assert!(!launched.env.contains_key("CAPO_CONNECTOR_TOKEN"));
+        for value in launched.env.values() {
+            assert!(
+                !value.contains("sk-ant-"),
+                "no seeded key reaches the launch"
+            );
+            assert!(!value.contains("oauth-token-"));
+        }
+
+        // The scrub is AUDITED: a `env_scrubbed` event names the dropped vars (no value).
+        let scrub_event = outcome
+            .events
+            .iter()
+            .find(|event| event.status == "env_scrubbed")
+            .expect("the runner-side scrub is recorded as an audit event");
+        // The scrub rides its DEDICATED kind, not the identity-verification kind, so
+        // an operator can filter env-scrub events without them being mixed into
+        // `runtime.remote_target_resolved`.
+        assert_eq!(
+            scrub_event.kind, "runtime.connector_env_scrubbed",
+            "the env scrub is audited under its dedicated kind"
+        );
+        assert!(scrub_event.detail.contains("ANTHROPIC_API_KEY"));
+        assert!(scrub_event.detail.contains("CAPO_CONNECTOR_TOKEN"));
+        assert!(
+            !scrub_event.detail.contains("sk-ant-"),
+            "the audit detail names vars only, never a value"
         );
     }
 
@@ -12666,5 +13121,68 @@ mod tests {
         );
         // The non-secret content survives — redaction is surgical, not a blanket drop.
         assert!(forwarded.contains("starting run") && forwarded.contains("done"));
+    }
+
+    /// DT5 (finding 1): the remote runner CONTROL CHANNEL is
+    /// `blocked_pending_permission` until an explicit grant exists — the exact
+    /// symmetry of the server-bind gate. A scripted PRIVATE tunnel resolves with
+    /// `permission_required = true`; `RemoteRunnerAttach::resolve` (no grant) MUST
+    /// fail closed with `AuthRequired` and never open the channel.
+    #[test]
+    fn dt5_runner_control_channel_is_blocked_pending_permission_without_a_grant() {
+        let tunnel = ConnectivityTunnel::fake_scripted(FakeTunnelScript::private_matching(
+            "dt5-runner-control",
+            "trusted-runner",
+        ));
+        let owner = EndpointOwner::runtime_target("runner-dt5-blocked");
+        let result = RemoteRunnerAttach::resolve(&tunnel, owner, ChannelKind::Stdio, |_channel| {
+            unreachable!("a blocked-pending-permission channel must never be opened")
+        });
+        assert_eq!(
+            result.err(),
+            Some(ConnectivityError::AuthRequired {
+                scope: ExposureScope::Private,
+            }),
+            "a private runner control channel is refused without a grant"
+        );
+    }
+
+    /// DT5 (finding 1): with a matching ACTIVE grant the SAME private runner control
+    /// channel resolves and binds — proving the gate is grant-conditional, not a
+    /// blanket refusal of non-loopback runners.
+    #[test]
+    fn dt5_runner_control_channel_resolves_with_a_matching_active_grant() {
+        let tunnel = ConnectivityTunnel::fake_scripted(FakeTunnelScript::private_matching(
+            "dt5-runner-control-ok",
+            "trusted-runner",
+        ));
+        let owner = EndpointOwner::runtime_target("runner-dt5-granted");
+        let grant = ExposureBindGrant::from_active_exposure(
+            "connectivity-exposure-dt5-runner",
+            "active",
+            Some("grant-approval-dt5-runner"),
+            ExposureScope::Private.permission_scope(),
+            Some("keychain:capo/dt5-runner-control-handle"),
+            ExposureScope::Private,
+        )
+        .expect("an active private exposure with a grant + handle builds a bind grant");
+
+        let root = temp_root("dt5-runner-granted");
+        let workspace = root.join("workspace");
+        let artifacts = root.join("artifacts");
+        fs::create_dir_all(&workspace).unwrap();
+        let attach = RemoteRunnerAttach::resolve_with_grant(
+            &tunnel,
+            owner,
+            ChannelKind::Stdio,
+            Some(&grant),
+            |channel| {
+                RemoteChannel::Fake(FakeRemoteChannel::from_open_channel(
+                    channel, workspace, artifacts,
+                ))
+            },
+        )
+        .expect("a matching active grant authorizes the runner control channel");
+        assert_eq!(attach.channel().exposure, ExposureScope::Private);
     }
 }

@@ -238,6 +238,15 @@ pub enum EventKind {
     //     checkpoint ref + the remote worktree key, never a secret.
     RuntimeRemoteControlRevoked,
     RuntimeRemoteRollbackPerformed,
+    // DT5 (distributed-topology): the runner-side privileged-connector env scrub.
+    // When the runner spawn path drops a subscription-backed agent's provider
+    // session credentials (`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / the
+    // connector token, ...) from the launch env BEFORE `transport.launch`, it
+    // records this dedicated audit fact. The detail names ONLY the dropped variable
+    // NAMES (a count + the names), never a value, so an operator can filter for
+    // env-scrub events on a kind that is NOT overloaded with the
+    // identity-verification semantics of `RuntimeRemoteTargetResolved`.
+    RuntimeConnectorEnvScrubbed,
 }
 
 /// The terminal outcome a projected turn-ending event carries, in the
@@ -374,6 +383,7 @@ impl EventKind {
             Self::SandboxEnforced => "sandbox.enforced",
             Self::SandboxUnenforced => "sandbox.unenforced",
             Self::SandboxLaunchRefused => "sandbox.launch_refused",
+            Self::RuntimeConnectorEnvScrubbed => "runtime.connector_env_scrubbed",
         }
     }
 
@@ -498,6 +508,7 @@ impl EventKind {
             EventKind::SandboxLaunchRefused,
             EventKind::RuntimeRemoteControlRevoked,
             EventKind::RuntimeRemoteRollbackPerformed,
+            EventKind::RuntimeConnectorEnvScrubbed,
         ];
         ALL.iter()
             .copied()

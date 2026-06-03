@@ -1091,6 +1091,11 @@ fn rr1_rr2_remote_runtime_event_kinds_round_trip() {
             EventKind::RuntimeRemoteRollbackPerformed,
             "runtime.remote_rollback_performed",
         ),
+        // DT5: the runner-side privileged-connector env-scrub audit kind.
+        (
+            EventKind::RuntimeConnectorEnvScrubbed,
+            "runtime.connector_env_scrubbed",
+        ),
     ] {
         assert_eq!(kind.as_str(), wire);
         assert_eq!(EventKind::from_wire(wire), Some(kind));

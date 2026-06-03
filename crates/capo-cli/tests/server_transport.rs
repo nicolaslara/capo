@@ -2,6 +2,8 @@
 mod basic;
 #[path = "server_transport/dispatch.rs"]
 mod dispatch;
+#[path = "server_transport/dt5_exposure.rs"]
+mod dt5_exposure;
 #[path = "server_transport/live.rs"]
 mod live;
 #[path = "server_transport/replay.rs"]

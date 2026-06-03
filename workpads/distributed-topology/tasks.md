@@ -857,7 +857,57 @@ Dependencies: DT3. Cross-workpad: `runtime-tunnel.md` (idempotency keys on
 
 ## DT5 - Auditable + Revocable Remote Control End-To-End
 
-Status: pending.
+Status: done. DT5 INTEGRATES the in-tree exposure lifecycle + grant model + the RR6
+runner revocation into a checkable safety boundary; it adds the two genuinely-new
+deliverables the section names and does NOT reimplement the permission engine.
+
+(1) CONDITIONAL NON-LOOPBACK BIND (review finding 12). The transport bind guard
+(`crates/capo-server/src/transport.rs`) now routes through
+`capo_runtime::authorize_server_bind(is_loopback, grant)`: with NO grant (the
+all-local default, `serve_tcp_with_handler` -> `..._and_grant(None)`) it is the
+loopback-only policy's HARD rejection, byte-for-byte the prior behavior; with an
+ACTIVE `capo_runtime::ExposureBindGrant` a non-loopback bind is permitted under the
+grant's promoted ceiling + `auth_ref` handle. `ExposureBindGrant::from_active_exposure`
+is constructed ONLY from an `active` exposure's audited fields (status must be
+`active`, a non-empty `capability_grant_id` + non-raw `auth_ref` handle required) so
+a `blocked_pending_permission` / `revoked` exposure, a missing grant, a missing
+handle, or a RAW credential in the handle field all fail closed. It carries only
+handles + a provenance label, never a raw credential.
+
+(2) RUNNER-SIDE PRIVILEGED-CONNECTOR ENV SCRUB (review finding 11).
+`capo_runtime::scrub_privileged_connector_env` (the name set in
+`PRIVILEGED_CONNECTOR_ENV_VARS`: `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/...
++ `CAPO_CONNECTOR_TOKEN`, case-insensitive, plus a defense-in-depth value-shape net)
+runs in `RemoteProcessRunner::start_process` on the RUNNER spawn path BEFORE
+`transport.launch`, where the server-side adapter scrub cannot reach. The dropped
+NAMES (never values) are recorded as a `runtime.remote_target_resolved` /
+`env_scrubbed` audit event, so the scrub is auditable from the trail.
+
+The rest of the DT5 surface is the EXISTING in-tree lifecycle, now proven as a DT5
+acceptance criterion end-to-end: `expose-stub` (private,
+`blocked_pending_permission`) -> `request-approval` -> `permission decide
+--decision allow_once` (the matching allow grant; `allow_always` is CLI-restricted
+to read scopes) -> `activate-exposure` (`active`) -> `revoke-exposure` (`revoked`,
+`reachable=false`, re-activation REFUSED). The RR6 `RemoteProcessRunner.revoke_control`
+/ `ensure_control_granted` (in-tree) is the runner-side "a revoked grant forbids new
+execution" guarantee, reused unchanged.
+
+Tests (all deterministic; no live tailnet/SSH, no wall clock):
+`crates/capo-runtime/src/lib.rs` `dt5_authorize_server_bind_rejects_non_loopback_without_a_grant_and_allows_with_one`,
+`dt5_exposure_bind_grant_refuses_to_build_from_a_non_active_or_handleless_exposure`,
+`dt5_scrub_privileged_connector_env_drops_known_vars_and_credential_shaped_values`,
+`dt5_runner_side_spawn_scrubs_privileged_connector_env_before_launch` (asserts the
+scrubbed launch env via the transport's `last_launched_request`, plus the audit
+event); `crates/capo-server/src/tests/dt5.rs` proves the conditional bind through the
+REAL transport guard (`serve_tcp_with_handler_and_grant`, `0.0.0.0:0` non-loopback,
+`max_connections=0` so it never blocks): loopback+no-grant accepted, non-loopback+no-grant
+REFUSED, non-loopback+active-grant permitted; `crates/capo-cli/tests/server_transport/dt5_exposure.rs`
+proves the lifecycle end-to-end over the CLI (blocked-until-grant-then-active,
+revoke-makes-unreachable-and-refuses-reactivation, and a replay/audit test that two
+independent fresh-store reads reconstruct the identical terminal `revoked` lifecycle).
+Residual: the actual non-loopback dial riding the DT5-granted tunnel on a real device
+is the DT7 live opt-in smoke (still pending); a `public` exposure stays disabled by
+default (CT8 in-tree).
 
 Prerequisite: connectivity exposure lifecycle (in-tree,
 `crates/capo-cli/src/connectivity.rs`) + `safety-gates` grant model + DT3.

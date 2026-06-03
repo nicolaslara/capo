@@ -560,16 +560,32 @@ pub(crate) fn serve_tcp_with_handler<H: RequestHandler>(
     max_connections: Option<usize>,
     config: ServeConfig,
 ) -> TransportResult<usize> {
+    serve_tcp_with_handler_and_grant(listener, handler, max_connections, config, None)
+}
+
+/// DT5 conditional-bind entry point: like [`serve_tcp_with_handler`] but accepts an
+/// optional [`capo_runtime::ExposureBindGrant`]. With `None` (the all-local
+/// default) the bind is loopback-only (hard rejection of a non-loopback address,
+/// byte-for-byte the prior behavior). With an ACTIVE grant a non-loopback bind is
+/// permitted under the recorded, grant-backed exposure (review finding 12).
+pub(crate) fn serve_tcp_with_handler_and_grant<H: RequestHandler>(
+    listener: TcpListener,
+    handler: Arc<H>,
+    max_connections: Option<usize>,
+    config: ServeConfig,
+    bind_grant: Option<capo_runtime::ExposureBindGrant>,
+) -> TransportResult<usize> {
     let bound_address = listener.local_addr().map_err(TransportError::Io)?;
-    // CT1: the bind side consults `ExposurePolicy` rather than a hand-rolled
-    // loopback check. The default (zero-config) policy is loopback-only with no
-    // auth handle, so loopback still passes byte-for-byte and a non-loopback bind
-    // fails closed exactly as before — but now the listener and connect sides
-    // share one policy so loosening one side can never open an asymmetric hole.
-    // Promoting to a non-loopback bind requires an explicitly promoted policy AND
-    // an auth_ref handle (CT2); the server build path will thread those in.
-    ExposurePolicy::loopback_default()
-        .authorize_socket(bound_address.ip().is_loopback(), None)
+    // CT1/DT5: the bind side consults the connectivity policy rather than a
+    // hand-rolled loopback check. With no grant (`config.bind_grant == None`, the
+    // all-local default) this is the loopback-only policy's HARD rejection,
+    // byte-for-byte the prior behavior — loopback passes, a non-loopback bind fails
+    // closed. DT5's conditional bind (review finding 12) supplies an ACTIVE
+    // `ExposureBindGrant` so a non-loopback bind is permitted ONLY under a recorded,
+    // grant-backed exposure (promoted ceiling + `auth_ref` handle). The listener and
+    // connect sides share one policy so loosening one side cannot open an
+    // asymmetric hole.
+    capo_runtime::authorize_server_bind(bound_address.ip().is_loopback(), bind_grant.as_ref())
         .map_err(|error| {
             TransportError::Protocol(format!(
                 "server listener must be loopback, got {bound_address}: {error}"

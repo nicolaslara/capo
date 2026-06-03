@@ -21,8 +21,8 @@
 //! channel fingerprint (a HANDLE), never a key/token.
 
 use crate::{
-    ChannelKind, ConnectivityResult, ConnectivityTunnel, EndpointOwner, OpenChannel, RemoteChannel,
-    RemoteProcessConfig, RemoteProcessRunner,
+    ChannelKind, ConnectivityError, ConnectivityResult, ConnectivityTunnel, EndpointOwner,
+    ExposureBindGrant, OpenChannel, RemoteChannel, RemoteProcessConfig, RemoteProcessRunner,
 };
 
 /// DT3: the resolved attach of a remote runner over the tunnel.
@@ -62,7 +62,47 @@ impl RemoteRunnerAttach {
     where
         F: FnOnce(&OpenChannel) -> RemoteChannel,
     {
+        Self::resolve_with_grant(tunnel, owner, channel_kind, None, build_transport)
+    }
+
+    /// DT5: resolve the runner control channel under an OPTIONAL
+    /// [`ExposureBindGrant`], modeling the runner control channel as a
+    /// [`crate::ConnectivityExposure`] that is `blocked_pending_permission` until an
+    /// explicit grant exists — the EXACT symmetry of the server-bind gate.
+    ///
+    /// A resolved endpoint that requires permission (a `private`/`public` exposure)
+    /// is REFUSED with [`ConnectivityError::AuthRequired`] unless a matching ACTIVE
+    /// grant is supplied: the grant's scope must be at least the resolved exposure's
+    /// scope (the grant promoted the ceiling that high). With no grant the channel is
+    /// never silently opened — the all-local LOOPBACK default needs no grant and
+    /// passes unchanged, byte-for-byte, because a loopback resolution sets
+    /// `permission_required = false`.
+    ///
+    /// The grant carries ONLY handles (`auth_ref` / `capability_grant_id`), never a
+    /// raw credential, so threading it through the attach cannot leak a secret.
+    pub fn resolve_with_grant<F>(
+        tunnel: &ConnectivityTunnel,
+        owner: EndpointOwner,
+        channel_kind: ChannelKind,
+        grant: Option<&ExposureBindGrant>,
+        build_transport: F,
+    ) -> ConnectivityResult<Self>
+    where
+        F: FnOnce(&OpenChannel) -> RemoteChannel,
+    {
         let resolved = tunnel.resolve_endpoint(owner, channel_kind)?;
+        // DT5 grant gate: a non-loopback control channel is blocked_pending_permission
+        // until an explicit, scope-covering active grant exists. Fail closed otherwise.
+        if resolved.permission_required {
+            let authorized = grant
+                .map(|grant| grant.covers_exposure(resolved.exposure))
+                .unwrap_or(false);
+            if !authorized {
+                return Err(ConnectivityError::AuthRequired {
+                    scope: resolved.exposure,
+                });
+            }
+        }
         let channel = tunnel.open_channel(&resolved)?;
         let transport = build_transport(&channel);
         let runner = RemoteProcessRunner::new(RemoteProcessConfig::with_transport(

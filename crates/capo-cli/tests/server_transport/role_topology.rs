@@ -441,3 +441,50 @@ fn runner_role_rejects_missing_server_endpoint_up_front() {
         "a runner with no server endpoint must be rejected before any socket:\n{output}"
     );
 }
+
+/// DT5 (finding 2): the runner-side symmetry of the server-bind gate. When the
+/// resolved SERVER control endpoint is a `private` exposure, it is
+/// `blocked_pending_permission` until the DT5 grant exists, and the runner REFUSES
+/// to announce — a typed error before any socket — instead of failing opaquely at
+/// connect. This is the runner analogue of
+/// `server_role_resolves_loopback_bind_and_marks_private_blocked_pending_permission`.
+#[test]
+fn runner_announce_refused_when_server_control_endpoint_is_blocked_pending_permission() {
+    let state_root = temp_root("role-topology-runner-blocked-state");
+    let state = state_root.display().to_string();
+    let output = capo_failure([
+        "role",
+        "runner",
+        "--target",
+        "runner-target-blocked",
+        "--name",
+        "blocked runner",
+        "--runner",
+        "remote-process",
+        "--workspace",
+        "/tmp/runner-ws-blocked",
+        "--artifacts",
+        "/tmp/runner-art-blocked",
+        "--server-endpoint",
+        "server-private-ep",
+        "--exposure",
+        "private",
+        "--state",
+        &state,
+    ]);
+    assert!(
+        output.contains("runner cannot announce") && output.contains("blocked_pending_permission"),
+        "a private (un-granted) server control endpoint must refuse the announce up front:\n{output}"
+    );
+    assert!(
+        output.contains("activate the DT5 grant first"),
+        "the refusal must point at the DT5 grant path:\n{output}"
+    );
+    // No authoritative store write happened on the runner side either.
+    let runner_db = state_root.join("capo.sqlite");
+    assert!(
+        !runner_db.exists(),
+        "a refused announce must not write a local authoritative store: {}",
+        runner_db.display()
+    );
+}
