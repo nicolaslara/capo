@@ -238,5 +238,16 @@ fn server_error_wire(error: &ServerError) -> (&'static str, String) {
                  a resume cursor must be at or below the latest committed sequence"
             ),
         ),
+        ServerError::InvalidRunnerReplayFrame {
+            event_id,
+            field,
+            value,
+            expected,
+        } => (
+            "invalid_runner_replay_frame",
+            format!(
+                "runner replay frame {event_id} has invalid {field} `{value}`; expected {expected}"
+            ),
+        ),
     }
 }

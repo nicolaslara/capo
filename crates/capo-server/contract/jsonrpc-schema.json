@@ -147,6 +147,7 @@
                     "unclassifiable_report_source",
                     "invalid_runtime_target_field",
                     "subscribe_from_sequence_ahead_of_log",
+                    "invalid_runner_replay_frame",
                     "remote",
                     "cancelled",
                     "interrupted"
@@ -268,7 +269,8 @@
             "goal_risks",
             "goal_report",
             "continue_goal",
-            "register_runtime_target"
+            "register_runtime_target",
+            "replay_runner_events"
           ],
           "type": "string"
         },
@@ -344,7 +346,8 @@
                     "goal_timeline",
                     "goal_report",
                     "continuation_evaluated",
-                    "runtime_target_registered"
+                    "runtime_target_registered",
+                    "runner_events_replayed"
                   ],
                   "type": "string"
                 }

@@ -98,6 +98,20 @@ pub enum ServerError {
         from_sequence: i64,
         latest_sequence: i64,
     },
+    /// DT4b: a `ReplayRunnerEvents` frame carried a `kind` or `redaction_state`
+    /// outside the allowed vocabulary. A replay frame may arrive from a remote
+    /// runner speaking JSON-RPC directly, so the server re-validates each frame at
+    /// the seam BEFORE appending: the wire `kind` must resolve to a typed
+    /// `runtime.remote_*` kind (the replay path can never inject a non-runtime or
+    /// unknown kind into the authoritative log), and `redaction_state` must be a
+    /// persistable classification (`safe`/`redacted`) so an unscrubbed frame is
+    /// rejected rather than committed.
+    InvalidRunnerReplayFrame {
+        event_id: String,
+        field: &'static str,
+        value: String,
+        expected: &'static str,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -492,6 +506,67 @@ pub enum ServerCommand {
         /// turn is indistinguishable from an operator turn.
         turn: Box<ContinueGoalTurn>,
     },
+    /// DT4b: a reconnecting runner REPLAYS the `runtime.*` events it spooled while
+    /// the runner<->server leg was down, over the EXISTING JSON-RPC command
+    /// transport, for the server (the single authoritative writer) to append.
+    ///
+    /// This is the production replay-on-reattach seam DT-D2 names. The runner-side
+    /// [`capo_runtime::RunnerEventSpool`] retains the events across the disconnect
+    /// (the server's idempotency-key dedupe cannot help an event that was NEVER
+    /// SENT); on reattach the runner drains the spool, builds these frames, and
+    /// submits this command. The server appends each frame through the single
+    /// writer, whose `(project_id, idempotency_key)` dedupe makes the replay
+    /// EXACTLY ONCE — a retried reattach that re-sends an already-appended event is
+    /// a no-op.
+    ///
+    /// Like [`Self::RegisterRuntimeTarget`], this command can arrive from a remote
+    /// runner speaking JSON-RPC directly, so the server RE-VALIDATES each frame at
+    /// this seam before appending: the wire `kind` must resolve to a typed
+    /// `runtime.remote_*` kind (a raw-TCP caller cannot inject an arbitrary kind or
+    /// a non-runtime kind into the log via the replay path), and the
+    /// `redaction_state` must be a persistable classification (`safe`/`redacted`)
+    /// so an unscrubbed frame cannot be appended.
+    ReplayRunnerEvents {
+        /// The drained spool frames, in production order. Each carries the stable
+        /// idempotency key the server dedupes on.
+        frames: Vec<RunnerReplayFrame>,
+    },
+}
+
+/// DT4b: one spooled `runtime.*` event a reconnecting runner replays over the
+/// existing transport (the wire form of a
+/// [`capo_runtime::SpooledRuntimeEvent`]). `kind` and `redaction_state` are wire
+/// strings re-validated at the server seam before append, so a raw-TCP caller
+/// cannot inject an arbitrary kind or an unscrubbed classification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerReplayFrame {
+    pub event_id: String,
+    /// The `runtime.*` wire kind (validated to a typed `runtime.remote_*` kind at
+    /// the server seam via [`capo_state::EventKind::from_wire`]).
+    pub kind: String,
+    pub session_id: String,
+    /// The stable idempotency key the server dedupes on (exactly-once replay).
+    pub idempotency_key: String,
+    /// The redacted payload JSON (already scrubbed by the runner-side spool).
+    pub payload_json: String,
+    /// The redaction classification wire string (`safe`/`redacted`).
+    pub redaction_state: String,
+}
+
+impl From<&capo_runtime::SpooledRuntimeEvent> for RunnerReplayFrame {
+    /// Build the wire replay frame the reconnecting runner submits from a drained
+    /// spool entry. The typed kind/redaction become their wire strings; the server
+    /// re-validates them back to typed values before appending.
+    fn from(event: &capo_runtime::SpooledRuntimeEvent) -> Self {
+        Self {
+            event_id: event.event_id.clone(),
+            kind: event.kind.as_str().to_string(),
+            session_id: event.session_id.as_str().to_string(),
+            idempotency_key: event.idempotency_key.clone(),
+            payload_json: event.payload_json.clone(),
+            redaction_state: event.redaction_state.as_str().to_string(),
+        }
+    }
 }
 
 /// AI5: the live safe-boundary conditions + explicit enablement a
@@ -926,6 +1001,22 @@ pub enum ServerResponsePayload {
     /// enabled, the `DispatchTurn` summary of the ONE follow-on turn driven through
     /// the production path. `dispatched` is `Some` iff exactly one turn was driven.
     ContinuationEvaluated(ContinuationEvaluatedSummary),
+    /// DT4b: the outcome of a runner's [`ServerCommand::ReplayRunnerEvents`]: the
+    /// committed sequence the single writer assigned each replayed frame, in
+    /// production order. A re-replay of an already-appended frame returns its
+    /// EXISTING sequence (dedupe no-op), so a caller can prove exactly-once from
+    /// the fact that two replays of the same drained frames return identical
+    /// sequences.
+    RunnerEventsReplayed(RunnerEventsReplayedSummary),
+}
+
+/// DT4b: the server-side outcome of replaying a reconnecting runner's spooled
+/// events. `appended_sequences` is the committed sequence per replayed frame, in
+/// production order; a re-replay of an already-appended frame returns its existing
+/// sequence (the `(project_id, idempotency_key)` dedupe no-op).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerEventsReplayedSummary {
+    pub appended_sequences: Vec<i64>,
 }
 
 /// DT1: the server-side summary of a runner's announced runtime target. The
@@ -1594,5 +1685,19 @@ fn default_request_id(command: &ServerCommand) -> String {
             slug(goal_id),
             slug(continuation_id)
         ),
+        ServerCommand::ReplayRunnerEvents { frames } => {
+            // Stable id over the replayed frames' idempotency keys, so a retried
+            // reattach of the SAME drained frames reuses the same request id.
+            let digest = frames
+                .iter()
+                .map(|frame| frame.idempotency_key.as_str())
+                .collect::<Vec<_>>()
+                .join("|");
+            format!(
+                "server-runner-replay-{}-{}",
+                frames.len(),
+                stable_hash(digest.as_bytes())
+            )
+        }
     }
 }

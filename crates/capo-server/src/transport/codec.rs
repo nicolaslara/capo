@@ -440,7 +440,36 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             "conditions": encode_continue_goal_conditions(conditions),
             "turn": encode_continue_goal_turn(turn),
         }),
+        ServerCommand::ReplayRunnerEvents { frames } => json!({
+            "type": "replay_runner_events",
+            "frames": frames
+                .iter()
+                .map(encode_runner_replay_frame)
+                .collect::<Vec<_>>(),
+        }),
     }
+}
+
+fn encode_runner_replay_frame(frame: &crate::RunnerReplayFrame) -> Value {
+    json!({
+        "event_id": frame.event_id,
+        "kind": frame.kind,
+        "session_id": frame.session_id,
+        "idempotency_key": frame.idempotency_key,
+        "payload_json": frame.payload_json,
+        "redaction_state": frame.redaction_state,
+    })
+}
+
+fn decode_runner_replay_frame(value: &Value) -> TransportResult<crate::RunnerReplayFrame> {
+    Ok(crate::RunnerReplayFrame {
+        event_id: required_string(value, "event_id")?,
+        kind: required_string(value, "kind")?,
+        session_id: required_string(value, "session_id")?,
+        idempotency_key: required_string(value, "idempotency_key")?,
+        payload_json: required_string(value, "payload_json")?,
+        redaction_state: required_string(value, "redaction_state")?,
+    })
 }
 
 fn encode_continue_goal_conditions(c: &crate::ContinueGoalConditions) -> Value {
@@ -776,6 +805,14 @@ pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
             conditions: decode_continue_goal_conditions(required_value(value, "conditions")?)?,
             turn: Box::new(decode_continue_goal_turn(required_value(value, "turn")?)?),
         }),
+        "replay_runner_events" => Ok(ServerCommand::ReplayRunnerEvents {
+            frames: required_value(value, "frames")?
+                .as_array()
+                .ok_or_else(|| TransportError::Protocol("frames must be an array".to_string()))?
+                .iter()
+                .map(decode_runner_replay_frame)
+                .collect::<TransportResult<Vec<_>>>()?,
+        }),
         other => Err(TransportError::Protocol(format!(
             "unknown command type: {other}"
         ))),
@@ -907,6 +944,10 @@ pub(super) fn encode_payload(payload: &ServerResponsePayload) -> Value {
                 .dispatched
                 .as_ref()
                 .map(|turn| Value::Object(encode_dispatch_turn_body(turn))),
+        }),
+        ServerResponsePayload::RunnerEventsReplayed(summary) => json!({
+            "type": "runner_events_replayed",
+            "appended_sequences": summary.appended_sequences,
         }),
         ServerResponsePayload::Recovery(recovery) => json!({
             "type": "recovery",
@@ -1276,6 +1317,24 @@ pub(super) fn decode_payload(value: &Value) -> TransportResult<ServerResponsePay
                     Some(Value::Null) | None => None,
                     Some(turn) => Some(decode_dispatch_turn_summary(turn)?),
                 },
+            },
+        )),
+        "runner_events_replayed" => Ok(ServerResponsePayload::RunnerEventsReplayed(
+            crate::RunnerEventsReplayedSummary {
+                appended_sequences: required_value(value, "appended_sequences")?
+                    .as_array()
+                    .ok_or_else(|| {
+                        TransportError::Protocol("appended_sequences must be an array".to_string())
+                    })?
+                    .iter()
+                    .map(|seq| {
+                        seq.as_i64().ok_or_else(|| {
+                            TransportError::Protocol(
+                                "appended_sequences entries must be integers".to_string(),
+                            )
+                        })
+                    })
+                    .collect::<TransportResult<Vec<_>>>()?,
             },
         )),
         "recovery" => Ok(ServerResponsePayload::Recovery(RecoverySummary {

@@ -268,6 +268,7 @@ fn schema_enumerations_cover_every_wire_variant() {
             ServerCommand::GoalReport { .. } => "goal_report",
             ServerCommand::ContinueGoal { .. } => "continue_goal",
             ServerCommand::RegisterRuntimeTarget { .. } => "register_runtime_target",
+            ServerCommand::ReplayRunnerEvents { .. } => "replay_runner_events",
         }
     }
 
@@ -295,6 +296,7 @@ fn schema_enumerations_cover_every_wire_variant() {
             ServerResponsePayload::GoalReport(_) => "goal_report",
             ServerResponsePayload::ContinuationEvaluated(_) => "continuation_evaluated",
             ServerResponsePayload::RuntimeTargetRegistered(_) => "runtime_target_registered",
+            ServerResponsePayload::RunnerEventsReplayed(_) => "runner_events_replayed",
         }
     }
 
@@ -325,6 +327,7 @@ fn schema_enumerations_cover_every_wire_variant() {
             ServerError::SubscribeFromSequenceAheadOfLog { .. } => {
                 "subscribe_from_sequence_ahead_of_log"
             }
+            ServerError::InvalidRunnerReplayFrame { .. } => "invalid_runner_replay_frame",
         }
     }
 
@@ -685,6 +688,16 @@ fn sample_commands() -> Vec<ServerCommand> {
             goal_id: "goal-render".to_string(),
             format: crate::GoalReportFormat::Json,
         },
+        ServerCommand::ReplayRunnerEvents {
+            frames: vec![crate::RunnerReplayFrame {
+                event_id: "runner-evt-0".to_string(),
+                kind: "runtime.remote_output_delta".to_string(),
+                session_id: "session-replay".to_string(),
+                idempotency_key: "runtime.remote_output_delta:run-x:0".to_string(),
+                payload_json: "{\"offset\":0}".to_string(),
+                redaction_state: "safe".to_string(),
+            }],
+        },
     ]
 }
 
@@ -904,6 +917,9 @@ fn sample_payloads() -> Vec<ServerResponsePayload> {
             body: r#"{"goal_id":"goal-render"}"#.to_string(),
             degraded: true,
         }),
+        ServerResponsePayload::RunnerEventsReplayed(crate::RunnerEventsReplayedSummary {
+            appended_sequences: vec![1, 2, 3],
+        }),
     ]
 }
 
@@ -1010,6 +1026,12 @@ fn sample_errors() -> Vec<ServerError> {
             field: "runner_kind",
             value: s(),
             expected: "local-process, remote-process, or container",
+        },
+        ServerError::InvalidRunnerReplayFrame {
+            event_id: s(),
+            field: "kind",
+            value: s(),
+            expected: "a runtime.remote_* event kind",
         },
     ]
 }

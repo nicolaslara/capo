@@ -539,6 +539,7 @@ fn command_methods() -> Vec<&'static str> {
         "goal_report",
         "continue_goal",
         "register_runtime_target",
+        "replay_runner_events",
     ]
 }
 
@@ -567,6 +568,7 @@ fn payload_types() -> Vec<&'static str> {
         "goal_report",
         "continuation_evaluated",
         "runtime_target_registered",
+        "runner_events_replayed",
     ]
 }
 
@@ -594,6 +596,7 @@ fn error_kinds() -> Vec<&'static str> {
         "unclassifiable_report_source",
         "invalid_runtime_target_field",
         "subscribe_from_sequence_ahead_of_log",
+        "invalid_runner_replay_frame",
         "remote",
         "cancelled",
         "interrupted",

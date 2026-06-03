@@ -757,7 +757,64 @@ Dependencies: DT2. Cross-workpad: `streaming-transport` (`EventStream`,
 
 ## DT4b - Runner Buffered-Event Reconciliation (spool + idempotent replay)
 
-Status: pending.
+Status: done. The DT-D2 mechanism landed as a runner-side spool
+(`crates/capo-runtime/src/runner_spool.rs`) PLUS a production replay-on-reattach
+SEAM over the existing JSON-RPC command transport (resolving review findings 1, 2,
+4 -- the replay is no longer a test-only `state_for_test()` backdoor). `RunnerEventSpool`
+buffers the `runtime.*` events a runner produced WHILE the runner<->server leg is down
+(`mark_disconnected` -> `offer`), bounded (oldest-dropped, recorded via
+`SpoolAdmission::BufferedEvictingOldest` + `evicted_count`), and replays them in
+production order on reattach (`drain_for_replay`). Each buffered event is a
+`SpooledRuntimeEvent` carrying a TYPED `EventKind` (never a raw kind string) + the
+stable `runtime.*` idempotency key + the redacted payload.
+
+The reconnecting runner converts each drained `SpooledRuntimeEvent` into a wire
+`RunnerReplayFrame` (`From<&SpooledRuntimeEvent>`) and submits a
+`ServerCommand::ReplayRunnerEvents { frames }` over the SAME transport DT1 uses;
+`CapoServer::handle()` routes it to `handle_replay_runner_events`, the single-writer
+append path. Like `RegisterRuntimeTarget`, the server RE-VALIDATES every frame at
+this seam BEFORE appending (a replay can arrive from a remote runner speaking
+JSON-RPC directly): the wire `kind` must resolve through `EventKind::from_wire` to a
+`runtime.remote_*` kind, and `redaction_state` must be a persistable
+(`safe`/`redacted`) classification -- a non-runtime/unknown kind or an unscrubbed
+frame is refused (`ServerError::InvalidRunnerReplayFrame`), never committed. The
+server stays the single writer and de-duplicates the replay on
+`(project_id, idempotency_key)` via the in-tree `SqliteStateStore::append_event`
+dedupe, so a reattach that re-sends an already-appended event returns the existing
+sequence (a no-op) -- exactly-once -- and `append_event` fans the committed event to
+live subscribers, so a tailing client sees each replayed event once. While CONNECTED
+the spool buffers nothing (`offer` returns `None`), so it is inert in the steady
+state and, transitively, in the all-local default where the leg never disconnects
+(DT6). Credential safety: DT3 redacts before an event reaches the spool, AND the
+spool defensively re-scans every payload on insert (`scan_credential_shapes`), so a
+spooled frame can never be where a secret leaks across the reconnect; the server
+seam re-checks the classification as a second gate.
+
+Tests: `crates/capo-runtime/src/runner_spool.rs` unit suite (connected-inert,
+buffered-in-order, bounded-evict-oldest, secret-scrub, idempotency-key survives onto
+the NewEvent) + `crates/capo-server/src/tests/dt4b.rs`, which now drive the replay
+END-TO-END through the production seam (`ServerCommand::ReplayRunnerEvents` ->
+`CapoServer::handle()`), NOT `state_for_test()`:
+`spooled_runner_events_replay_through_the_single_writer_exactly_once` (runner
+produces -> spools -> reconnects -> submits over the command transport -> single
+writer appends -> tailing client sees each once, in order),
+`re_replaying_an_already_appended_event_is_a_no_op_and_the_sequence_stays_contiguous`
+(both replays through `handle()`; the second returns identical sequences),
+`a_replayed_spooled_frame_carries_no_seeded_secret`, and two seam-validation tests
+(`the_replay_seam_refuses_a_non_runtime_kind_before_appending`,
+`the_replay_seam_refuses_an_unscrubbed_redaction_classification`) proving a forbidden
+kind / unscrubbed frame is rejected before any append and never reaches the log. The
+command also round-trips through the real JSON-RPC codec (the `contract` schema
+suite). All deterministic: the disconnect/reconnect is the spool's own state
+transition, NOT a wall-clock drop.
+
+Falsification (DT-D2, review finding 3): the spool is retained rather than degraded
+to DT4a's watermark resume. The falsification EVIDENCE is the ABSENCE of a trace
+showing a drop produces zero buffered events; no positive production/dogfood trace
+has been collected, so this rests on absence-of-evidence (the weakest tier the DT-D2
+text allows), not a positive trace. Live smoke (review finding 6): DT4b has
+deterministic assertions only; the live cross-device E2E smoke is deferred to DT7
+(pending) -- the live replay path has NOT been exercised here.
 
 Prerequisite: DT3 + DT0's DT-D2 resolution (reconciliation = runner spool +
 idempotent replay).

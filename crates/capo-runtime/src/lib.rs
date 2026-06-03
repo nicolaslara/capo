@@ -38,6 +38,12 @@ pub mod keep_alive;
 /// reachability channel to a `RemoteProcessRunner`, so the server drives a remote
 /// process group through the existing `RuntimeRunner` boundary (no loop change).
 pub mod remote_attach;
+/// DT4b: runner buffered-event reconciliation — a runner-side spool that buffers the
+/// `runtime.*` events produced while the runner<->server leg is down and replays them
+/// on reattach for the single-writer server to append idempotently (exactly-once via
+/// the `(project_id, idempotency_key)` dedupe). A SEPARATE mechanism from DT4a's
+/// watermark resume (which covers events already committed to the log).
+pub mod runner_spool;
 mod sandbox;
 mod worktree;
 
@@ -51,6 +57,7 @@ pub use keep_alive::{
     RunnerHealthEvent, RunnerServerPlane, runner_health_event_is_clean,
 };
 pub use remote_attach::RemoteRunnerAttach;
+pub use runner_spool::{RunnerEventSpool, SpoolAdmission, SpooledRuntimeEvent};
 
 pub use async_runner::{
     AsyncLocalProcessRunner, AsyncRunningProcess, StreamSource, StreamingOutcome,
@@ -442,7 +449,7 @@ impl RedactionPolicy {
 /// component scrubbed even if the token itself is short. Ordinary prose words,
 /// file paths, hex digests / git SHAs, and dashed UUIDs are excluded so the scan
 /// does not blank out useful command output.
-fn scan_credential_shapes(text: &str) -> (String, bool) {
+pub(crate) fn scan_credential_shapes(text: &str) -> (String, bool) {
     let mut out = String::with_capacity(text.len());
     let mut redacted = false;
     // Split on whitespace boundaries, preserving the exact whitespace so the

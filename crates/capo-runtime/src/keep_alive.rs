@@ -659,5 +659,22 @@ mod tests {
             runner_health_event_is_clean(&event, &markers),
             "heartbeat frame must contain no seeded credential marker"
         );
+
+        // The clean assertion above is only meaningful if the scan ACTUALLY reads
+        // the event's fields — including `runtime_process_ref`, the one field that
+        // could in principle carry an opaque handle. Prove the scan is invoked over
+        // that field: an event whose `runtime_process_ref` carries a seeded marker
+        // is reported NOT clean. This falsifies the "trivially clean because the
+        // fields are hard-coded safe" reading of the test (review finding 5): the
+        // scan covers `runtime_process_ref`, so a leak there would be caught.
+        let mut tainted = event.clone();
+        tainted.runtime_process_ref = "runtime-proc:sk-ant-SEEDED".to_string();
+        assert!(
+            !runner_health_event_is_clean(&tainted, &markers),
+            "the scan must read runtime_process_ref: a seeded marker there must be caught"
+        );
+        // And the original, untainted event stays clean (the taint above is the
+        // only difference, so the scan is field-sensitive, not all-or-nothing).
+        assert!(runner_health_event_is_clean(&event, &markers));
     }
 }

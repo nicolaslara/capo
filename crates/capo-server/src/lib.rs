@@ -1620,7 +1620,90 @@ impl CapoServer {
                 conditions,
                 *turn,
             ),
+            ServerCommand::ReplayRunnerEvents { frames } => {
+                self.handle_replay_runner_events(request_id, origin, frames)
+            }
         }
+    }
+
+    /// DT4b: append a reconnecting runner's replayed spool frames through the
+    /// SINGLE WRITER over the existing transport.
+    ///
+    /// This is the production replay-on-reattach seam DT-D2 names: the runner-side
+    /// [`capo_runtime::RunnerEventSpool`] retained these `runtime.*` events while
+    /// the leg was down and now re-offers them; the server is the only writer to
+    /// the authoritative log. Each frame is RE-VALIDATED at this seam before
+    /// append (a replay can arrive from a remote runner speaking JSON-RPC
+    /// directly): the wire `kind` must resolve to a typed `runtime.remote_*` kind
+    /// and the `redaction_state` must be a persistable classification, so the
+    /// replay path can never inject a non-runtime kind or an unscrubbed frame into
+    /// the log. The store's `(project_id, idempotency_key)` dedupe makes the
+    /// replay EXACTLY ONCE — a retried reattach that re-sends an already-appended
+    /// frame returns the existing sequence (a no-op) and never duplicates a run.
+    fn handle_replay_runner_events(
+        &self,
+        request_id: String,
+        origin: ServerClientOrigin,
+        frames: Vec<RunnerReplayFrame>,
+    ) -> ServerResult<ServerResponse> {
+        let mut appended_sequences = Vec::with_capacity(frames.len());
+        for frame in &frames {
+            // Re-validate the wire kind: it must be a known `runtime.remote_*`
+            // kind. A non-runtime or unknown kind is refused before any append.
+            let kind = capo_state::EventKind::from_wire(&frame.kind).ok_or_else(|| {
+                ServerError::InvalidRunnerReplayFrame {
+                    event_id: frame.event_id.clone(),
+                    field: "kind",
+                    value: frame.kind.clone(),
+                    expected: "a known runtime.remote_* event kind",
+                }
+            })?;
+            if !frame.kind.starts_with("runtime.remote_") {
+                return Err(ServerError::InvalidRunnerReplayFrame {
+                    event_id: frame.event_id.clone(),
+                    field: "kind",
+                    value: frame.kind.clone(),
+                    expected: "a runtime.remote_* event kind",
+                });
+            }
+            // Re-validate the redaction classification: a replayed frame must be a
+            // persistable (`safe`/`redacted`) classification — an unscrubbed frame
+            // (`unknown`/`contains_sensitive`) is refused, never committed.
+            let redaction_state = capo_state::RedactionState::from_wire(&frame.redaction_state)
+                .filter(|state| state.is_persistable_artifact())
+                .ok_or_else(|| ServerError::InvalidRunnerReplayFrame {
+                    event_id: frame.event_id.clone(),
+                    field: "redaction_state",
+                    value: frame.redaction_state.clone(),
+                    expected: "safe or redacted",
+                })?;
+
+            let mut event =
+                capo_state::NewEvent::new(frame.event_id.clone(), kind, &origin.actor_id);
+            event.project_id = Some(self.project_id.clone());
+            event.session_id = Some(SessionId::new(frame.session_id.clone()));
+            event.idempotency_key = Some(frame.idempotency_key.clone());
+            event.payload_json = frame.payload_json.clone();
+            event.redaction_state = redaction_state;
+
+            // The single writer appends (and, on a re-replay, the
+            // `(project_id, idempotency_key)` dedupe returns the existing
+            // sequence — exactly-once) and fans the committed event to live
+            // subscribers, so a tailing client sees each replayed event once.
+            let sequence = self
+                .controller
+                .state()
+                .append_event(event, &[])
+                .map_err(ServerError::State)?;
+            appended_sequences.push(sequence);
+        }
+        self.response(
+            request_id,
+            origin,
+            ServerResponsePayload::RunnerEventsReplayed(RunnerEventsReplayedSummary {
+                appended_sequences,
+            }),
+        )
     }
 
     /// Test-only access to the underlying event store, so a test can append a
