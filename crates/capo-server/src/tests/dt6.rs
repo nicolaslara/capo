@@ -57,9 +57,17 @@ fn contract_dir() -> PathBuf {
 const CODEX_FIXTURE: &str = include_str!("../../../capo-adapters/fixtures/codex-exec.jsonl");
 
 /// Distributed event-kind markers (wire tags) that MUST NOT appear in an
-/// all-local single-box turn. Any of these in the realized thread projection
-/// would mean the distributed surface was constructed/entered in the default
-/// path, which is exactly the DT6 inertness regression.
+/// all-local single-box turn. Any of these in the realized log would mean the
+/// distributed surface was constructed/entered in the default path, which is
+/// exactly the DT6 inertness regression.
+///
+/// IMPORTANT (resolving review finding 3): these are checked against the RAW
+/// COMMITTED EVENT LOG, not only the thread read model. The thread projection only
+/// surfaces `Output`/`Tool`/`Terminal` items, so a runtime-layer kind like
+/// `runtime.start_requested` (emitted by the local runner in `capo-runtime`) would
+/// NEVER appear as a thread item and the old item-only check was vacuous for it. By
+/// scanning the raw `events` table we catch a distributed/runtime kind even if it
+/// never projects into a thread item.
 const DISTRIBUTED_EVENT_KIND_MARKERS: &[&str] = &[
     "connectivity.",
     "runtime.health_changed",
@@ -68,10 +76,24 @@ const DISTRIBUTED_EVENT_KIND_MARKERS: &[&str] = &[
     "runtime.start_requested",
 ];
 
+/// Reopen the all-local store at `root` and return every committed event kind, in
+/// sequence order. This is the RAW log (the `events` table) -- the single source of
+/// truth the read models are projected from -- so a distributed/runtime event kind
+/// that never becomes a thread item is still caught (finding 3).
+fn committed_event_kinds(root: &Path) -> Vec<String> {
+    let store = capo_state::SqliteStateStore::open(root).expect("reopen the all-local store");
+    store
+        .events_after(0, 1_000_000)
+        .expect("read the committed event log")
+        .into_iter()
+        .map(|event| event.kind)
+        .collect()
+}
+
 /// Run one deterministic all-local turn through the production write path and
 /// return the server-projected thread read model (over the in-process handler,
 /// the same path `ReadThread` serves). No role flags, loopback only.
-fn run_all_local_turn(session: &str, run: &str, turn: &str) -> ServerThread {
+fn run_all_local_turn(session: &str, run: &str, turn: &str) -> (ServerThread, PathBuf) {
     let root = temp_root();
     let project_id = ProjectId::new("project-dt6-all-local");
     let server = CapoServer::open(project_id, &root).expect("server opens for the all-local box");
@@ -131,7 +153,7 @@ fn run_all_local_turn(session: &str, run: &str, turn: &str) -> ServerThread {
     let ServerResponsePayload::Thread(thread) = read.payload else {
         panic!("expected a thread payload for the all-local turn");
     };
-    thread
+    (thread, root)
 }
 
 #[test]
@@ -141,8 +163,8 @@ fn all_local_turn_thread_projection_is_byte_for_byte_stable() {
     // derived purely from the committed event log + the existing `Subscribe`/thread
     // read model, so equality proves the single-box turn loop is deterministic and
     // unchanged by the distributed surface.
-    let first = run_all_local_turn("session-dt6", "run-dt6", "turn-dt6");
-    let second = run_all_local_turn("session-dt6", "run-dt6", "turn-dt6");
+    let (first, first_root) = run_all_local_turn("session-dt6", "run-dt6", "turn-dt6");
+    let (second, _second_root) = run_all_local_turn("session-dt6", "run-dt6", "turn-dt6");
     assert_eq!(
         first, second,
         "the all-local thread projection must be byte-for-byte stable across runs \
@@ -170,14 +192,38 @@ fn all_local_turn_thread_projection_is_byte_for_byte_stable() {
     // runner path (DT3), the spool (DT4b), and the exposure gating (DT5) are
     // constructed only for a non-loopback RoleConfig, so NONE of their event kinds
     // can appear here.
+    //
+    // We scan the RAW COMMITTED EVENT LOG (resolving review finding 3): a
+    // runtime-layer kind such as `runtime.start_requested` (emitted by the local
+    // runner) is NEVER projected into a thread item, so the prior item-only check was
+    // vacuous for it. The raw log is the source of truth the read models project
+    // from, so a distributed/runtime kind is caught here even when it never becomes a
+    // thread item.
+    let committed_kinds = committed_event_kinds(&first_root);
+    assert!(
+        !committed_kinds.is_empty(),
+        "the all-local turn must commit events (so the marker scan is not vacuous)"
+    );
+    for kind in &committed_kinds {
+        for marker in DISTRIBUTED_EVENT_KIND_MARKERS {
+            assert!(
+                !kind.starts_with(marker),
+                "the all-local default committed a distributed/runtime event kind `{kind}` \
+                 (marker `{marker}`); the distributed surface must be structurally inert \
+                 without a non-loopback endpoint"
+            );
+        }
+    }
+
+    // Belt-and-braces: the projected thread items must also be marker-free (the read
+    // model can only surface a subset of kinds, but if a distributed kind ever did
+    // project, this catches it too).
     for turn in &first.turns {
         for item in &turn.items {
             for marker in DISTRIBUTED_EVENT_KIND_MARKERS {
                 assert!(
-                    !item.event_kind.starts_with(marker)
-                        && !item.event_kind.contains("target_registered"),
-                    "the all-local default produced a distributed event kind `{}` (marker `{}`); \
-                     the distributed surface must be structurally inert without a non-loopback endpoint",
+                    !item.event_kind.starts_with(marker),
+                    "the all-local default projected a distributed event kind `{}` (marker `{}`)",
                     item.event_kind,
                     marker,
                 );

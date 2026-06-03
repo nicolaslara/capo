@@ -1095,7 +1095,34 @@ Dependencies: DT1-DT6. Cross-workpad: `streaming-transport` (E2E gate pattern,
 
 ## DT8 - Operator Docs For The Distributed Run Path
 
-Status: pending.
+Status: done. The operator runbook ships as
+`workpads/distributed-topology/operator-distributed-run.md`. It covers, concretely
+against the DT1 CLI surface: starting the server role + the loopback-default /
+DT5-granted non-loopback bind (`capo role server`, `capo server serve`, the hard
+refusal absent a grant); starting + ANNOUNCING a remote runner over JSON-RPC and
+attaching it (`capo role runner`, the DT3 tunnel-resolved attach); the client tail
+(`capo role client`, `capo control --connect`) and DT4a watermark resume; the DT2
+two-plane keep-alive (runner<->server LOGGED vs. client<->server EPHEMERAL) with
+the `available -> degraded -> unreachable` health states and the
+`connectivity.health_changed` reconnect signal; the DT5 audit/revoke lifecycle
+(`expose-stub -> request-approval -> permission decide -> activate-exposure ->
+revoke-exposure`, audited via `exposure-status`); and the DT6 all-local default +
+structural inertness. It states the safety posture in operator terms (privileged
+connector, handle-only credentials, runner->server confidentiality as a TRANSPORT
+property plus runner-side redaction, tailnet-ACL review per `runtime-tunnel.md`) and
+references the DT7 deterministic gate (`cargo test --workspace`) + the opt-in live
+smoke env gate (`CAPO_SERVER_RUN_DISTRIBUTED_LIVE`,
+`CAPO_DISTRIBUTED_TAILNET_PREFLIGHT`).
+
+The doc is NOT self-attested: a deterministic doc-vs-CLI consistency check lands as
+`crates/capo-cli/tests/server_transport/dt8.rs` --
+`operator_doc_commands_are_all_dispatched_by_the_cli` asserts every command the doc
+instructs an operator to run is actually routed by `crates/capo-cli/src/main.rs`;
+`operator_doc_references_shipped_flags` asserts the doc names only flags the role /
+connectivity handlers actually parse; `operator_doc_states_the_safety_and_gate_posture`
+pins the DT2/DT5/DT6/DT7 posture phrases. A CLI-surface change that the doc does not
+follow (or a doc that invents a command/flag) fails the gate. Docs only; no new
+behavior. `git diff --check` clean.
 
 Prerequisite: DT1-DT5.
 

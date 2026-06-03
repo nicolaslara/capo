@@ -6,6 +6,8 @@ mod dispatch;
 mod dt5_exposure;
 #[path = "server_transport/dt7.rs"]
 mod dt7;
+#[path = "server_transport/dt8.rs"]
+mod dt8;
 #[path = "server_transport/live.rs"]
 mod live;
 #[path = "server_transport/replay.rs"]

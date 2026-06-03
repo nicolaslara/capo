@@ -30,11 +30,15 @@
 //!
 //! 2. [`live_distributed_smoke`] -- `#[ignore]`d AND behind the explicit opt-in env
 //!    gate [`LIVE_DISTRIBUTED_ENV`] (`CAPO_SERVER_RUN_DISTRIBUTED_LIVE`, mirroring
-//!    the `CAPO_SERVER_RUN_*_LIVE` family), with an optional reachability preflight
-//!    [`TAILNET_PREFLIGHT_ENV`]. It skips CLEANLY when unset, so it never runs in
-//!    ordinary test runs and is never the SOLE evidence. When opted in it drives the
-//!    same flow over a real `Ssh`/`Tailscale` endpoint and asserts the IDENTICAL
-//!    shape via the shared helper.
+//!    the `CAPO_SERVER_RUN_*_LIVE` family). Its reachability preflight probes a REAL
+//!    Tailscale endpoint via the in-tree CT10 predicate `live_tailscale_smoke_decision`
+//!    (the `CAPO_CONNECTIVITY_TAILSCALE_PREFLIGHT` + `CAPO_CONNECTIVITY_RUN_TAILSCALE_LIVE`
+//!    gates + the live `tailscale status --json` source) -- NOT `ConnectivityTunnel::fake()`,
+//!    which always reports reachable. It skips CLEANLY when unset or when no reachable
+//!    tailnet peer exists, so it never runs in ordinary test runs and is never the SOLE
+//!    evidence. When opted in it resolves the DT3 attach over a REAL
+//!    `ConnectivityTunnel::Tailscale` (with the DT5 grant a `Private` endpoint requires)
+//!    and asserts the IDENTICAL shape via the shared helper.
 
 use std::io::BufReader;
 use std::process::Child;
@@ -43,10 +47,12 @@ use std::thread;
 use std::time::Duration;
 
 use capo_runtime::{
-    ChannelKind, ConnectivityClock, ConnectivityTunnel, EndpointOwner, FakeRemoteChannel,
-    FakeTunnelScript, HealthState, HeartbeatConfig, HeartbeatMonitor, LocalProcessRequest,
-    RemoteChannel, RemoteRunnerAttach, RemoteStreamFinalReason, RunnerEventSpool,
-    RunnerServerPlane, RuntimeError, SpoolAdmission,
+    ChannelKind, ConnectivityClock, ConnectivityEndpointConfig, ConnectivityTunnel, EndpointOwner,
+    ExposureBindGrant, ExposureScope, FakeRemoteChannel, FakeTunnelScript, HealthState,
+    HeartbeatConfig, HeartbeatMonitor, LiveTailscaleSmokeDecision, LiveTailscaleStatusSource,
+    LocalProcessRequest, RemoteChannel, RemoteRunnerAttach, RemoteStreamFinalReason,
+    RunnerEventSpool, RunnerServerPlane, RuntimeError, SpoolAdmission, TailscaleStatusSource,
+    live_tailscale_smoke_decision,
 };
 use capo_server::{
     CapoServer, RunnerReplayFrame, ServerCommand, ServerRequest, ServerResponsePayload,
@@ -62,10 +68,14 @@ use super::support::*;
 /// never stands as the only evidence for the task.
 const LIVE_DISTRIBUTED_ENV: &str = "CAPO_SERVER_RUN_DISTRIBUTED_LIVE";
 
-/// The optional reachability preflight gate: when set, the live smoke first
-/// confirms a generic `Ssh`/`Tailscale` endpoint is reachable before driving a
-/// turn, so an unreachable tailnet skips cleanly rather than failing.
-const TAILNET_PREFLIGHT_ENV: &str = "CAPO_DISTRIBUTED_TAILNET_PREFLIGHT";
+/// The endpoint id the live smoke resolves over the real tailnet. The CT10 live
+/// predicate matches it against the peer's MagicDNS `DNSName` / `HostName`, so an
+/// operator names their own tailnet runner host here (or via the env override).
+const LIVE_TAILNET_ENDPOINT_DEFAULT: &str = "capo-runner";
+
+/// Optional override for [`LIVE_TAILNET_ENDPOINT_DEFAULT`], so an operator points the
+/// live smoke at their own tailnet host without editing the test.
+const LIVE_TAILNET_ENDPOINT_ENV: &str = "CAPO_DISTRIBUTED_TAILNET_ENDPOINT";
 
 /// A bounded per-step deadline so a hung subprocess fails the gate LOUDLY (with a
 /// kill + reap) rather than blocking the suite forever. The deterministic gate must
@@ -75,6 +85,59 @@ const STEP_DEADLINE: Duration = Duration::from_secs(20);
 /// A seeded secret marker. The shared shape assertion proves it never crosses the
 /// (fake) tunnel on the runner leg, nor reaches a spooled/replayed frame.
 const FORBIDDEN_SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+
+/// The reachability/attach transport the DT3 runner-side redaction step resolves
+/// over. The deterministic gate uses [`E2eTunnel::Fake`] (loopback / `FakeTunnel`,
+/// no network); the LIVE smoke uses [`E2eTunnel::Tailscale`] -- a REAL
+/// `ConnectivityTunnel::Tailscale` resolved over the live `tailscale status --json`
+/// source, NOT a fake (resolving findings 1 + 2: the live path must not be the same
+/// `FakeTunnel` the always-on gate uses, and the preflight must probe a real
+/// endpoint, not `fake()` -- which always returns `reachable: true`).
+///
+/// A real Tailscale endpoint resolves at `Private`, so it `permission_required`s an
+/// active [`ExposureBindGrant`]; the live variant carries that grant so the attach
+/// honours the DT5 gate exactly as a real non-loopback control channel would.
+enum E2eTunnel {
+    Fake,
+    Tailscale {
+        endpoint_id: String,
+        grant: ExposureBindGrant,
+    },
+}
+
+impl E2eTunnel {
+    /// Build the `ConnectivityTunnel` this run resolves the DT3 attach over.
+    fn tunnel(&self) -> ConnectivityTunnel {
+        match self {
+            // Deterministic gate: loopback / fake, no network.
+            E2eTunnel::Fake => ConnectivityTunnel::fake(),
+            // Live smoke: a REAL Tailscale tunnel backed by the live
+            // `tailscale status --json` source (the gated CT10 surface), so the
+            // attach crosses a real reachability boundary -- not the fake the gate
+            // uses.
+            E2eTunnel::Tailscale { endpoint_id, .. } => ConnectivityTunnel::tailscale(
+                ConnectivityEndpointConfig::tailscale(endpoint_id.clone(), endpoint_id.clone()),
+                TailscaleStatusSource::new(LiveTailscaleStatusSource::default()),
+            ),
+        }
+    }
+
+    /// The DT5 grant the attach needs (a real Tailscale `Private` endpoint is
+    /// `permission_required`; the fake loopback resolve needs none).
+    fn grant(&self) -> Option<&ExposureBindGrant> {
+        match self {
+            E2eTunnel::Fake => None,
+            E2eTunnel::Tailscale { grant, .. } => Some(grant),
+        }
+    }
+
+    /// Whether the resolved attach is expected to ride a loopback/fake transport
+    /// (true for the deterministic gate) vs. a real machine boundary (false for the
+    /// live Tailscale path). The honesty guard asserts the attach matches this.
+    fn expects_loopback(&self) -> bool {
+        matches!(self, E2eTunnel::Fake)
+    }
+}
 
 /// A child process guard that KILLS + REAPS on drop, so a panicking step can never
 /// leak the server subprocess (the "explicit cleanup" the DT7 AC names). The bounded
@@ -393,26 +456,39 @@ fn drive_runner_health_degrade_recover() -> Vec<HealthState> {
 /// secret-laden output, then prove the runner-side redaction pass scrubs the secret
 /// before it crosses the tunnel. Returns the forwarded (already-redacted) output.
 /// The returned `RemoteRunnerAttach` is reused by the DT5 revoke seam.
-fn drive_runner_side_redaction() -> (String, RemoteRunnerAttach, std::path::PathBuf) {
+fn drive_runner_side_redaction(
+    e2e_tunnel: &E2eTunnel,
+) -> (String, RemoteRunnerAttach, std::path::PathBuf) {
     let root = temp_root("dt7-redact");
     let workspace = root.join("workspace");
     let artifacts = root.join("artifacts");
     std::fs::create_dir_all(&workspace).expect("workspace");
 
     let raw = format!("remote step ok\nkey={FORBIDDEN_SECRET}\nremote step done");
-    let tunnel = ConnectivityTunnel::fake();
+    let tunnel = e2e_tunnel.tunnel();
     let owner = EndpointOwner::runtime_target("dt7-runner");
     let ws = workspace.clone();
-    let attach = RemoteRunnerAttach::resolve(&tunnel, owner, ChannelKind::Stdio, move |channel| {
-        RemoteChannel::Fake(
-            FakeRemoteChannel::from_open_channel(channel, ws, artifacts)
-                .with_streamed_output(raw.into_bytes()),
-        )
-    })
-    .expect("fake tunnel resolves a loopback attach without a grant");
-    assert!(
+    // The DT3 attach resolves the runner endpoint over the SELECTED tunnel (fake for
+    // the gate; a real Tailscale tunnel for the live smoke) and binds the opened
+    // reachability channel to the runner. A real Tailscale endpoint is
+    // `permission_required`, so the live path threads its active DT5 grant.
+    let attach = RemoteRunnerAttach::resolve_with_grant(
+        &tunnel,
+        owner,
+        ChannelKind::Stdio,
+        e2e_tunnel.grant(),
+        move |channel| {
+            RemoteChannel::Fake(
+                FakeRemoteChannel::from_open_channel(channel, ws, artifacts)
+                    .with_streamed_output(raw.into_bytes()),
+            )
+        },
+    )
+    .expect("the selected tunnel resolves an attach (loopback fake, or granted Tailscale)");
+    assert_eq!(
         attach.is_loopback(),
-        "the deterministic attach must honestly report a loopback transport"
+        e2e_tunnel.expects_loopback(),
+        "the attach must honestly report whether it rode a loopback/fake transport"
     );
 
     let outcome = attach
@@ -586,10 +662,10 @@ fn drive_watermark_resume_no_gap_no_dupe() -> Vec<i64> {
 
 /// Compose all six seams into one [`DistributedE2eShape`]. Shared by the always-on
 /// gate and (its deterministic half of) the live smoke pairing.
-fn capture_distributed_e2e_shape() -> DistributedE2eShape {
+fn capture_distributed_e2e_shape(e2e_tunnel: &E2eTunnel) -> DistributedE2eShape {
     let observed_runtime_target_registered = drive_three_process_announce_and_tail();
     let runner_health_states = drive_runner_health_degrade_recover();
-    let (runner_forwarded_output, attach, workspace) = drive_runner_side_redaction();
+    let (runner_forwarded_output, attach, workspace) = drive_runner_side_redaction(e2e_tunnel);
     let revoked_control_refused = drive_revoke_refuses_control(&attach, &workspace);
     let resumed_sequence = drive_watermark_resume_no_gap_no_dupe();
     let (replayed_event_occurrences, spooled_payloads) = drive_spool_replay_exactly_once();
@@ -616,27 +692,33 @@ fn capture_distributed_e2e_shape() -> DistributedE2eShape {
 /// completion from being operator-attested.
 #[test]
 fn distributed_e2e_gate_runs_three_roles_over_loopback() {
-    let shape = capture_distributed_e2e_shape();
+    // The always-on gate resolves the DT3 attach over the deterministic fake tunnel
+    // (loopback, no network).
+    let shape = capture_distributed_e2e_shape(&E2eTunnel::Fake);
     assert_distributed_e2e_shape(&shape);
 }
 
 /// DT7 live cross-device smoke. `#[ignore]`d AND gated behind the explicit opt-in
 /// env var [`LIVE_DISTRIBUTED_ENV`] (it also skips CLEANLY when unset, so an operator
-/// can exercise the tailnet/SSH path without failing for everyone else). An optional
-/// reachability preflight [`TAILNET_PREFLIGHT_ENV`] lets an unreachable tailnet skip
-/// cleanly rather than fail.
+/// can exercise the tailnet path without failing for everyone else). Its reachability
+/// preflight probes a REAL Tailscale endpoint through the in-tree CT10 predicate
+/// `live_tailscale_smoke_decision`; an unreachable tailnet (binary absent / not
+/// logged in / no reachable peer) skips cleanly rather than fails.
 ///
 /// Run it with:
 ///   `CAPO_SERVER_RUN_DISTRIBUTED_LIVE=1 \`
+///   `CAPO_CONNECTIVITY_TAILSCALE_PREFLIGHT=1 CAPO_CONNECTIVITY_RUN_TAILSCALE_LIVE=1 \`
 ///   `  cargo test -p capo-cli --test server_transport -- --ignored live_distributed_smoke`
+/// (point it at your own tailnet host with `CAPO_DISTRIBUTED_TAILNET_ENDPOINT=<host>`.)
 ///
-/// It drives the three roles end to end over a real `Ssh`/`Tailscale` endpoint (the
-/// smoke gates on a GENERIC reachable endpoint, not a vendor lock) and asserts the
-/// IDENTICAL shape via [`assert_distributed_e2e_shape`] -- the deterministic pairing.
-/// Where a real tailnet device is not wired into CI, the live path reuses the
-/// deterministic loopback/`FakeTunnel` composition so the smoke is reproducible and
-/// provider-independent while still asserting the full cross-cutting shape (the
-/// always-on gate is the authoritative deterministic evidence).
+/// It drives the three roles end to end and resolves the DT3 attach over a REAL
+/// `ConnectivityTunnel::Tailscale` (backed by the live `tailscale status --json`
+/// source, NOT a fake), then asserts the IDENTICAL shape via
+/// [`assert_distributed_e2e_shape`] -- the deterministic pairing. A real Tailscale
+/// `Private` endpoint is `permission_required`, so the live attach carries the DT5
+/// grant a granted non-loopback control channel would. The always-on gate over the
+/// fake tunnel remains the authoritative deterministic evidence; this smoke proves
+/// the SAME shape holds when the attach crosses a real reachability boundary.
 #[test]
 #[ignore = "live distributed smoke: set CAPO_SERVER_RUN_DISTRIBUTED_LIVE=1"]
 fn live_distributed_smoke() {
@@ -646,31 +728,60 @@ fn live_distributed_smoke() {
         // deterministic assertion of the same shape.
         eprintln!(
             "skipping live distributed smoke: set {LIVE_DISTRIBUTED_ENV}=1 to run it \
-             (optional reachability preflight: {TAILNET_PREFLIGHT_ENV}=1)"
+             (the reachability preflight uses the CT10 live-Tailscale gates \
+              CAPO_CONNECTIVITY_TAILSCALE_PREFLIGHT + CAPO_CONNECTIVITY_RUN_TAILSCALE_LIVE)"
         );
         return;
     }
 
-    // Optional reachability preflight: if requested but the tailnet/SSH endpoint is
-    // not reachable, skip cleanly rather than fail (the path is unavailable, not
-    // broken). A generic `Ssh`/`Tailscale` reachability probe stands in here; absent
-    // a wired endpoint it resolves over the deterministic loopback substrate.
-    if std::env::var(TAILNET_PREFLIGHT_ENV).as_deref() == Ok("1") {
-        let tunnel = ConnectivityTunnel::fake();
-        if !tunnel.check_reachability().reachable {
+    // REACHABILITY PREFLIGHT over a REAL Tailscale endpoint (resolving findings 1 +
+    // 2). We do NOT probe `ConnectivityTunnel::fake()` (which hard-returns
+    // `reachable: true`, so its skip guard is dead code). Instead we use the in-tree
+    // DEFINED CT10 predicate `live_tailscale_smoke_decision`, which reads the live
+    // Tailscale env gates and probes the real `tailscale status --json` binary. When
+    // the tailnet path is unavailable (binary absent / not logged in / no reachable
+    // peer / gate unset) it returns a recorded, secret-free `Skip` reason and we skip
+    // CLEANLY rather than fail.
+    let endpoint_id = std::env::var(LIVE_TAILNET_ENDPOINT_ENV)
+        .unwrap_or_else(|_| LIVE_TAILNET_ENDPOINT_DEFAULT.to_string());
+    let live_source = TailscaleStatusSource::new(LiveTailscaleStatusSource::default());
+    let peer = match live_tailscale_smoke_decision(&live_source, &endpoint_id) {
+        LiveTailscaleSmokeDecision::Run(peer) => peer,
+        LiveTailscaleSmokeDecision::Skip { reason } => {
             eprintln!(
-                "skipping live distributed smoke: {TAILNET_PREFLIGHT_ENV}=1 but no reachable \
-                 Ssh/Tailscale endpoint"
+                "skipping live distributed smoke: tailnet path unavailable for \
+                 endpoint `{endpoint_id}` ({reason})"
             );
             return;
         }
-    }
+    };
+    eprintln!(
+        "live distributed smoke: reachable tailnet peer for `{endpoint_id}` \
+         (device={}, reachable={})",
+        peer.observed_device_id, peer.reachable
+    );
 
-    // Drive the same end-to-end flow and assert the IDENTICAL shape via the shared
-    // helper -- the live smoke is never the sole evidence, and the cross-cutting
-    // invariants (no secret crosses the leg, exposures are revocable, the server is
-    // the single writer) are pinned by the same assertion.
-    let shape = capture_distributed_e2e_shape();
+    // Build the LIVE attach tunnel: a REAL `ConnectivityTunnel::Tailscale` backed by
+    // the live status source (NOT a fake). A Tailscale endpoint resolves at
+    // `Private`, so it is `permission_required` -- the live attach carries an active
+    // DT5 `ExposureBindGrant` exactly as a real granted non-loopback control channel
+    // would (without the grant the attach is `blocked_pending_permission`).
+    let grant = ExposureBindGrant::from_active_exposure(
+        format!("exposure:dt7-live:{endpoint_id}"),
+        "active",
+        Some("grant:dt7-live"),
+        "connectivity.tailnet.private",
+        Some("keychain:capo/dt7-live-tailnet-authkey"),
+        ExposureScope::Private,
+    )
+    .expect("an active Private exposure grant builds for the live attach");
+    let e2e_tunnel = E2eTunnel::Tailscale { endpoint_id, grant };
+
+    // Drive the same end-to-end flow over the REAL tunnel and assert the IDENTICAL
+    // shape via the shared helper -- the live smoke is never the sole evidence, and
+    // the cross-cutting invariants (no secret crosses the leg, exposures are
+    // revocable, the server is the single writer) are pinned by the same assertion.
+    let shape = capture_distributed_e2e_shape(&e2e_tunnel);
     assert_distributed_e2e_shape(&shape);
 
     // A secrets-stripped evidence line an operator can attach: every scanned string
