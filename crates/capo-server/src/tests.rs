@@ -26,6 +26,7 @@ mod dt3;
 mod dt4a;
 mod dt4b;
 mod dt5;
+mod dt6;
 mod e2e_gate;
 mod event_tail;
 mod foundation;

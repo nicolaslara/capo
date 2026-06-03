@@ -761,6 +761,41 @@ mod tests {
     }
 
     #[test]
+    fn dt6_no_role_flags_default_command_is_structurally_inert() {
+        // DT6 (structural inertness, anchored to the REAL command surface): the
+        // default `capo role server` with NO role flags resolves the single-box,
+        // loopback-only topology. The rendered report must declare the keep-alive
+        // planes INERT and `all_local_default=true`, proving the DT2/DT3/DT4b/DT5
+        // distributed machinery is NOT constructed in the default path — the
+        // mechanism behind "adds no events" in the all-local default.
+        let parsed = crate::cli_surface::ParsedArgs::new(vec![]).expect("default parsed args");
+        let output = role_server(&parsed, &[]).expect("the no-flags default role-server resolves");
+        assert!(
+            output.contains("keep_alive_planes=inert"),
+            "the all-local default must report inert keep-alive planes: {output}"
+        );
+        assert!(
+            output.contains("all_local_default=true"),
+            "the no-role-flags default must report all_local_default=true: {output}"
+        );
+        assert!(
+            !output.contains("keep_alive_planes=live"),
+            "the all-local default must not construct a live keep-alive plane: {output}"
+        );
+    }
+
+    #[test]
+    fn dt6_keep_alive_config_is_none_when_no_leg_is_present() {
+        // DT6: a server-only / client-only single-box process names no remote leg at
+        // all. The gate treats an absent leg as loopback (inert), so NO keep-alive
+        // config is built — the distributed plane is never constructed.
+        assert!(
+            keep_alive_config_for(None, None).is_none(),
+            "a single-box process with no remote leg must construct no keep-alive plane"
+        );
+    }
+
+    #[test]
     fn dt2_keep_alive_is_live_for_non_loopback_runner_leg() {
         // A private (tunnel-resolved) runner leg makes the keep-alive plane LIVE; the
         // loopback client leg stays inert within the same distributed deployment.
