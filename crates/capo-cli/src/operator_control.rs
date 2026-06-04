@@ -1184,10 +1184,7 @@ mod tests {
 
     #[test]
     fn codex_reply_renderer_reads_scanned_stdout_artifact_without_state_summary() {
-        let root = std::env::temp_dir().join(format!(
-            "capo-codex-reply-render-{}",
-            stable_cli_hash("codex-reply-render")
-        ));
+        let root = capo_tmptest::TempRoot::new("capo-codex-reply-render");
         let run_id = capo_core::RunId::new("run-codex-render");
         let stdout = root
             .join("control-live-artifacts")
@@ -1251,10 +1248,7 @@ mod tests {
         use capo_core::ProjectId;
         use std::net::TcpListener;
 
-        let server_root = std::env::temp_dir().join(format!(
-            "capo-operator-loop-path-{}",
-            stable_cli_hash("operator-loop-path")
-        ));
+        let server_root = capo_tmptest::TempRoot::new("capo-operator-loop-path");
         let _ = std::fs::remove_dir_all(&server_root);
         std::fs::create_dir_all(&server_root).expect("mkdir server root");
 

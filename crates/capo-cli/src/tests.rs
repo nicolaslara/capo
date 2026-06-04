@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
 use crate::adapter_dispatch_run::{
@@ -8660,12 +8659,8 @@ fn seed_running_agent(state_root: &Path, agent: &str, goal: &str) {
     .expect("send task");
 }
 
-fn temp_root(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    std::env::temp_dir().join(format!("capo-{name}-{nanos}"))
+fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+    capo_tmptest::TempRoot::new(&format!("capo-{name}"))
 }
 
 fn output_value(output: &str, key: &str) -> String {

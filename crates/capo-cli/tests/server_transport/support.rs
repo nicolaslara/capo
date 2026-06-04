@@ -1,8 +1,7 @@
 use std::io::Write;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) fn spawn_server(state_root: &Path, max_requests: usize) -> Child {
     spawn_server_with_env(state_root, max_requests, &[])
@@ -190,12 +189,8 @@ pub(crate) fn capo_bin() -> &'static str {
     env!("CARGO_BIN_EXE_capo")
 }
 
-pub(crate) fn temp_root(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    std::env::temp_dir().join(format!("capo-{name}-{nanos}"))
+pub(crate) fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+    capo_tmptest::TempRoot::new(&format!("capo-{name}"))
 }
 
 /// A loopback port reserved by a momentarily-held listener. The listener is closed
