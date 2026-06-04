@@ -1,4 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
 use capo_core::{
@@ -1966,12 +1965,6 @@ fn append_source_binding(
         .expect("append source binding");
 }
 
-fn temp_root(name: &str) -> std::path::PathBuf {
-    let mut root = std::env::temp_dir();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    root.push(format!("capo-{name}-{nanos}"));
-    root
+fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+    capo_tmptest::TempRoot::new(&format!("capo-{name}"))
 }

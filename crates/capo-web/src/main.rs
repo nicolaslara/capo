@@ -838,22 +838,14 @@ mod tests {
     //! the SSE wire shape cannot drift silently.
 
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant};
 
     use capo_server::{EventNotification, ServerEvent, contract::sse_frame};
 
     use super::*;
 
-    static TEMP_ROOT_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-    fn temp_root() -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let counter = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("capo-web-{nanos}-{counter}"))
+    fn temp_root() -> capo_tmptest::TempRoot {
+        capo_tmptest::TempRoot::new("capo-web")
     }
 
     fn open_server(root: &Path) -> Arc<CapoServer> {

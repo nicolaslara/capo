@@ -77,8 +77,14 @@ impl TempRoot {
 
 impl Drop for TempRoot {
     fn drop(&mut self) {
-        if !self.path.as_os_str().is_empty() {
-            let _ = std::fs::remove_dir_all(&self.path);
+        if self.path.as_os_str().is_empty() {
+            return;
+        }
+        // Usually a directory tree, but some tests deliberately create a regular
+        // file at the root path (e.g. to force a "not a directory" error). Remove
+        // either; ignore a missing path.
+        if std::fs::remove_dir_all(&self.path).is_err() {
+            let _ = std::fs::remove_file(&self.path);
         }
     }
 }

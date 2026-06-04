@@ -5,7 +5,6 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn first_tool_set_supports_status_and_evidence() {
@@ -359,7 +358,7 @@ fn wrapper_split_authorization_cannot_be_replayed_for_another_tool() {
     fs::create_dir_all(&workspace).expect("workspace");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let authorization = wrappers.authorize_tool_call(
         &wrapper_request(
@@ -424,7 +423,7 @@ fn shell_and_git_wrappers_execute_through_runtime_with_artifacts() {
         .expect("git init");
     fs::write(workspace.join("tracked.txt"), "tracked\n").expect("write tracked");
 
-    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts);
+    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts.to_path_buf());
     config.redaction_rules.push(RedactionRule {
         pattern: "SECRET".to_string(),
         replacement: "[REDACTED]".to_string(),
@@ -545,7 +544,7 @@ fn file_read_redacts_a_configured_secret_in_the_output_artifact() {
     )
     .expect("seed file");
 
-    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts);
+    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts.to_path_buf());
     config.redaction_rules.push(RedactionRule {
         pattern: "SUPERSECRET".to_string(),
         replacement: "[REDACTED]".to_string(),
@@ -595,7 +594,7 @@ fn file_read_credential_shape_scan_redacts_an_unnamed_secret_in_output() {
     // No RedactionRule configured: only the default credential-shape scan runs.
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let policy = PermissionPolicy::allow_trusted_local();
 
@@ -640,7 +639,7 @@ fn git_commit_wrapper_commits_staged_changes_and_denies_static_profiles() {
 
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
 
     let commit = wrappers.authorize_and_invoke(
@@ -1248,7 +1247,7 @@ fn shell_run_typed_output_carries_exit_status_passed_duration_and_artifact() {
     fs::create_dir_all(&workspace).expect("workspace");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let policy = PermissionPolicy::allow_trusted_local();
 
@@ -1311,7 +1310,7 @@ fn shell_run_over_cap_success_is_truncated_not_failed() {
     let workspace = temp_root("aci3-shell-overcap-workspace");
     let artifacts = temp_root("aci3-shell-overcap-artifacts");
     fs::create_dir_all(&workspace).expect("workspace");
-    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts);
+    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts.to_path_buf());
     config.output_limit_bytes = 4; // tiny inline cap
     let wrappers = RuntimeToolWrappers::new(config);
     let policy = PermissionPolicy::allow_trusted_local();
@@ -1367,7 +1366,7 @@ fn file_read_typed_output_carries_path_bytes_and_hash() {
     fs::write(workspace.join("note.md"), "hello aci3").expect("seed");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let read = wrappers.authorize_and_invoke(
         wrapper_request(
@@ -1470,7 +1469,7 @@ fn file_write_emits_a_unified_diff_artifact() {
     fs::write(workspace.join("doc.txt"), "line one\nline two\n").expect("seed");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let write = wrappers.authorize_and_invoke(
         wrapper_request(
@@ -1515,7 +1514,7 @@ fn file_write_precondition_mismatch_does_not_clobber() {
     fs::write(workspace.join("guard.txt"), original).expect("seed");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let policy = PermissionPolicy::allow_trusted_local();
 
@@ -1577,7 +1576,7 @@ fn file_write_structured_replace_edits_in_place() {
     fs::write(workspace.join("cfg.toml"), "name = \"old\"\nkeep = 1\n").expect("seed");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let policy = PermissionPolicy::allow_trusted_local();
 
@@ -1634,7 +1633,7 @@ fn apply_patch_clean_apply_returns_typed_diff_and_changed_ranges() {
     .expect("seed");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let result = wrappers.authorize_and_invoke(
         wrapper_request(
@@ -1692,7 +1691,7 @@ fn apply_patch_whitespace_and_fuzzy_tolerant_location() {
     .expect("seed");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let policy = PermissionPolicy::allow_trusted_local();
     // The search has NO leading indent; the file does. The whitespace-tolerant
@@ -1734,7 +1733,7 @@ fn apply_patch_rejected_hunk_returns_structured_retryable_error_without_writing(
     fs::write(workspace.join("src.txt"), original).expect("seed");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let result = wrappers.authorize_and_invoke(
         wrapper_request(
@@ -1790,7 +1789,7 @@ fn apply_patch_no_match_preview_is_redacted_in_summary() {
     let original = "alpha\nSECRET_TOKEN_abc123\ncharlie\n";
     fs::write(workspace.join("creds.txt"), original).expect("seed");
 
-    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts);
+    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts.to_path_buf());
     config.redaction_rules.push(RedactionRule {
         pattern: "SECRET_TOKEN_abc123".to_string(),
         replacement: "[REDACTED]".to_string(),
@@ -1845,7 +1844,7 @@ fn apply_patch_lint_on_edit_returns_typed_findings() {
     fs::write(workspace.join("lib.rs"), "fn main() {}\n").expect("seed");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let result = wrappers.authorize_and_invoke(
         wrapper_request(
@@ -1905,7 +1904,7 @@ fn apply_patch_lint_passes_on_well_formatted_rust() {
     fs::write(workspace.join("ok.rs"), "fn main() {}\n").expect("seed");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let result = wrappers.authorize_and_invoke(
         wrapper_request(
@@ -1952,7 +1951,7 @@ fn apply_patch_cannot_edit_outside_the_workspace() {
     fs::write(&secret, "do not touch\n").expect("seed secret");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let policy = PermissionPolicy::allow_trusted_local();
 
@@ -2025,12 +2024,8 @@ fn wrapper_request(
     }
 }
 
-fn temp_root(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    std::env::temp_dir().join(format!("capo-tools-{name}-{nanos}"))
+fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+    capo_tmptest::TempRoot::new(&format!("capo-tools-{name}"))
 }
 
 #[test]
@@ -2191,9 +2186,11 @@ fn tool_exposure_invoke_no_longer_routes_capo_to_the_fake() {
 #[test]
 #[should_panic(expected = "fake-only summary shim")]
 fn tool_exposure_invoke_no_longer_routes_runtime_to_the_fake() {
+    let workspace = temp_root("aci1-invoke-runtime-ws");
+    let artifacts = temp_root("aci1-invoke-runtime-artifacts");
     let exposure = ToolExposure::runtime_wrappers(RuntimeToolConfig::local_workspace(
-        temp_root("aci1-invoke-runtime-ws"),
-        temp_root("aci1-invoke-runtime-artifacts"),
+        workspace.to_path_buf(),
+        artifacts.to_path_buf(),
     ));
     let _ = exposure.invoke(FakeToolRequest {
         tool_call_id: ToolCallId::new("call-runtime"),
@@ -2254,7 +2251,7 @@ fn tool_exposure_authorize_and_invoke_dispatches_the_real_runtime_wrappers() {
     fs::write(workspace.join("note.md"), "hello aci1").expect("seed file");
     let exposure = ToolExposure::runtime_wrappers(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let result = exposure.authorize_and_invoke(
         ToolExposureRequest::Runtime(wrapper_request(
@@ -2454,7 +2451,7 @@ fn wrapper_emitted_results_validate_against_their_output_schema() {
     fs::write(workspace.join("note.md"), "hello aci2").expect("seed note");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let policy = PermissionPolicy::allow_trusted_local();
 
@@ -2534,8 +2531,8 @@ fn output_schema_validation_rejects_a_wrong_shaped_result() {
 
 /// Seed a fixture repo with `n` lines each containing the needle, plus a second
 /// file in a subdirectory, so search caps/truncation can be exercised
-/// deterministically. Returns the workspace path.
-fn seed_search_fixture(name: &str, needle: &str, lines: usize) -> PathBuf {
+/// deterministically. Returns the workspace guard (cleaned up on drop).
+fn seed_search_fixture(name: &str, needle: &str, lines: usize) -> capo_tmptest::TempRoot {
     let workspace = temp_root(name);
     fs::create_dir_all(workspace.join("sub")).expect("workspace sub");
     let mut body = String::new();
@@ -2559,7 +2556,7 @@ fn search_returns_typed_bounded_path_line_preview_matches() {
     let artifacts = temp_root("aci5-search-clean-artifacts");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let result = wrappers.authorize_and_invoke(
         wrapper_request(
@@ -2606,7 +2603,7 @@ fn search_per_call_match_cap_truncates_with_explicit_marker() {
     let artifacts = temp_root("aci5-search-matchcap-artifacts");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let result = wrappers.authorize_and_invoke(
         wrapper_request(
@@ -2636,7 +2633,7 @@ fn search_total_byte_cap_truncates_with_explicit_marker() {
     let artifacts = temp_root("aci5-search-bytecap-artifacts");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let result = wrappers.authorize_and_invoke(
         wrapper_request(
@@ -2679,7 +2676,7 @@ fn search_empty_result_is_a_successful_not_failed_call() {
     let artifacts = temp_root("aci5-search-empty-artifacts");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let result = wrappers.authorize_and_invoke(
         wrapper_request(
@@ -2708,8 +2705,9 @@ fn search_redacts_secrets_in_previews() {
         "api_key = SECRET_TOKEN_abc123\nother line\n",
     )
     .expect("seed");
+    let artifacts = temp_root("aci5-redact-art");
     let mut config =
-        RuntimeToolConfig::local_workspace(workspace.clone(), temp_root("aci5-redact-art"));
+        RuntimeToolConfig::local_workspace(workspace.clone(), artifacts.to_path_buf());
     config.redaction_rules.push(RedactionRule {
         pattern: "SECRET_TOKEN_abc123".to_string(),
         replacement: "[REDACTED]".to_string(),
@@ -2745,7 +2743,7 @@ fn search_cannot_read_outside_the_workspace() {
     let artifacts = temp_root("aci5-search-escape-artifacts");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let escaped = wrappers.authorize_and_invoke(
         wrapper_request(
@@ -2776,7 +2774,7 @@ fn test_run_passing_command_returns_typed_passed_record_with_timing() {
     fs::create_dir_all(&workspace).expect("workspace");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let policy = PermissionPolicy::allow_trusted_local();
 
@@ -2838,7 +2836,7 @@ fn test_run_failing_command_captures_bounded_failing_items_and_full_artifact() {
     fs::create_dir_all(&workspace).expect("workspace");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let policy = PermissionPolicy::allow_trusted_local();
 
@@ -2915,7 +2913,7 @@ fn test_run_caps_inline_failing_items_with_explicit_truncation_marker() {
     fs::create_dir_all(&workspace).expect("workspace");
     let wrappers = RuntimeToolWrappers::new(RuntimeToolConfig::local_workspace(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
     ));
     let policy = PermissionPolicy::allow_trusted_local();
 
@@ -2977,7 +2975,7 @@ fn test_run_redacts_secrets_in_the_output_artifact() {
     let workspace = temp_root("aci6-test-redact-workspace");
     let artifacts = temp_root("aci6-test-redact-artifacts");
     fs::create_dir_all(&workspace).expect("workspace");
-    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts);
+    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts.to_path_buf());
     config.redaction_rules.push(RedactionRule {
         pattern: "SECRET_TOKEN_xyz789".to_string(),
         replacement: "[REDACTED]".to_string(),
@@ -3023,7 +3021,7 @@ fn test_run_redacts_secrets_in_inline_failing_items() {
     let workspace = temp_root("aci6-failing-items-redact-workspace");
     let artifacts = temp_root("aci6-failing-items-redact-artifacts");
     fs::create_dir_all(&workspace).expect("workspace");
-    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts);
+    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts.to_path_buf());
     config.redaction_rules.push(RedactionRule {
         pattern: "SECRET_TOKEN_xyz789".to_string(),
         replacement: "[REDACTED]".to_string(),
@@ -3072,7 +3070,7 @@ fn test_run_clean_output_is_labeled_safe() {
     let workspace = temp_root("aci6-clean-safe-workspace");
     let artifacts = temp_root("aci6-clean-safe-artifacts");
     fs::create_dir_all(&workspace).expect("workspace");
-    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts);
+    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts.to_path_buf());
     // A redaction rule is configured but the command output never matches it.
     config.redaction_rules.push(RedactionRule {
         pattern: "SECRET_TOKEN_xyz789".to_string(),
