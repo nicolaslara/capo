@@ -22,13 +22,8 @@ fn system_origin() -> ServerClientOrigin {
 }
 
 /// A unique scratch workspace under the system temp dir for a test.
-fn scratch_dir(name: &str) -> std::path::PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let counter = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("capo-rtl6-{name}-{nanos}-{counter}"));
+fn scratch_dir(name: &str) -> capo_tmptest::TempRoot {
+    let dir = capo_tmptest::TempRoot::new(&format!("capo-rtl6-{name}"));
     std::fs::create_dir_all(&dir).expect("create scratch dir");
     dir
 }
@@ -548,8 +543,10 @@ fn controller_hard_kill_terminates_the_process_group_mid_run_and_records_the_abo
     let workspace = scratch_dir("workspace-kill");
     let artifacts = scratch_dir("artifacts-kill");
 
-    let runner =
-        LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+    let runner = LocalProcessRunner::new(LocalProcessConfig::for_test(
+        workspace.clone(),
+        artifacts.to_path_buf(),
+    ));
     // A long-running process with a backgrounded descendant that drops a marker
     // after a delay -- if the group survives, the marker would appear.
     let marker = workspace.join("descendant-survived.txt");

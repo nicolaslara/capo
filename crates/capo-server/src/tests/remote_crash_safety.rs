@@ -151,7 +151,8 @@ fn server_revoked_grant_stops_run_and_forbids_re_establishment() {
         "a revoked grant must STOP the remote run over the channel"
     );
 
-    let workspace = temp_root().join("ws-revoke-2");
+    let revoke_root = temp_root();
+    let workspace = revoke_root.join("ws-revoke-2");
     std::fs::create_dir_all(&workspace).expect("workspace");
     let err = runner
         .start_process(LocalProcessRequest {

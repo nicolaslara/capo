@@ -72,6 +72,8 @@ fn git_capture(dir: &Path, args: &[&str]) -> String {
 struct GitFixture {
     source_commit: String,
     git_remote: GitRemote,
+    // Keeps the origin/remote-repo/worktree temp dirs alive for the fixture's life.
+    _root: capo_tmptest::TempRoot,
 }
 
 fn git_fixture(name: &str) -> GitFixture {
@@ -97,6 +99,7 @@ fn git_fixture(name: &str) -> GitFixture {
     GitFixture {
         source_commit,
         git_remote,
+        _root: root,
     }
 }
 
@@ -144,9 +147,10 @@ fn server_rr8_deterministic_fixture_pins_the_live_smoke_shapes() {
     // shape rather than operator attestation.
     let fixture = git_fixture("srv-rr8-pair");
     let channel = OpenChannel::for_test("chan-rr8", "endpoint-rr8", "fp-rr8");
-    let workspace = temp_root().join("ws-rr8");
+    let root = temp_root();
+    let workspace = root.join("ws-rr8");
     std::fs::create_dir_all(&workspace).unwrap();
-    let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), temp_root())
+    let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), root.join("artifacts"))
         .with_git_remote(fixture.git_remote.clone())
         .recover_alive_reattachable()
         .with_streamed_output(b"out token AKIAIOSFODNN7EXAMPLE done".to_vec());
@@ -215,7 +219,7 @@ fn server_rr8_ssh_runner_is_non_loopback_and_handle_only_auth() {
     // HONESTY: a real SSH transport crossed a boundary -> non-loopback. Auth is a
     // handle (label) only; no raw credential is read or stored.
     let channel = OpenChannel::for_test("chan-ssh", "endpoint-ssh", "fp-ssh");
-    let ssh = SshRemoteConfig::new("capo@remote.example", "fp-ssh", temp_root())
+    let ssh = SshRemoteConfig::new("capo@remote.example", "fp-ssh", temp_root().to_path_buf())
         .with_auth_ref("ssh-agent:default");
     let runner = SshRemoteProcessRunner::build(channel, ssh);
     assert!(!runner.is_loopback());
@@ -240,7 +244,7 @@ fn server_rr8_live_ssh_smoke_full_lifecycle_or_clean_skip() {
 
     let fixture = git_fixture("srv-rr8-live");
     let channel = OpenChannel::for_test("chan-rr8-live", &ssh_destination, "fp-rr8-live");
-    let ssh = SshRemoteConfig::new(ssh_destination, "fp-rr8-live", temp_root())
+    let ssh = SshRemoteConfig::new(ssh_destination, "fp-rr8-live", temp_root().to_path_buf())
         .with_auth_ref("ssh-agent:default")
         .with_git_remote(fixture.git_remote.clone());
     let runner = SshRemoteProcessRunner::build(channel, ssh);

@@ -93,7 +93,11 @@ fn committed_event_kinds(root: &Path) -> Vec<String> {
 /// Run one deterministic all-local turn through the production write path and
 /// return the server-projected thread read model (over the in-process handler,
 /// the same path `ReadThread` serves). No role flags, loopback only.
-fn run_all_local_turn(session: &str, run: &str, turn: &str) -> (ServerThread, PathBuf) {
+fn run_all_local_turn(
+    session: &str,
+    run: &str,
+    turn: &str,
+) -> (ServerThread, capo_tmptest::TempRoot) {
     let root = temp_root();
     let project_id = ProjectId::new("project-dt6-all-local");
     let server = CapoServer::open(project_id, &root).expect("server opens for the all-local box");

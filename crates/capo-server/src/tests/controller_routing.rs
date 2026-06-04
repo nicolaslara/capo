@@ -253,9 +253,10 @@ fn post_cutover_default_selection_is_real_with_a_one_value_fake_rollback() {
         ControllerSelection::from_opt_in("0"),
         ControllerSelection::Fake
     );
+    let fake_root = temp_root();
     let fake_server = CapoServer::open_with_controller(
         ProjectId::new("project-capo"),
-        temp_root(),
+        &fake_root,
         ControllerSelection::Fake,
     )
     .expect("server");

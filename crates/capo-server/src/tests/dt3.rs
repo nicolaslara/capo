@@ -38,15 +38,16 @@ use crate::{CapoServer, EventNotification};
 fn attach_over_tunnel(
     name: &str,
     script: impl FnOnce(FakeRemoteChannel) -> FakeRemoteChannel,
-) -> (RemoteRunnerAttach, std::path::PathBuf) {
-    let root = temp_root();
-    let workspace = root.join(format!("workspace-{name}"));
-    let artifacts = root.join(format!("artifacts-{name}"));
+) -> (RemoteRunnerAttach, capo_tmptest::TempRoot) {
+    // `workspace` is the guard returned to (and kept alive by) the caller; the
+    // artifacts dir lives under it so both are cleaned up when the caller drops it.
+    let workspace = temp_root();
+    let artifacts = workspace.join(format!("artifacts-{name}"));
     std::fs::create_dir_all(&workspace).expect("workspace");
 
     let tunnel = ConnectivityTunnel::fake();
     let owner = EndpointOwner::runtime_target(format!("runner-{name}"));
-    let ws = workspace.clone();
+    let ws = workspace.to_path_buf();
     let attach = RemoteRunnerAttach::resolve(&tunnel, owner, ChannelKind::Stdio, |channel| {
         RemoteChannel::Fake(script(FakeRemoteChannel::from_open_channel(
             channel, ws, artifacts,
@@ -77,7 +78,7 @@ fn server_drives_remote_process_through_tunnel_resolved_runner() {
             turn_id: None,
             program: "/bin/sh".to_string(),
             argv: vec!["-c".to_string(), "printf x".to_string()],
-            cwd: workspace,
+            cwd: workspace.to_path_buf(),
             env: std::collections::HashMap::new(),
         })
         .expect("remote start over the tunnel-resolved runner");
@@ -118,7 +119,7 @@ fn dt3_two_redaction_seams_both_hold_runner_side_and_server_egress() {
             turn_id: None,
             program: "/bin/sh".to_string(),
             argv: vec!["-c".to_string(), "printf x".to_string()],
-            cwd: workspace,
+            cwd: workspace.to_path_buf(),
             env: std::collections::HashMap::new(),
         })
         .expect("remote start");

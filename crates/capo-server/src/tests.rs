@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     io::{Read, Write},
     net::{Shutdown, TcpListener, TcpStream},
@@ -46,8 +44,6 @@ mod stream;
 mod transport;
 mod turn_orchestration;
 
-static TEMP_ROOT_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
 fn handle(server: &CapoServer, command: ServerCommand) -> ServerResponse {
     server
         .handle(ServerRequest::cli(command))
@@ -63,11 +59,6 @@ fn assert_agent_registered(response: &ServerResponse, name: &str) {
     assert_eq!(agent.current_session_id, None);
 }
 
-fn temp_root() -> std::path::PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let counter = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("capo-server-{nanos}-{counter}"))
+fn temp_root() -> capo_tmptest::TempRoot {
+    capo_tmptest::TempRoot::new("capo-server")
 }

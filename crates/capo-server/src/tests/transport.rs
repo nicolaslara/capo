@@ -255,7 +255,7 @@ fn tcp_transport_round_trips_server_requests_and_recovers_state() {
     assert_eq!(snapshot.active_session_count, 0);
     assert_eq!(restart_thread.join().expect("restart thread"), 2);
 
-    let reopened = CapoServer::open(ProjectId::new("project-capo"), root).expect("reopen");
+    let reopened = CapoServer::open(ProjectId::new("project-capo"), &root).expect("reopen");
     let dashboard = reopened.dashboard_snapshot().expect("dashboard");
     assert_eq!(dashboard.agent_count, 1);
     assert_eq!(dashboard.active_session_count, 0);

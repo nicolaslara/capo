@@ -1,5 +1,4 @@
 use super::*;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn prototype_state_backend_is_sqlite() {
@@ -2096,11 +2095,7 @@ fn tool_call_provenance_and_timing_persist_and_rebuild_identically() {
 /// row.
 #[test]
 fn aci11_reopened_store_rebuilds_tool_call_observation_and_report_projections_identically() {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("capo-state-aci11-reopen-{nanos}"));
+    let root = capo_tmptest::TempRoot::new("capo-state-aci11-reopen");
 
     let project_id = ProjectId::new("project-capo");
     let session_id = SessionId::new("session-aci11-reopen");
@@ -3051,11 +3046,7 @@ fn connectivity_exposure_requires_grant_and_projects_revocation_and_health() {
 /// credential.
 #[test]
 fn ct2_connectivity_handle_schema_round_trips_and_replays() {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("capo-state-ct2-handles-{nanos}"));
+    let root = capo_tmptest::TempRoot::new("capo-state-ct2-handles");
     let project_id = ProjectId::new("project-capo");
     let exposure_id = "connectivity-exposure-ct2";
 
@@ -3160,11 +3151,7 @@ fn ct2_connectivity_handle_schema_round_trips_and_replays() {
 /// (`heartbeat-ms:<ms>`), never a credential.
 #[test]
 fn ct5_connectivity_health_timeline_round_trips_and_replays() {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("capo-state-ct5-health-{nanos}"));
+    let root = capo_tmptest::TempRoot::new("capo-state-ct5-health");
     let project_id = ProjectId::new("project-capo");
     let exposure_id = "connectivity-exposure-ct5";
 
@@ -3272,11 +3259,7 @@ fn ct5_connectivity_health_timeline_round_trips_and_replays() {
 /// alone, and the revoked exposure STAYS revoked + unreachable after a restart.
 #[test]
 fn ct7_revoke_lifecycle_round_trips_and_replays() {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("capo-state-ct7-revoke-{nanos}"));
+    let root = capo_tmptest::TempRoot::new("capo-state-ct7-revoke");
     let project_id = ProjectId::new("project-capo");
     let exposure_id = "connectivity-exposure-ct7";
 
@@ -4461,13 +4444,33 @@ fn sg8_checkpoint_projection_persists_and_rebuilds_identically() {
     assert_eq!(rebuilt, live);
 }
 
-fn temp_store(name: &str) -> SqliteStateStore {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("capo-state-{name}-{nanos}"));
-    SqliteStateStore::open(root).expect("open temp store")
+/// A store opened under a self-cleaning temp dir. Derefs to [`SqliteStateStore`]
+/// so callers use it exactly like the store; the temp dir is removed when this
+/// wrapper drops (after the store it owns), keeping the on-disk DB alive for the
+/// whole test.
+struct TempStore {
+    store: SqliteStateStore,
+    _tmp: capo_tmptest::TempRoot,
+}
+
+impl std::ops::Deref for TempStore {
+    type Target = SqliteStateStore;
+
+    fn deref(&self) -> &SqliteStateStore {
+        &self.store
+    }
+}
+
+impl std::ops::DerefMut for TempStore {
+    fn deref_mut(&mut self) -> &mut SqliteStateStore {
+        &mut self.store
+    }
+}
+
+fn temp_store(name: &str) -> TempStore {
+    let tmp = capo_tmptest::TempRoot::new(&format!("capo-state-{name}"));
+    let store = SqliteStateStore::open(tmp.to_path_buf()).expect("open temp store");
+    TempStore { store, _tmp: tmp }
 }
 
 fn reviewed_memory_record(

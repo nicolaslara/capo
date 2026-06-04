@@ -53,9 +53,26 @@ fn report(goal_id: &str, report_id: &str, kind: &str, source: &str) -> GoalRepor
     }
 }
 
-fn open_server() -> CapoServer {
+/// A server opened under a self-cleaning temp dir. Derefs to [`CapoServer`] so
+/// callers use it exactly like the server; the temp dir (and its SQLite store)
+/// is removed when this wrapper drops at the end of the test.
+struct TempServer {
+    server: CapoServer,
+    _root: capo_tmptest::TempRoot,
+}
+
+impl std::ops::Deref for TempServer {
+    type Target = CapoServer;
+
+    fn deref(&self) -> &CapoServer {
+        &self.server
+    }
+}
+
+fn open_server() -> TempServer {
     let root = temp_root();
-    CapoServer::open(ProjectId::new("project-capo"), &root).expect("server")
+    let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
+    TempServer { server, _root: root }
 }
 
 #[test]

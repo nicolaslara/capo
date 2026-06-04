@@ -76,6 +76,9 @@ struct GitRemoteFixture {
     source_commit: String,
     dirty_filename: String,
     git_remote: GitRemote,
+    // Keeps the origin/remote-repo/worktree temp dirs (all under this root) alive
+    // for the fixture's lifetime; removed on drop.
+    _root: capo_tmptest::TempRoot,
 }
 
 fn git_remote_fixture(name: &str) -> GitRemoteFixture {
@@ -114,26 +117,34 @@ fn git_remote_fixture(name: &str) -> GitRemoteFixture {
         source_commit,
         dirty_filename,
         git_remote,
+        _root: root,
     }
 }
 
 /// Build a remote runner over a fake channel backed by a real git-remote model.
 /// NO network, NO real SSH.
-fn runner_with_git_remote(name: &str, git_remote: GitRemote) -> RemoteProcessRunner {
+fn runner_with_git_remote(
+    name: &str,
+    git_remote: GitRemote,
+) -> (RemoteProcessRunner, capo_tmptest::TempRoot) {
     let channel = OpenChannel::for_test(
         format!("chan-{name}"),
         format!("endpoint-{name}"),
         format!("fp-{name}"),
     );
-    let workspace = temp_root().join(format!("ws-{name}"));
-    let artifacts = temp_root().join(format!("art-{name}"));
+    // workspace + artifacts live under one root guard returned to the caller so
+    // the materialized worktree survives for the whole test.
+    let root = temp_root();
+    let workspace = root.join(format!("ws-{name}"));
+    let artifacts = root.join(format!("art-{name}"));
     std::fs::create_dir_all(&workspace).unwrap();
     let base = FakeRemoteChannel::from_open_channel(&channel, workspace, artifacts)
         .with_git_remote(git_remote);
-    RemoteProcessRunner::new(RemoteProcessConfig::with_transport(
+    let runner = RemoteProcessRunner::new(RemoteProcessConfig::with_transport(
         channel,
         RemoteChannel::Fake(base),
-    ))
+    ));
+    (runner, root)
 }
 
 #[test]
@@ -141,7 +152,7 @@ fn server_materialization_pins_head_to_the_source_sha() {
     // INVARIANT: materialization is content-addressed — the remote worktree HEAD
     // matches the source commit SHA exactly, and the committed file is present.
     let fixture = git_remote_fixture("srv-pins-head");
-    let runner = runner_with_git_remote("srv-pins-head", fixture.git_remote.clone());
+    let (runner, _ws) = runner_with_git_remote("srv-pins-head", fixture.git_remote.clone());
 
     let materialized = runner
         .materialize_workspace(&fixture.source_commit)
@@ -166,7 +177,7 @@ fn server_uncommitted_scratch_is_never_materialized_on_the_remote() {
     // NOT travel. A dirty local file is ABSENT on the materialized remote worktree,
     // and the non-sync is an EXPLICIT recorded fact, not a silent gap.
     let fixture = git_remote_fixture("srv-no-scratch");
-    let runner = runner_with_git_remote("srv-no-scratch", fixture.git_remote.clone());
+    let (runner, _ws) = runner_with_git_remote("srv-no-scratch", fixture.git_remote.clone());
 
     assert!(fixture.origin.join(&fixture.dirty_filename).exists());
 
@@ -195,7 +206,7 @@ fn server_materialization_event_redacts_an_embedded_credential_in_the_transport_
     // BEFORE it is recorded — an embedded secret is scrubbed, so no credential ever
     // lands on a remote-runtime event.
     let fixture = git_remote_fixture("srv-redact");
-    let runner = runner_with_git_remote("srv-redact", fixture.git_remote.clone());
+    let (runner, _ws) = runner_with_git_remote("srv-redact", fixture.git_remote.clone());
 
     let materialized = runner
         .materialize_workspace(&fixture.source_commit)
@@ -220,7 +231,7 @@ fn server_remote_commit_maps_back_by_git_into_a_named_local_ref() {
     // INVARIANT: results are mapped BACK by git — the remote worktree tip is fetched
     // into a named local ref (the DP8 reconcile/merge-back point).
     let fixture = git_remote_fixture("srv-fetch-back");
-    let runner = runner_with_git_remote("srv-fetch-back", fixture.git_remote.clone());
+    let (runner, _ws) = runner_with_git_remote("srv-fetch-back", fixture.git_remote.clone());
 
     let materialized = runner
         .materialize_workspace(&fixture.source_commit)
@@ -248,7 +259,7 @@ fn server_materialization_of_an_unknown_commit_is_a_typed_failure() {
     // INVARIANT: a failed git step is the TYPED error, never a silent fall-through
     // to the wrong dir.
     let fixture = git_remote_fixture("srv-typed-fail");
-    let runner = runner_with_git_remote("srv-typed-fail", fixture.git_remote.clone());
+    let (runner, _ws) = runner_with_git_remote("srv-typed-fail", fixture.git_remote.clone());
 
     let err = runner
         .materialize_workspace("0000000000000000000000000000000000000000")
@@ -264,7 +275,7 @@ fn server_materialization_is_replay_stable_across_repeated_runs() {
     // INVARIANT: re-materializing the SAME source SHA rebuilds identical projected
     // state (idempotent + replay-stable).
     let fixture = git_remote_fixture("srv-replay");
-    let runner = runner_with_git_remote("srv-replay", fixture.git_remote.clone());
+    let (runner, _ws) = runner_with_git_remote("srv-replay", fixture.git_remote.clone());
 
     let first = runner
         .materialize_workspace(&fixture.source_commit)
