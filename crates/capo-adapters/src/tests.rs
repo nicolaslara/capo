@@ -774,8 +774,11 @@ fn claude_launch_plan_builds_subscription_safe_runtime_request() {
 fn launch_plan_rejects_secret_like_env_or_argv_markers() {
     let workspace = temp_root("unsafe-launch-workspace");
     let artifacts = temp_root("unsafe-launch-artifacts");
-    let mut plan =
-        CodexExecAdapter::local_launch_plan(workspace.to_path_buf(), artifacts.to_path_buf(), "hello");
+    let mut plan = CodexExecAdapter::local_launch_plan(
+        workspace.to_path_buf(),
+        artifacts.to_path_buf(),
+        "hello",
+    );
     plan.env_allowlist.push("OPENAI_API_KEY".to_string());
     assert!(
         plan.assert_subscription_safe()
@@ -823,7 +826,8 @@ fn codex_local_smoke_plan_uses_restrictive_defaults() {
 fn claude_local_smoke_plan_disables_tools_and_mcp_by_default() {
     let workspace = temp_root("claude-workspace");
     let artifacts = temp_root("claude-artifacts");
-    let plan = ClaudeCodeAdapter::local_smoke_plan(workspace.to_path_buf(), artifacts.to_path_buf());
+    let plan =
+        ClaudeCodeAdapter::local_smoke_plan(workspace.to_path_buf(), artifacts.to_path_buf());
 
     assert_eq!(plan.opt_in_env, "CAPO_RUN_CLAUDE_LOCAL_SMOKE");
     assert_eq!(plan.program, "claude");

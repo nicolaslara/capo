@@ -72,7 +72,10 @@ impl std::ops::Deref for TempServer {
 fn open_server() -> TempServer {
     let root = temp_root();
     let server = CapoServer::open(ProjectId::new("project-capo"), &root).expect("server");
-    TempServer { server, _root: root }
+    TempServer {
+        server,
+        _root: root,
+    }
 }
 
 #[test]

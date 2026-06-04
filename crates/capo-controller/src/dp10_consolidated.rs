@@ -68,7 +68,9 @@ mod tests {
     // Shared fixtures.
     // ------------------------------------------------------------------
 
-    fn controller_with_session(label: &str) -> (FakeBoundaryController, FakeRunRefs, capo_tmptest::TempRoot) {
+    fn controller_with_session(
+        label: &str,
+    ) -> (FakeBoundaryController, FakeRunRefs, capo_tmptest::TempRoot) {
         let root = temp_root();
         let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), &root)
             .expect("controller");

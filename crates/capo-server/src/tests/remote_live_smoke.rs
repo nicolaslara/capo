@@ -150,10 +150,11 @@ fn server_rr8_deterministic_fixture_pins_the_live_smoke_shapes() {
     let root = temp_root();
     let workspace = root.join("ws-rr8");
     std::fs::create_dir_all(&workspace).unwrap();
-    let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), root.join("artifacts"))
-        .with_git_remote(fixture.git_remote.clone())
-        .recover_alive_reattachable()
-        .with_streamed_output(b"out token AKIAIOSFODNN7EXAMPLE done".to_vec());
+    let base =
+        FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), root.join("artifacts"))
+            .with_git_remote(fixture.git_remote.clone())
+            .recover_alive_reattachable()
+            .with_streamed_output(b"out token AKIAIOSFODNN7EXAMPLE done".to_vec());
     let runner = RemoteProcessRunner::new(RemoteProcessConfig::with_transport(
         channel,
         RemoteChannel::Fake(base),

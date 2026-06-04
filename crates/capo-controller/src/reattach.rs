@@ -40,7 +40,6 @@ mod tests {
 
     use crate::{ContinuationConditions, ContinuationDecision, FakeBoundaryController, GoalBudget};
 
-
     fn temp_root(name: &str) -> capo_tmptest::TempRoot {
         capo_tmptest::TempRoot::new(&format!("capo-ga6-{name}"))
     }

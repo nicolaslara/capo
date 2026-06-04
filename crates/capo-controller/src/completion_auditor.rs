@@ -570,7 +570,6 @@ mod tests {
 
     use super::*;
 
-
     fn temp_root(name: &str) -> capo_tmptest::TempRoot {
         capo_tmptest::TempRoot::new(&format!("capo-ga5-{name}"))
     }

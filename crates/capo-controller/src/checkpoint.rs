@@ -534,13 +534,17 @@ mod tests {
 
     use super::*;
 
-
     fn temp_root(name: &str) -> capo_tmptest::TempRoot {
         capo_tmptest::TempRoot::new(&format!("capo-sg8-{name}"))
     }
 
     /// A controller plus a fresh workspace dir and a shadow-git root dir.
-    fn fixture() -> (FakeBoundaryController, capo_tmptest::TempRoot, capo_tmptest::TempRoot, capo_tmptest::TempRoot) {
+    fn fixture() -> (
+        FakeBoundaryController,
+        capo_tmptest::TempRoot,
+        capo_tmptest::TempRoot,
+        capo_tmptest::TempRoot,
+    ) {
         let state_root = temp_root("state");
         let workspace = temp_root("workspace");
         let shadow_git_root = temp_root("shadow");

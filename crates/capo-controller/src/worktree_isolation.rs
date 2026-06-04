@@ -359,7 +359,6 @@ mod tests {
     use super::*;
     use crate::CheckpointScope;
 
-
     fn temp_root(name: &str) -> capo_tmptest::TempRoot {
         let dir = capo_tmptest::TempRoot::new(&format!("capo-dp8c-{name}")).keep();
         std::fs::create_dir_all(&dir).expect("temp dir");

@@ -73,7 +73,9 @@ mod tests {
     /// policy DENIES the write scope, so when the agent offers ONLY an allow
     /// option for an edit, the controller's authority over-rules it and answers
     /// the pending permission `cancelled` -- the safety floor on the wire.
-    fn controller_with_session(label: &str) -> (FakeBoundaryController, FakeRunRefs, capo_tmptest::TempRoot) {
+    fn controller_with_session(
+        label: &str,
+    ) -> (FakeBoundaryController, FakeRunRefs, capo_tmptest::TempRoot) {
         let root = temp_root();
         let controller = FakeBoundaryController::open_with_permission_policy(
             ProjectId::new("project-capo"),

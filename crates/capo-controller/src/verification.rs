@@ -379,12 +379,15 @@ mod tests {
 
     use super::*;
 
-
     fn temp_root(name: &str) -> capo_tmptest::TempRoot {
         capo_tmptest::TempRoot::new(&format!("capo-sg6-{name}"))
     }
 
-    fn controller() -> (FakeBoundaryController, capo_tmptest::TempRoot, capo_tmptest::TempRoot) {
+    fn controller() -> (
+        FakeBoundaryController,
+        capo_tmptest::TempRoot,
+        capo_tmptest::TempRoot,
+    ) {
         let workspace = temp_root("workspace");
         // state lives UNDER the returned workspace guard so the controller's DB
         // survives for the whole test and is cleaned up with the workspace.

@@ -196,7 +196,7 @@ fn read_lanes(state_root: &str) -> Option<Lanes> {
             }
         }
     }
-    events.sort_by(|a, b| b.sequence.cmp(&a.sequence));
+    events.sort_by_key(|b| std::cmp::Reverse(b.sequence));
     let mut seen = std::collections::HashSet::new();
     let activity: Vec<Value> = events
         .into_iter()

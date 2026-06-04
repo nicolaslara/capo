@@ -2706,8 +2706,7 @@ fn search_redacts_secrets_in_previews() {
     )
     .expect("seed");
     let artifacts = temp_root("aci5-redact-art");
-    let mut config =
-        RuntimeToolConfig::local_workspace(workspace.clone(), artifacts.to_path_buf());
+    let mut config = RuntimeToolConfig::local_workspace(workspace.clone(), artifacts.to_path_buf());
     config.redaction_rules.push(RedactionRule {
         pattern: "SECRET_TOKEN_abc123".to_string(),
         replacement: "[REDACTED]".to_string(),

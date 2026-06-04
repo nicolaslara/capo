@@ -64,7 +64,6 @@ use crate::{
     WorkspaceWriteLeaseOutcome,
 };
 
-
 fn temp_root(name: &str) -> capo_tmptest::TempRoot {
     capo_tmptest::TempRoot::new(&format!("capo-ga8-{name}"))
 }
