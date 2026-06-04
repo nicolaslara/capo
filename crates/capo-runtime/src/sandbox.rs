@@ -615,11 +615,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     use crate::LocalProcessConfig;
 
-    fn tmp_root(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("capo-sbtest-{name}-{}", std::process::id()));
+    fn tmp_root(name: &str) -> capo_tmptest::TempRoot {
+        let dir = capo_tmptest::TempRoot::new(&format!("capo-sbtest-{name}")).keep();
         fs::create_dir_all(&dir).unwrap();
         // Canonicalize so macOS /tmp -> /private/tmp matches the seatbelt subpath.
-        dir.canonicalize().unwrap()
+        // Re-wrap the canonical path so cleanup targets the real directory.
+        capo_tmptest::TempRoot::at(dir.canonicalize().unwrap())
     }
 
     #[cfg(target_os = "macos")]

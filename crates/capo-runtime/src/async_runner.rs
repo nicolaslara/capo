@@ -655,16 +655,12 @@ pub struct StreamingOutcome {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
 
     use super::*;
 
-    fn temp_root(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        std::env::temp_dir().join(format!("capo-runtime-async-{name}-{nanos}"))
+    fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+        capo_tmptest::TempRoot::new(&format!("capo-runtime-async-{name}"))
     }
 
     fn runner(workspace: &std::path::Path, artifacts: PathBuf) -> AsyncLocalProcessRunner {
@@ -686,7 +682,7 @@ mod tests {
         let workspace = temp_root("workspace-stream");
         let artifacts = temp_root("artifacts-stream");
         std::fs::create_dir_all(&workspace).unwrap();
-        let runner = runner(&workspace, artifacts);
+        let runner = runner(&workspace, artifacts.to_path_buf());
 
         let mut running = runner
             .spawn_streaming(LocalProcessRequest::new(
@@ -779,7 +775,7 @@ mod tests {
         let workspace = temp_root("workspace-stdin");
         let artifacts = temp_root("artifacts-stdin");
         std::fs::create_dir_all(&workspace).unwrap();
-        let runner = runner(&workspace, artifacts);
+        let runner = runner(&workspace, artifacts.to_path_buf());
 
         let mut running = runner
             .spawn_streaming(LocalProcessRequest::new(
@@ -811,7 +807,7 @@ mod tests {
         let artifacts = temp_root("artifacts-cap");
         std::fs::create_dir_all(&workspace).unwrap();
         let config_cap = 16;
-        let mut config = LocalProcessConfig::for_test(workspace.clone(), artifacts);
+        let mut config = LocalProcessConfig::for_test(workspace.clone(), artifacts.to_path_buf());
         config.output_limit_bytes = config_cap;
         let runner = AsyncLocalProcessRunner::new(config);
 
@@ -890,7 +886,7 @@ mod tests {
         let artifacts = temp_root("artifacts-cancel-tree");
         std::fs::create_dir_all(&workspace).unwrap();
         let marker = workspace.join("descendant-survived.txt");
-        let runner = runner(&workspace, artifacts);
+        let runner = runner(&workspace, artifacts.to_path_buf());
 
         let mut running = runner
             .spawn_streaming(LocalProcessRequest::new(
@@ -927,7 +923,7 @@ mod tests {
         let workspace = temp_root("workspace-fail");
         let artifacts = temp_root("artifacts-fail");
         std::fs::create_dir_all(&workspace).unwrap();
-        let runner = runner(&workspace, artifacts);
+        let runner = runner(&workspace, artifacts.to_path_buf());
 
         let mut running = runner
             .spawn_streaming(LocalProcessRequest::new(
@@ -953,7 +949,7 @@ mod tests {
         let workspace = temp_root("workspace-sync-classify");
         let artifacts = temp_root("artifacts-sync-classify");
         std::fs::create_dir_all(&workspace).unwrap();
-        let runner = runner(&workspace, artifacts);
+        let runner = runner(&workspace, artifacts.to_path_buf());
 
         let pass = runner
             .run_to_completion(LocalProcessRequest::new(
@@ -989,7 +985,7 @@ mod tests {
         let workspace = temp_root("workspace-nested-reactor");
         let artifacts = temp_root("artifacts-nested-reactor");
         std::fs::create_dir_all(&workspace).unwrap();
-        let runner = runner(&workspace, artifacts);
+        let runner = runner(&workspace, artifacts.to_path_buf());
 
         let outcome = tokio::task::spawn_blocking(move || {
             runner.run_to_completion(LocalProcessRequest::new(
@@ -1014,7 +1010,7 @@ mod tests {
         let workspace = temp_root("workspace-sync-cap");
         let artifacts = temp_root("artifacts-sync-cap");
         std::fs::create_dir_all(&workspace).unwrap();
-        let mut config = LocalProcessConfig::for_test(workspace.clone(), artifacts);
+        let mut config = LocalProcessConfig::for_test(workspace.clone(), artifacts.to_path_buf());
         config.output_limit_bytes = 16;
         let runner = AsyncLocalProcessRunner::new(config);
 
@@ -1044,7 +1040,7 @@ mod tests {
         let workspace = temp_root("workspace-async-env");
         let artifacts = temp_root("artifacts-async-env");
         std::fs::create_dir_all(&workspace).unwrap();
-        let runner = runner(&workspace, artifacts);
+        let runner = runner(&workspace, artifacts.to_path_buf());
 
         let error = runner
             .spawn_streaming(LocalProcessRequest {
@@ -1068,14 +1064,15 @@ mod tests {
         let outside = temp_root("workspace-async-outside");
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
-        let runner = runner(&workspace, temp_root("artifacts-async-cwd"));
+        let artifacts = temp_root("artifacts-async-cwd");
+        let runner = runner(&workspace, artifacts.to_path_buf());
 
         let error = runner
             .spawn_streaming(LocalProcessRequest::new(
                 RunId::new("run-async-reject"),
                 "/bin/echo",
                 vec!["nope".to_string()],
-                outside,
+                outside.to_path_buf(),
                 HashMap::new(),
             ))
             .expect_err("cwd outside workspace must be rejected");
@@ -1093,7 +1090,7 @@ mod tests {
         let workspace = temp_root("workspace-async-credscan");
         let artifacts = temp_root("artifacts-async-credscan");
         std::fs::create_dir_all(&workspace).unwrap();
-        let runner = runner(&workspace, artifacts);
+        let runner = runner(&workspace, artifacts.to_path_buf());
 
         let mut running = runner
             .spawn_streaming(LocalProcessRequest::new(
@@ -1164,7 +1161,7 @@ mod tests {
         let workspace = temp_root("workspace-async-split");
         let artifacts = temp_root("artifacts-async-split");
         std::fs::create_dir_all(&workspace).unwrap();
-        let runner = runner(&workspace, artifacts);
+        let runner = runner(&workspace, artifacts.to_path_buf());
 
         let mut running = runner
             .spawn_streaming(LocalProcessRequest::new(

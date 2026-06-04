@@ -399,26 +399,18 @@ fn key_segment(key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use super::*;
 
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn temp_dir(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("capo-dp8-{name}-{nanos}-{n}"));
+    fn temp_dir(name: &str) -> capo_tmptest::TempRoot {
+        let dir = capo_tmptest::TempRoot::new(&format!("capo-dp8-{name}")).keep();
         std::fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
+        // Canonicalize (macOS /tmp -> /private/tmp) and re-wrap so the guard
+        // cleans up the real directory on drop.
+        capo_tmptest::TempRoot::at(dir.canonicalize().unwrap())
     }
 
     /// Initialize a git repo with one commit so `git worktree add` has a base.
-    fn init_repo(name: &str) -> PathBuf {
+    fn init_repo(name: &str) -> capo_tmptest::TempRoot {
         let repo = temp_dir(name);
         run_git(&repo, &["init", "--quiet"]);
         run_git(&repo, &["config", "user.name", "test"]);

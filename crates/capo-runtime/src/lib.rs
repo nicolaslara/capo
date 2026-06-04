@@ -7507,7 +7507,6 @@ fn orphan_state_hash(pid: u32, recorded_boot_id: Option<&str>, observed_state: &
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
 
@@ -7935,7 +7934,7 @@ mod tests {
                 turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec!["-c".to_string(), "printf scrub-ok".to_string()],
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env,
             })
             .expect("the scrubbed launch succeeds (no DisallowedEnvOverride)");
@@ -9280,7 +9279,7 @@ mod tests {
                     "-c".to_string(),
                     "printf stdout-SECRET; printf stderr-SECRET >&2".to_string(),
                 ],
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env: HashMap::new(),
             })
             .expect("run local process");
@@ -9347,7 +9346,7 @@ mod tests {
                      printf 'tok ghp_abcdEFGH1234ijklMNOP5678qrst' >&2"
                         .to_string(),
                 ],
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env: HashMap::new(),
             })
             .expect("run local process");
@@ -9396,7 +9395,7 @@ mod tests {
                      /usr/local/lib/python3.11/site-packages/numpy'"
                         .to_string(),
                 ],
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env: HashMap::new(),
             })
             .expect("run local process");
@@ -9425,7 +9424,7 @@ mod tests {
         let artifacts = temp_root("artifacts-live");
         fs::create_dir_all(&workspace).unwrap();
         let runner =
-            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts.to_path_buf()));
 
         let mut running = runner
             .spawn_process(LocalProcessRequest {
@@ -9436,7 +9435,7 @@ mod tests {
                     "-c".to_string(),
                     "printf before-sleep; sleep 5; printf after-sleep".to_string(),
                 ],
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env: HashMap::new(),
             })
             .expect("spawn local process");
@@ -9584,7 +9583,7 @@ mod tests {
         let artifacts = temp_root("artifacts-timeout");
         fs::create_dir_all(&workspace).unwrap();
         let runner =
-            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts.to_path_buf()));
 
         let mut running = runner
             .spawn_process(LocalProcessRequest {
@@ -9595,7 +9594,7 @@ mod tests {
                     "-c".to_string(),
                     "printf before-timeout; sleep 5; printf after-timeout".to_string(),
                 ],
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env: HashMap::new(),
             })
             .expect("spawn local process");
@@ -9617,7 +9616,7 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         let marker = workspace.join("descendant-survived.txt");
         let runner =
-            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts.to_path_buf()));
 
         let mut running = runner
             .spawn_process(LocalProcessRequest {
@@ -9628,7 +9627,7 @@ mod tests {
                     "-c".to_string(),
                     format!("(sleep 1; printf survived > {}) & wait", marker.display()),
                 ],
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env: HashMap::new(),
             })
             .expect("spawn local process tree");
@@ -9660,7 +9659,7 @@ mod tests {
                     "-c".to_string(),
                     "printf this-output-is-too-large".to_string(),
                 ],
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env: HashMap::new(),
             })
             .expect("spawn local process");
@@ -9691,7 +9690,7 @@ mod tests {
                 turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec!["-c".to_string(), "printf remote-ok".to_string()],
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env: HashMap::new(),
             })
             .expect("run remote loopback process");
@@ -9772,7 +9771,10 @@ mod tests {
         workspace: &Path,
         script: impl FnOnce(FakeRemoteChannel) -> FakeRemoteChannel,
     ) -> RemoteProcessRunner {
-        let artifacts = temp_root(&format!("artifacts-{name}"));
+        // Artifacts live UNDER the caller-owned workspace so they are cleaned up
+        // by the caller's workspace temp-dir guard (this helper returns only the
+        // runner, so a separate guard here would drop too early).
+        let artifacts = workspace.join("artifacts");
         let channel = OpenChannel::for_test(
             format!("chan-{name}"),
             format!("endpoint-{name}"),
@@ -10158,11 +10160,11 @@ mod tests {
             "remote-target-order",
             "endpoint-order",
             workspace.clone(),
-            artifacts,
+            artifacts.to_path_buf(),
         ));
 
         let outcome = runner
-            .start_process(remote_request("run-order", workspace, "printf ok"))
+            .start_process(remote_request("run-order", workspace.to_path_buf(), "printf ok"))
             .expect("remote start");
 
         // Append-first Start Sequence: pending request -> target resolved ->
@@ -10207,7 +10209,7 @@ mod tests {
             "remote-target-idem",
             "endpoint-idem",
             workspace.clone(),
-            artifacts,
+            artifacts.to_path_buf(),
         ));
 
         let first = runner
@@ -10256,7 +10258,7 @@ mod tests {
         // A DIFFERENT idempotency key DOES spawn a second process with a distinct
         // remote pid — proving the dedup is keyed, and the pid is not a constant.
         let other = runner
-            .start_process(remote_request("run-idem-2", workspace, "printf ok"))
+            .start_process(remote_request("run-idem-2", workspace.to_path_buf(), "printf ok"))
             .expect("start with a different key");
         assert_eq!(
             runner.transport_spawn_count(),
@@ -10279,13 +10281,13 @@ mod tests {
         let runner = FakeRemoteProcessRunner::with_launch_failure(
             channel,
             workspace.clone(),
-            artifacts,
+            artifacts.to_path_buf(),
             "channel refused launch",
             true,
         );
 
         let error = runner
-            .start_process(remote_request("run-fail", workspace, "printf nope"))
+            .start_process(remote_request("run-fail", workspace.to_path_buf(), "printf nope"))
             .expect_err("launch must fail");
 
         match error {
@@ -10329,7 +10331,7 @@ mod tests {
         let artifacts = temp_root("artifacts-remote-resolved");
         fs::create_dir_all(&workspace).unwrap();
         let channel = OpenChannel::for_test("chan-resolved", "endpoint-resolved", "fp-resolved");
-        let runner = FakeRemoteProcessRunner::build(channel, workspace, artifacts);
+        let runner = FakeRemoteProcessRunner::build(channel, workspace.to_path_buf(), artifacts.to_path_buf());
 
         // Identity is the injected fingerprint, proving no resolution happened.
         assert_eq!(runner.target_fingerprint(), "fp-resolved");
@@ -10350,11 +10352,11 @@ mod tests {
             "remote-target-cleanup",
             "endpoint-cleanup",
             workspace.clone(),
-            artifacts,
+            artifacts.to_path_buf(),
         ));
 
         let outcome = runner
-            .start_process(remote_request("run-cleanup", workspace, "printf ok"))
+            .start_process(remote_request("run-cleanup", workspace.to_path_buf(), "printf ok"))
             .expect("remote start");
 
         let first = runner.cleanup(&outcome.process).expect("first cleanup");
@@ -10382,13 +10384,13 @@ mod tests {
             "endpoint-probe",
             "remote-target-probe",
         );
-        let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts);
+        let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts.to_path_buf());
         let runner = RemoteProcessRunner::new(RemoteProcessConfig::with_transport(
             channel,
             RemoteChannel::Fake(base.with_probe_reports_dead()),
         ));
         let outcome = runner
-            .start_process(remote_request("run-probe", workspace, "printf ok"))
+            .start_process(remote_request("run-probe", workspace.to_path_buf(), "printf ok"))
             .expect("remote start");
 
         // Force the stored status to `running` so the ONLY thing that can make
@@ -10425,7 +10427,7 @@ mod tests {
             format!("endpoint-{name}"),
             format!("fp-{name}"),
         );
-        let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts);
+        let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts.to_path_buf());
         let recorded_boot = base.remote_boot_id();
         let transport = RemoteChannel::Fake(script(base));
         let runner =
@@ -10434,7 +10436,7 @@ mod tests {
         let outcome = runner
             .start_process(remote_request(
                 &format!("run-{name}"),
-                workspace,
+                workspace.to_path_buf(),
                 "printf ok",
             ))
             .expect("remote start for recovery fixture");
@@ -10535,7 +10537,7 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         let channel =
             OpenChannel::for_test("chan-rec-return", "endpoint-rec-return", "fp-rec-return");
-        let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts);
+        let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts.to_path_buf());
         let recorded_boot = base.remote_boot_id();
 
         // Launch once over a plain channel to mint the stored ref.
@@ -10560,7 +10562,7 @@ mod tests {
             let chan = FakeRemoteChannel::from_open_channel(
                 &channel,
                 workspace.clone(),
-                temp_root("artifacts-rec-return-reresolve"),
+                temp_root("artifacts-rec-return-reresolve").to_path_buf(),
             );
             RemoteProcessRunner::new(RemoteProcessConfig::with_transport(
                 channel.clone(),
@@ -10742,8 +10744,8 @@ mod tests {
         let runner = RemoteProcessRunner::new(RemoteProcessConfig::loopback_for_test(
             "remote-target-bare",
             "endpoint-bare",
-            workspace,
-            artifacts,
+            workspace.to_path_buf(),
+            artifacts.to_path_buf(),
         ));
         let bare = LocalRuntimeProcessRef {
             run_id: RunId::new("run-bare"),
@@ -10782,7 +10784,7 @@ mod tests {
         // The channel now resolves to "endpoint-NEW", but the stored ref recorded
         // "host-ORIGINAL" at launch.
         let channel = OpenChannel::for_test("chan-host", "endpoint-NEW", "fp-host");
-        let runner = FakeRemoteProcessRunner::build(channel, workspace, artifacts);
+        let runner = FakeRemoteProcessRunner::build(channel, workspace.to_path_buf(), artifacts.to_path_buf());
         let stored = LocalRuntimeProcessRef {
             run_id: RunId::new("run-host"),
             runtime_process_ref: "remote-process:fp-host:host-ORIGINAL:pid=51000:boot=boot-x"
@@ -10822,7 +10824,7 @@ mod tests {
             format!("endpoint-{name}"),
             format!("fp-{name}"),
         );
-        let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts);
+        let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts.to_path_buf());
         let scripted = script(base);
         let transport = RemoteChannel::Fake(scripted.clone());
         let runner =
@@ -10830,7 +10832,7 @@ mod tests {
         let outcome = runner
             .start_process(remote_request(
                 &format!("run-{name}"),
-                workspace,
+                workspace.to_path_buf(),
                 "printf ok",
             ))
             .expect("remote start for streaming fixture");
@@ -11034,7 +11036,7 @@ mod tests {
             format!("endpoint-{name}"),
             format!("fp-{name}"),
         );
-        let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts);
+        let base = FakeRemoteChannel::from_open_channel(&channel, workspace.clone(), artifacts.to_path_buf());
         let recorded_boot = base.remote_boot_id();
         let scripted = script(base);
         let transport = RemoteChannel::Fake(scripted.clone());
@@ -11043,7 +11045,7 @@ mod tests {
         let outcome = runner
             .start_process(remote_request(
                 &format!("run-{name}"),
-                workspace,
+                workspace.to_path_buf(),
                 "printf ok",
             ))
             .expect("remote start for crash-safe fixture");
@@ -11267,7 +11269,7 @@ mod tests {
         let workspace = temp_root("workspace-rr6-revoke-2");
         fs::create_dir_all(&workspace).unwrap();
         let err = runner
-            .start_process(remote_request("run-rr6-revoke-2", workspace, "printf ok"))
+            .start_process(remote_request("run-rr6-revoke-2", workspace.to_path_buf(), "printf ok"))
             .expect_err("a revoked grant must refuse a new launch");
         assert!(
             matches!(err, RuntimeError::RemoteControlRevoked { .. }),
@@ -11340,7 +11342,7 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         assert!(matches!(
             runner
-                .start_process(remote_request("run-rr6-teardown-2", workspace, "printf ok"))
+                .start_process(remote_request("run-rr6-teardown-2", workspace.to_path_buf(), "printf ok"))
                 .expect_err("a revoked grant must refuse a new launch"),
             RuntimeError::RemoteControlRevoked { .. }
         ));
@@ -11360,7 +11362,7 @@ mod tests {
         let workspace = temp_root("workspace-rr6-clone");
         fs::create_dir_all(&workspace).unwrap();
         let err = clone
-            .start_process(remote_request("run-rr6-clone", workspace, "printf ok"))
+            .start_process(remote_request("run-rr6-clone", workspace.to_path_buf(), "printf ok"))
             .expect_err("the clone is revoked too");
         assert!(matches!(err, RuntimeError::RemoteControlRevoked { .. }));
     }
@@ -11403,9 +11405,10 @@ mod tests {
     fn local_process_runner_rejects_non_allowlisted_env_overrides() {
         let workspace = temp_root("workspace-env");
         fs::create_dir_all(&workspace).unwrap();
+        let artifacts = temp_root("artifacts-env");
         let runner = LocalProcessRunner::new(LocalProcessConfig::for_test(
             workspace.clone(),
-            temp_root("artifacts-env"),
+            artifacts.to_path_buf(),
         ));
 
         let error = runner
@@ -11414,7 +11417,7 @@ mod tests {
                 turn_id: None,
                 program: "/usr/bin/env".to_string(),
                 argv: Vec::new(),
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env: HashMap::from([("SECRET_TOKEN".to_string(), "secret".to_string())]),
             })
             .unwrap_err();
@@ -11431,9 +11434,10 @@ mod tests {
         let outside = temp_root("workspace-outside");
         fs::create_dir_all(&workspace).unwrap();
         fs::create_dir_all(&outside).unwrap();
+        let artifacts = temp_root("artifacts");
         let runner = LocalProcessRunner::new(LocalProcessConfig::for_test(
-            workspace,
-            temp_root("artifacts"),
+            workspace.to_path_buf(),
+            artifacts.to_path_buf(),
         ));
 
         let error = runner
@@ -11442,7 +11446,7 @@ mod tests {
                 turn_id: None,
                 program: "/bin/echo".to_string(),
                 argv: vec!["nope".to_string()],
-                cwd: outside,
+                cwd: outside.to_path_buf(),
                 env: HashMap::new(),
             })
             .unwrap_err();
@@ -11463,7 +11467,7 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         let marker = workspace.join("orphan-survived.txt");
         let runner =
-            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts.to_path_buf()));
 
         let mut running = runner
             .spawn_process(LocalProcessRequest {
@@ -11477,7 +11481,7 @@ mod tests {
                     // the orphan we must reap by the persisted group PID.
                     format!("(sleep 2; printf survived > {}) &", marker.display()),
                 ],
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env: HashMap::new(),
             })
             .expect("spawn orphan tree");
@@ -11511,14 +11515,14 @@ mod tests {
         let artifacts = temp_root("artifacts-reap-gone");
         fs::create_dir_all(&workspace).unwrap();
         let runner =
-            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts.to_path_buf()));
         let mut running = runner
             .spawn_process(LocalProcessRequest {
                 run_id: RunId::new("run-reap-gone"),
                 turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec!["-c".to_string(), "exit 0".to_string()],
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env: HashMap::new(),
             })
             .expect("spawn short process");
@@ -11550,7 +11554,7 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         let marker = workspace.join("survivor-across-reboot.txt");
         let runner =
-            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts.to_path_buf()));
         let mut running = runner
             .spawn_process(LocalProcessRequest {
                 run_id: RunId::new("run-reap-reboot"),
@@ -11560,7 +11564,7 @@ mod tests {
                     "-c".to_string(),
                     format!("(sleep 2; printf survived > {}) &", marker.display()),
                 ],
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env: HashMap::new(),
             })
             .expect("spawn process group");
@@ -11616,7 +11620,7 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         let marker = workspace.join("probe-survivor.txt");
         let runner =
-            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts.to_path_buf()));
         let mut running = runner
             .spawn_process(LocalProcessRequest {
                 run_id: RunId::new("run-probe-alive"),
@@ -11626,7 +11630,7 @@ mod tests {
                     "-c".to_string(),
                     format!("(sleep 2; printf survived > {}) &", marker.display()),
                 ],
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env: HashMap::new(),
             })
             .expect("spawn live group");
@@ -11657,14 +11661,14 @@ mod tests {
         let artifacts = temp_root("artifacts-probe-gone");
         fs::create_dir_all(&workspace).unwrap();
         let runner =
-            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts.to_path_buf()));
         let mut running = runner
             .spawn_process(LocalProcessRequest {
                 run_id: RunId::new("run-probe-gone"),
                 turn_id: None,
                 program: "/bin/sh".to_string(),
                 argv: vec!["-c".to_string(), "exit 0".to_string()],
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env: HashMap::new(),
             })
             .expect("spawn short process");
@@ -11695,7 +11699,7 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         let marker = workspace.join("probe-reboot-survivor.txt");
         let runner =
-            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts.to_path_buf()));
         let mut running = runner
             .spawn_process(LocalProcessRequest {
                 run_id: RunId::new("run-probe-reboot"),
@@ -11705,7 +11709,7 @@ mod tests {
                     "-c".to_string(),
                     format!("(sleep 2; printf survived > {}) &", marker.display()),
                 ],
-                cwd: workspace,
+                cwd: workspace.to_path_buf(),
                 env: HashMap::new(),
             })
             .expect("spawn live group");
@@ -11729,12 +11733,8 @@ mod tests {
         );
     }
 
-    fn temp_root(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        std::env::temp_dir().join(format!("capo-runtime-{name}-{nanos}"))
+    fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+        capo_tmptest::TempRoot::new(&format!("capo-runtime-{name}"))
     }
 
     #[test]
@@ -11934,7 +11934,7 @@ mod tests {
         let artifacts = temp_root("piped-artifacts");
         fs::create_dir_all(&workspace).unwrap();
         let runner =
-            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts));
+            LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), artifacts.to_path_buf()));
 
         // `/bin/cat` echoes each stdin line to stdout, a minimal bidirectional
         // line protocol.
@@ -11943,7 +11943,7 @@ mod tests {
                 RunId::new("run-piped"),
                 "/bin/cat",
                 Vec::new(),
-                workspace,
+                workspace.to_path_buf(),
                 HashMap::new(),
             ))
             .expect("spawn piped process");
@@ -12049,6 +12049,9 @@ mod tests {
         source_commit: String,
         dirty_filename: String,
         git_remote: GitRemote,
+        // Held only to keep the origin/remote-repo/worktree temp dirs alive for
+        // the lifetime of the fixture; cleaned up when the fixture is dropped.
+        _temp_guards: Vec<capo_tmptest::TempRoot>,
     }
 
     fn rr7_git_remote_fixture(name: &str) -> GitRemoteFixture {
@@ -12075,18 +12078,19 @@ mod tests {
         fs::write(origin.join(&dirty_filename), "secret local scratch").unwrap();
 
         let git_remote = GitRemote::new(
-            origin.clone(),
-            remote_repo,
-            worktree_root,
+            origin.to_path_buf(),
+            remote_repo.to_path_buf(),
+            worktree_root.to_path_buf(),
             // A transport URL with an EMBEDDED credential — it MUST be redacted
             // before it lands on the materialization event.
             "ssh://git:AKIAIOSFODNN7EXAMPLE@remote.example/repo.git",
         );
         GitRemoteFixture {
-            origin,
+            origin: origin.to_path_buf(),
             source_commit,
             dirty_filename,
             git_remote,
+            _temp_guards: vec![origin, remote_repo, worktree_root],
         }
     }
 
@@ -12096,9 +12100,10 @@ mod tests {
         name: &str,
         git_remote: Option<GitRemote>,
         script: impl FnOnce(FakeRemoteChannel) -> FakeRemoteChannel,
-    ) -> (RemoteProcessRunner, PathBuf) {
+    ) -> (RemoteProcessRunner, capo_tmptest::TempRoot) {
         let workspace = temp_root(&format!("rr7-ws-{name}"));
-        let artifacts = temp_root(&format!("rr7-art-{name}"));
+        // Artifacts under the workspace so the returned workspace guard cleans both.
+        let artifacts = workspace.join("artifacts");
         fs::create_dir_all(&workspace).unwrap();
         let channel = OpenChannel::for_test(
             format!("chan-{name}"),
@@ -12295,7 +12300,7 @@ mod tests {
             let outcome = runner
                 .start_process(remote_request(
                     &format!("run-{name}"),
-                    workspace,
+                    workspace.to_path_buf(),
                     "printf ok",
                 ))
                 .expect("start");
@@ -12411,7 +12416,7 @@ mod tests {
             Err(RuntimeError::RemoteControlRevoked { .. })
         ));
 
-        let start = runner.start_process(remote_request("run-revoked", workspace, "printf ok"));
+        let start = runner.start_process(remote_request("run-revoked", workspace.to_path_buf(), "printf ok"));
         assert!(matches!(
             start,
             Err(RuntimeError::RemoteControlRevoked { .. })
@@ -12428,7 +12433,9 @@ mod tests {
         workspace: &Path,
         script: impl FnOnce(FakeRemoteChannel) -> FakeRemoteChannel,
     ) -> RemoteProcessRunner {
-        let artifacts = temp_root(&format!("rr7-sb-art-{name}"));
+        // Artifacts under the caller-owned workspace (this helper returns only the
+        // runner) so the caller's workspace guard cleans them up.
+        let artifacts = workspace.join("artifacts");
         let channel = OpenChannel::for_test(
             format!("rr7-sb-chan-{name}"),
             format!("rr7-sb-endpoint-{name}"),
@@ -12671,7 +12678,8 @@ mod tests {
         // ALREADY-RESOLVED channel + SSH destination (no endpoint resolution), and
         // the auth handle is a label only (carried by handle, never a raw key).
         let channel = OpenChannel::for_test("chan-ssh", "endpoint-ssh", "fp-ssh");
-        let ssh = SshRemoteConfig::new("capo@remote.example", "fp-ssh", temp_root("rr8-ssh-art"))
+        let ssh =
+            SshRemoteConfig::new("capo@remote.example", "fp-ssh", temp_root("rr8-ssh-art").to_path_buf())
             .with_auth_ref("ssh-agent:default");
         let runner = SshRemoteProcessRunner::build(channel, ssh);
         assert!(
@@ -12723,7 +12731,7 @@ mod tests {
 
         // SHAPE 2: the remote process-ref shape.
         let outcome = runner
-            .start_process(remote_request("run-rr8-fixture", workspace, "printf ok"))
+            .start_process(remote_request("run-rr8-fixture", workspace.to_path_buf(), "printf ok"))
             .expect("start");
         let process_ref = &outcome.process.runtime_process_ref;
         assert!(
@@ -12847,7 +12855,7 @@ mod tests {
         let ssh = SshRemoteConfig::new(
             ssh_destination.clone(),
             "fp-rr8-live",
-            temp_root("rr8-live-art"),
+            temp_root("rr8-live-art").to_path_buf(),
         )
         .with_auth_ref("ssh-agent:default")
         .with_git_remote(fixture.git_remote.clone());
@@ -12975,10 +12983,11 @@ mod tests {
     fn dt3_attach_with_boot(
         name: &str,
         script: impl FnOnce(FakeRemoteChannel) -> FakeRemoteChannel,
-    ) -> (RemoteRunnerAttach, PathBuf, String) {
-        let root = temp_root(name);
-        let workspace = root.join("workspace");
-        let artifacts = root.join("artifacts");
+    ) -> (RemoteRunnerAttach, capo_tmptest::TempRoot, String) {
+        // `workspace` is the guard returned to (and kept alive by) the caller;
+        // artifacts live under it so both are cleaned up when the caller drops it.
+        let workspace = temp_root(name);
+        let artifacts = workspace.join("artifacts");
         fs::create_dir_all(&workspace).unwrap();
         let tunnel = ConnectivityTunnel::fake();
         let owner = EndpointOwner::runtime_target(format!("runner-{name}"));
@@ -12986,7 +12995,7 @@ mod tests {
         let attach = RemoteRunnerAttach::resolve(&tunnel, owner, ChannelKind::Stdio, |channel| {
             // The transport is bound to the channel the TUNNEL opened — identity is
             // the channel handle, never a raw address/credential.
-            let base = FakeRemoteChannel::from_open_channel(channel, workspace.clone(), artifacts);
+            let base = FakeRemoteChannel::from_open_channel(channel, workspace.clone(), artifacts.clone());
             *recorded_boot.borrow_mut() = base.remote_boot_id();
             RemoteChannel::Fake(script(base))
         })
@@ -12997,7 +13006,7 @@ mod tests {
     fn dt3_attach(
         name: &str,
         script: impl FnOnce(FakeRemoteChannel) -> FakeRemoteChannel,
-    ) -> (RemoteRunnerAttach, PathBuf) {
+    ) -> (RemoteRunnerAttach, capo_tmptest::TempRoot) {
         let (attach, workspace, _boot) = dt3_attach_with_boot(name, script);
         (attach, workspace)
     }
@@ -13018,7 +13027,7 @@ mod tests {
         );
         let outcome = attach
             .runner()
-            .start_process(remote_request("dt3-drive", workspace, "printf hello"))
+            .start_process(remote_request("dt3-drive", workspace.to_path_buf(), "printf hello"))
             .expect("remote start over the tunnel-resolved runner");
 
         let kinds: Vec<&str> = outcome.events.iter().map(|e| e.kind.as_str()).collect();
@@ -13059,7 +13068,7 @@ mod tests {
             dt3_attach_with_boot("dt3-orphan", |c| c.recover_alive_unattachable());
         let outcome = attach
             .runner()
-            .start_process(remote_request("dt3-orphan", workspace, "printf ok"))
+            .start_process(remote_request("dt3-orphan", workspace.to_path_buf(), "printf ok"))
             .expect("remote start");
         let running = LocalRuntimeProcessRef {
             status: "running".to_string(),
@@ -13102,7 +13111,7 @@ mod tests {
         });
         let outcome = attach
             .runner()
-            .start_process(remote_request("dt3-redact", workspace, "printf x"))
+            .start_process(remote_request("dt3-redact", workspace.to_path_buf(), "printf x"))
             .expect("remote start");
 
         let stream = attach.runner().stream_output(&outcome.process, 0);
