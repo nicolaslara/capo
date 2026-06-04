@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{fs, path::PathBuf};
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -724,7 +720,7 @@ fn claude_launch_plan_builds_subscription_safe_runtime_request() {
     let artifacts = temp_root("claude-launch-artifacts");
     let plan = ClaudeCodeAdapter::local_launch_plan(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
         "Summarize this project state.",
     );
 
@@ -778,7 +774,8 @@ fn claude_launch_plan_builds_subscription_safe_runtime_request() {
 fn launch_plan_rejects_secret_like_env_or_argv_markers() {
     let workspace = temp_root("unsafe-launch-workspace");
     let artifacts = temp_root("unsafe-launch-artifacts");
-    let mut plan = CodexExecAdapter::local_launch_plan(workspace, artifacts, "hello");
+    let mut plan =
+        CodexExecAdapter::local_launch_plan(workspace.to_path_buf(), artifacts.to_path_buf(), "hello");
     plan.env_allowlist.push("OPENAI_API_KEY".to_string());
     assert!(
         plan.assert_subscription_safe()
@@ -826,7 +823,7 @@ fn codex_local_smoke_plan_uses_restrictive_defaults() {
 fn claude_local_smoke_plan_disables_tools_and_mcp_by_default() {
     let workspace = temp_root("claude-workspace");
     let artifacts = temp_root("claude-artifacts");
-    let plan = ClaudeCodeAdapter::local_smoke_plan(workspace, artifacts);
+    let plan = ClaudeCodeAdapter::local_smoke_plan(workspace.to_path_buf(), artifacts.to_path_buf());
 
     assert_eq!(plan.opt_in_env, "CAPO_RUN_CLAUDE_LOCAL_SMOKE");
     assert_eq!(plan.program, "claude");
@@ -862,13 +859,15 @@ fn claude_local_smoke_plan_disables_tools_and_mcp_by_default() {
 
 #[test]
 fn local_adapter_smoke_runner_skips_without_explicit_opt_in() {
+    let workspace = temp_root("skip-workspace");
+    let artifacts = temp_root("skip-artifacts");
     let plan = LocalAdapterSmokePlan {
         adapter_kind: NormalizedAdapterKind::CodexExec,
         opt_in_env: "CAPO_TEST_UNSET_LOCAL_SMOKE",
         program: "/bin/echo".to_string(),
         argv: vec!["CAPO_CODEX_SMOKE_OK".to_string()],
-        workspace_root: temp_root("skip-workspace"),
-        artifact_root: temp_root("skip-artifacts"),
+        workspace_root: workspace.to_path_buf(),
+        artifact_root: artifacts.to_path_buf(),
         env_allowlist: Vec::new(),
         redaction_rules: Vec::new(),
         output_limit_bytes: 1024,
@@ -889,8 +888,8 @@ fn local_adapter_smoke_runner_executes_through_runtime_boundary() {
         opt_in_env: "CAPO_TEST_UNSET_LOCAL_SMOKE",
         program: "/bin/echo".to_string(),
         argv: vec!["CAPO_CODEX_SMOKE_OK".to_string()],
-        workspace_root: workspace,
-        artifact_root,
+        workspace_root: workspace.to_path_buf(),
+        artifact_root: artifact_root.to_path_buf(),
         env_allowlist: Vec::new(),
         redaction_rules: Vec::new(),
         output_limit_bytes: 1024,
@@ -914,10 +913,9 @@ fn local_adapter_smoke_runner_executes_through_runtime_boundary() {
 #[test]
 #[ignore = "requires CAPO_RUN_CODEX_LOCAL_SMOKE=1 and local Codex login"]
 fn local_codex_adapter_smoke() {
-    let plan = CodexExecAdapter::local_smoke_plan(
-        temp_root("real-codex-workspace"),
-        temp_root("real-codex-artifacts"),
-    );
+    let workspace = temp_root("real-codex-workspace");
+    let artifacts = temp_root("real-codex-artifacts");
+    let plan = CodexExecAdapter::local_smoke_plan(workspace.to_path_buf(), artifacts.to_path_buf());
     let outcome = LocalAdapterSmokeRunner::run_if_opted_in(&plan)
         .expect("codex local smoke should either skip or pass");
 
@@ -930,10 +928,10 @@ fn local_codex_adapter_smoke() {
 #[test]
 #[ignore = "requires CAPO_RUN_CLAUDE_LOCAL_SMOKE=1 and verified restricted Claude Code args"]
 fn local_claude_adapter_smoke() {
-    let plan = ClaudeCodeAdapter::local_smoke_plan(
-        temp_root("real-claude-workspace"),
-        temp_root("real-claude-artifacts"),
-    );
+    let workspace = temp_root("real-claude-workspace");
+    let artifacts = temp_root("real-claude-artifacts");
+    let plan =
+        ClaudeCodeAdapter::local_smoke_plan(workspace.to_path_buf(), artifacts.to_path_buf());
     let outcome = LocalAdapterSmokeRunner::run_if_opted_in(&plan)
         .expect("claude local smoke should either skip or pass");
 
@@ -1244,8 +1242,8 @@ fn claude_workspace_write_plan_assert_subscription_safe_is_load_bearing() {
     let workspace = temp_root("claude-assert-workspace");
     let artifacts = temp_root("claude-assert-artifacts");
     let mut plan = ClaudeCodeAdapter::local_workspace_write_launch_plan(
-        workspace,
-        artifacts,
+        workspace.to_path_buf(),
+        artifacts.to_path_buf(),
         "Apply the requested edit.",
     );
     plan.assert_subscription_safe().unwrap();
@@ -1299,7 +1297,7 @@ fn claude_spawned_stub_does_not_inherit_anthropic_connector_env() {
 
     let plan = ClaudeCodeAdapter::local_workspace_write_launch_plan(
         workspace.clone(),
-        artifacts,
+        artifacts.to_path_buf(),
         "ignored",
     );
     let runner = LocalProcessRunner::new(plan.runtime_config());
@@ -1313,7 +1311,7 @@ fn claude_spawned_stub_does_not_inherit_anthropic_connector_env() {
         turn_id: None,
         program: stub.to_string_lossy().to_string(),
         argv: Vec::new(),
-        cwd: workspace,
+        cwd: workspace.to_path_buf(),
         env: HashMap::new(),
     };
     // The live Claude one-shot path: spawn_process then wait_running_with_timeout.
@@ -1348,8 +1346,8 @@ fn claude_live_one_shot_refuses_tampered_secret_arg_before_spawn() {
     let workspace = temp_root("claude-tamper-workspace");
     let artifacts = temp_root("claude-tamper-artifacts");
     let mut plan = ClaudeCodeAdapter::local_workspace_write_launch_plan(
-        workspace,
-        artifacts,
+        workspace.to_path_buf(),
+        artifacts.to_path_buf(),
         "Apply the requested edit.",
     );
     plan.assert_subscription_safe().unwrap();
@@ -1390,12 +1388,8 @@ fn sensitive_marker_scan_flags_auth_token_values() {
     ));
 }
 
-fn temp_root(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    std::env::temp_dir().join(format!("capo-adapter-{name}-{nanos}"))
+fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+    capo_tmptest::TempRoot::new(&format!("capo-adapter-{name}"))
 }
 
 fn acp_client_call(method: &str, params: Value) -> AcpClientCall {

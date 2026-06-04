@@ -107,6 +107,7 @@ version = "0.1.0"
 dependencies = [
  "capo-core",
  "capo-runtime",
+ "capo-tmptest",
  "capo-tools",
  "serde",
  "serde_json",
@@ -125,6 +126,7 @@ dependencies = [
  "capo-runtime",
  "capo-server",
  "capo-state",
+ "capo-tmptest",
  "capo-tools",
  "capo-voice",
  "capo-workpads",
@@ -142,6 +144,7 @@ dependencies = [
  "capo-memory",
  "capo-runtime",
  "capo-state",
+ "capo-tmptest",
  "capo-tools",
  "rusqlite",
  "serde_json",
@@ -173,6 +176,7 @@ version = "0.1.0"
 dependencies = [
  "capo-core",
  "capo-state",
+ "capo-tmptest",
 ]
 
 [[package]]
@@ -181,6 +185,7 @@ version = "0.1.0"
 dependencies = [
  "capo-core",
  "capo-state",
+ "capo-tmptest",
  "serde_json",
  "sha2",
  "tokio",
@@ -196,6 +201,7 @@ dependencies = [
  "capo-query",
  "capo-runtime",
  "capo-state",
+ "capo-tmptest",
  "capo-tools",
  "serde_json",
 ]
@@ -210,11 +216,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "capo-tmptest"
+version = "0.1.0"
+
+[[package]]
 name = "capo-tools"
 version = "0.1.0"
 dependencies = [
  "capo-core",
  "capo-runtime",
+ "capo-tmptest",
  "serde_json",
  "similar",
 ]
@@ -235,6 +246,7 @@ dependencies = [
  "capo-query",
  "capo-server",
  "capo-state",
+ "capo-tmptest",
  "futures",
  "http-body-util",
  "serde",

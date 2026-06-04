@@ -618,13 +618,8 @@ mod tests {
         assert!(!plan.argv.iter().any(|a| a == "--add-dir"));
     }
 
-    fn temp_root(name: &str) -> PathBuf {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        std::env::temp_dir().join(format!("capo-adapter-{name}-{nanos}"))
+    fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+        capo_tmptest::TempRoot::new(&format!("capo-adapter-{name}"))
     }
 
     /// A Drop guard that opens BOTH chat gates for the duration of a test and

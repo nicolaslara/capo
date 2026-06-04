@@ -21,6 +21,7 @@ serde_json = "1.0.150"
 # synchronous method, so it needs no direct tokio dependency of its own.
 
 [dev-dependencies]
+capo-tmptest.workspace = true
 serde_json = "1.0.150"
 # GA9 restart/replay test only: open the on-disk store directly to CLEAR the
 # read-model (projection) tables before a reopen, so the post-restart assertions

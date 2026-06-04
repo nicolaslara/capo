@@ -24,6 +24,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.150"
 
 [dev-dependencies]
+capo-tmptest.workspace = true
 # End-to-end HTTP/SSE test: drive the real axum router through its full
 # request/response stack (tower::ServiceExt::oneshot) without a network socket.
 tower = { version = "0.5", features = ["util"] }

@@ -1,0 +1,9 @@
+[package]
+name = "capo-tmptest"
+description = "Test-only self-cleaning temp directories for Capo's test suites."
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
