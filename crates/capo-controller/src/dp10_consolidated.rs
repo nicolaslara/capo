@@ -60,23 +60,15 @@ mod tests {
     use crate::{FakeBoundaryController, FakeRunRefs};
     use capo_tools::PermissionPolicy;
 
-    fn temp_root() -> std::path::PathBuf {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "capo-dp10-{nanos}-{:?}",
-            std::thread::current().id()
-        ))
+    fn temp_root() -> capo_tmptest::TempRoot {
+        capo_tmptest::TempRoot::new("capo-dp10")
     }
 
     // ------------------------------------------------------------------
     // Shared fixtures.
     // ------------------------------------------------------------------
 
-    fn controller_with_session(label: &str) -> (FakeBoundaryController, FakeRunRefs) {
+    fn controller_with_session(label: &str) -> (FakeBoundaryController, FakeRunRefs, capo_tmptest::TempRoot) {
         let root = temp_root();
         let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), &root)
             .expect("controller");
@@ -86,7 +78,7 @@ mod tests {
         let refs = controller
             .send_task(&registration, "Drive a consolidated DP10 ACP path")
             .expect("send task");
-        (controller, refs)
+        (controller, refs, root)
     }
 
     fn acp_update(session: &str, body: serde_json::Value) -> serde_json::Value {
@@ -105,7 +97,7 @@ mod tests {
     /// batch (not a replay batch), and the read model rebuilds identically.
     #[test]
     fn dp10_acp_resume_adds_no_items_and_rebuilds_identically() {
-        let (controller, refs) = controller_with_session("resume");
+        let (controller, refs, _state) = controller_with_session("resume");
 
         let plan = AcpReplayEngine::plan_resume_attach(
             "acp-ext-dp10-resume",
@@ -142,7 +134,7 @@ mod tests {
     /// every ACP read model rebuilds identically after a clear-and-replay.
     #[test]
     fn dp10_acp_foreign_load_imports_once_and_rebuilds_identically() {
-        let (controller, refs) = controller_with_session("foreign-load");
+        let (controller, refs, _state) = controller_with_session("foreign-load");
 
         let frames = vec![
             acp_update(
@@ -247,7 +239,7 @@ mod tests {
     /// and the reduction is replay-stable.
     #[test]
     fn dp10_acp_repeated_tool_updates_yield_one_read_model() {
-        let (controller, refs) = controller_with_session("repeat");
+        let (controller, refs, _state) = controller_with_session("repeat");
 
         let frames = vec![
             acp_update(
@@ -338,7 +330,7 @@ mod tests {
     /// ambiguous, auditable reconciliation -- never silently as stable.
     #[test]
     fn dp10_acp_idless_chunks_record_low_boundary_confidence() {
-        let (controller, refs) = controller_with_session("idless");
+        let (controller, refs, _state) = controller_with_session("idless");
 
         // Two consecutive same-type chunks (same role + content hash) collapse into
         // one message group; because more than one chunk collapses, the boundary is
@@ -763,10 +755,10 @@ mod tests {
         )
     }
 
-    fn sandbox_tmp(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("capo-dp10-sb-{name}-{}", std::process::id()));
+    fn sandbox_tmp(name: &str) -> capo_tmptest::TempRoot {
+        let dir = capo_tmptest::TempRoot::new(&format!("capo-dp10-sb-{name}")).keep();
         std::fs::create_dir_all(&dir).expect("sandbox tmp");
-        dir.canonicalize().expect("canonicalize")
+        capo_tmptest::TempRoot::at(dir.canonicalize().expect("canonicalize"))
     }
 
     /// DP10 / DP7: a forbidden network egress is REFUSED before launch (an event,
@@ -808,7 +800,7 @@ mod tests {
         let sandbox = OsSandbox::new(
             SandboxTier::host_default(),
             // Confine writes to `other`, but run with cwd `root` -> out of scope.
-            SandboxProfile::workspace_confined([other]),
+            SandboxProfile::workspace_confined([other.to_path_buf()]),
         );
         let plan = sandbox
             .plan(sandbox_request(&root, "run-dp10-write"), false)

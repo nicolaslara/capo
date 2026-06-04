@@ -741,8 +741,6 @@ fn packet_content_hash(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use capo_core::RequirementId;
     use capo_state::{
@@ -753,22 +751,16 @@ mod tests {
 
     use super::*;
 
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn temp_root(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("capo-ga3-{name}-{nanos}-{n}"))
+    fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+        capo_tmptest::TempRoot::new(&format!("capo-ga3-{name}"))
     }
 
     const PROJECT: &str = "project-capo";
     const GOAL: &str = "goal-ga3";
     const SESSION: &str = "session-ga3";
 
-    fn open() -> (FakeBoundaryController, PathBuf) {
+    fn open() -> (FakeBoundaryController, capo_tmptest::TempRoot) {
         let state_root = temp_root("state");
         let controller =
             FakeBoundaryController::open(ProjectId::new(PROJECT), &state_root).expect("controller");

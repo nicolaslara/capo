@@ -351,27 +351,19 @@ fn stable_worktree_hash(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use capo_state::SqliteStateStore;
 
     use super::*;
     use crate::CheckpointScope;
 
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn temp_root(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("capo-dp8c-{name}-{nanos}-{n}"));
+    fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+        let dir = capo_tmptest::TempRoot::new(&format!("capo-dp8c-{name}")).keep();
         std::fs::create_dir_all(&dir).expect("temp dir");
-        dir.canonicalize().expect("canonicalize")
+        capo_tmptest::TempRoot::at(dir.canonicalize().expect("canonicalize"))
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
@@ -390,7 +382,7 @@ mod tests {
     }
 
     /// A git repo with one seed commit so `git worktree add` has a base.
-    fn init_repo(name: &str) -> PathBuf {
+    fn init_repo(name: &str) -> capo_tmptest::TempRoot {
         let repo = temp_root(name);
         run_git(&repo, &["init", "--quiet"]);
         run_git(&repo, &["config", "user.name", "test"]);

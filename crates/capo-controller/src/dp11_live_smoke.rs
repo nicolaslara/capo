@@ -65,23 +65,15 @@ mod tests {
     // Shared fixtures.
     // ------------------------------------------------------------------
 
-    fn temp_root() -> std::path::PathBuf {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "capo-dp11-{nanos}-{:?}",
-            std::thread::current().id()
-        ))
+    fn temp_root() -> capo_tmptest::TempRoot {
+        capo_tmptest::TempRoot::new("capo-dp11")
     }
 
     /// A read-only static policy controller + one open session. The read-only
     /// policy DENIES the write scope, so when the agent offers ONLY an allow
     /// option for an edit, the controller's authority over-rules it and answers
     /// the pending permission `cancelled` -- the safety floor on the wire.
-    fn controller_with_session(label: &str) -> (FakeBoundaryController, FakeRunRefs) {
+    fn controller_with_session(label: &str) -> (FakeBoundaryController, FakeRunRefs, capo_tmptest::TempRoot) {
         let root = temp_root();
         let controller = FakeBoundaryController::open_with_permission_policy(
             ProjectId::new("project-capo"),
@@ -95,7 +87,7 @@ mod tests {
         let refs = controller
             .send_task(&registration, "Drive a DP11 live-paired ACP turn")
             .expect("send task");
-        (controller, refs)
+        (controller, refs, root)
     }
 
     /// The ACP live adapter under test, confined to a per-label workspace/artifact
@@ -309,7 +301,7 @@ mod tests {
     /// pairing the live smoke reproduces.
     #[test]
     fn depth_e2e_gate_acp_turn_matches_paired_shape() {
-        let (controller, refs) = controller_with_session("gate");
+        let (controller, refs, _state) = controller_with_session("gate");
         let adapter = acp_live_adapter("gate", "acp-agent", vec!["--stdio".to_string()]);
         let transport = cancel_pending_permission_frames("acp-dp11-gate-session");
 
@@ -421,10 +413,10 @@ mod tests {
     // Sandbox refusal shape (DP7) -- platform-independent depth-gate anchor.
     // ==================================================================
 
-    fn sandbox_tmp(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("capo-dp11-sb-{name}-{}", std::process::id()));
+    fn sandbox_tmp(name: &str) -> capo_tmptest::TempRoot {
+        let dir = capo_tmptest::TempRoot::new(&format!("capo-dp11-sb-{name}")).keep();
         std::fs::create_dir_all(&dir).expect("sandbox tmp");
-        dir.canonicalize().expect("canonicalize")
+        capo_tmptest::TempRoot::at(dir.canonicalize().expect("canonicalize"))
     }
 
     fn sandbox_request(root: &std::path::Path, run: &str) -> LocalProcessRequest {
@@ -486,7 +478,7 @@ mod tests {
         let other_root = sandbox_tmp("write-other");
         let write_sandbox = OsSandbox::new(
             SandboxTier::host_default(),
-            SandboxProfile::workspace_confined([other_root]),
+            SandboxProfile::workspace_confined([other_root.to_path_buf()]),
         );
         let write_plan = write_sandbox
             .plan(sandbox_request(&write_root, "run-dp11-write"), false)
@@ -549,10 +541,13 @@ mod tests {
         }
 
         let root = sandbox_tmp("live");
-        let outside = std::env::temp_dir()
-            .canonicalize()
-            .expect("tmp")
-            .join(format!("capo-dp11-escape-{}.txt", std::process::id()));
+        let outside_guard = capo_tmptest::TempRoot::at(
+            std::env::temp_dir()
+                .canonicalize()
+                .expect("tmp")
+                .join(format!("capo-dp11-escape-{}.txt", std::process::id())),
+        );
+        let outside = outside_guard.to_path_buf();
         let _ = std::fs::remove_file(&outside);
 
         let sandbox = OsSandbox::new(tier, SandboxProfile::workspace_confined([root.clone()]));
@@ -697,7 +692,7 @@ done
             return;
         }
 
-        let (controller, refs) = controller_with_session("live");
+        let (controller, refs, _state) = controller_with_session("live");
         let stub_dir = temp_root().join("acp-stub");
         let program = write_acp_agent_stub(&stub_dir);
         let adapter = acp_live_adapter("live", &program, Vec::new());

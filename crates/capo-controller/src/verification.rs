@@ -374,27 +374,21 @@ fn stable_verification_hash(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use capo_state::SqliteStateStore;
 
     use super::*;
 
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn temp_root(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("capo-sg6-{name}-{nanos}-{n}"))
+    fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+        capo_tmptest::TempRoot::new(&format!("capo-sg6-{name}"))
     }
 
-    fn controller() -> (FakeBoundaryController, PathBuf, PathBuf) {
-        let state_root = temp_root("state");
+    fn controller() -> (FakeBoundaryController, capo_tmptest::TempRoot, capo_tmptest::TempRoot) {
         let workspace = temp_root("workspace");
+        // state lives UNDER the returned workspace guard so the controller's DB
+        // survives for the whole test and is cleaned up with the workspace.
+        let state_root = workspace.join("state");
         std::fs::create_dir_all(&workspace).expect("workspace");
         let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), &state_root)
             .expect("controller");
@@ -483,7 +477,7 @@ mod tests {
     fn over_cap_successful_run_is_passed_and_truncated_not_failed() {
         let (controller, workspace, artifacts) = controller();
         let scope = scope();
-        let mut config = config(&workspace, artifacts);
+        let mut config = config(&workspace, artifacts.to_path_buf());
         config.output_limit_bytes = 16;
 
         let outcome = controller
@@ -565,7 +559,7 @@ mod tests {
         let outcome = controller
             .run_verification(
                 &scope,
-                config(&workspace, artifacts),
+                config(&workspace, artifacts.to_path_buf()),
                 &VerificationCommand::new(
                     VerificationKind::Smoke,
                     "/bin/sh",

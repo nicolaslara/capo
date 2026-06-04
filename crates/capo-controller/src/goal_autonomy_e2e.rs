@@ -44,9 +44,8 @@
 
 #![cfg(test)]
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::path::Path;
+use std::time::Duration;
 
 use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
 use capo_core::{
@@ -65,15 +64,9 @@ use crate::{
     WorkspaceWriteLeaseOutcome,
 };
 
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn temp_root(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("capo-ga8-{name}-{nanos}-{n}"))
+fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+    capo_tmptest::TempRoot::new(&format!("capo-ga8-{name}"))
 }
 
 const PROJECT: &str = "project-capo";
@@ -86,7 +79,7 @@ const RUN: &str = "run-ga8";
 /// A controller backed by a scripted-mock adapter so the continue path can drive a
 /// REAL turn through the loop (`run_turn`) with a deterministic batch -- never a
 /// live provider.
-fn open() -> (FakeBoundaryController, PathBuf) {
+fn open() -> (FakeBoundaryController, capo_tmptest::TempRoot) {
     let state_root = temp_root("state");
     let controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new(PROJECT),

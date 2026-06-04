@@ -389,28 +389,22 @@ fn stable_score_hash(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use capo_runtime::LocalProcessConfig;
     use capo_state::SqliteStateStore;
 
     use super::*;
 
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn temp_root(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("capo-sg7-{name}-{nanos}-{n}"))
+    fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+        capo_tmptest::TempRoot::new(&format!("capo-sg7-{name}"))
     }
 
-    fn controller() -> (FakeBoundaryController, PathBuf, PathBuf) {
-        let state_root = temp_root("state");
+    fn controller() -> (FakeBoundaryController, capo_tmptest::TempRoot, capo_tmptest::TempRoot) {
         let workspace = temp_root("workspace");
+        // state lives UNDER the returned workspace guard so the controller's DB
+        // survives for the whole test and is cleaned up with the workspace.
+        let state_root = workspace.join("state");
         std::fs::create_dir_all(&workspace).expect("workspace");
         let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), &state_root)
             .expect("controller");
@@ -474,7 +468,7 @@ mod tests {
         observe(
             &controller,
             &workspace,
-            artifacts,
+            artifacts.to_path_buf(),
             VerificationKind::Test,
             0,
         );
@@ -510,7 +504,7 @@ mod tests {
         observe(
             &controller,
             &workspace,
-            artifacts,
+            artifacts.to_path_buf(),
             VerificationKind::Test,
             5,
         );
@@ -604,7 +598,7 @@ mod tests {
         observe(
             &controller2,
             &workspace2,
-            artifacts2,
+            artifacts2.to_path_buf(),
             VerificationKind::Test,
             0,
         );
@@ -744,7 +738,7 @@ mod tests {
         observe(
             &controller,
             &workspace,
-            artifacts,
+            artifacts.to_path_buf(),
             VerificationKind::Check,
             0,
         );
@@ -791,7 +785,7 @@ mod tests {
         observe(
             &controller,
             &workspace,
-            artifacts,
+            artifacts.to_path_buf(),
             VerificationKind::Smoke,
             0,
         );
@@ -826,7 +820,7 @@ mod tests {
     /// against the same log the agent claim lives in.
     fn controller_reusing(
         base: &FakeBoundaryController,
-    ) -> (FakeBoundaryController, PathBuf, PathBuf) {
+    ) -> (FakeBoundaryController, capo_tmptest::TempRoot, capo_tmptest::TempRoot) {
         let state_dir = base
             .state()
             .db_path()
@@ -847,7 +841,7 @@ mod tests {
         observe(
             &controller,
             &workspace,
-            artifacts,
+            artifacts.to_path_buf(),
             VerificationKind::Test,
             0,
         );
@@ -881,7 +875,7 @@ mod tests {
         observe(
             &controller,
             &workspace,
-            artifacts,
+            artifacts.to_path_buf(),
             VerificationKind::Test,
             0,
         );

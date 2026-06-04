@@ -529,25 +529,18 @@ fn stable_checkpoint_hash(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     use capo_state::SqliteStateStore;
 
     use super::*;
 
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn temp_root(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("capo-sg8-{name}-{nanos}-{n}"))
+    fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+        capo_tmptest::TempRoot::new(&format!("capo-sg8-{name}"))
     }
 
     /// A controller plus a fresh workspace dir and a shadow-git root dir.
-    fn fixture() -> (FakeBoundaryController, PathBuf, PathBuf, PathBuf) {
+    fn fixture() -> (FakeBoundaryController, capo_tmptest::TempRoot, capo_tmptest::TempRoot, capo_tmptest::TempRoot) {
         let state_root = temp_root("state");
         let workspace = temp_root("workspace");
         let shadow_git_root = temp_root("shadow");

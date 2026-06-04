@@ -28,8 +28,6 @@
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
     use capo_core::{
@@ -42,15 +40,9 @@ mod tests {
 
     use crate::{ContinuationConditions, ContinuationDecision, FakeBoundaryController, GoalBudget};
 
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn temp_root(name: &str) -> std::path::PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("capo-ga6-{name}-{nanos}-{n}"))
+    fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+        capo_tmptest::TempRoot::new(&format!("capo-ga6-{name}"))
     }
 
     const PROJECT: &str = "project-capo";

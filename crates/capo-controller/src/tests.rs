@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use capo_adapters::{
@@ -7,7 +6,6 @@ use capo_adapters::{
 
 use super::*;
 
-static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn controller_plans_local_adapter_dispatch_without_runtime_execution() {
@@ -49,12 +47,19 @@ fn controller_plans_local_adapter_dispatch_without_runtime_execution() {
 
 #[test]
 fn controller_rejects_unknown_local_adapter_dispatch_plan() {
-    let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), temp_root())
+    let root = temp_root();
+    let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), &root)
         .expect("open controller");
     controller.register_agent("worker").expect("register agent");
 
     let error = controller
-        .plan_local_adapter_dispatch("unknown", "worker", "Do work.", temp_root(), temp_root())
+        .plan_local_adapter_dispatch(
+            "unknown",
+            "worker",
+            "Do work.",
+            temp_root().to_path_buf(),
+            temp_root().to_path_buf(),
+        )
         .unwrap_err();
 
     assert!(error.contains("unsupported local adapter dispatch plan"));
@@ -62,7 +67,8 @@ fn controller_rejects_unknown_local_adapter_dispatch_plan() {
 
 #[test]
 fn fake_boundaries_drive_controller_state_and_interrupt_from_read_models() {
-    let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), temp_root())
+    let tmp_state_root = temp_root();
+    let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), &tmp_state_root)
         .expect("open controller");
     let registration = controller.register_agent("fake-codex").expect("agent");
     let refs = controller
@@ -163,9 +169,10 @@ fn fake_boundaries_drive_controller_state_and_interrupt_from_read_models() {
 
 #[test]
 fn denied_static_permission_stops_tool_invocation_in_controller_path() {
+    let tmp_state_root = temp_root();
     let controller = FakeBoundaryController::open_with_permission_policy(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         PermissionPolicy::static_read_only_local(),
     )
     .expect("open controller");
@@ -241,7 +248,8 @@ fn denied_static_permission_stops_tool_invocation_in_controller_path() {
 
 #[test]
 fn scripted_mock_agent_drives_multi_turn_controller_state() {
-    let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), temp_root())
+    let tmp_state_root = temp_root();
+    let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), &tmp_state_root)
         .expect("open controller");
     let registration = controller.register_agent("mock-worker").expect("agent");
     let refs = controller
@@ -374,7 +382,8 @@ fn scripted_mock_agent_drives_multi_turn_controller_state() {
 
 #[test]
 fn acp_fixture_replay_dedupes_stable_tool_updates_in_state() {
-    let store = SqliteStateStore::open(temp_root()).expect("open state");
+    let tmp_state_root = temp_root();
+    let store = SqliteStateStore::open(&tmp_state_root).expect("open state");
     let project_id = ProjectId::new("project-capo");
     let session_id = SessionId::new("session-acp");
     let fixture = std::fs::read_to_string(concat!(
@@ -952,9 +961,10 @@ fn controller_drives_injected_scripted_mock_adapter_behind_the_trait() {
                 .message_completed("msg-1", "scripted injected summary"),
         ),
     );
+    let tmp_state_root = temp_root();
     let controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open controller with injected adapter");
@@ -1016,9 +1026,10 @@ fn command_path_re_derives_injected_adapter_external_session_ref() {
                 .message_completed("msg-1", "scripted injected summary"),
         ),
     );
+    let tmp_state_root = temp_root();
     let controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open controller with injected adapter");
@@ -1077,9 +1088,10 @@ fn command_path_stop_re_derives_injected_adapter_external_session_ref() {
                 .message_completed("msg-1", "scripted injected summary"),
         ),
     );
+    let tmp_state_root = temp_root();
     let controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open controller with injected adapter");
@@ -1116,7 +1128,8 @@ fn controller_default_open_keeps_fake_adapter_output_byte_for_byte() {
     // The default `open` constructor still injects the fake adapter, so its
     // deterministic summary/confidence/status are unchanged after the RTL2
     // injection refactor.
-    let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), temp_root())
+    let tmp_state_root = temp_root();
+    let controller = FakeBoundaryController::open(ProjectId::new("project-capo"), &tmp_state_root)
         .expect("open controller");
     let registration = controller.register_agent("fake-codex").expect("agent");
     let refs = controller
@@ -1146,9 +1159,10 @@ fn turn_loop_runs_a_scripted_single_turn_observe_project_emit_cycle() {
     // projects them, and the loop emits a TurnFinished carrying the stop reason,
     // summary refs, and observed tool refs.
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("loop-session"));
+    let tmp_state_root = temp_root();
     let controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open controller");
@@ -1212,9 +1226,10 @@ fn turn_loop_interrupt_and_stop_commands_map_onto_finished_outcomes() {
     use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
 
     // Interrupt: drive a turn to a Finished/Interrupted outcome.
+    let tmp_state_root = temp_root();
     let controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("loop-session-int")),
     )
     .expect("open controller");
@@ -1250,9 +1265,10 @@ fn turn_loop_interrupt_and_stop_commands_map_onto_finished_outcomes() {
     }));
 
     // Stop: drive a turn to a Finished/Stopped outcome.
+    let tmp_state_root = temp_root();
     let stop_controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("loop-session-stop")),
     )
     .expect("open controller");
@@ -1310,9 +1326,10 @@ fn turn_loop_interrupt_and_stop_commands_map_onto_finished_outcomes() {
 fn two_interrupts_on_same_session_distinct_turns_persist_and_reconstruct() {
     use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
 
+    let tmp_state_root = temp_root();
     let controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("two-interrupt-session")),
     )
     .expect("open controller");
@@ -1403,9 +1420,10 @@ fn command_path_interrupt_and_stop_persist_non_null_turn_id() {
     use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
 
     // Interrupt via the command entry point.
+    let tmp_state_root = temp_root();
     let interrupt_controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("cmd-interrupt-session")),
     )
     .expect("open controller");
@@ -1440,9 +1458,10 @@ fn command_path_interrupt_and_stop_persist_non_null_turn_id() {
     assert!(reconstructed.observed_terminal_event());
 
     // Stop via the command entry point.
+    let tmp_state_root = temp_root();
     let stop_controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("cmd-stop-session")),
     )
     .expect("open controller");
@@ -1479,9 +1498,10 @@ fn turn_loop_run_turn_maps_terminal_adapter_events_onto_stop_reasons() {
     // session.interrupted). These terminal arms of finish_turn are otherwise only
     // reachable through the command path.
     // Failed branch.
+    let tmp_state_root = temp_root();
     let fail_controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("loop-session-fail")),
     )
     .expect("open controller");
@@ -1510,9 +1530,10 @@ fn turn_loop_run_turn_maps_terminal_adapter_events_onto_stop_reasons() {
     }));
 
     // Interrupted branch via a scripted terminal event (not the command path).
+    let tmp_state_root = temp_root();
     let int_controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("loop-session-aint")),
     )
     .expect("open controller");
@@ -1690,9 +1711,10 @@ fn turn_loop_projected_turn_rebuilds_identically_after_restart_replay() {
 fn session_thread_item_text_matches_real_controller_append_payloads() {
     use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent, ScriptedMockTurn};
 
+    let tmp_state_root = temp_root();
     let controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("thread-real-session")),
     )
     .expect("open controller");
@@ -1958,9 +1980,10 @@ fn turn_loop_dispatch_derivation_matches_run_turn_for_the_same_batch() {
     // annotation cannot drift from the in-loop `run_turn` outcome: both call the
     // one pure derivation, so there is a single completion model.
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("loop-session"));
+    let tmp_state_root = temp_root();
     let controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open controller");
@@ -2676,9 +2699,10 @@ fn run_that_exceeds_max_turns_aborts_with_run_aborted_event_and_projects_no_furt
 
     // RTL7 acceptance: a scripted run that exceeds max-turns aborts with a
     // `run.aborted` event and no further turns are projected.
+    let tmp_state_root = temp_root();
     let controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("ceiling-session")),
     )
     .expect("open controller");
@@ -2903,9 +2927,10 @@ fn wall_clock_and_token_cost_breaches_abort_with_their_reason_code_and_terminal_
     // RTL7: every ceiling dimension -- not just max_turns -- aborts with the
     // right reason code AND the coordinated terminal projection set (run/session
     // aborted, agent freed). Drives the two dimensions max_turns does not cover.
+    let tmp_state_root = temp_root();
     let controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("ceiling-dims-session")),
     )
     .expect("open controller");
@@ -2996,15 +3021,19 @@ fn wall_clock_and_token_cost_breaches_abort_with_their_reason_code_and_terminal_
 fn real_controller_tool_exposures_are_real_not_the_fake_default() {
     use capo_tools::RuntimeToolConfig;
 
+    let tmp_state_root = temp_root();
     let controller =
-        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+        RealBoundaryController::open(ProjectId::new("project-capo"), &tmp_state_root).expect("open");
     // The Capo registry is live by construction.
     assert!(controller.capo_tools_are_real());
     assert!(controller.capo_registry().is_some());
     // Runtime wrappers are not the fake either, once wired with a workspace.
     assert!(!controller.runtime_tools_are_real());
     let controller =
-        controller.with_runtime_tools(RuntimeToolConfig::local_workspace(temp_root(), temp_root()));
+        controller.with_runtime_tools(RuntimeToolConfig::local_workspace(
+            temp_root().to_path_buf(),
+            temp_root().to_path_buf(),
+        ));
     assert!(controller.runtime_tools_are_real());
 }
 
@@ -3026,8 +3055,9 @@ fn production_send_task_command_dispatches_summary_tool_through_authorize_and_in
 
     let project_id = ProjectId::new("project-capo");
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("ai3-prod-session"));
+    let tmp_state_root = temp_root();
     let controller =
-        RealBoundaryController::open_with_adapter(project_id.clone(), temp_root(), scripted)
+        RealBoundaryController::open_with_adapter(project_id.clone(), tmp_state_root.to_path_buf(), scripted)
             .expect("open real controller");
     let registration = controller.register_agent("ai3-prod-worker").expect("agent");
 
@@ -3139,9 +3169,10 @@ fn real_controller_turn_invokes_a_capo_tool_through_authorize_and_invoke() {
     use capo_tools::{CapoToolContext, CapoToolRequest, ToolExposureRequest, ToolExposureResult};
 
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci1-capo-session"));
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open real controller");
@@ -3267,9 +3298,10 @@ fn real_controller_dispatch_persists_provenance_and_timing_that_replays_identica
     use capo_tools::{CapoToolContext, CapoToolRequest, ToolExposureRequest};
 
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci7-prov-session"));
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open real controller");
@@ -3364,9 +3396,10 @@ fn real_controller_dispatches_an_agent_report_persisted_as_agent_reported() {
     use capo_tools::{AgentReportRequest, ToolExposureRequest, ToolExposureResult};
 
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci8-report-session"));
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open real controller");
@@ -3472,9 +3505,10 @@ fn real_controller_dispatch_persists_observed_and_reported_distinctly_and_replay
     use capo_tools::{AgentReportRequest, CapoToolContext, CapoToolRequest, ToolExposureRequest};
 
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci9-mixed-session"));
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open real controller");
@@ -3601,13 +3635,14 @@ fn real_controller_turn_invokes_a_runtime_wrapper_through_authorize_and_invoke()
 
     let scripted =
         AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci1-runtime-session"));
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open real controller")
-    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace, artifacts));
+    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace.to_path_buf(), artifacts.to_path_buf()));
     let registration = controller
         .register_agent("aci1-runtime-worker")
         .expect("agent");
@@ -3697,7 +3732,7 @@ fn real_controller_dispatch_never_leaks_a_secret_into_event_payloads() {
     // (the OUTPUT artifact) that echoes the new secret-bearing content.
     std::fs::write(workspace.join("config.env"), "name=ok\n").expect("seed file");
 
-    let mut config = RuntimeToolConfig::local_workspace(workspace, artifacts);
+    let mut config = RuntimeToolConfig::local_workspace(workspace.to_path_buf(), artifacts.to_path_buf());
     config.redaction_rules.push(RedactionRule {
         pattern: named_secret.to_string(),
         replacement: "[REDACTED]".to_string(),
@@ -3705,9 +3740,10 @@ fn real_controller_dispatch_never_leaks_a_secret_into_event_payloads() {
 
     let scripted =
         AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci7-leak-scan-session"));
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open real controller")
@@ -3851,9 +3887,10 @@ fn real_controller_denied_capo_dispatch_persists_denied_projection() {
     };
 
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci1-deny-session"));
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         PermissionPolicy::static_read_only_local(),
         scripted,
     )
@@ -3941,13 +3978,14 @@ fn real_controller_failed_runtime_dispatch_persists_failed_projection() {
     std::fs::create_dir_all(&workspace).expect("workspace");
 
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci1-fail-session"));
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open real controller")
-    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace, artifacts));
+    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace.to_path_buf(), artifacts.to_path_buf()));
     let registration = controller
         .register_agent("aci1-fail-worker")
         .expect("agent");
@@ -4029,13 +4067,14 @@ fn real_controller_apply_patch_no_match_folds_onto_shared_failed_status() {
 
     let scripted =
         AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci4-no-match-session"));
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open real controller")
-    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace, artifacts));
+    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace.to_path_buf(), artifacts.to_path_buf()));
     let registration = controller
         .register_agent("aci4-no-match-worker")
         .expect("agent");
@@ -4123,13 +4162,14 @@ fn real_controller_passing_test_run_persists_completed_projection() {
     std::fs::create_dir_all(&workspace).expect("workspace");
 
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("fp1-pass-session"));
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open real controller")
-    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace, artifacts));
+    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace.to_path_buf(), artifacts.to_path_buf()));
     let registration = controller.register_agent("fp1-pass-worker").expect("agent");
     let refs = controller
         .send_task(&registration, "Run a passing test command")
@@ -4223,13 +4263,14 @@ fn real_controller_failing_shell_run_persists_failed_projection() {
     std::fs::create_dir_all(&workspace).expect("workspace");
 
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("fp1-fail-session"));
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open real controller")
-    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace, artifacts));
+    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace.to_path_buf(), artifacts.to_path_buf()));
     let registration = controller.register_agent("fp1-fail-worker").expect("agent");
     let refs = controller
         .send_task(&registration, "Run a failing shell command")
@@ -4311,9 +4352,10 @@ fn real_controller_dispatched_tool_call_reconstructs_as_single_observed_ref() {
     use capo_tools::{CapoToolContext, CapoToolRequest, ToolExposureRequest};
 
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("aci1-replay-session"));
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         scripted,
     )
     .expect("open real controller");
@@ -4841,7 +4883,7 @@ fn live_shell_run_smoke_is_paired_with_a_deterministic_assertion() {
         scripted,
     )
     .expect("open real controller")
-    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace, artifacts));
+    .with_runtime_tools(RuntimeToolConfig::local_workspace(workspace.to_path_buf(), artifacts.to_path_buf()));
     let registration = controller
         .register_agent("aci11-live-worker")
         .expect("agent");
@@ -4976,13 +5018,8 @@ impl SqliteStateStoreBundle {
     }
 }
 
-fn temp_root() -> std::path::PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let counter = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("capo-controller-{nanos}-{counter}"))
+fn temp_root() -> capo_tmptest::TempRoot {
+    capo_tmptest::TempRoot::new("capo-controller")
 }
 
 // --- AI2: real-Codex chat backend, binding-respecting + fail-closed-fast ----
@@ -5060,9 +5097,10 @@ fn codex_bound_chat_drives_the_real_adapter_through_a_codex_stub_with_gate_open(
         std::env::set_var("CAPO_SERVER_RUN_CODEX_LIVE", "1");
     }
 
+    let tmp_state_root = temp_root();
     let controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         codex_handle,
     )
     .expect("open controller with codex handle");
@@ -5124,13 +5162,14 @@ fn codex_bound_chat_fails_closed_fast_when_gate_is_off() {
     // A real Codex handle pointed at a NON-EXISTENT absolute program: the
     // fail-closed-fast path must never spawn it, so the bogus path is never run.
     let codex_handle = AgentAdapterHandle::codex(
-        CodexLiveAdapter::new(temp_root(), temp_root())
+        CodexLiveAdapter::new(temp_root().to_path_buf(), temp_root().to_path_buf())
             .with_codex_program_override("/nonexistent/codex-should-never-spawn".to_string())
             .with_timeout_seconds(1),
     );
+    let tmp_state_root = temp_root();
     let controller = FakeBoundaryController::open_with_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         codex_handle,
     )
     .expect("open controller with codex handle");
@@ -5184,9 +5223,10 @@ fn sg1_allowed_request_emits_requested_decided_grant_created_sequence() {
     use capo_tools::{CapoToolContext, CapoToolRequest, ToolExposureRequest};
 
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("sg1-allow-session"));
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         // The TrustedLocal policy remains the real controller default; it is
         // reachable through the real loop (not the fake test-only policy).
         PermissionPolicy::allow_trusted_local(),
@@ -5334,9 +5374,10 @@ fn sg1_denied_request_blocks_invocation_with_structured_refusal() {
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("sg1-deny-session"));
     // The Static read-only policy is reachable through the real loop and denies a
     // write/mutating tool.
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         PermissionPolicy::static_read_only_local(),
         scripted,
     )
@@ -5513,9 +5554,10 @@ fn sg1_real_loop_send_task_surfaces_typed_refusal_when_dispatch_denies() {
     // upfront-decide gate this change removed would NOT have blocked it. The only
     // authority that can deny is the dispatch's single canonical decide via the SG3
     // standing-deny read-back seeded below.
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         PermissionPolicy::allow_trusted_local(),
         scripted,
     )
@@ -5656,6 +5698,7 @@ fn sg2_round_trip_setup(
     RealRunRefs,
     crate::PermissionRoundTripScope,
     AdapterPermissionRequest,
+    capo_tmptest::TempRoot,
 ) {
     use capo_adapters::{AgentAdapterHandle, ScriptedMockAgent};
 
@@ -5664,9 +5707,10 @@ fn sg2_round_trip_setup(
         ScriptedMockAgent::acp_shaped(format!("sg2-{label}-session"))
             .with_permission_request(&request_ref, request.clone()),
     );
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         policy,
         scripted.clone(),
     )
@@ -5696,7 +5740,7 @@ fn sg2_round_trip_setup(
         turn_id: TurnId::new(format!("turn-sg2-{label}")),
         request_ref,
     };
-    (controller, refs, scope, raised)
+    (controller, refs, scope, raised, tmp_state_root)
 }
 
 fn sg2_options(kinds: &[AcpPermissionOptionKind]) -> Vec<AcpPermissionOption> {
@@ -5737,7 +5781,7 @@ fn sg2_allow_once_round_trip_allows_turn_scoped_and_returns_option_id() {
             AcpPermissionOptionKind::RejectOnce,
         ]),
     );
-    let (controller, refs, scope, raised) = sg2_round_trip_setup(
+    let (controller, refs, scope, raised, _state) = sg2_round_trip_setup(
         "allow-once",
         PermissionPolicy::allow_trusted_local(),
         request,
@@ -5801,7 +5845,7 @@ fn sg2_allow_always_round_trip_downscopes_to_session_end() {
             AcpPermissionOptionKind::RejectAlways,
         ]),
     );
-    let (controller, refs, scope, raised) = sg2_round_trip_setup(
+    let (controller, refs, scope, raised, _state) = sg2_round_trip_setup(
         "allow-always",
         PermissionPolicy::allow_trusted_local(),
         request,
@@ -5852,7 +5896,7 @@ fn sg2_reject_once_round_trip_rejects_with_no_grant() {
         "trusted-local-dev",
         sg2_options(&[AcpPermissionOptionKind::RejectOnce]),
     );
-    let (controller, refs, scope, raised) = sg2_round_trip_setup(
+    let (controller, refs, scope, raised, _state) = sg2_round_trip_setup(
         "reject-once",
         PermissionPolicy::allow_trusted_local(),
         request,
@@ -5896,7 +5940,7 @@ fn sg2_reject_always_round_trip_creates_durable_deny_grant() {
         "trusted-local-dev",
         sg2_options(&[AcpPermissionOptionKind::RejectAlways]),
     );
-    let (controller, refs, scope, raised) = sg2_round_trip_setup(
+    let (controller, refs, scope, raised, _state) = sg2_round_trip_setup(
         "reject-always",
         PermissionPolicy::allow_trusted_local(),
         request,
@@ -5941,7 +5985,7 @@ fn sg2_cancellation_round_trip_returns_cancelled_and_records_cancel() {
         "trusted-local-dev",
         sg2_options(&[AcpPermissionOptionKind::AllowOnce]),
     );
-    let (controller, refs, scope, raised) =
+    let (controller, refs, scope, raised, _state) =
         sg2_round_trip_setup("cancel", PermissionPolicy::allow_trusted_local(), request);
 
     let response = controller
@@ -5982,7 +6026,7 @@ fn sg2_no_selectable_option_is_adapter_error_cancel() {
         "trusted-local-dev",
         Vec::new(),
     );
-    let (controller, refs, scope, raised) = sg2_round_trip_setup(
+    let (controller, refs, scope, raised, _state) = sg2_round_trip_setup(
         "no-option",
         PermissionPolicy::allow_trusted_local(),
         request,
@@ -6016,7 +6060,7 @@ fn sg2_policy_deny_overrules_adapter_allow_option() {
         "read-only-local",
         sg2_options(&[AcpPermissionOptionKind::AllowOnce]),
     );
-    let (controller, refs, scope, raised) = sg2_round_trip_setup(
+    let (controller, refs, scope, raised, _state) = sg2_round_trip_setup(
         "policy-deny",
         PermissionPolicy::static_read_only_local(),
         request,
@@ -6089,7 +6133,7 @@ fn sg2_policy_deny_returns_reject_option_when_offered() {
             AcpPermissionOptionKind::RejectOnce,
         ]),
     );
-    let (controller, _refs, scope, raised) = sg2_round_trip_setup(
+    let (controller, _refs, scope, raised, _state) = sg2_round_trip_setup(
         "policy-deny-reject",
         PermissionPolicy::static_read_only_local(),
         request,
@@ -6122,7 +6166,7 @@ fn sg2_loop_drives_round_trip_allow_and_adapter_proceeds() {
         "trusted-local-dev",
         sg2_options(&[AcpPermissionOptionKind::AllowOnce]),
     );
-    let (controller, _refs, scope, _raised) = sg2_round_trip_setup(
+    let (controller, _refs, scope, _raised, _state) = sg2_round_trip_setup(
         "loop-allow",
         PermissionPolicy::allow_trusted_local(),
         request,
@@ -6153,7 +6197,7 @@ fn sg2_loop_drives_round_trip_policy_deny_halts_adapter() {
         "read-only-local",
         sg2_options(&[AcpPermissionOptionKind::AllowOnce]),
     );
-    let (controller, _refs, scope, _raised) = sg2_round_trip_setup(
+    let (controller, _refs, scope, _raised, _state) = sg2_round_trip_setup(
         "loop-policy-deny",
         PermissionPolicy::static_read_only_local(),
         request,
@@ -6183,7 +6227,7 @@ fn sg2_loop_round_trip_absent_request_is_noop() {
         "trusted-local-dev",
         sg2_options(&[AcpPermissionOptionKind::AllowOnce]),
     );
-    let (controller, _refs, mut scope, _raised) = sg2_round_trip_setup(
+    let (controller, _refs, mut scope, _raised, _state) = sg2_round_trip_setup(
         "loop-absent",
         PermissionPolicy::allow_trusted_local(),
         request,
@@ -6208,7 +6252,7 @@ fn sg2_round_trip_lifecycle_rebuilds_from_event_log() {
         "trusted-local-dev",
         sg2_options(&[AcpPermissionOptionKind::AllowOnce]),
     );
-    let (controller, refs, scope, raised) =
+    let (controller, refs, scope, raised, _state) =
         sg2_round_trip_setup("replay", PermissionPolicy::allow_trusted_local(), request);
 
     let response = controller
@@ -6335,9 +6379,10 @@ fn sg3_grant(
 #[test]
 fn sg3_grant_read_back_authorizes_a_valid_durable_grant() {
     // A read-only-local STATIC policy denies `filesystem:write:workspace`...
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_permission_policy(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         PermissionPolicy::static_read_only_local(),
     )
     .expect("open controller");
@@ -6385,9 +6430,10 @@ fn sg3_grant_read_back_authorizes_a_valid_durable_grant() {
 /// a `capability.grant_revoked` event with the reason is appended.
 #[test]
 fn sg3_revoke_then_re_request_is_denied_and_old_events_preserved() {
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_permission_policy(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         PermissionPolicy::static_read_only_local(),
     )
     .expect("open controller");
@@ -6509,9 +6555,10 @@ fn sg3_revoke_then_re_request_is_denied_and_old_events_preserved() {
 /// never explicitly revoked (expiry is a denial input in decide).
 #[test]
 fn sg3_expired_grant_does_not_authorize() {
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_permission_policy(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         PermissionPolicy::static_read_only_local(),
     )
     .expect("open controller");
@@ -6569,9 +6616,10 @@ fn sg3_live_dispatch_durable_grant_authorizes_a_policy_denied_write() {
 
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("sg3-live-session"));
     // The read-only-local STATIC policy DENIES `capo.evidence_record` (a write).
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         PermissionPolicy::static_read_only_local(),
         scripted,
     )
@@ -6703,9 +6751,10 @@ fn sg3_live_dispatch_durable_deny_grant_blocks_a_policy_allowed_call() {
 
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("sg3-deny-session"));
     // The TrustedLocal policy ALLOWS this read tool (it is the permissive default).
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         PermissionPolicy::allow_trusted_local(),
         scripted,
     )
@@ -6819,9 +6868,10 @@ fn sg4_default_trusted_local_controller_denies_each_critical_scope_until_durable
     ];
 
     // DEFAULT controller: the permissive TrustedLocal policy, no critical opt-in.
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_permission_policy(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         PermissionPolicy::allow_trusted_local(),
     )
     .expect("open default trusted-local controller");
@@ -6909,9 +6959,10 @@ fn sg4_default_trusted_local_controller_denies_each_critical_scope_until_durable
 /// across sessions/agents.
 #[test]
 fn sg3_grant_read_back_is_subject_scoped_across_sessions() {
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_permission_policy(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         PermissionPolicy::static_read_only_local(),
     )
     .expect("open controller");
@@ -6980,9 +7031,10 @@ fn sg3_re_grant_after_revoke_does_not_un_revoke_under_permissive_policy() {
     let scripted = AgentAdapterHandle::scripted_mock(ScriptedMockAgent::new("sg3-resticky"));
     // TrustedLocal allows the tool, so a re-request WOULD re-create the grant if
     // the create path did not preserve the prior revocation.
+    let tmp_state_root = temp_root();
     let controller = RealBoundaryController::open_with_permission_policy_and_adapter(
         ProjectId::new("project-capo"),
-        temp_root(),
+        tmp_state_root.to_path_buf(),
         PermissionPolicy::allow_trusted_local(),
         scripted,
     )
@@ -7102,8 +7154,9 @@ fn sg5_lease_scope(session: &str, run: &str, workspace_root: &str) -> crate::Wor
 /// the second session's write then succeeds.
 #[test]
 fn sg5_workspace_lock_rejects_second_writer_until_holder_releases() {
+    let tmp_state_root = temp_root();
     let controller =
-        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+        RealBoundaryController::open(ProjectId::new("project-capo"), &tmp_state_root).expect("open");
     let workspace = "/workspace/capo";
     let holder = sg5_lease_scope("session-holder", "run-holder", workspace);
     let challenger = sg5_lease_scope("session-challenger", "run-challenger", workspace);
@@ -7169,8 +7222,9 @@ fn sg5_workspace_lock_rejects_second_writer_until_holder_releases() {
 /// holder's own read is allowed too.
 #[test]
 fn sg5_reads_are_not_blocked_by_the_write_lease() {
+    let tmp_state_root = temp_root();
     let controller =
-        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+        RealBoundaryController::open(ProjectId::new("project-capo"), &tmp_state_root).expect("open");
     let workspace = "/workspace/capo";
     let holder = sg5_lease_scope("session-holder", "run-holder", workspace);
     let reader = sg5_lease_scope("session-reader", "run-reader", workspace);
@@ -7276,8 +7330,9 @@ fn sg5_lease_state_rebuilds_from_the_event_log() {
 /// itself.
 #[test]
 fn sg5_holder_re_acquire_is_idempotent() {
+    let tmp_state_root = temp_root();
     let controller =
-        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+        RealBoundaryController::open(ProjectId::new("project-capo"), &tmp_state_root).expect("open");
     let holder = sg5_lease_scope("session-holder", "run-holder", "/workspace/capo");
 
     let first = controller
@@ -7314,8 +7369,9 @@ fn sg5_holder_re_acquire_is_idempotent() {
 /// let a second session also "acquire" the workspace, breaking single-writer.
 #[test]
 fn sg5_same_session_reacquire_after_release_re_holds() {
+    let tmp_state_root = temp_root();
     let controller =
-        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+        RealBoundaryController::open(ProjectId::new("project-capo"), &tmp_state_root).expect("open");
     let holder = sg5_lease_scope("session-holder", "run-holder", "/workspace/capo");
 
     controller
@@ -7367,8 +7423,9 @@ fn sg5_same_session_reacquire_after_release_re_holds() {
 /// cannot steal the single-writer lock by releasing someone else's lease).
 #[test]
 fn sg5_cross_session_release_conflicts_and_leaves_holder() {
+    let tmp_state_root = temp_root();
     let controller =
-        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+        RealBoundaryController::open(ProjectId::new("project-capo"), &tmp_state_root).expect("open");
     let holder = sg5_lease_scope("session-holder", "run-holder", "/workspace/capo");
     let other = sg5_lease_scope("session-other", "run-other", "/workspace/capo");
 
@@ -7409,8 +7466,9 @@ fn sg5_cross_session_release_conflicts_and_leaves_holder() {
 /// no event.
 #[test]
 fn sg5_release_of_free_lease_is_a_no_op() {
+    let tmp_state_root = temp_root();
     let controller =
-        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+        RealBoundaryController::open(ProjectId::new("project-capo"), &tmp_state_root).expect("open");
     let scope = sg5_lease_scope("session-holder", "run-holder", "/workspace/capo");
     let events_before = controller.state().event_count().expect("count");
 
@@ -7443,8 +7501,9 @@ fn sg5_release_of_free_lease_is_a_no_op() {
 /// normalized path, not the lossy slug that collapsed `/srv/a/b` and `/srv/ab`.
 #[test]
 fn sg5_distinct_workspace_roots_get_independent_leases() {
+    let tmp_state_root = temp_root();
     let controller =
-        RealBoundaryController::open(ProjectId::new("project-capo"), temp_root()).expect("open");
+        RealBoundaryController::open(ProjectId::new("project-capo"), &tmp_state_root).expect("open");
     // Roots that the old separator-stripping slug collapsed to one key.
     let root_a = sg5_lease_scope("session-a", "run-a", "/srv/a/b");
     let root_b = sg5_lease_scope("session-b", "run-b", "/srv/ab");
@@ -7604,8 +7663,9 @@ fn sg9_recovery_event_kinds(controller: &FakeBoundaryController, session: &str) 
 #[test]
 fn sg9_gone_run_classifies_exited_not_exited_unknown() {
     let project = ProjectId::new("project-capo");
+    let tmp_state_root = temp_root();
     let controller =
-        FakeBoundaryController::open(project.clone(), temp_root()).expect("open controller");
+        FakeBoundaryController::open(project.clone(), &tmp_state_root).expect("open controller");
     // A run with NO persisted pid (a deterministic/mock run that crashed before
     // spawning) has nothing live to reattach -> Exited.
     sg9_seed_inflight_run(
@@ -7662,15 +7722,16 @@ fn sg9_alive_run_with_handle_reattaches_in_place_without_killing() {
     use std::collections::HashMap;
 
     let project = ProjectId::new("project-capo");
+    let tmp_state_root = temp_root();
     let controller =
-        FakeBoundaryController::open(project.clone(), temp_root()).expect("open controller");
+        FakeBoundaryController::open(project.clone(), &tmp_state_root).expect("open controller");
 
     // Spawn a real, still-running process group to stand in for the live run.
     let workspace = temp_root();
     std::fs::create_dir_all(&workspace).expect("workspace");
     let marker = workspace.join("reattach-survivor.txt");
     let runner =
-        LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), temp_root()));
+        LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), workspace.join("artifacts")));
     let running = runner
         .spawn_process(LocalProcessRequest {
             run_id: RunId::new("run-alive"),
@@ -7680,7 +7741,7 @@ fn sg9_alive_run_with_handle_reattaches_in_place_without_killing() {
                 "-c".to_string(),
                 format!("(sleep 2; printf survived > {}) &", marker.display()),
             ],
-            cwd: workspace,
+            cwd: workspace.to_path_buf(),
             env: HashMap::new(),
         })
         .expect("spawn live group");
@@ -7762,20 +7823,21 @@ fn sg9_alive_run_without_handle_classifies_orphaned() {
     use std::collections::HashMap;
 
     let project = ProjectId::new("project-capo");
+    let tmp_state_root = temp_root();
     let controller =
-        FakeBoundaryController::open(project.clone(), temp_root()).expect("open controller");
+        FakeBoundaryController::open(project.clone(), &tmp_state_root).expect("open controller");
 
     let workspace = temp_root();
     std::fs::create_dir_all(&workspace).expect("workspace");
     let runner =
-        LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), temp_root()));
+        LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), workspace.join("artifacts")));
     let running = runner
         .spawn_process(LocalProcessRequest {
             run_id: RunId::new("run-orphan"),
             turn_id: None,
             program: "/bin/sh".to_string(),
             argv: vec!["-c".to_string(), "(sleep 3) &".to_string()],
-            cwd: workspace,
+            cwd: workspace.to_path_buf(),
             env: HashMap::new(),
         })
         .expect("spawn live group");
@@ -7975,8 +8037,9 @@ fn sg9_repeated_recovery_is_idempotent() {
 #[test]
 fn sg9_recovery_reclaims_stale_lease_from_dead_holder() {
     let project = ProjectId::new("project-capo");
+    let tmp_state_root = temp_root();
     let controller =
-        RealBoundaryController::open(project.clone(), temp_root()).expect("open controller");
+        RealBoundaryController::open(project.clone(), &tmp_state_root).expect("open controller");
     let workspace = "/workspace/capo";
 
     // A run takes the write lease, then crashes (it is gone on restart).
@@ -8033,8 +8096,9 @@ fn sg9_recovery_reclaims_stale_lease_from_dead_holder() {
 #[test]
 fn sg9_re_reclaim_of_a_re_acquired_lease_frees_the_lock() {
     let project = ProjectId::new("project-capo");
+    let tmp_state_root = temp_root();
     let controller =
-        RealBoundaryController::open(project.clone(), temp_root()).expect("open controller");
+        RealBoundaryController::open(project.clone(), &tmp_state_root).expect("open controller");
     let workspace = "/workspace/capo";
 
     // Holder A acquires the lease, then crashes; recovery reclaims it.
@@ -8106,8 +8170,9 @@ fn sg9_re_reclaim_of_a_re_acquired_lease_frees_the_lock() {
 #[test]
 fn sg9_recover_inflight_runs_reclaims_lease_of_gone_run() {
     let project = ProjectId::new("project-capo");
+    let tmp_state_root = temp_root();
     let controller =
-        FakeBoundaryController::open(project.clone(), temp_root()).expect("open controller");
+        FakeBoundaryController::open(project.clone(), &tmp_state_root).expect("open controller");
 
     // A gone in-flight run that also held the workspace lease.
     sg9_seed_inflight_run(
@@ -8155,22 +8220,23 @@ fn sg9_recover_inflight_runs_keeps_lease_of_live_orphan() {
     use std::collections::HashMap;
 
     let project = ProjectId::new("project-capo");
+    let tmp_state_root = temp_root();
     let controller =
-        FakeBoundaryController::open(project.clone(), temp_root()).expect("open controller");
+        FakeBoundaryController::open(project.clone(), &tmp_state_root).expect("open controller");
 
     // Spawn a real, still-running process group (a live orphan with NO attachable
     // runtime_process_ref).
     let workspace = temp_root();
     std::fs::create_dir_all(&workspace).expect("workspace");
     let runner =
-        LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), temp_root()));
+        LocalProcessRunner::new(LocalProcessConfig::for_test(workspace.clone(), workspace.join("artifacts")));
     let running = runner
         .spawn_process(LocalProcessRequest {
             run_id: RunId::new("run-live-orphan"),
             turn_id: None,
             program: "/bin/sh".to_string(),
             argv: vec!["-c".to_string(), "(sleep 3) &".to_string()],
-            cwd: workspace,
+            cwd: workspace.to_path_buf(),
             env: HashMap::new(),
         })
         .expect("spawn live group");
@@ -8265,6 +8331,21 @@ mod sg10 {
         ProjectId::new(PROJECT)
     }
 
+    /// A static-policy controller bundled with the temp dir its store lives in,
+    /// so the on-disk DB survives for the whole test. Derefs to the controller.
+    struct StaticController {
+        controller: FakeBoundaryController,
+        _state: capo_tmptest::TempRoot,
+    }
+
+    impl std::ops::Deref for StaticController {
+        type Target = FakeBoundaryController;
+
+        fn deref(&self) -> &FakeBoundaryController {
+            &self.controller
+        }
+    }
+
     /// A controller over the read-only-local STATIC policy, which DENIES a
     /// workspace write by default -- the policy used to prove deny / grant
     /// authorization / revoke / expiry without relying on the permissive default.
@@ -8276,13 +8357,18 @@ mod sg10 {
     /// (`decide_with_grant_read_back`, `revoke_capability_grant`, the lock,
     /// checkpoint, `run_verification`, `score_run`, `recover_inflight_runs`) on one
     /// handle.
-    fn static_controller() -> FakeBoundaryController {
-        FakeBoundaryController::open_with_permission_policy(
+    fn static_controller() -> StaticController {
+        let state = temp_root();
+        let controller = FakeBoundaryController::open_with_permission_policy(
             project(),
-            temp_root(),
+            &state,
             PermissionPolicy::static_read_only_local(),
         )
-        .expect("open static controller")
+        .expect("open static controller");
+        StaticController {
+            controller,
+            _state: state,
+        }
     }
 
     fn write_request(session: &str) -> PermissionRequest {
@@ -8530,14 +8616,15 @@ mod sg10 {
     /// exit status, recorded as OBSERVED evidence.
     #[test]
     fn sg10_verification_pass_from_exit_status() {
-        let controller = FakeBoundaryController::open(project(), temp_root()).expect("controller");
+        let tmp_state_root = temp_root();
+        let controller = FakeBoundaryController::open(project(), &tmp_state_root).expect("controller");
         let workspace = temp_root();
         std::fs::create_dir_all(&workspace).expect("workspace");
         let artifacts = temp_root();
         let outcome = controller
             .run_verification(
                 &verification_scope(),
-                LocalProcessConfig::for_test(workspace.clone(), artifacts),
+                LocalProcessConfig::for_test(workspace.clone(), artifacts.to_path_buf()),
                 &shell_command(VerificationKind::Test, "printf ok; exit 0", &workspace),
             )
             .expect("run verification");
@@ -8550,14 +8637,15 @@ mod sg10 {
     /// real exit status.
     #[test]
     fn sg10_verification_fail_from_exit_status() {
-        let controller = FakeBoundaryController::open(project(), temp_root()).expect("controller");
+        let tmp_state_root = temp_root();
+        let controller = FakeBoundaryController::open(project(), &tmp_state_root).expect("controller");
         let workspace = temp_root();
         std::fs::create_dir_all(&workspace).expect("workspace");
         let artifacts = temp_root();
         let outcome = controller
             .run_verification(
                 &verification_scope(),
-                LocalProcessConfig::for_test(workspace.clone(), artifacts),
+                LocalProcessConfig::for_test(workspace.clone(), artifacts.to_path_buf()),
                 &shell_command(
                     VerificationKind::Check,
                     "printf boom >&2; exit 7",
@@ -8587,7 +8675,8 @@ mod sg10 {
     /// holder releases does the second writer succeed.
     #[test]
     fn sg10_workspace_lock_contention_rejects_second_writer() {
-        let controller = FakeBoundaryController::open(project(), temp_root()).expect("controller");
+        let tmp_state_root = temp_root();
+        let controller = FakeBoundaryController::open(project(), &tmp_state_root).expect("controller");
         let workspace = "/w/sg10-lock";
         let holder = lease_scope("session-holder", "run-holder", workspace);
         let contender = lease_scope("session-contender", "run-contender", workspace);
@@ -8655,7 +8744,8 @@ mod sg10 {
     /// a file added after the checkpoint).
     #[test]
     fn sg10_checkpoint_rollback_restores_prior_state() {
-        let controller = FakeBoundaryController::open(project(), temp_root()).expect("controller");
+        let tmp_state_root = temp_root();
+        let controller = FakeBoundaryController::open(project(), &tmp_state_root).expect("controller");
         let workspace = temp_root();
         let shadow = temp_root();
         std::fs::create_dir_all(&workspace).expect("workspace");
@@ -8773,7 +8863,7 @@ mod sg10 {
         controller
             .run_verification(
                 &verify_scope,
-                LocalProcessConfig::for_test(workspace.clone(), temp_root()),
+                LocalProcessConfig::for_test(workspace.clone(), workspace.join("artifacts")),
                 &shell_command(VerificationKind::Test, "exit 0", &workspace),
             )
             .expect("run verification");
@@ -9454,7 +9544,7 @@ mod sg11 {
 // proven to rebuild identically on restart.
 // --------------------------------------------------------------------------
 
-fn dp2_controller_with_session(label: &str) -> (FakeBoundaryController, FakeRunRefs) {
+fn dp2_controller_with_session(label: &str) -> (FakeBoundaryController, FakeRunRefs, capo_tmptest::TempRoot) {
     let root = temp_root();
     let controller =
         FakeBoundaryController::open(ProjectId::new("project-capo"), &root).expect("controller");
@@ -9464,7 +9554,7 @@ fn dp2_controller_with_session(label: &str) -> (FakeBoundaryController, FakeRunR
     let refs = controller
         .send_task(&registration, "Drive an ACP replay")
         .expect("send task");
-    (controller, refs)
+    (controller, refs, root)
 }
 
 fn acp_update(session: &str, body: serde_json::Value) -> serde_json::Value {
@@ -9481,7 +9571,7 @@ fn dp2_session_resume_attach_adds_no_items_but_records_attach_batch() {
     // with NO message/item replay events; the read-model session item count is
     // unchanged, and the batch records source=session_resume_attach.
     use capo_adapters::AcpReplayEngine;
-    let (controller, refs) = dp2_controller_with_session("resume");
+    let (controller, refs, _state) = dp2_controller_with_session("resume");
 
     let tools_before = controller
         .state()
@@ -9544,7 +9634,7 @@ fn dp2_foreign_session_load_imports_each_item_once_then_rebuilds_identically() {
     // updates + timeline keys + batch are event-sourced; and a clear-and-replay
     // rebuild reconstructs every DP2 read model byte-identically.
     use capo_adapters::{AcpReplayEngine, AcpReplaySource};
-    let (controller, refs) = dp2_controller_with_session("foreign-load");
+    let (controller, refs, _state) = dp2_controller_with_session("foreign-load");
 
     let frames = vec![
         acp_update(
@@ -9670,7 +9760,7 @@ fn dp2_load_of_known_history_adds_no_duplicate_ui_items() {
     // duplicate UI items -- the second load reconciles every candidate as a
     // duplicate observation against the timeline keys the first load recorded.
     use capo_adapters::{AcpReplayEngine, AcpReplaySource};
-    let (controller, refs) = dp2_controller_with_session("known-load");
+    let (controller, refs, _state) = dp2_controller_with_session("known-load");
 
     let frames = vec![
         acp_update(
@@ -9778,8 +9868,9 @@ fn dp2_load_of_known_history_adds_no_duplicate_ui_items() {
 #[test]
 fn dp5_live_packet_includes_eligible_store_record_and_excludes_invalidated() {
     let project_id = ProjectId::new("project-capo");
+    let tmp_state_root = temp_root();
     let controller =
-        FakeBoundaryController::open(project_id.clone(), temp_root()).expect("open controller");
+        FakeBoundaryController::open(project_id.clone(), &tmp_state_root).expect("open controller");
     let registration = controller.register_agent("fake-codex").expect("agent");
 
     // Seed two memory records whose bodies both match the goal terms below.
@@ -9853,7 +9944,8 @@ fn dp5_live_packet_includes_eligible_store_record_and_excludes_invalidated() {
     // store record, so the seeded run must include exactly one MORE retrieved
     // item -- proving the eligibility-filtered store record flowed into the
     // packet (and the invalidated record never did).
-    let baseline_controller = FakeBoundaryController::open(project_id.clone(), temp_root())
+    let tmp_state_root = temp_root();
+    let baseline_controller = FakeBoundaryController::open(project_id.clone(), &tmp_state_root)
         .expect("open baseline controller");
     let baseline_registration = baseline_controller
         .register_agent("fake-codex")

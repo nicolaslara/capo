@@ -563,9 +563,6 @@ fn is_weak_validation_summary(summary: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use capo_state::{
         EvidenceProjection, GoalProjection, NewEvent, ProjectionRecord, RequirementLedgerProjection,
@@ -573,15 +570,9 @@ mod tests {
 
     use super::*;
 
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn temp_root(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("capo-ga5-{name}-{nanos}-{n}"))
+    fn temp_root(name: &str) -> capo_tmptest::TempRoot {
+        capo_tmptest::TempRoot::new(&format!("capo-ga5-{name}"))
     }
 
     const PROJECT: &str = "project-capo";
@@ -590,7 +581,7 @@ mod tests {
     const SESSION: &str = "session-ga5";
     const RUN: &str = "run-ga5";
 
-    fn open() -> (FakeBoundaryController, PathBuf) {
+    fn open() -> (FakeBoundaryController, capo_tmptest::TempRoot) {
         let state_root = temp_root("state");
         let controller =
             FakeBoundaryController::open(ProjectId::new(PROJECT), &state_root).expect("controller");
