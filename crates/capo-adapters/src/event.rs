@@ -375,8 +375,17 @@ pub(crate) fn text_from_content_array(value: Option<&Value>) -> Option<String> {
             let text = items
                 .iter()
                 .filter_map(|item| {
+                    // A direct text block `{ type:"text", text }`.
                     string_at(item, &["text"])
-                        .or_else(|| string_at(item, &["content"]))
+                        // The real claude-code-acp 0.16.2 tool_call shape wraps the
+                        // payload: `{ type:"content", content:{ type:"text", text } }`
+                        // (content is an OBJECT, so a flat `string_at(["content"])`
+                        // returns None and the block was previously dropped). Recurse
+                        // into the wrapper — this also handles a scalar `content`.
+                        .or_else(|| text_from_content_array(item.get("content")))
+                        // A `{ type:"diff", path?, oldText?, newText }` block: surface
+                        // the resulting content so observed edits aren't lost.
+                        .or_else(|| string_at(item, &["newText"]))
                         .or_else(|| string_at(item, &["input"]))
                 })
                 .collect::<Vec<_>>()
@@ -401,4 +410,42 @@ pub(crate) fn stable_hash(bytes: &[u8]) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("fnv1a64:{hash:016x}")
+}
+
+#[cfg(test)]
+mod content_array_tests {
+    use super::text_from_content_array;
+    use serde_json::json;
+
+    #[test]
+    fn extracts_text_from_the_real_0_16_2_tool_call_array_shape() {
+        // claude-code-acp 0.16.2 emits tool_call `content` as an ARRAY of wrapped
+        // blocks: a `content` wrapper whose `content` is an object, plus a `diff`
+        // block. Both must be surfaced (regression guard for M5).
+        let v = json!([
+            {"type": "content", "content": {"type": "text", "text": "wrote HELLO.txt"}},
+            {"type": "diff", "path": "HELLO.txt", "oldText": "", "newText": "capo-works"}
+        ]);
+        let got = text_from_content_array(Some(&v)).expect("must extract content");
+        assert!(got.contains("wrote HELLO.txt"), "content block text lost: {got:?}");
+        assert!(got.contains("capo-works"), "diff newText lost: {got:?}");
+    }
+
+    #[test]
+    fn still_handles_legacy_string_and_object_and_flat_text_shapes() {
+        assert_eq!(
+            text_from_content_array(Some(&json!("hi"))).as_deref(),
+            Some("hi")
+        );
+        assert_eq!(
+            text_from_content_array(Some(&json!({"type": "text", "text": "obj"}))).as_deref(),
+            Some("obj")
+        );
+        assert_eq!(
+            text_from_content_array(Some(&json!([{"type": "text", "text": "flat"}]))).as_deref(),
+            Some("flat")
+        );
+        assert_eq!(text_from_content_array(None), None);
+        assert_eq!(text_from_content_array(Some(&json!([]))), None);
+    }
 }
