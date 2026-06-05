@@ -3,10 +3,24 @@
 > Adversarial self-review of the branch diff (correctness/concurrency, security,
 > ACP-protocol, quality). Findings were verified (false alarms dropped). NONE of
 > these break the proven single-user dogfood loop — they are concurrency,
-> robustness, and fidelity hardening. **M1 (detached failures swallowed) has been
-> partially addressed** (failures are now logged; the richer fix — appending a
-> terminal `turn_failed` event — remains). The rest are documented here for a
-> supervised fix session, prioritized.
+> robustness, and fidelity hardening.
+>
+> ### Fixed during the overnight run (after the review)
+> - **B1 — FIXED** (`277fef0`): conductor turns are serialized with a per-conductor
+>   `tokio::sync::Mutex`, so concurrent `/api/chat` can no longer interleave / cross-attribute.
+> - **M5 — FIXED** (`199d2e2`): `text_from_content_array` recurses into the real 0.16.2
+>   `{type:content,content:{text}}` wrapper and captures `{type:diff,newText}`, so observed
+>   tool content is no longer dropped on the real bridge (+2 unit tests).
+> - **M1 — PARTIAL** (`fc75ede`): detached worker-turn failures are now logged instead of
+>   silently swallowed; the richer fix (append a terminal `turn_failed` event) remains open.
+>
+> Still open below: M2, M3, M4, M6, M7, and the minors.
+>
+> ### Note on the live E2E (`conductor_live_e2e`)
+> Gated/`#[ignore]`d; two nested live LLMs, so NOT 100% deterministic — it occasionally
+> flakes (~1 in 5 observed) when the conductor doesn't delegate or the worker phrases the
+> write differently. The DETERMINISTIC tests are the stable validation gate; treat the live
+> E2E as a smoke and re-run on a flake.
 
 # REVIEW REPORT — `slice-a-acp-wiring` (capo)
 

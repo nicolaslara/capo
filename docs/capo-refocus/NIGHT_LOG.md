@@ -71,8 +71,17 @@ branch → log here.
       responsiveness. Additive + flag-gated (sync default unchanged). Deterministic test green.
 - [x] Docs consolidated onto the branch (`2b60635`): REFOCUS-SUMMARY + PLAN/VALIDATION/EXPERIMENT.
 
-### Final state: 10 commits on `slice-a-acp-wiring`. Objective COMPLETE + validated live +
-### reliable + documented. Nothing merged to main, nothing pushed. See REFOCUS-SUMMARY.md.
+- [x] **Adversarial branch-wide self-review** → `KNOWN-ISSUES.md` (verified findings;
+      none break the proven loop). Fixed the highest-value safe ones, each verified +
+      committed: **B1** (`277fef0`, serialize conductor turns), **M5** (`199d2e2`, surface
+      real-bridge tool_call content+diff), **M1 partial** (`fc75ede`, log detached failures).
+      Remaining (M2/M3/M4/M6/M7 + minors) documented for supervised triage.
+- [x] Live E2E observed to flake ~1/5 (LLM nondeterminism); deterministic tests are the
+      stable gate. Full `cargo test --workspace` green after all fixes.
+
+### Final state: 13 commits on `slice-a-acp-wiring`. Objective COMPLETE + validated live +
+### reliable + self-reviewed + hardened + documented. Nothing merged to main, nothing
+### pushed. Canonical overview: REFOCUS-SUMMARY.md; open items: KNOWN-ISSUES.md.
 - [ ] Cut sweep — feature-gate peripheral crates/superseded paths out of the default
       running path (now lower-risk: 7 commits are a safety net; revert any bad cut).
 - [ ] (optional) async `start_agent` for conductor responsiveness (depth discipline).
