@@ -121,6 +121,11 @@ struct ConductorChat {
     run_id: String,
     turn_seq: AtomicU64,
     mode: Mutex<ChatMode>,
+    /// Serializes conductor turns: there is ONE long-lived conductor session, so
+    /// two concurrent `/api/chat` requests would interleave two ACP turns on the
+    /// same session/run and cross-attribute replies + tool calls via the shared
+    /// pre/post watermarks. One turn at a time keeps each turn's slice correct.
+    turn_lock: tokio::sync::Mutex<()>,
 }
 
 #[tokio::main]
@@ -281,6 +286,7 @@ fn bootstrap_conductor(server: &CapoServer) -> Result<ConductorChat, String> {
             scope: "all".to_string(),
             agent_id: None,
         }),
+        turn_lock: tokio::sync::Mutex::new(()),
     })
 }
 
@@ -327,6 +333,11 @@ async fn chat(
     State(cfg): State<Arc<Config>>,
     Json(body): Json<ChatBody>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    // Serialize conductor turns (B1): one long-lived conductor session means
+    // concurrent turns would interleave and cross-attribute. Held for the whole
+    // turn so the pre/post watermark slicing stays turn-scoped.
+    let _turn_guard = cfg.conductor.turn_lock.lock().await;
+
     // 1. Apply the one/all toggle to the conductor's mode, if the client sent one.
     if let Some(scope) = body.mode.as_deref() {
         let scope = if scope == "one" { "one" } else { "all" };
@@ -1519,6 +1530,7 @@ mod tests {
                     scope: "all".to_string(),
                     agent_id: None,
                 }),
+                turn_lock: tokio::sync::Mutex::new(()),
             }),
             chat: ChatConfig {
                 acp_program: "/bin/sh".to_string(),
