@@ -540,6 +540,7 @@ fn command_methods() -> Vec<&'static str> {
         "continue_goal",
         "register_runtime_target",
         "replay_runner_events",
+        "run_conductor_turn_local",
     ]
 }
 

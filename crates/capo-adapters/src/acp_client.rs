@@ -41,8 +41,26 @@ impl AcpAdapter {
             // The deterministic stub/scripted plans never execute fs calls on the
             // wire (the agent writes its own disk); the live profile sets this.
             workspace_root: None,
+            // The deterministic stub/scripted plans forward no MCP servers, so
+            // `session/new` keeps emitting `mcpServers: []` (byte-identical).
+            forwarded_mcp_servers: Vec::new(),
         }
     }
+}
+
+/// An HTTP MCP server forwarded into `session/new`'s `mcpServers` array.
+///
+/// The empirically-required stateless-HTTP shape the agent dials directly on
+/// localhost (see `docs/capo-refocus/EXPERIMENT-tool-channel.md`):
+/// `{ "type":"http", "url":<url>, "headers":[{ "name":k, "value":v }...] }`.
+/// This is the capo-hosted in-process MCP endpoint the conductor reaches its
+/// "capo tools" through.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcpHttpMcpServer {
+    /// The localhost URL the agent dials directly (e.g. `http://127.0.0.1:PORT/mcp`).
+    pub url: String,
+    /// Header `(name, value)` pairs (e.g. the bearer token gating the endpoint).
+    pub headers: Vec<(String, String)>,
 }
 
 /// Which permission-decision profile the live wire client applies when it answers
@@ -126,9 +144,35 @@ pub struct AcpSessionSetupPlan {
     /// filesystem operation and only ACKs the tool as complete once the client
     /// replies -- it never writes the file itself.
     pub workspace_root: Option<std::path::PathBuf>,
+    /// HTTP MCP servers forwarded into `session/new`'s `mcpServers` array.
+    ///
+    /// Empty (the default for the deterministic stub/scripted plans) means
+    /// `session/new` keeps emitting `mcpServers: []` (byte-identical to today, so
+    /// the stub + scripted transports are unchanged). When non-empty (the
+    /// conductor-turn profile), each entry renders as the empirically-required
+    /// stateless-HTTP shape `{ "type":"http", "url", "headers" }` the agent dials
+    /// directly on localhost to reach capo's in-process "capo tools" MCP endpoint.
+    pub forwarded_mcp_servers: Vec<AcpHttpMcpServer>,
 }
 
 impl AcpSessionSetupPlan {
+    /// Builder: forward an HTTP MCP server into `session/new`'s `mcpServers`
+    /// array. Used by the conductor-turn profile to expose capo's in-process
+    /// "capo tools" endpoint to the claude-code-acp session. See
+    /// [`Self::forwarded_mcp_servers`].
+    #[must_use]
+    pub fn with_http_mcp_server(
+        mut self,
+        url: impl Into<String>,
+        headers: Vec<(String, String)>,
+    ) -> Self {
+        self.forwarded_mcp_servers.push(AcpHttpMcpServer {
+            url: url.into(),
+            headers,
+        });
+        self
+    }
+
     /// Builder: select an ACP session mode (`session/set_mode modeId`) the live
     /// wire client switches to before prompting. Used by the live file-write
     /// profile to bypass the per-tool permission round-trip the confined-workspace

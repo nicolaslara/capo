@@ -195,6 +195,7 @@ dependencies = [
 name = "capo-server"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "capo-adapters",
  "capo-controller",
  "capo-core",
@@ -203,7 +204,10 @@ dependencies = [
  "capo-state",
  "capo-tmptest",
  "capo-tools",
+ "http-body-util",
  "serde_json",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

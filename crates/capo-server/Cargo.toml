@@ -15,6 +15,10 @@ capo-runtime.workspace = true
 capo-state.workspace = true
 capo-tools.workspace = true
 serde_json = "1.0.150"
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
 capo-tmptest.workspace = true
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

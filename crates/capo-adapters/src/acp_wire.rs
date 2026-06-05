@@ -349,7 +349,25 @@ impl<'d, T: AcpTransport> AcpWireClient<'d, T> {
     /// `session/new`: create a new session, recording the external session id.
     pub fn session_new(&mut self, cwd: &str) -> Result<String, AcpWireError> {
         let id = self.alloc_id();
-        let params = json!({ "cwd": cwd, "mcpServers": [] });
+        // Render the forwarded MCP servers from the setup plan. Empty (stub +
+        // scripted plans) => `[]`, byte-identical to today. Non-empty (the
+        // conductor profile) => the empirically-required stateless-HTTP shape
+        // `{ "type":"http", "url", "headers":[{name,value}...] }` the agent dials
+        // directly on localhost.
+        let mcp_servers: Vec<Value> = self
+            .setup_plan
+            .forwarded_mcp_servers
+            .iter()
+            .map(|server| {
+                let headers: Vec<Value> = server
+                    .headers
+                    .iter()
+                    .map(|(name, value)| json!({ "name": name, "value": value }))
+                    .collect();
+                json!({ "type": "http", "url": server.url, "headers": headers })
+            })
+            .collect();
+        let params = json!({ "cwd": cwd, "mcpServers": mcp_servers });
         let result = self.request("session/new", params, id)?;
         let session_id = result
             .get("sessionId")
@@ -1939,6 +1957,99 @@ mod tests {
             plan.timeline_keys
                 .iter()
                 .any(|key| key.timeline_key == "acp:acp-session-load:tool:tool-load-1")
+        );
+    }
+
+    /// DESIGN-B Layer 2 (a): when the setup plan carries NO forwarded MCP
+    /// servers (the stub/scripted default), `session/new` emits `mcpServers: []`
+    /// -- byte-identical to the pre-Layer-2 behavior, so the stub/scripted paths
+    /// are unchanged.
+    #[test]
+    fn session_new_emits_empty_mcp_servers_by_default() {
+        let mut transport = ScriptedAcpTransport::new().on_request(
+            "session/new",
+            vec![ScriptedServerFrame::Response(
+                json!({ "sessionId": "acp-session-empty-mcp" }),
+            )],
+        );
+        {
+            let mut client = AcpWireClient::attach(&mut transport, setup_plan());
+            let session_id = client
+                .session_new("/tmp/capo-acp-wire-ws")
+                .expect("session/new");
+            assert_eq!(session_id, "acp-session-empty-mcp");
+        }
+
+        let frame = transport
+            .recorded
+            .iter()
+            .find(|f| f.get("method").and_then(Value::as_str) == Some("session/new"))
+            .expect("recorded session/new frame");
+        let mcp = frame
+            .get("params")
+            .and_then(|p| p.get("mcpServers"))
+            .and_then(Value::as_array)
+            .expect("mcpServers array");
+        assert!(
+            mcp.is_empty(),
+            "the default plan must emit mcpServers: [], got {mcp:?}"
+        );
+    }
+
+    /// DESIGN-B Layer 2 (a): when the setup plan carries a forwarded HTTP MCP
+    /// server (the conductor profile, via `with_http_mcp_server`), `session/new`
+    /// emits the empirically-required stateless-HTTP entry shape
+    /// `{ "type":"http", "url", "headers":[{ "name", "value" }...] }` the agent
+    /// dials directly on localhost. Asserted with NO live bridge.
+    #[test]
+    fn session_new_forwards_http_mcp_server_entry() {
+        let mut transport = ScriptedAcpTransport::new().on_request(
+            "session/new",
+            vec![ScriptedServerFrame::Response(
+                json!({ "sessionId": "acp-session-fwd-mcp" }),
+            )],
+        );
+        let plan = setup_plan().with_http_mcp_server(
+            "http://127.0.0.1:54321/mcp",
+            vec![("Authorization".to_string(), "Bearer capo-token".to_string())],
+        );
+        {
+            let mut client = AcpWireClient::attach(&mut transport, plan);
+            let session_id = client
+                .session_new("/tmp/capo-acp-wire-ws")
+                .expect("session/new");
+            assert_eq!(session_id, "acp-session-fwd-mcp");
+        }
+
+        let frame = transport
+            .recorded
+            .iter()
+            .find(|f| f.get("method").and_then(Value::as_str) == Some("session/new"))
+            .expect("recorded session/new frame");
+        let mcp = frame
+            .get("params")
+            .and_then(|p| p.get("mcpServers"))
+            .and_then(Value::as_array)
+            .expect("mcpServers array");
+        assert_eq!(mcp.len(), 1, "exactly one forwarded MCP server");
+        let entry = &mcp[0];
+        assert_eq!(entry.get("type").and_then(Value::as_str), Some("http"));
+        assert_eq!(
+            entry.get("url").and_then(Value::as_str),
+            Some("http://127.0.0.1:54321/mcp")
+        );
+        let headers = entry
+            .get("headers")
+            .and_then(Value::as_array)
+            .expect("headers array");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(
+            headers[0].get("name").and_then(Value::as_str),
+            Some("Authorization")
+        );
+        assert_eq!(
+            headers[0].get("value").and_then(Value::as_str),
+            Some("Bearer capo-token")
         );
     }
 }

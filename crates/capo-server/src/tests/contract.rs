@@ -270,6 +270,7 @@ fn schema_enumerations_cover_every_wire_variant() {
             ServerCommand::RegisterRuntimeTarget { .. } => "register_runtime_target",
             ServerCommand::ReplayRunnerEvents { .. } => "replay_runner_events",
             ServerCommand::RunAcpLiveTurnLocal { .. } => "run_acp_live_turn_local",
+            ServerCommand::RunConductorTurnLocal { .. } => "run_conductor_turn_local",
         }
     }
 
@@ -699,6 +700,19 @@ fn sample_commands() -> Vec<ServerCommand> {
                 payload_json: "{\"offset\":0}".to_string(),
                 redaction_state: "safe".to_string(),
             }],
+        },
+        ServerCommand::RunConductorTurnLocal {
+            session_id: s(),
+            run_id: s(),
+            turn_id: s(),
+            user_message: s(),
+            conductor_goal: s(),
+            mcp_url: s(),
+            mcp_headers: vec![("Authorization".to_string(), "Bearer x".to_string())],
+            acp_program: s(),
+            acp_argv: vec![s()],
+            acp_session_mode: None,
+            live_acp_opt_in: true,
         },
     ]
 }

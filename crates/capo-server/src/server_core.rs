@@ -370,6 +370,166 @@ impl CapoServer {
             ServerResponsePayload::AcpLiveTurn(summary),
         )
     }
+
+    /// SLICE-A (DESIGN-B Layer 2): drive ONE CONDUCTOR turn -- a near-clone of
+    /// [`Self::run_acp_live_turn_local`] with TWO deltas, both at the setup-plan
+    /// stage: (1) capo's in-process HTTP MCP endpoint (`mcp_url`/`mcp_headers`)
+    /// is forwarded into `session/new` via `with_http_mcp_server`, so the
+    /// conductor can dial the "capo tools" directly; (2) the prompt is composed
+    /// as `"{conductor_goal}\n\n[user]: {user_message}"`. Everything else --
+    /// the gate, `run_refs_for_session_run`, the adapter build, `spawn_live_session`,
+    /// `drive_acp_live_turn` (so every tool call still round-trips through the
+    /// `ControllerAcpDecider` permission seam), and `finalize` -- is reused
+    /// unchanged.
+    pub(crate) fn run_conductor_turn_local(
+        &self,
+        request_id: String,
+        origin: ServerClientOrigin,
+        req: ConductorTurnLocalRequest,
+    ) -> ServerResult<ServerResponse> {
+        use capo_adapters::{AcpAdapter, AcpLiveAdapter, TurnRequest, acp_live_gate_open};
+        use capo_core::TurnId;
+
+        // GATE: same fail-closed contract as run_acp_live_turn_local.
+        if !req.live_acp_opt_in || !acp_live_gate_open() {
+            return Err(ServerError::AdapterFixture(
+                "conductor turn is fail-closed: set live_acp_opt_in AND \
+                 CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 CAPO_SERVER_RUN_ACP_LIVE=1"
+                    .to_string(),
+            ));
+        }
+
+        let session_id = SessionId::new(req.session_id);
+        let run_id = RunId::new(req.run_id);
+        let (_session, _run, _agent, refs) =
+            self.run_refs_for_session_run(&session_id, &run_id)?;
+
+        // The conductor runs in the project dir by default (it delegates real
+        // work to workers, which carry their own worktrees).
+        let workspace_root = self.codex_chat.acp_workspace_root.clone();
+        let artifact_root = self.codex_chat.acp_artifact_root.clone();
+
+        let wrappers = capo_tools::RuntimeToolWrappers::new(
+            capo_tools::RuntimeToolConfig::local_workspace(
+                workspace_root.clone(),
+                artifact_root.clone(),
+            ),
+        );
+        let policy = if req.acp_session_mode.is_some() {
+            capo_tools::PermissionPolicy::allow_trusted_local()
+        } else {
+            capo_tools::PermissionPolicy::static_read_only_local()
+        };
+        let mut setup_plan = AcpAdapter::session_setup_plan(
+            &wrappers.list_tools(),
+            &policy,
+            SessionId::new(format!("conductor-setup-{session_id}")),
+        );
+        // DELTA 1: forward capo's in-process HTTP MCP endpoint into session/new.
+        setup_plan = setup_plan.with_http_mcp_server(req.mcp_url, req.mcp_headers);
+        if let Some(mode) = req.acp_session_mode.clone() {
+            setup_plan = setup_plan
+                .with_session_mode(mode)
+                .with_workspace_root(workspace_root.clone());
+        }
+        let adapter = AcpLiveAdapter::new(
+            req.acp_program,
+            req.acp_argv,
+            workspace_root.clone(),
+            artifact_root,
+            setup_plan,
+        );
+
+        let turn_id = TurnId::new(req.turn_id.clone());
+        let mut session = adapter
+            .spawn_live_session(&turn_id)
+            .map_err(|error| ServerError::AdapterFixture(format!("conductor spawn: {error}")))?;
+        let transport = session
+            .take_transport()
+            .ok_or_else(|| ServerError::AdapterFixture("conductor transport already taken".into()))?;
+
+        // DELTA 2: compose the conductor prompt.
+        let goal = format!("{}\n\n[user]: {}", req.conductor_goal, req.user_message);
+        let outcome = self
+            .controller
+            .drive_acp_live_turn(
+                &refs,
+                &adapter,
+                transport,
+                &TurnRequest {
+                    turn_id: turn_id.clone(),
+                    agent_name: "conductor".to_string(),
+                    goal: goal.clone(),
+                },
+            )
+            .map_err(ServerError::State)?;
+
+        session
+            .finalize("server conductor turn complete")
+            .map_err(|error| ServerError::AdapterFixture(format!("conductor finalize: {error}")))?;
+
+        let summary = AcpLiveTurnSummary {
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
+            turn_id: req.turn_id.clone(),
+            workspace_root: workspace_root.to_string_lossy().to_string(),
+            event_count: outcome.transcript.events.len(),
+            appended_event_count: outcome.ingest.appended_event_count,
+            stop_reason: outcome.transcript.stop_reason.clone(),
+        };
+
+        let command_hash = command_identity_hash(format!(
+            "run_conductor_turn_local:{}:{}:{}:{}",
+            session_id,
+            run_id,
+            req.turn_id,
+            stable_hash(goal.as_bytes())
+        ));
+        let command = self.command_envelope(
+            &request_id,
+            &origin,
+            &command_hash,
+            CommandTarget::Session(session_id.clone()),
+            CommandIntent::SendTask,
+            Some(goal),
+        );
+        self.record_server_request_handled(
+            &command,
+            &origin,
+            "run_conductor_turn_local",
+            Some(&refs),
+            Some(serde_json::json!({
+                "turn_id": summary.turn_id,
+                "workspace_root": summary.workspace_root,
+                "event_count": summary.event_count,
+                "appended_event_count": summary.appended_event_count,
+                "stop_reason": summary.stop_reason,
+            })),
+        )
+        .map_err(ServerError::State)?;
+
+        self.response(
+            request_id,
+            origin,
+            ServerResponsePayload::AcpLiveTurn(summary),
+        )
+    }
+}
+
+/// SLICE-A (DESIGN-B Layer 2): the flat inputs for
+/// [`CapoServer::run_conductor_turn_local`].
+pub(crate) struct ConductorTurnLocalRequest {
+    pub session_id: String,
+    pub run_id: String,
+    pub turn_id: String,
+    pub user_message: String,
+    pub conductor_goal: String,
+    pub mcp_url: String,
+    pub mcp_headers: Vec<(String, String)>,
+    pub acp_program: String,
+    pub acp_argv: Vec<String>,
+    pub acp_session_mode: Option<String>,
+    pub live_acp_opt_in: bool,
 }
 
 /// SLICE-A: the flat inputs for [`CapoServer::run_acp_live_turn_local`].

@@ -14,6 +14,7 @@ use capo_state::{
     ProjectionRecord, RedactionState,
 };
 
+mod acp_mcp_http;
 mod controller_routing;
 mod dashboard;
 mod dispatch;
@@ -27,10 +28,13 @@ mod turn_orchestration;
 mod types;
 mod util;
 
+pub use acp_mcp_http::{
+    AcpWorkerToolConfig, McpState, ToolInvocation, router as acp_mcp_router,
+};
 use controller_routing::ControllerRoute;
 pub use controller_routing::{ControllerSelection, REAL_CONTROLLER_OPT_IN_ENV};
 use dispatch::DispatchExecutionOutcome;
-use server_core::AcpLiveTurnLocalRequest;
+use server_core::{AcpLiveTurnLocalRequest, ConductorTurnLocalRequest};
 pub use event_tail::{EventStream, TailRecvError};
 use live_provider::{LiveProviderLocalRunRequest, LiveProviderPreflightRequest};
 pub use safety_floor::{
@@ -1512,6 +1516,35 @@ impl CapoServer {
                     workspace_root,
                     live_acp_opt_in,
                     acp_session_mode,
+                },
+            ),
+            ServerCommand::RunConductorTurnLocal {
+                session_id,
+                run_id,
+                turn_id,
+                user_message,
+                conductor_goal,
+                mcp_url,
+                mcp_headers,
+                acp_program,
+                acp_argv,
+                acp_session_mode,
+                live_acp_opt_in,
+            } => self.run_conductor_turn_local(
+                request_id,
+                origin,
+                ConductorTurnLocalRequest {
+                    session_id,
+                    run_id,
+                    turn_id,
+                    user_message,
+                    conductor_goal,
+                    mcp_url,
+                    mcp_headers,
+                    acp_program,
+                    acp_argv,
+                    acp_session_mode,
+                    live_acp_opt_in,
                 },
             ),
             ServerCommand::Recover => {

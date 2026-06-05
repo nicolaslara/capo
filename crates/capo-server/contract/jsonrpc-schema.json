@@ -270,7 +270,8 @@
             "goal_report",
             "continue_goal",
             "register_runtime_target",
-            "replay_runner_events"
+            "replay_runner_events",
+            "run_conductor_turn_local"
           ],
           "type": "string"
         },

@@ -352,6 +352,35 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             "live_acp_opt_in": live_acp_opt_in,
             "acp_session_mode": acp_session_mode,
         }),
+        ServerCommand::RunConductorTurnLocal {
+            session_id,
+            run_id,
+            turn_id,
+            user_message,
+            conductor_goal,
+            mcp_url,
+            mcp_headers,
+            acp_program,
+            acp_argv,
+            acp_session_mode,
+            live_acp_opt_in,
+        } => json!({
+            "type": "run_conductor_turn_local",
+            "session_id": session_id,
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "user_message": user_message,
+            "conductor_goal": conductor_goal,
+            "mcp_url": mcp_url,
+            "mcp_headers": mcp_headers
+                .iter()
+                .map(|(name, val)| json!({ "name": name, "value": val }))
+                .collect::<Vec<_>>(),
+            "acp_program": acp_program,
+            "acp_argv": acp_argv,
+            "acp_session_mode": acp_session_mode,
+            "live_acp_opt_in": live_acp_opt_in,
+        }),
         ServerCommand::Recover => json!({ "type": "recover" }),
         ServerCommand::Subscribe {
             session_id,
@@ -762,6 +791,41 @@ pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
             workspace_root: optional_string(value, "workspace_root")?,
             live_acp_opt_in: required_bool(value, "live_acp_opt_in")?,
             acp_session_mode: optional_string(value, "acp_session_mode")?,
+        }),
+        "run_conductor_turn_local" => Ok(ServerCommand::RunConductorTurnLocal {
+            session_id: required_string(value, "session_id")?,
+            run_id: required_string(value, "run_id")?,
+            turn_id: required_string(value, "turn_id")?,
+            user_message: required_string(value, "user_message")?,
+            conductor_goal: required_string(value, "conductor_goal")?,
+            mcp_url: required_string(value, "mcp_url")?,
+            mcp_headers: value
+                .get("mcp_headers")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            let name = item.get("name")?.as_str()?.to_string();
+                            let val = item.get("value")?.as_str()?.to_string();
+                            Some((name, val))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            acp_program: required_string(value, "acp_program")?,
+            acp_argv: value
+                .get("acp_argv")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            acp_session_mode: optional_string(value, "acp_session_mode")?,
+            live_acp_opt_in: required_bool(value, "live_acp_opt_in")?,
         }),
         "recover" => Ok(ServerCommand::Recover),
         "subscribe" => Ok(ServerCommand::Subscribe {

@@ -17,7 +17,7 @@ mod permission_request;
 mod provider_parsers;
 mod scripted_mock_agent;
 
-pub use acp_client::{AcpClientCall, AcpPermissionProfile, AcpSessionSetupPlan};
+pub use acp_client::{AcpClientCall, AcpHttpMcpServer, AcpPermissionProfile, AcpSessionSetupPlan};
 pub use acp_live::{
     ACP_LIVE_PREFLIGHT_OPT_IN_ENV, ACP_LIVE_RUN_OPT_IN_ENV, AcpLiveAdapter, AcpLiveError,
     LiveAcpSession, acp_live_gate_open, turn_output_from_transcript,

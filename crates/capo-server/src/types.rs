@@ -400,6 +400,45 @@ pub enum ServerCommand {
         /// default mode.
         acp_session_mode: Option<String>,
     },
+    /// SLICE-A (DESIGN-B Layer 2): drive ONE CONDUCTOR turn -- a claude-code-acp
+    /// session the user chats with, with capo's in-process "capo tools" HTTP MCP
+    /// endpoint forwarded into its `session/new` `mcpServers` array so the
+    /// conductor can call `start_agent`/`list_agents`/etc. to manage worker
+    /// agents (the L1->L2 hop).
+    ///
+    /// A sibling of [`Self::RunAcpLiveTurnLocal`] (NOT an overload) so that
+    /// command's contract -- and `acp_dispatch_smoke.rs` /
+    /// `acp_live_bridge_smoke.rs` -- stay untouched. Reuses the same
+    /// `drive_acp_live_turn` machinery, same gate, same controller permission
+    /// seam (`ControllerAcpDecider`), so every conductor tool call still
+    /// round-trips through `session/request_permission`.
+    ///
+    /// The two deltas vs `RunAcpLiveTurnLocal`: (1) `mcp_url`/`mcp_headers` are
+    /// forwarded into `session/new` via `with_http_mcp_server`; (2) the prompt is
+    /// composed as `"{conductor_goal}\n\n[user]: {user_message}"`.
+    RunConductorTurnLocal {
+        session_id: String,
+        run_id: String,
+        turn_id: String,
+        /// The user's chat message to the conductor for this turn.
+        user_message: String,
+        /// The conductor system/goal prefix prepended to the user message.
+        conductor_goal: String,
+        /// The capo in-process HTTP MCP endpoint URL the conductor dials directly
+        /// (e.g. `http://127.0.0.1:PORT/mcp`).
+        mcp_url: String,
+        /// Header `(name, value)` pairs forwarded with the MCP entry (e.g. the
+        /// bearer token gating the capo endpoint).
+        mcp_headers: Vec<(String, String)>,
+        /// The ACP agent program to spawn (a local stub for the slice; the real
+        /// `npx @zed-industries/claude-code-acp` bridge for ops).
+        acp_program: String,
+        acp_argv: Vec<String>,
+        /// Optional ACP session mode, same semantics as `RunAcpLiveTurnLocal`.
+        acp_session_mode: Option<String>,
+        /// Explicit per-command opt-in, required ON TOP of the env gate.
+        live_acp_opt_in: bool,
+    },
     Recover,
     /// Tail the append-only event log (ST4). The subscriber catches up on the
     /// backlog strictly after `from_sequence` (optionally filtered to one
@@ -1696,6 +1735,21 @@ fn default_request_id(command: &ServerCommand) -> String {
             slug(run_id),
             slug(turn_id),
             stable_hash(goal.as_bytes())
+        ),
+        ServerCommand::RunConductorTurnLocal {
+            session_id,
+            run_id,
+            turn_id,
+            user_message,
+            conductor_goal,
+            ..
+        } => format!(
+            "server-conductor-turn-{}-{}-{}-{}-{}",
+            slug(session_id),
+            slug(run_id),
+            slug(turn_id),
+            stable_hash(conductor_goal.as_bytes()),
+            stable_hash(user_message.as_bytes())
         ),
         ServerCommand::Recover => "server-recover".to_string(),
         ServerCommand::Subscribe {
