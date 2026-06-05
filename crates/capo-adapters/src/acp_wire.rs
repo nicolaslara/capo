@@ -364,7 +364,12 @@ impl<'d, T: AcpTransport> AcpWireClient<'d, T> {
                     .iter()
                     .map(|(name, value)| json!({ "name": name, "value": value }))
                     .collect();
-                json!({ "type": "http", "url": server.url, "headers": headers })
+                // claude-code-acp keys each forwarded server by `name`
+                // (acp-agent.js: `mcpServers[server.name]`), and the ACP
+                // `McpServer` schema REQUIRES `name` — omitting it makes the real
+                // bridge reject `session/new` with "Invalid params". capo forwards
+                // exactly one endpoint, so a constant name is sufficient.
+                json!({ "name": "capo", "type": "http", "url": server.url, "headers": headers })
             })
             .collect();
         let params = json!({ "cwd": cwd, "mcpServers": mcp_servers });
