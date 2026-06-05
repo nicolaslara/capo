@@ -213,7 +213,8 @@ fn tool_schemas() -> Value {
                 "properties": {
                     "task": {"type": "string", "description": "The goal/instruction for the worker agent."},
                     "worktree": {"type": "string", "description": "Optional absolute path to a confined worktree to run in; defaults to the project dir."},
-                    "name": {"type": "string", "description": "Optional worker name; auto-derived from the task if omitted."}
+                    "name": {"type": "string", "description": "Optional worker name; auto-derived from the task if omitted."},
+                    "detached": {"type": "boolean", "description": "When true, start the worker and return immediately (status:running) instead of blocking on its turn, so you (the conductor) stay responsive; poll progress with review_agent/list_agents. Default false."}
                 },
                 "required": ["task"]
             }
@@ -301,6 +302,9 @@ fn tool_start_agent(state: &McpState, args: &Value) -> Result<String, String> {
         .and_then(Value::as_str)
         .ok_or("start_agent requires `task`")?;
     let worktree = args.get("worktree").and_then(Value::as_str);
+    // Depth discipline: when detached, the conductor (L1) is NOT blocked on the
+    // worker turn (L2) — start_agent returns immediately with status:running.
+    let detached = args.get("detached").and_then(Value::as_bool).unwrap_or(false);
     let name = args
         .get("name")
         .and_then(Value::as_str)
@@ -363,6 +367,44 @@ fn tool_start_agent(state: &McpState, args: &Value) -> Result<String, String> {
          commands like cat/printf/echo). Use the file tools so the host can apply \
          and supervise every change.\n\nTask: {task}"
     );
+    // DETACHED (depth discipline): spawn the worker turn on a background thread and
+    // return immediately so the conductor stays responsive. The worker turn drives
+    // through the same RunAcpLiveTurnLocal seam and appends to the event log as
+    // usual; the conductor polls via review_agent/list_agents. Default behavior
+    // (the synchronous drive below) is unchanged.
+    if detached {
+        let server = state.server.clone();
+        let (sid, rid, tid) = (session_id.clone(), run_id.clone(), turn_id.clone());
+        let program = state.worker.acp_program.clone();
+        let argv = state.worker.acp_argv.clone();
+        let mode = state.worker.acp_session_mode.clone();
+        let ws = workspace_root.clone();
+        std::thread::spawn(move || {
+            let _ = server.handle(ServerRequest::cli(ServerCommand::RunAcpLiveTurnLocal {
+                session_id: sid,
+                run_id: rid,
+                goal: worker_goal,
+                turn_id: tid,
+                acp_program: program,
+                acp_argv: argv,
+                workspace_root: ws,
+                live_acp_opt_in: true,
+                acp_session_mode: mode,
+            }));
+        });
+        return Ok(json!({
+            "agent_id": agent_id,
+            "name": name,
+            "session_id": session_id,
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "status": "running",
+            "detached": true,
+            "workspace_root": workspace_root,
+        })
+        .to_string());
+    }
+
     let resp = state
         .server
         .handle(ServerRequest::cli(ServerCommand::RunAcpLiveTurnLocal {

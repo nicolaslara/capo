@@ -226,3 +226,64 @@ async fn mcp_http_server_advertises_and_dispatches_capo_tools() {
 
     server_task.abort();
 }
+
+/// `start_agent {detached:true}` returns IMMEDIATELY with status:running (the
+/// depth-discipline responsiveness contract — the conductor is not blocked on the
+/// worker turn), and the worker turn still runs on a background thread and
+/// produces the OBSERVED file. Deterministic (/bin/sh stub worker, no live bridge).
+#[tokio::test]
+async fn start_agent_detached_returns_running_and_writes_in_background() {
+    unsafe {
+        std::env::set_var("CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT", "1");
+        std::env::set_var("CAPO_SERVER_RUN_ACP_LIVE", "1");
+    }
+    let root = capo_tmptest::TempRoot::new("capo-mcp-http-detached");
+    let server = CapoServer::open(ProjectId::new("project-capo"), root.path()).expect("server");
+    let workspace = root.join("acp-ws");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+    let program = write_file_acp_agent_stub(&root.join("acp-stub"), "out.txt", "hi from acp");
+
+    let bearer = "test-bearer-token".to_string();
+    let worker = AcpWorkerToolConfig {
+        acp_program: program,
+        acp_argv: Vec::new(),
+        default_workspace_root: Some(workspace.to_string_lossy().to_string()),
+        acp_session_mode: None,
+    };
+    let app = acp_mcp_router(McpState::new(server.clone(), worker, bearer.clone()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server_task = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve"); });
+
+    // The observed file must NOT exist before the call.
+    assert!(!workspace.join("out.txt").exists());
+
+    let call = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "start_agent", "arguments": {"task": "write a file", "name": "w", "detached": true}}
+    });
+    let (status, body) = http_request(addr, "POST", &bearer, Some(&call)).await;
+    assert_eq!(status, 200);
+    let v: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["result"]["isError"], false, "detached start must succeed: {body}");
+    let text = v["result"]["content"][0]["text"].as_str().expect("text");
+    let summary: Value = serde_json::from_str(text).expect("summary json");
+    // The defining contract: it returned status:running (NOT a completed turn with
+    // a stop_reason) — i.e. the conductor was not blocked on the worker turn.
+    assert_eq!(summary["status"], "running", "detached returns running: {summary}");
+    assert_eq!(summary["detached"], true);
+    assert!(summary.get("stop_reason").is_none(), "detached must not carry a completed turn outcome");
+
+    // The background worker thread still drives the turn and writes the file.
+    let mut wrote = false;
+    for _ in 0..50 {
+        if std::fs::read_to_string(workspace.join("out.txt")).ok().as_deref() == Some("hi from acp") {
+            wrote = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(wrote, "the detached worker must write the observed file in the background within 5s");
+
+    server_task.abort();
+}
