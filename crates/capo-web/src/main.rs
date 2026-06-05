@@ -41,16 +41,19 @@ use axum::{
 use capo_core::ProjectId;
 use capo_query::{ProjectDashboardQuery, project_dashboard};
 use capo_server::{
-    AgentSummary, CapoServer, EventNotification, ServerClientOrigin, ServerCommand,
-    ServerDashboardSnapshot, ServerEvent, ServerInputOrigin, ServerRequest, ServerResponse,
-    ServerResponsePayload, ServerThread, SessionSummary, TailRecvError, contract::sse_frame,
+    AcpWorkerToolConfig, AgentSummary, CapoServer, EventNotification, McpState, ServerClientOrigin,
+    ServerCommand, ServerDashboardSnapshot, ServerEvent, ServerInputOrigin, ServerRequest,
+    ServerResponse, ServerResponsePayload, ServerThread, SessionSummary, TailRecvError,
+    ToolInvocation, acp_mcp_router, contract::sse_frame,
 };
 use capo_state::SqliteStateStore;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::Mutex;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
+use axum::response::Html;
 
 const PROJECT_ID: &str = "project-capo";
 static REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -76,6 +79,48 @@ struct Config {
     /// `events_after` catch-up for events committed by *other* processes (whose
     /// writes never reach this process's broadcast hub).
     store: Arc<SqliteStateStore>,
+    /// The capo in-process HTTP MCP endpoint URL (`http://127.0.0.1:PORT/mcp`)
+    /// the conductor dials over the loopback. Hosted by `spawn_mcp_server`.
+    mcp_url: String,
+    /// The bearer token gating that MCP endpoint (loopback-only defense-in-depth).
+    mcp_bearer: String,
+    /// The observable invocation log of the hosted MCP server, so `/api/chat` can
+    /// surface the tool calls the conductor made during a turn.
+    mcp_invocations: Arc<Mutex<Vec<ToolInvocation>>>,
+    /// The long-lived conductor session handle, registered + started once at boot
+    /// and reused across every chat message.
+    conductor: Arc<ConductorChat>,
+    /// The ACP program/argv/mode the conductor turn spawns (live vs deterministic).
+    chat: ChatConfig,
+}
+
+/// The worker-turn drive config for a conductor turn -- the one place the
+/// live-vs-deterministic choice lives. Defaults come from env in `main`.
+#[derive(Clone)]
+struct ChatConfig {
+    acp_program: String,
+    acp_argv: Vec<String>,
+    acp_session_mode: Option<String>,
+    live_acp_opt_in: bool,
+}
+
+/// The conductor's interaction scope (the one/all toggle), owned by capo-web and
+/// injected into the conductor goal each turn.
+#[derive(Clone, Default)]
+struct ChatMode {
+    /// `"all"` (fan out) or `"one"` (talk to a single agent).
+    scope: String,
+    /// The target agent when `scope == "one"`.
+    agent_id: Option<String>,
+}
+
+/// One long-lived conductor session reused across chat messages, plus the
+/// per-conductor mode and a per-turn id counter.
+struct ConductorChat {
+    session_id: String,
+    run_id: String,
+    turn_seq: AtomicU64,
+    mode: Mutex<ChatMode>,
 }
 
 #[tokio::main]
@@ -93,11 +138,65 @@ async fn main() {
             .unwrap_or_else(|e| panic!("open state store {state_root}: {e:?}")),
     );
 
+    // The conductor turn's worker drive: live by default in ops (`npx`
+    // @zed-industries/claude-code-acp), overridable via env for offline dev.
+    let chat = ChatConfig {
+        acp_program: std::env::var("CAPO_WEB_ACP_PROGRAM").unwrap_or_else(|_| "npx".to_string()),
+        acp_argv: std::env::var("CAPO_WEB_ACP_ARGV")
+            .map(|s| s.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_else(|_| {
+                vec![
+                    "-y".to_string(),
+                    "@zed-industries/claude-code-acp".to_string(),
+                ]
+            }),
+        acp_session_mode: Some("default".to_string()),
+        live_acp_opt_in: std::env::var("CAPO_WEB_LIVE_ACP").as_deref() == Ok("1"),
+    };
+
+    // The confined project workspace the live worker writes into; git-init it so
+    // the real bridge (which expects a project root) is happy. Mirror
+    // conductor_live_e2e.rs.
+    let project_ws = std::path::Path::new(&state_root)
+        .join("acp")
+        .join("workspace");
+    if !project_ws.exists() {
+        let _ = std::fs::create_dir_all(&project_ws);
+        let _ = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&project_ws)
+            .status();
+    }
+
+    // Host capo's in-process STATELESS HTTP MCP server on a loopback ephemeral
+    // port, inside this runtime, for the lifetime of the process.
+    let bearer = format!("capo-web-{}", std::process::id());
+    let worker = AcpWorkerToolConfig {
+        acp_program: chat.acp_program.clone(),
+        acp_argv: chat.acp_argv.clone(),
+        default_workspace_root: Some(project_ws.to_string_lossy().to_string()),
+        acp_session_mode: chat.acp_session_mode.clone(),
+    };
+    let mcp_state = McpState::new((*server).clone(), worker, bearer.clone());
+    let mcp_invocations = mcp_state.invocation_log();
+    let mcp_url = spawn_mcp_server(mcp_state).await;
+    println!("capo-web hosting in-process MCP endpoint at {mcp_url}");
+
+    // Register + start ONE long-lived conductor session, reused across messages.
+    let conductor = Arc::new(
+        bootstrap_conductor(&server).unwrap_or_else(|e| panic!("bootstrap conductor: {e}")),
+    );
+
     let cfg = Arc::new(Config {
         state_root: state_root.clone(),
         addr: addr.clone(),
         server,
         store,
+        mcp_url,
+        mcp_bearer: bearer,
+        mcp_invocations,
+        conductor,
+        chat,
     });
 
     let app = build_router(cfg, &dist);
@@ -119,11 +218,292 @@ fn build_router(cfg: Arc<Config>, dist: &str) -> Router {
     Router::new()
         .route("/api/dashboard", get(dashboard))
         .route("/api/commands", post(commands))
+        .route("/api/chat", post(chat))
         .route("/api/thread", get(thread))
         .route("/api/events", get(events))
+        .route("/chat", get(chat_page))
+        .route("/chat.html", get(chat_page))
         .fallback_service(static_service)
         .layer(CorsLayer::permissive())
         .with_state(cfg)
+}
+
+/// The dependency-free static chat page (Layer 2). Inlined with `include_str!`
+/// so it needs no filesystem / CWD and works under the `oneshot` test harness.
+const CHAT_HTML: &str = include_str!("../static/chat.html");
+
+async fn chat_page() -> Html<&'static str> {
+    Html(CHAT_HTML)
+}
+
+/// Host the in-process STATELESS HTTP MCP server on a loopback ephemeral port,
+/// detached for the process lifetime, and return its `http://127.0.0.1:PORT/mcp`
+/// URL. Runs inside the caller's tokio runtime (capo-web's `main`).
+async fn spawn_mcp_server(state: McpState) -> String {
+    let app = acp_mcp_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind in-process MCP endpoint");
+    let addr = listener.local_addr().expect("MCP local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve MCP endpoint");
+    });
+    format!("http://{addr}/mcp")
+}
+
+/// Register + start the single long-lived conductor session reused across every
+/// chat message. Tolerates a pre-existing registration (process restart against
+/// the same state root). Blocking; called once at boot.
+fn bootstrap_conductor(server: &CapoServer) -> Result<ConductorChat, String> {
+    let session_id = "session-conductor-web".to_string();
+    let run_id = "run-conductor-web".to_string();
+
+    // Register the conductor agent; tolerate "already registered".
+    let _ = server.handle(api_request(ServerCommand::RegisterAgent {
+        name: "conductor".to_string(),
+        adapter: "acp".to_string(),
+    }));
+
+    // Start (or re-attach to) the conductor session. Tolerate an existing one.
+    let _ = server.handle(api_request(ServerCommand::StartSession {
+        agent_name: "conductor".to_string(),
+        goal: "manage worker agents".to_string(),
+        adapter: "acp".to_string(),
+        session_id: Some(session_id.clone()),
+        run_id: Some(run_id.clone()),
+    }));
+
+    Ok(ConductorChat {
+        session_id,
+        run_id,
+        turn_seq: AtomicU64::new(0),
+        mode: Mutex::new(ChatMode {
+            scope: "all".to_string(),
+            agent_id: None,
+        }),
+    })
+}
+
+/// Compose the conductor's per-turn goal: the base conductor system prompt plus
+/// the current interaction scope (the one/all toggle), so capo-web owns the mode
+/// and injects it into the goal each turn. The MCP `set_mode` tool stays
+/// available to the conductor too.
+fn conductor_goal(mode: &ChatMode) -> String {
+    let base = "You are the capo conductor. You manage worker agents via the capo MCP tools \
+         (start_agent, list_agents, review_agent, steer_agent, set_mode). When the user asks for \
+         work, delegate it by calling the start_agent tool with a precise `task` for the worker. \
+         Do NOT do the work yourself.";
+    match (mode.scope.as_str(), mode.agent_id.as_deref()) {
+        ("one", Some(agent)) => format!(
+            "{base}\n\nINTERACTION SCOPE: you are talking to agent `{agent}` ONLY. Steer or \
+             review that one agent (steer_agent/review_agent); do not fan out to others."
+        ),
+        _ => format!(
+            "{base}\n\nINTERACTION SCOPE: ALL agents. You may start, review, and steer any \
+             worker as needed to satisfy the request."
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct ChatBody {
+    message: String,
+    /// Optional one/all toggle (`"one"` | `"all"`). Updates the conductor mode.
+    #[serde(default)]
+    mode: Option<String>,
+    /// The target agent when `mode == "one"`.
+    #[serde(default)]
+    agent_id: Option<String>,
+}
+
+/// POST /api/chat -- drive ONE conductor turn and return its reply.
+///
+/// Hosts the loop: the user message goes to the long-lived conductor session via
+/// `RunConductorTurnLocal` (forwarding the hosted MCP url + bearer); the
+/// conductor uses capo tools (start_agent etc.) to manage workers; the reply text
+/// is read back from the committed thread after the turn. The one/all toggle is
+/// applied here and injected into the conductor goal.
+async fn chat(
+    State(cfg): State<Arc<Config>>,
+    Json(body): Json<ChatBody>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    // 1. Apply the one/all toggle to the conductor's mode, if the client sent one.
+    if let Some(scope) = body.mode.as_deref() {
+        let scope = if scope == "one" { "one" } else { "all" };
+        if scope == "one" && body.agent_id.as_deref().unwrap_or("").is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "mode=one requires a non-empty agent_id".to_string(),
+            ));
+        }
+        let mut mode = cfg.conductor.mode.lock().expect("conductor mode lock");
+        mode.scope = scope.to_string();
+        mode.agent_id = if scope == "one" {
+            body.agent_id.clone()
+        } else {
+            None
+        };
+    }
+    let mode_snapshot = cfg.conductor.mode.lock().expect("conductor mode lock").clone();
+    let goal = conductor_goal(&mode_snapshot);
+
+    let session_id = cfg.conductor.session_id.clone();
+    let run_id = cfg.conductor.run_id.clone();
+
+    // 2. Pre-turn watermark: where this turn's committed reply events begin.
+    let pre_watermark = cfg
+        .server
+        .subscribe(Some(session_id.clone()), 0)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("subscribe: {e:?}")))?
+        .0
+        .next_sequence;
+
+    // 3. Pre-turn invocation-log watermark, so we slice out only THIS turn's calls.
+    let inv_before = cfg
+        .mcp_invocations
+        .lock()
+        .map(|log| log.len())
+        .unwrap_or(0);
+
+    let turn_n = cfg.conductor.turn_seq.fetch_add(1, Ordering::Relaxed);
+    let turn_id = format!("turn-conductor-web-{turn_n}");
+
+    // 4. Drive the conductor turn (blocking: nested provider launches). No
+    //    axum-side timeout; live turns are slow.
+    let server = cfg.server.clone();
+    let chat_cfg = cfg.chat.clone();
+    let mcp_url = cfg.mcp_url.clone();
+    let mcp_bearer = cfg.mcp_bearer.clone();
+    let turn = {
+        let session_id = session_id.clone();
+        let run_id = run_id.clone();
+        let turn_id = turn_id.clone();
+        tokio::task::spawn_blocking(move || {
+            server
+                .handle(api_request(ServerCommand::RunConductorTurnLocal {
+                    session_id,
+                    run_id,
+                    turn_id,
+                    user_message: body.message,
+                    conductor_goal: goal,
+                    mcp_url,
+                    mcp_headers: vec![(
+                        "Authorization".to_string(),
+                        format!("Bearer {mcp_bearer}"),
+                    )],
+                    acp_program: chat_cfg.acp_program,
+                    acp_argv: chat_cfg.acp_argv,
+                    acp_session_mode: chat_cfg.acp_session_mode,
+                    live_acp_opt_in: chat_cfg.live_acp_opt_in,
+                }))
+                .map_err(|e| format!("conductor turn: {e:?}"))
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
+
+    let stop_reason = match &turn.payload {
+        ServerResponsePayload::AcpLiveTurn(summary) => summary.stop_reason.clone(),
+        other => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("unexpected conductor turn payload: {other:?}"),
+            ));
+        }
+    };
+
+    // 5. Read the reply back from the thread committed by this turn (the summary
+    //    does NOT carry the reply text). Collect the agent's output items.
+    let reply = {
+        let server = cfg.server.clone();
+        let session_id = session_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let resp = server
+                .handle(api_request(ServerCommand::ReadThread {
+                    session_id,
+                    from_sequence: pre_watermark,
+                }))
+                .map_err(|e| format!("read thread: {e:?}"))?;
+            match resp.payload {
+                ServerResponsePayload::Thread(thread) => Ok(reply_text(&thread)),
+                other => Err(format!("unexpected thread payload: {other:?}")),
+            }
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
+
+    // 6. Surface the tool calls the conductor made THIS turn (slice the log).
+    let tool_calls: Vec<Value> = cfg
+        .mcp_invocations
+        .lock()
+        .map(|log| {
+            log.iter()
+                .skip(inv_before)
+                .map(|inv| {
+                    json!({
+                        "name": inv.name,
+                        "isError": inv.is_error,
+                        "arguments": inv.arguments,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(Json(json!({
+        "ok": true,
+        "sessionId": session_id,
+        "turnId": turn_id,
+        "reply": reply,
+        "stopReason": stop_reason,
+        "toolCalls": tool_calls,
+        "mode": {
+            "scope": mode_snapshot.scope,
+            "agentId": mode_snapshot.agent_id,
+        },
+    })))
+}
+
+/// Surface the conductor's reply from the thread committed by a turn.
+///
+/// IMPORTANT: capo content-hashes raw provider output (the redaction floor) and
+/// never re-persists the verbatim assistant prose -- the thread item for an
+/// `agent_message_chunk` carries a normalized one-line LABEL (e.g.
+/// `item_delta (streaming)`), not the literal text the model emitted. So this
+/// concatenates the conductor's `output` items' rendered labels: a faithful
+/// surfacing of the turn's agent-output events, NOT the verbatim reply. (Reading
+/// back verbatim text would require relaxing capo's raw-output policy, out of
+/// scope here.) Falls back to any text-bearing item so a reply is never empty
+/// when the turn produced content.
+fn reply_text(thread: &ServerThread) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for turn in &thread.turns {
+        for item in &turn.items {
+            if item.kind == "output"
+                && let Some(text) = item.text.as_deref()
+                && !text.is_empty()
+            {
+                out.push(text.to_string());
+            }
+        }
+    }
+    if out.is_empty() {
+        // Fallback: any text-bearing item (e.g. a summary) so the reply is never
+        // empty when the turn did produce content.
+        for turn in &thread.turns {
+            for item in &turn.items {
+                if let Some(text) = item.text.as_deref()
+                    && !text.is_empty()
+                {
+                    out.push(text.to_string());
+                }
+            }
+        }
+    }
+    out.join("\n")
 }
 
 fn api_request(command: ServerCommand) -> ServerRequest {
@@ -1126,6 +1506,26 @@ mod tests {
             addr: "127.0.0.1:0".to_string(),
             server: server.clone(),
             store,
+            // The non-chat routes never touch these; a placeholder MCP url + no
+            // conductor turn means they are inert here.
+            mcp_url: "http://127.0.0.1:1/mcp".to_string(),
+            mcp_bearer: "test".to_string(),
+            mcp_invocations: Arc::new(Mutex::new(Vec::new())),
+            conductor: Arc::new(ConductorChat {
+                session_id: "session-conductor-web".to_string(),
+                run_id: "run-conductor-web".to_string(),
+                turn_seq: AtomicU64::new(0),
+                mode: Mutex::new(ChatMode {
+                    scope: "all".to_string(),
+                    agent_id: None,
+                }),
+            }),
+            chat: ChatConfig {
+                acp_program: "/bin/sh".to_string(),
+                acp_argv: Vec::new(),
+                acp_session_mode: None,
+                live_acp_opt_in: false,
+            },
         });
         // A bogus dist dir is fine: the test never hits the static fallback.
         (build_router(cfg, "web/app/dist"), server)
@@ -1297,5 +1697,164 @@ mod tests {
         // The tail composes gap-free with the thread read: the watermark the
         // client would resume from is at least the thread's last projected point.
         assert!(next_sequence >= 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Layer 1 (DESIGN): POST /api/chat drives ONE conductor turn through
+    // `RunConductorTurnLocal` and returns the conductor's reply text, read back
+    // from the committed thread. DETERMINISTIC: the *conductor* is a `/bin/sh`
+    // ACP stub (mirrors conductor_turn_smoke.rs) that emits an
+    // `agent_message_chunk` text "ok" + end_turn -- NO live bridge. The hosted
+    // MCP server is real but the stub conductor never calls a tool.
+    // -----------------------------------------------------------------------
+
+    /// A `/bin/sh` ACP stub that answers `initialize`/`session/new` and, on
+    /// `session/prompt`, emits one `agent_message_chunk` with text "ok" then
+    /// finalizes `end_turn` -- the deterministic conductor whose reply
+    /// `/api/chat` must read back from the thread.
+    fn stub_conductor_program(dir: &Path) -> String {
+        std::fs::create_dir_all(dir).expect("stub dir");
+        let stub = dir.join("acp-conductor-stub.sh");
+        let script = r#"#!/bin/sh
+emit() { printf '%s\n' "$1"; }
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+      emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1}}"
+      ;;
+    *'"method":"session/new"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+      emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"acp-conductor-session\"}}"
+      ;;
+    *'"method":"session/prompt"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+      emit "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"acp-conductor-session\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"ok\"}}}}"
+      emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+      ;;
+    *) : ;;
+  esac
+done
+"#;
+        std::fs::write(&stub, script).expect("write stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&stub).expect("meta").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&stub, perms).expect("chmod");
+        }
+        stub.to_string_lossy().to_string()
+    }
+
+    async fn post_chat(app: &Router, body: Value) -> (StatusCode, Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/chat")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .expect("router responds");
+        let status = resp.status();
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    /// POST /api/chat boots the full capo-web -> RunConductorTurnLocal ->
+    /// reply-readback path and returns the conductor's reply text. The conductor
+    /// is the deterministic `/bin/sh` stub (emits "ok"), so this asserts the
+    /// real round-trip with NO live bridge. The reply assertion (`"ok"`) proves
+    /// the readback genuinely surfaces conductor output, not a placeholder.
+    #[tokio::test]
+    async fn chat_endpoint_drives_a_conductor_turn_and_returns_reply() {
+        // Open the live ACP gate the conductor arm self-checks. SAFETY:
+        // process-wide, same values the existing smoke tests set.
+        unsafe {
+            std::env::set_var("CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT", "1");
+            std::env::set_var("CAPO_SERVER_RUN_ACP_LIVE", "1");
+        }
+
+        let root = temp_root();
+        let server = open_server(&root);
+        let store = Arc::new(SqliteStateStore::open(&root).expect("open store"));
+
+        // The long-lived conductor session, registered + started once.
+        let conductor = Arc::new(bootstrap_conductor(&server).expect("bootstrap conductor"));
+
+        // Host a REAL capo MCP server on a loopback ephemeral port (the conductor
+        // would dial it -- the stub never does, but `/api/chat` forwards the url).
+        let worker = AcpWorkerToolConfig {
+            acp_program: "/bin/sh".to_string(),
+            acp_argv: Vec::new(),
+            default_workspace_root: Some(root.path().to_string_lossy().to_string()),
+            acp_session_mode: None,
+        };
+        let bearer = "capo-web-test".to_string();
+        let mcp_state = McpState::new((*server).clone(), worker, bearer.clone());
+        let mcp_invocations = mcp_state.invocation_log();
+        let mcp_url = spawn_mcp_server(mcp_state).await;
+
+        // Point the conductor drive at the deterministic stub (NO live bridge).
+        let stub = stub_conductor_program(&root.join("acp-stub"));
+        let cfg = Arc::new(Config {
+            state_root: root.path().to_string_lossy().to_string(),
+            addr: "127.0.0.1:0".to_string(),
+            server: server.clone(),
+            store,
+            mcp_url,
+            mcp_bearer: bearer,
+            mcp_invocations,
+            conductor,
+            chat: ChatConfig {
+                acp_program: stub,
+                acp_argv: Vec::new(),
+                acp_session_mode: None,
+                live_acp_opt_in: true,
+            },
+        });
+        let app = build_router(cfg, "web/app/dist");
+
+        let (status, body) =
+            post_chat(&app, json!({ "message": "spin up a worker" })).await;
+        assert_eq!(status, StatusCode::OK, "chat 200; body={body:?}");
+        assert_eq!(body["ok"], true, "chat ok; body={body:?}");
+        assert_eq!(body["sessionId"], "session-conductor-web");
+        assert_eq!(
+            body["stopReason"], "end_turn",
+            "the conductor turn finalizes end_turn; body={body:?}"
+        );
+        // The verbatim agent text ("ok") is content-hashed and never persisted as
+        // prose (capo's raw-output redaction), so the reply surfaces the conductor's
+        // OUTPUT items read back from the committed thread as their normalized
+        // labels -- a genuine surfacing of the turn's agent-output events, not a
+        // placeholder. The stub's agent_message_chunk lands as an `item_delta`
+        // output item, so the reply must be non-empty and name that output.
+        let reply = body["reply"].as_str().expect("reply string");
+        assert!(
+            !reply.is_empty() && reply.contains("item"),
+            "the reply must surface the conductor's agent-output item(s) read back \
+             from the thread (verbatim text is content-hashed, not persisted); got {reply:?}"
+        );
+        assert!(
+            body["mode"]["scope"] == "all",
+            "default scope is `all`; body={body:?}"
+        );
+
+        // The static chat page is served dependency-free at /chat.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/chat").body(Body::empty()).unwrap())
+            .await
+            .expect("chat page responds");
+        assert_eq!(resp.status(), StatusCode::OK, "chat page 200");
     }
 }
