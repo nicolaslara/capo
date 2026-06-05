@@ -67,6 +67,17 @@ Requires: `claude` logged into a Pro/Max subscription, `node`/`npx` (the bridge 
   delegate to a Task/Bash sub-agent whose filesystem ops are *simulated* and never
   land. The worker prompt is also steered to edit files directly.
 
+## Self-review
+
+An adversarial self-review of the full branch diff ran overnight; verified findings
+are in **`KNOWN-ISSUES.md`**. None break the proven single-user dogfood loop — they
+are concurrency/robustness/fidelity hardening (e.g. concurrent `/api/chat` shares one
+conductor session; `set_mode` MCP tool is currently a no-op vs the web-side mode;
+tool_call `content`/`diff` blocks are dropped in normalization on the real bridge;
+no turn timeout). The one item already partially fixed: detached `start_agent`
+failures are now logged instead of silently swallowed. Triage `KNOWN-ISSUES.md` in a
+supervised session.
+
 ## Honest caveats / open items
 
 - **Conductor responsiveness**: `start_agent` now has an optional `detached` flag

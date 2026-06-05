@@ -379,8 +379,13 @@ fn tool_start_agent(state: &McpState, args: &Value) -> Result<String, String> {
         let argv = state.worker.acp_argv.clone();
         let mode = state.worker.acp_session_mode.clone();
         let ws = workspace_root.clone();
+        let log_session = session_id.clone();
         std::thread::spawn(move || {
-            let _ = server.handle(ServerRequest::cli(ServerCommand::RunAcpLiveTurnLocal {
+            // Surface failures instead of swallowing them: a discarded Err here
+            // would leave the session looking indefinitely "running" to a later
+            // review_agent/list_agents. (A richer fix appends a terminal
+            // `turn_failed` event; logging is the minimal visibility.)
+            if let Err(error) = server.handle(ServerRequest::cli(ServerCommand::RunAcpLiveTurnLocal {
                 session_id: sid,
                 run_id: rid,
                 goal: worker_goal,
@@ -390,7 +395,9 @@ fn tool_start_agent(state: &McpState, args: &Value) -> Result<String, String> {
                 workspace_root: ws,
                 live_acp_opt_in: true,
                 acp_session_mode: mode,
-            }));
+            })) {
+                eprintln!("capo: detached worker turn failed (session={log_session}): {error:?}");
+            }
         });
         return Ok(json!({
             "agent_id": agent_id,
