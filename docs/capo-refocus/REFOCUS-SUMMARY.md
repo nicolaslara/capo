@@ -69,12 +69,15 @@ Requires: `claude` logged into a Pro/Max subscription, `node`/`npx` (the bridge 
 
 ## Honest caveats / open items
 
-- **Conductor is synchronously blocked** for the worker turn inside `start_agent`
-  (it still works and stays correct, but L1 isn't truly responsive yet). Making
-  `start_agent` async/detached (worker runs in the background, conductor returns an
-  id immediately, poll via `review_agent`/`list_agents`) is the depth-discipline
-  improvement — deferred (it would refactor the validated path; left for a supervised
-  session).
+- **Conductor responsiveness**: `start_agent` now has an optional `detached` flag
+  (commit `9b17208`) — when set, it returns immediately (`status:running`) and the
+  worker runs on a background thread; the conductor polls via `review_agent`/
+  `list_agents`. This is the depth-discipline responsiveness path, added additively
+  and flag-gated (default stays synchronous = the validated path). NOTE: the live web
+  path still calls `start_agent` synchronously by default (so `/api/chat` returns once
+  the worker is done); switching the web path to `detached` (and polling for the
+  result) is a small, deliberate follow-up — left as a choice so the validated
+  synchronous behavior is preserved.
 - **Cut sweep** (bring capo back under control by removing/gating peripheral crates &
   superseded provider paths) is provided as an analysis (`CUT-PLAN.md`), NOT executed
   — those crates weren't created in this effort, so the destructive step is left for
