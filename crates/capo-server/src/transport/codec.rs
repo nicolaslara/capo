@@ -330,6 +330,26 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             "turn_token_cost": turn_token_cost,
             "unattended": unattended,
         }),
+        ServerCommand::RunAcpLiveTurnLocal {
+            session_id,
+            run_id,
+            goal,
+            turn_id,
+            acp_program,
+            acp_argv,
+            workspace_root,
+            live_acp_opt_in,
+        } => json!({
+            "type": "run_acp_live_turn_local",
+            "session_id": session_id,
+            "run_id": run_id,
+            "goal": goal,
+            "turn_id": turn_id,
+            "acp_program": acp_program,
+            "acp_argv": acp_argv,
+            "workspace_root": workspace_root,
+            "live_acp_opt_in": live_acp_opt_in,
+        }),
         ServerCommand::Recover => json!({ "type": "recover" }),
         ServerCommand::Subscribe {
             session_id,
@@ -721,6 +741,25 @@ pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
             // as unattended, which forces the read-only dry-run profile (RTL6/9).
             unattended: optional_bool(value, "unattended")?.unwrap_or(true),
         }),
+        "run_acp_live_turn_local" => Ok(ServerCommand::RunAcpLiveTurnLocal {
+            session_id: required_string(value, "session_id")?,
+            run_id: required_string(value, "run_id")?,
+            goal: required_string(value, "goal")?,
+            turn_id: required_string(value, "turn_id")?,
+            acp_program: required_string(value, "acp_program")?,
+            acp_argv: value
+                .get("acp_argv")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            workspace_root: optional_string(value, "workspace_root")?,
+            live_acp_opt_in: required_bool(value, "live_acp_opt_in")?,
+        }),
         "recover" => Ok(ServerCommand::Recover),
         "subscribe" => Ok(ServerCommand::Subscribe {
             session_id: optional_string(value, "session_id")?,
@@ -948,6 +987,16 @@ pub(super) fn encode_payload(payload: &ServerResponsePayload) -> Value {
         ServerResponsePayload::RunnerEventsReplayed(summary) => json!({
             "type": "runner_events_replayed",
             "appended_sequences": summary.appended_sequences,
+        }),
+        ServerResponsePayload::AcpLiveTurn(summary) => json!({
+            "type": "acp_live_turn",
+            "session_id": summary.session_id,
+            "run_id": summary.run_id,
+            "turn_id": summary.turn_id,
+            "workspace_root": summary.workspace_root,
+            "event_count": summary.event_count,
+            "appended_event_count": summary.appended_event_count,
+            "stop_reason": summary.stop_reason,
         }),
         ServerResponsePayload::Recovery(recovery) => json!({
             "type": "recovery",
@@ -1335,6 +1384,17 @@ pub(super) fn decode_payload(value: &Value) -> TransportResult<ServerResponsePay
                         })
                     })
                     .collect::<TransportResult<Vec<_>>>()?,
+            },
+        )),
+        "acp_live_turn" => Ok(ServerResponsePayload::AcpLiveTurn(
+            crate::AcpLiveTurnSummary {
+                session_id: required_string(value, "session_id")?,
+                run_id: required_string(value, "run_id")?,
+                turn_id: required_string(value, "turn_id")?,
+                workspace_root: required_string(value, "workspace_root")?,
+                event_count: required_usize(value, "event_count")?,
+                appended_event_count: required_usize(value, "appended_event_count")?,
+                stop_reason: optional_string(value, "stop_reason")?,
             },
         )),
         "recovery" => Ok(ServerResponsePayload::Recovery(RecoverySummary {

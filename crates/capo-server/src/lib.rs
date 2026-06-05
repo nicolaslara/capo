@@ -30,6 +30,7 @@ mod util;
 use controller_routing::ControllerRoute;
 pub use controller_routing::{ControllerSelection, REAL_CONTROLLER_OPT_IN_ENV};
 use dispatch::DispatchExecutionOutcome;
+use server_core::AcpLiveTurnLocalRequest;
 pub use event_tail::{EventStream, TailRecvError};
 use live_provider::{LiveProviderLocalRunRequest, LiveProviderPreflightRequest};
 pub use safety_floor::{
@@ -99,6 +100,11 @@ struct CodexChatBindings {
     codex_artifact_root: PathBuf,
     claude_workspace_root: PathBuf,
     claude_artifact_root: PathBuf,
+    /// SLICE-A: the project-dir-default confined workspace/artifacts for an
+    /// ACP-bound agent turn (`<state_root>/acp/{workspace,artifacts}`), used when
+    /// `RunAcpLiveTurnLocal` carries no explicit `workspace_root`.
+    acp_workspace_root: PathBuf,
+    acp_artifact_root: PathBuf,
     /// Absolute path to a codex binary (ops `CAPO_CODEX_BIN`; tests a stub). Only
     /// honored when absolute -- the runtime spawns with `env_clear()`.
     program_override: Option<String>,
@@ -116,6 +122,7 @@ impl CodexChatBindings {
     fn from_state_root(state_root: &Path) -> Self {
         let codex_base = state_root.join("codex-chat");
         let claude_base = state_root.join("claude-chat");
+        let acp_base = state_root.join("acp");
         let program_override = std::env::var("CAPO_CODEX_BIN")
             .ok()
             .filter(|path| Path::new(path).is_absolute());
@@ -129,6 +136,8 @@ impl CodexChatBindings {
             codex_artifact_root: codex_base.join("artifacts"),
             claude_workspace_root: claude_base.join("workspace"),
             claude_artifact_root: claude_base.join("artifacts"),
+            acp_workspace_root: acp_base.join("workspace"),
+            acp_artifact_root: acp_base.join("artifacts"),
             program_override,
             claude_program_override,
         }
@@ -321,6 +330,12 @@ impl CapoServer {
                 // chat). Anything else is rejected before the agent is created.
                 let chat_binding = match adapter.as_str() {
                     "fake" => None,
+                    // SLICE-A: `acp` is an adapter-native (non-chat) binding. It
+                    // does NOT install a chat handle; the agent's ACP turns are
+                    // driven by `RunAcpLiveTurnLocal` through the controller's
+                    // `drive_acp_live_turn` seam, not the chat path. Accepting it
+                    // here lets the server REGISTER an acp-bound agent.
+                    "acp" => None,
                     "codex" => Some(RealChatBinding::Codex),
                     "claude" => Some(RealChatBinding::Claude),
                     other => {
@@ -1474,6 +1489,29 @@ impl CapoServer {
                     ServerResponsePayload::DispatchTurn(summary),
                 )
             }
+            ServerCommand::RunAcpLiveTurnLocal {
+                session_id,
+                run_id,
+                goal,
+                turn_id,
+                acp_program,
+                acp_argv,
+                workspace_root,
+                live_acp_opt_in,
+            } => self.run_acp_live_turn_local(
+                request_id,
+                origin,
+                AcpLiveTurnLocalRequest {
+                    session_id,
+                    run_id,
+                    goal,
+                    turn_id,
+                    acp_program,
+                    acp_argv,
+                    workspace_root,
+                    live_acp_opt_in,
+                },
+            ),
             ServerCommand::Recover => {
                 let recovery = self.recover_server(&request_id, &origin)?;
                 self.response(

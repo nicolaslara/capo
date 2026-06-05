@@ -269,6 +269,7 @@ fn schema_enumerations_cover_every_wire_variant() {
             ServerCommand::ContinueGoal { .. } => "continue_goal",
             ServerCommand::RegisterRuntimeTarget { .. } => "register_runtime_target",
             ServerCommand::ReplayRunnerEvents { .. } => "replay_runner_events",
+            ServerCommand::RunAcpLiveTurnLocal { .. } => "run_acp_live_turn_local",
         }
     }
 
@@ -297,6 +298,7 @@ fn schema_enumerations_cover_every_wire_variant() {
             ServerResponsePayload::ContinuationEvaluated(_) => "continuation_evaluated",
             ServerResponsePayload::RuntimeTargetRegistered(_) => "runtime_target_registered",
             ServerResponsePayload::RunnerEventsReplayed(_) => "runner_events_replayed",
+            ServerResponsePayload::AcpLiveTurn(_) => "acp_live_turn",
         }
     }
 

@@ -4,8 +4,8 @@ use capo_state::{AgentProjection, EventKind, NewEvent, RunProjection, SessionPro
 
 use crate::util::{adapter_kind_for_events, command_identity_hash, slug, stable_hash};
 use crate::{
-    CapoServer, RecoverySummary, ServerClientOrigin, ServerError, ServerResponse,
-    ServerResponsePayload, ServerResult,
+    AcpLiveTurnSummary, CapoServer, RecoverySummary, ServerClientOrigin, ServerError,
+    ServerResponse, ServerResponsePayload, ServerResult,
 };
 
 impl CapoServer {
@@ -205,4 +205,158 @@ impl CapoServer {
         event.payload_json = payload.to_string();
         self.controller.state().append_event(event, &[])
     }
+
+    /// SLICE-A: drive ONE live ACP turn through the controller's
+    /// `drive_acp_live_turn` seam, confined to a working directory, behind the
+    /// existing live ACP env gate. This is the server-level wiring that reaches
+    /// the previously test-only `AcpLiveAdapter` + `drive_acp_live_turn` path and
+    /// produces an OBSERVED file change in the confined workspace.
+    ///
+    /// For this slice the agent is a LOCAL stub program spawned through the
+    /// runtime (deterministic, `env_clear()`, no network), NOT the live `npx` ACP
+    /// bridge. It is spawned via `AcpLiveAdapter::spawn_live_session`, which
+    /// self-checks the same gate; we ALSO check the gate up front so a closed gate
+    /// fails closed before any work.
+    pub(crate) fn run_acp_live_turn_local(
+        &self,
+        request_id: String,
+        origin: ServerClientOrigin,
+        req: AcpLiveTurnLocalRequest,
+    ) -> ServerResult<ServerResponse> {
+        use capo_adapters::{AcpAdapter, AcpLiveAdapter, TurnRequest, acp_live_gate_open};
+        use capo_core::TurnId;
+
+        // GATE: fail closed unless BOTH the explicit per-command opt-in AND the
+        // env gate (`CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1` +
+        // `CAPO_SERVER_RUN_ACP_LIVE=1`) hold. Default behavior is unchanged.
+        if !req.live_acp_opt_in || !acp_live_gate_open() {
+            return Err(ServerError::AdapterFixture(
+                "acp live turn is fail-closed: set live_acp_opt_in AND \
+                 CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1 CAPO_SERVER_RUN_ACP_LIVE=1"
+                    .to_string(),
+            ));
+        }
+
+        let session_id = SessionId::new(req.session_id);
+        let run_id = RunId::new(req.run_id);
+        let (_session, _run, _agent, refs) =
+            self.run_refs_for_session_run(&session_id, &run_id)?;
+
+        // The confined working directory: the optional command path (a worktree)
+        // or the project-dir default under the server state root.
+        let workspace_root = req
+            .workspace_root
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| self.codex_chat.acp_workspace_root.clone());
+        let artifact_root = self.codex_chat.acp_artifact_root.clone();
+
+        // Build the ACP adapter exactly as the DP11 path does: a read-only-local
+        // policy (the controller is the wire permission authority), the runtime
+        // tool wrappers' tool list, confined to `workspace_root`/`artifact_root`.
+        let wrappers = capo_tools::RuntimeToolWrappers::new(
+            capo_tools::RuntimeToolConfig::local_workspace(
+                workspace_root.clone(),
+                artifact_root.clone(),
+            ),
+        );
+        let setup_plan = AcpAdapter::session_setup_plan(
+            &wrappers.list_tools(),
+            &capo_tools::PermissionPolicy::static_read_only_local(),
+            SessionId::new(format!("acp-setup-{session_id}")),
+        );
+        let adapter = AcpLiveAdapter::new(
+            req.acp_program,
+            req.acp_argv,
+            workspace_root.clone(),
+            artifact_root,
+            setup_plan,
+        );
+
+        let turn_id = TurnId::new(req.turn_id.clone());
+        // Spawn the LOCAL ACP agent through the runtime (gate self-checked) and
+        // drive ONE turn through the controller seam over its live transport.
+        let mut session = adapter
+            .spawn_live_session(&turn_id)
+            .map_err(|error| ServerError::AdapterFixture(format!("acp live spawn: {error}")))?;
+        let transport = session
+            .take_transport()
+            .ok_or_else(|| ServerError::AdapterFixture("acp live transport already taken".into()))?;
+
+        let outcome = self
+            .controller
+            .drive_acp_live_turn(
+                &refs,
+                &adapter,
+                transport,
+                &TurnRequest {
+                    turn_id: turn_id.clone(),
+                    agent_name: "acp-worker".to_string(),
+                    goal: req.goal.clone(),
+                },
+            )
+            .map_err(ServerError::State)?;
+
+        // Tear the agent down and enforce the secrets-stripped stderr contract.
+        session
+            .finalize("server acp live turn complete")
+            .map_err(|error| ServerError::AdapterFixture(format!("acp live finalize: {error}")))?;
+
+        let summary = AcpLiveTurnSummary {
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
+            turn_id: req.turn_id.clone(),
+            workspace_root: workspace_root.to_string_lossy().to_string(),
+            event_count: outcome.transcript.events.len(),
+            appended_event_count: outcome.ingest.appended_event_count,
+            stop_reason: outcome.transcript.stop_reason.clone(),
+        };
+
+        let command_hash = command_identity_hash(format!(
+            "run_acp_live_turn_local:{}:{}:{}:{}",
+            session_id,
+            run_id,
+            req.turn_id,
+            stable_hash(req.goal.as_bytes())
+        ));
+        let command = self.command_envelope(
+            &request_id,
+            &origin,
+            &command_hash,
+            CommandTarget::Session(session_id.clone()),
+            CommandIntent::SendTask,
+            Some(req.goal),
+        );
+        self.record_server_request_handled(
+            &command,
+            &origin,
+            "run_acp_live_turn_local",
+            Some(&refs),
+            Some(serde_json::json!({
+                "turn_id": summary.turn_id,
+                "workspace_root": summary.workspace_root,
+                "event_count": summary.event_count,
+                "appended_event_count": summary.appended_event_count,
+                "stop_reason": summary.stop_reason,
+            })),
+        )
+        .map_err(ServerError::State)?;
+
+        self.response(
+            request_id,
+            origin,
+            ServerResponsePayload::AcpLiveTurn(summary),
+        )
+    }
+}
+
+/// SLICE-A: the flat inputs for [`CapoServer::run_acp_live_turn_local`].
+pub(crate) struct AcpLiveTurnLocalRequest {
+    pub session_id: String,
+    pub run_id: String,
+    pub goal: String,
+    pub turn_id: String,
+    pub acp_program: String,
+    pub acp_argv: Vec<String>,
+    pub workspace_root: Option<String>,
+    pub live_acp_opt_in: bool,
 }

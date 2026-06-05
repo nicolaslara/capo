@@ -355,6 +355,40 @@ pub enum ServerCommand {
         /// profile; a live workspace write needs an attended run).
         unattended: bool,
     },
+    /// SLICE-A: drive ONE live ACP turn THROUGH the server command surface into
+    /// the controller's `drive_acp_live_turn` seam, confined to a working
+    /// directory (the project dir by default; an optional `workspace_root` for a
+    /// worktree). This reaches the previously test-only `AcpLiveAdapter` +
+    /// `drive_acp_live_turn` path and produces an OBSERVED file change in the
+    /// confined workspace.
+    ///
+    /// Behind the existing live ACP env gate (`acp_live_gate_open()` --
+    /// `CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT=1` + `CAPO_SERVER_RUN_ACP_LIVE=1`)
+    /// AND the explicit `live_acp_opt_in` command field; default behavior is
+    /// unchanged (the gate is closed by default -> fails closed without
+    /// spawning). For this slice the agent is a LOCAL stub program (deterministic,
+    /// no network), not the live `npx` ACP bridge.
+    ///
+    /// The session+run referenced by `session_id`/`run_id` must already exist
+    /// (e.g. created via `StartSession` with adapter `acp`); the handler builds
+    /// the `FakeRunRefs` from them via `run_refs_for_session_run`.
+    RunAcpLiveTurnLocal {
+        session_id: String,
+        run_id: String,
+        goal: String,
+        turn_id: String,
+        /// The ACP agent program to spawn (an absolute path to a local stub for
+        /// the slice; a real ACP agent binary for ops). Spawned through the
+        /// runtime with `env_clear()`, confined to `workspace_root`.
+        acp_program: String,
+        acp_argv: Vec<String>,
+        /// The confined working directory the agent runs in and writes into. The
+        /// `None` default is the server's project dir; a `Some(path)` carries an
+        /// optional worktree path.
+        workspace_root: Option<String>,
+        /// Explicit per-command opt-in, required ON TOP of the env gate.
+        live_acp_opt_in: bool,
+    },
     Recover,
     /// Tail the append-only event log (ST4). The subscriber catches up on the
     /// backlog strictly after `from_sequence` (optionally filtered to one
@@ -977,6 +1011,9 @@ pub enum ServerResponsePayload {
     /// `TurnFinished` annotation, so the production path observably emits the
     /// loop's outcome rather than only the raw run.
     DispatchTurn(DispatchTurnSummary),
+    /// SLICE-A: the outcome of driving one live ACP turn through the controller's
+    /// `drive_acp_live_turn` seam via [`ServerCommand::RunAcpLiveTurnLocal`].
+    AcpLiveTurn(AcpLiveTurnSummary),
     Recovery(RecoverySummary),
     /// The catch-up backlog for a [`ServerCommand::Subscribe`] (ST4). Live
     /// events that follow are pushed as JSON-RPC notifications
@@ -1450,6 +1487,23 @@ impl TaskRunSummary {
     }
 }
 
+/// SLICE-A: the server-facing outcome of one live ACP turn driven through the
+/// controller's `drive_acp_live_turn` seam.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcpLiveTurnSummary {
+    pub session_id: String,
+    pub run_id: String,
+    pub turn_id: String,
+    /// The confined working directory the agent ran in (and wrote into).
+    pub workspace_root: String,
+    /// How many normalized `session/update` events the turn streamed.
+    pub event_count: usize,
+    /// How many events the ingest appended through the loop's normal route.
+    pub appended_event_count: usize,
+    /// The finalized stop reason of the turn (e.g. `end_turn` / `cancelled`).
+    pub stop_reason: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoverySummary {
     pub recovery_attempt_id: String,
@@ -1619,6 +1673,19 @@ fn default_request_id(command: &ServerCommand) -> String {
                 stable_hash(goal.as_bytes())
             )
         }
+        ServerCommand::RunAcpLiveTurnLocal {
+            session_id,
+            run_id,
+            turn_id,
+            goal,
+            ..
+        } => format!(
+            "server-acp-live-turn-{}-{}-{}-{}",
+            slug(session_id),
+            slug(run_id),
+            slug(turn_id),
+            stable_hash(goal.as_bytes())
+        ),
         ServerCommand::Recover => "server-recover".to_string(),
         ServerCommand::Subscribe {
             session_id,
