@@ -347,12 +347,28 @@ fn tool_start_agent(state: &McpState, args: &Value) -> Result<String, String> {
     let workspace_root = worktree
         .map(str::to_string)
         .or_else(|| state.worker.default_workspace_root.clone());
+    // Steer the worker onto the ON-WIRE file tool. The real `claude-code-acp`
+    // bridge round-trips its `Write`/`Edit`/`Read` tools to capo over the ACP wire
+    // (`fs/write_text_file` -> capo's confined `file_write`, under the controller's
+    // permission decider). If left to its own devices, the worker may instead
+    // delegate filesystem work to a `Task` sub-agent whose Bash ops run INSIDE the
+    // nested `claude` and are SIMULATED -- they never cross the wire, so capo never
+    // performs (or supervises) the write and nothing lands on disk. Prefixing the
+    // task with an explicit directive keeps file work on the supervised on-wire
+    // path. This is additive guidance around the operator's `task`, not a
+    // replacement for it.
+    let worker_goal = format!(
+        "Perform the following task by editing files DIRECTLY with your built-in \
+         Write/Edit/Read file tools (NOT via the Task tool, a sub-agent, or shell \
+         commands like cat/printf/echo). Use the file tools so the host can apply \
+         and supervise every change.\n\nTask: {task}"
+    );
     let resp = state
         .server
         .handle(ServerRequest::cli(ServerCommand::RunAcpLiveTurnLocal {
             session_id: session_id.clone(),
             run_id: run_id.clone(),
-            goal: task.to_string(),
+            goal: worker_goal,
             turn_id: turn_id.clone(),
             acp_program: state.worker.acp_program.clone(),
             acp_argv: state.worker.acp_argv.clone(),
