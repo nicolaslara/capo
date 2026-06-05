@@ -259,11 +259,34 @@ impl CapoServer {
                 artifact_root.clone(),
             ),
         );
-        let setup_plan = AcpAdapter::session_setup_plan(
+        // Default (the `/bin/sh` stub path, `acp_session_mode == None`): a
+        // read-only-local policy that does NOT advertise `fs.writeTextFile` -- the
+        // stub writes the file itself, no wire callback. The LIVE bridge profile
+        // (`acp_session_mode == Some`) instead uses a trusted-local policy that
+        // advertises `fs.writeTextFile` (so the agent's Write tool routes the write
+        // back over the wire) and carries the session mode the live driver switches
+        // to before prompting (so the real bridge emits an on-wire write callback
+        // rather than simulating the tool in its default mode).
+        let policy = if req.acp_session_mode.is_some() {
+            capo_tools::PermissionPolicy::allow_trusted_local()
+        } else {
+            capo_tools::PermissionPolicy::static_read_only_local()
+        };
+        let mut setup_plan = AcpAdapter::session_setup_plan(
             &wrappers.list_tools(),
-            &capo_tools::PermissionPolicy::static_read_only_local(),
+            &policy,
             SessionId::new(format!("acp-setup-{session_id}")),
         );
+        if let Some(mode) = req.acp_session_mode.clone() {
+            // The live bridge delegates its Write/Read tools to the client over
+            // the wire and only ACKs them once the client performs the fs op, so
+            // the wire client must EXECUTE the write/read confined to the
+            // workspace. The stub path leaves this unset (the stub writes its own
+            // disk).
+            setup_plan = setup_plan
+                .with_session_mode(mode)
+                .with_workspace_root(workspace_root.clone());
+        }
         let adapter = AcpLiveAdapter::new(
             req.acp_program,
             req.acp_argv,
@@ -359,4 +382,5 @@ pub(crate) struct AcpLiveTurnLocalRequest {
     pub acp_argv: Vec<String>,
     pub workspace_root: Option<String>,
     pub live_acp_opt_in: bool,
+    pub acp_session_mode: Option<String>,
 }

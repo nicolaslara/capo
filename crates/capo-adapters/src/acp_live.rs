@@ -306,6 +306,14 @@ impl AcpLiveAdapter {
             .with_permission_decider(decider);
         client.initialize()?;
         let session_id = client.session_new(self.workspace_root.to_string_lossy().as_ref())?;
+        // If the setup plan selected a session mode (the live file-write profile
+        // uses a permission-bypassing mode so the real bridge emits an on-wire
+        // write callback instead of simulating the tool in its default mode),
+        // switch to it AFTER session/new and BEFORE prompting. The deterministic
+        // stub/scripted plans leave this `None`, so nothing extra is sent there.
+        if let Some(mode_id) = self.setup_plan.session_mode.clone() {
+            client.session_set_mode(&session_id, &mode_id)?;
+        }
         let transcript = client.prompt(&session_id, prompt)?;
         Ok(transcript)
     }

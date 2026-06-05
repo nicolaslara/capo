@@ -388,6 +388,17 @@ pub enum ServerCommand {
         workspace_root: Option<String>,
         /// Explicit per-command opt-in, required ON TOP of the env gate.
         live_acp_opt_in: bool,
+        /// Optional ACP session mode (`session/set_mode modeId`) to switch to
+        /// before prompting. `None` (the default, used by the deterministic
+        /// `/bin/sh` stub path) keeps the read-only-local setup plan and never
+        /// sends `session/set_mode`. `Some(mode)` (e.g. `"bypassPermissions"` /
+        /// `"acceptEdits"`) selects the LIVE bridge profile: it advertises
+        /// `fs.writeTextFile` so the agent's Write tool routes the write back over
+        /// the wire, and switches the session to `mode` so the real
+        /// `@zed-industries/claude-code-acp` bridge emits an on-wire
+        /// `fs/write_text_file` callback instead of simulating the tool in its
+        /// default mode.
+        acp_session_mode: Option<String>,
     },
     Recover,
     /// Tail the append-only event log (ST4). The subscriber catches up on the

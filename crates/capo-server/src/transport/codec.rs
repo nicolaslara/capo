@@ -339,6 +339,7 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             acp_argv,
             workspace_root,
             live_acp_opt_in,
+            acp_session_mode,
         } => json!({
             "type": "run_acp_live_turn_local",
             "session_id": session_id,
@@ -349,6 +350,7 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             "acp_argv": acp_argv,
             "workspace_root": workspace_root,
             "live_acp_opt_in": live_acp_opt_in,
+            "acp_session_mode": acp_session_mode,
         }),
         ServerCommand::Recover => json!({ "type": "recover" }),
         ServerCommand::Subscribe {
@@ -759,6 +761,7 @@ pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
                 .unwrap_or_default(),
             workspace_root: optional_string(value, "workspace_root")?,
             live_acp_opt_in: required_bool(value, "live_acp_opt_in")?,
+            acp_session_mode: optional_string(value, "acp_session_mode")?,
         }),
         "recover" => Ok(ServerCommand::Recover),
         "subscribe" => Ok(ServerCommand::Subscribe {

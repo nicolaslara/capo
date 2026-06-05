@@ -130,6 +130,7 @@ fn server_acp_dispatch_writes_observed_file_and_logs_events() {
             acp_argv: Vec::new(),
             workspace_root: Some(workspace.to_string_lossy().to_string()),
             live_acp_opt_in: true,
+            acp_session_mode: None,
         }))
         .expect("run acp live turn");
 
@@ -223,6 +224,7 @@ fn server_acp_dispatch_fails_closed_when_opt_in_is_false() {
         acp_argv: Vec::new(),
         workspace_root: Some(workspace.to_string_lossy().to_string()),
         live_acp_opt_in: false,
+        acp_session_mode: None,
     }));
 
     // Fail-closed may surface as a Rust `Err` OR as a non-success payload; either

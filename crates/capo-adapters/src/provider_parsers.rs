@@ -375,7 +375,13 @@ fn parse_acp_record(raw: &Value) -> Vec<NormalizedAdapterEvent> {
             } else {
                 "assistant"
             };
-            let content = string_at(update, &["content", "text"])
+            // 0.16.2 sends chunk `content` as a single object
+            // `{type:"text",text:...}` (older fixtures send a flat string or
+            // `{content:{text}}`); `text_from_content_array` handles String,
+            // Object, AND Array, so it covers every shape. Fall back to the legacy
+            // `content.text` / `content` string lookups for the /bin/sh stub.
+            let content = text_from_content_array(update.get("content"))
+                .or_else(|| string_at(update, &["content", "text"]))
                 .or_else(|| string_at(update, &["content"]))
                 .unwrap_or_default();
             let synthetic = format!("{}:{}", role, stable_hash(content.as_bytes()));
@@ -428,7 +434,14 @@ fn parse_acp_record(raw: &Value) -> Vec<NormalizedAdapterEvent> {
                 .or_else(|| string_at(update, &["name"]))
                 .or_else(|| string_at(update, &["toolKind"]));
             event.status = Some(operation);
-            event.content = string_at(update, &["content", "text"])
+            // 0.16.2 sends tool_call `content` as an ARRAY of blocks
+            // (`[{type:"content",content:{...}},{type:"diff",...}]`) and
+            // `rawOutput` as `[{type:"text",text:...}]`; `text_from_content_array`
+            // reaches into both, with the legacy `content.text` string lookup kept
+            // for the /bin/sh stub.
+            event.content = text_from_content_array(update.get("content"))
+                .or_else(|| string_at(update, &["content", "text"]))
+                .or_else(|| text_from_content_array(update.get("rawOutput")))
                 .or_else(|| string_at(update, &["rawOutput"]));
         }
         "plan" | "plan_update" => {

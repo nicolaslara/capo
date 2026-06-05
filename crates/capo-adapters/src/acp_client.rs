@@ -36,6 +36,11 @@ impl AcpAdapter {
             session_id,
             capability_profile_id: policy.default_profile_id().to_string(),
             permission_profile: AcpPermissionProfile::from_policy(policy),
+            // The deterministic stub/scripted plans never set a session mode.
+            session_mode: None,
+            // The deterministic stub/scripted plans never execute fs calls on the
+            // wire (the agent writes its own disk); the live profile sets this.
+            workspace_root: None,
         }
     }
 }
@@ -95,9 +100,54 @@ pub struct AcpSessionSetupPlan {
     /// The permission-decision profile the wire client applies to inbound
     /// `session/request_permission` requests. See [`AcpPermissionProfile`].
     pub permission_profile: AcpPermissionProfile,
+    /// The optional ACP session mode (`session/set_mode modeId`) the live wire
+    /// client switches to AFTER `session/new` and BEFORE `session/prompt`.
+    ///
+    /// `None` (the default for the deterministic stub/scripted plans) means the
+    /// client never sends `session/set_mode` -- the existing `/bin/sh` stub and the
+    /// scripted transport are unchanged. The live `npx @zed-industries/claude-code-acp`
+    /// bridge no-ops a write in its `default` mode (it simulates the tool in a
+    /// subagent instead of emitting a real `fs/write_text_file` callback), so the
+    /// live file-write profile sets this to a permission-bypassing mode
+    /// (`bypassPermissions`/`acceptEdits`) the agent advertised in its
+    /// `session/new` result, which is what drives a real on-wire write callback.
+    pub session_mode: Option<String>,
+    /// The confined workspace root the wire client uses to EXECUTE an inbound
+    /// `fs/read_text_file` / `fs/write_text_file` client-call (the ACP filesystem
+    /// methods the agent delegates to the client).
+    ///
+    /// `None` (the default for the deterministic stub/scripted plans, where the
+    /// agent does its OWN disk writes) means the wire client only routes/validates
+    /// and ACKs the call without touching the disk -- the existing behavior. When
+    /// set (the live bridge profile, which advertises `fs.writeTextFile`), the wire
+    /// client performs the requested read/write CONFINED to this root via
+    /// `capo_tools::confine_write_path` / `confine_read_path`, because the real
+    /// `@zed-industries/claude-code-acp` bridge expects the CLIENT to perform the
+    /// filesystem operation and only ACKs the tool as complete once the client
+    /// replies -- it never writes the file itself.
+    pub workspace_root: Option<std::path::PathBuf>,
 }
 
 impl AcpSessionSetupPlan {
+    /// Builder: select an ACP session mode (`session/set_mode modeId`) the live
+    /// wire client switches to before prompting. Used by the live file-write
+    /// profile to bypass the per-tool permission round-trip the confined-workspace
+    /// turn would otherwise stall on. See [`Self::session_mode`].
+    #[must_use]
+    pub fn with_session_mode(mut self, mode_id: impl Into<String>) -> Self {
+        self.session_mode = Some(mode_id.into());
+        self
+    }
+
+    /// Builder: set the confined workspace root the wire client EXECUTES inbound
+    /// `fs/read_text_file` / `fs/write_text_file` client-calls under. See
+    /// [`Self::workspace_root`].
+    #[must_use]
+    pub fn with_workspace_root(mut self, workspace_root: impl Into<std::path::PathBuf>) -> Self {
+        self.workspace_root = Some(workspace_root.into());
+        self
+    }
+
     pub fn wrapper_request_for_client_call(
         &self,
         call: AcpClientCall,

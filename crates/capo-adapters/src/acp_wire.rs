@@ -362,6 +362,26 @@ impl<'d, T: AcpTransport> AcpWireClient<'d, T> {
         Ok(session_id)
     }
 
+    /// `session/set_mode`: switch the session's permission/turn mode (e.g.
+    /// `acceptEdits` / `bypassPermissions`) BEFORE prompting.
+    ///
+    /// SAFETY: this is NOT a self-authorization on the wire. It is the
+    /// negotiated, agent-advertised session mode the setup plan selected for the
+    /// confined live profile so a write-tool turn proceeds without a per-tool
+    /// `session/request_permission` round-trip the controller would otherwise have
+    /// to allow anyway (the workspace is already confined by the runtime spawn +
+    /// `confine_write_path`). It is sent ONLY when the setup plan carries a
+    /// `session_mode` (the deterministic stub/scripted paths leave it `None`, so
+    /// this is never sent there).
+    pub fn session_set_mode(&mut self, session_id: &str, mode_id: &str) -> Result<(), AcpWireError> {
+        let id = self.alloc_id();
+        let params = json!({ "sessionId": session_id, "modeId": mode_id });
+        // The agent answers with an empty result object; surface a JSON-RPC error
+        // (e.g. an unknown mode) as a typed wire error rather than swallowing it.
+        self.request("session/set_mode", params, id)?;
+        Ok(())
+    }
+
     /// `session/prompt`: send the prompt and pump the wire until the agent
     /// returns the prompt response, ingesting every interleaved `session/update`
     /// notification AND answering every `session/request_permission` request on
@@ -487,6 +507,16 @@ impl<'d, T: AcpTransport> AcpWireClient<'d, T> {
             if line.is_empty() {
                 continue;
             }
+            // The real `npx @zed-industries/claude-code-acp` launcher (and the
+            // nested `claude`) can emit npm/node progress or deprecation banners to
+            // stdout that are NOT JSON-RPC frames. A JSON-RPC 2.0 frame is always a
+            // JSON object, so tolerate (skip) any line that does not begin with `{`
+            // rather than aborting the whole turn on banner noise. The /bin/sh stub
+            // and scripted transport emit only `{`-led JSON, so this is a no-op for
+            // the deterministic tests.
+            if !line.starts_with('{') {
+                continue;
+            }
             let value: Value =
                 serde_json::from_str(line).map_err(|error| AcpWireError::Decode {
                     line: line_number,
@@ -574,10 +604,18 @@ impl<'d, T: AcpTransport> AcpWireClient<'d, T> {
     /// out-of-confinement path is REJECTED with a JSON-RPC error -- never silently
     /// ingested. The serviced call is recorded on the transcript for audit.
     ///
-    /// Note: the wire client routes/validates and ACKS the call (the safety
-    /// decision: advertised? confined? valid params?) but does not itself execute
-    /// the runtime wrapper; the controller seam that wires `AcpLiveAdapter` into
-    /// the loop owns running the `WrapperToolRequest` against the runtime tools.
+    /// Note: the wire client routes/validates the call (the safety decision:
+    /// advertised? confined? valid params?). When the setup plan carries a
+    /// confined `workspace_root` (the live bridge profile), the client also
+    /// EXECUTES the requested filesystem operation under that root and replies
+    /// with the ACP-shaped result the agent expects -- `fs/write_text_file`
+    /// returns `null`, `fs/read_text_file` returns `{content}`. This is REQUIRED
+    /// for the real `@zed-industries/claude-code-acp` bridge, which delegates its
+    /// Write/Read tools to the client over the wire and treats the tool as
+    /// complete only once the client performs the operation and replies; it never
+    /// writes the file itself. When no `workspace_root` is set (the `/bin/sh` stub
+    /// / scripted plans, where the agent does its own disk writes), the client
+    /// only ACKs with the routed wrapper id and does not touch the disk.
     fn answer_client_call(
         &mut self,
         method: &str,
@@ -591,13 +629,43 @@ impl<'d, T: AcpTransport> AcpWireClient<'d, T> {
             .route_inbound_client_call(method, &params, self.run_id.clone())
         {
             Ok(wrapper_request) => {
+                // If the plan carries a confined workspace root, EXECUTE the fs
+                // operation under it (rejecting any out-of-confinement path) and
+                // reply with the ACP-shaped result. Otherwise ACK the routed
+                // wrapper id only (legacy stub/scripted behavior).
+                let result = match self.setup_plan.workspace_root.clone() {
+                    Some(workspace_root) => {
+                        match Self::execute_client_call_fs(
+                            method,
+                            &wrapper_request.input,
+                            &workspace_root,
+                        ) {
+                            Ok(result) => result,
+                            Err(reason) => {
+                                self.write_jsonrpc_error(
+                                    request_id,
+                                    JSONRPC_INVALID_REQUEST,
+                                    &reason,
+                                )?;
+                                transcript.client_calls.push(AcpClientCallRecord {
+                                    method: method.to_string(),
+                                    routed_tool_id: None,
+                                    accepted: false,
+                                    rejection: Some(reason),
+                                });
+                                return Ok(());
+                            }
+                        }
+                    }
+                    None => json!({
+                        "routed": true,
+                        "toolId": wrapper_request.tool_id,
+                    }),
+                };
                 let response = json!({
                     "jsonrpc": "2.0",
                     "id": request_id,
-                    "result": {
-                        "routed": true,
-                        "toolId": wrapper_request.tool_id,
-                    },
+                    "result": result,
                 });
                 self.transport
                     .send_line(&serde_json::to_string(&response).unwrap())?;
@@ -619,6 +687,54 @@ impl<'d, T: AcpTransport> AcpWireClient<'d, T> {
                 });
                 Ok(())
             }
+        }
+    }
+
+    /// EXECUTE an inbound `fs/read_text_file` / `fs/write_text_file` client-call
+    /// CONFINED to `workspace_root`, returning the ACP-shaped JSON result.
+    ///
+    /// `input` is the validated wrapper input the confinement seam already
+    /// extracted (`{path, content}` for a write, `{path}` for a read). The target
+    /// path is re-confined here with [`capo_tools::confine_write_path`] (which
+    /// folds `.`/`..`, rejects credential-like components, and canonicalizes the
+    /// existing prefix) so a write/read can never escape the confined workspace --
+    /// even though the agent already passed an absolute path. The ACP result shape
+    /// is the one the bridge expects: a write replies `null`; a read replies
+    /// `{content}`.
+    fn execute_client_call_fs(
+        method: &str,
+        input: &Value,
+        workspace_root: &std::path::Path,
+    ) -> Result<Value, String> {
+        let path_str = input
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "ACP client call missing path".to_string())?;
+        let confined = capo_tools::confine_write_path(
+            std::path::Path::new(path_str),
+            workspace_root,
+        )?;
+        match method {
+            "fs/write_text_file" => {
+                let content = input
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "ACP fs/write_text_file missing content".to_string())?;
+                if let Some(parent) = confined.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|error| format!("create parent dir failed: {error}"))?;
+                }
+                std::fs::write(&confined, content.as_bytes())
+                    .map_err(|error| format!("write failed: {error}"))?;
+                // ACP `fs/write_text_file` returns a null result.
+                Ok(Value::Null)
+            }
+            "fs/read_text_file" => {
+                let content = std::fs::read_to_string(&confined)
+                    .map_err(|error| format!("read failed: {error}"))?;
+                Ok(json!({ "content": content }))
+            }
+            other => Err(format!("unsupported ACP fs client call: {other}")),
         }
     }
 

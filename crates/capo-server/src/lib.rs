@@ -1498,6 +1498,7 @@ impl CapoServer {
                 acp_argv,
                 workspace_root,
                 live_acp_opt_in,
+                acp_session_mode,
             } => self.run_acp_live_turn_local(
                 request_id,
                 origin,
@@ -1510,6 +1511,7 @@ impl CapoServer {
                     acp_argv,
                     workspace_root,
                     live_acp_opt_in,
+                    acp_session_mode,
                 },
             ),
             ServerCommand::Recover => {
