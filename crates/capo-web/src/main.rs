@@ -102,6 +102,10 @@ struct ChatConfig {
     acp_argv: Vec<String>,
     acp_session_mode: Option<String>,
     live_acp_opt_in: bool,
+    /// Slice-0 (fork-free Path-1): lock the conductor session down to capo-only
+    /// MCP tools. Off by default so the validated fruit demo is unchanged; set
+    /// from `CAPO_WEB_LOCKDOWN=="1"`.
+    conductor_lockdown: bool,
 }
 
 /// The conductor's interaction scope (the one/all toggle), owned by capo-web and
@@ -157,6 +161,7 @@ async fn main() {
             }),
         acp_session_mode: Some("default".to_string()),
         live_acp_opt_in: std::env::var("CAPO_WEB_LIVE_ACP").as_deref() == Ok("1"),
+        conductor_lockdown: std::env::var("CAPO_WEB_LOCKDOWN").as_deref() == Ok("1"),
     };
 
     // The confined project workspace the live worker writes into; git-init it so
@@ -429,6 +434,7 @@ async fn chat(
                     acp_argv: chat_cfg.acp_argv,
                     acp_session_mode: chat_cfg.acp_session_mode,
                     live_acp_opt_in: chat_cfg.live_acp_opt_in,
+                    conductor_lockdown: chat_cfg.conductor_lockdown,
                 }))
                 .map_err(|e| format!("conductor turn: {e:?}"))
         })
@@ -1567,6 +1573,7 @@ mod tests {
                 acp_argv: Vec::new(),
                 acp_session_mode: None,
                 live_acp_opt_in: false,
+                conductor_lockdown: false,
             },
         });
         // A bogus dist dir is fine: the test never hits the static fallback.
@@ -1861,6 +1868,7 @@ done
                 acp_argv: Vec::new(),
                 acp_session_mode: None,
                 live_acp_opt_in: true,
+                conductor_lockdown: false,
             },
         });
         let app = build_router(cfg, "web/app/dist");

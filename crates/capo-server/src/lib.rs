@@ -1530,6 +1530,7 @@ impl CapoServer {
                 acp_argv,
                 acp_session_mode,
                 live_acp_opt_in,
+                conductor_lockdown,
             } => self.run_conductor_turn_local(
                 request_id,
                 origin,
@@ -1545,6 +1546,7 @@ impl CapoServer {
                     acp_argv,
                     acp_session_mode,
                     live_acp_opt_in,
+                    conductor_lockdown,
                 },
             ),
             ServerCommand::Recover => {

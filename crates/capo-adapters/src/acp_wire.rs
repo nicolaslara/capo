@@ -372,7 +372,74 @@ impl<'d, T: AcpTransport> AcpWireClient<'d, T> {
                 json!({ "name": "capo", "type": "http", "url": server.url, "headers": headers })
             })
             .collect();
-        let params = json!({ "cwd": cwd, "mcpServers": mcp_servers });
+        let mut params = json!({ "cwd": cwd, "mcpServers": mcp_servers });
+        // Slice-0 (fork-free Path-1): when the setup plan carries a session
+        // lockdown, render the proven `claude-code-acp` recipe into
+        // `_meta.claudeCode.options` so the conductor session is confined to
+        // capo-only MCP tools. When `None` (every existing stub/scripted/live
+        // plan), NO `_meta` key is added, so the params stay byte-identical to
+        // today.
+        if let Some(lockdown) = &self.setup_plan.session_lockdown {
+            // IMPORTANT — the bridge (`claude-code-acp@0.16.2`, `acp-agent.js`)
+            // reads the lockdown levers from TWO DIFFERENT places in `_meta`:
+            //   * `disableBuiltInTools` from `params._meta.disableBuiltInTools`
+            //     (TOP-LEVEL of `_meta` — `acp-agent.js:748,838`). This is the
+            //     ONLY lever that removes the bridge's OWN `mcp__acp__*` shell/fs
+            //     tools (the `acp` SDK MCP server is added iff this is falsy,
+            //     `:748-755`). If it is nested under `claudeCode.options` instead,
+            //     the bridge never sees it and the agent KEEPS `mcp__acp__Bash`
+            //     etc. — a lockdown LEAK (observed empirically).
+            //   * `systemPrompt` from `params._meta.systemPrompt` (TOP-LEVEL —
+            //     `:757-766`); a nested copy is never read.
+            //   * `settingSources` / `disallowedTools` / `strictMcpConfig` are
+            //     spread from `params._meta.claudeCode.options` (`:770,:780`).
+            // So we render TOP-LEVEL `disableBuiltInTools` + `systemPrompt`, and
+            // put the SDK-spread options under `claudeCode.options`.
+            let mut options = serde_json::Map::new();
+            options.insert(
+                "settingSources".to_string(),
+                Value::Array(
+                    lockdown
+                        .setting_sources
+                        .iter()
+                        .map(|s| Value::String(s.clone()))
+                        .collect(),
+                ),
+            );
+            options.insert(
+                "disallowedTools".to_string(),
+                Value::Array(
+                    lockdown
+                        .disallowed_tools
+                        .iter()
+                        .map(|s| Value::String(s.clone()))
+                        .collect(),
+                ),
+            );
+            options.insert(
+                "strictMcpConfig".to_string(),
+                Value::Bool(lockdown.strict_mcp_config),
+            );
+            let mut meta = serde_json::Map::new();
+            // TOP-LEVEL: the only lever that strips the bridge's own MCP tools.
+            meta.insert(
+                "disableBuiltInTools".to_string(),
+                Value::Bool(lockdown.disable_built_in_tools),
+            );
+            // TOP-LEVEL: the system-prompt append the bridge actually reads.
+            if let Some(append) = &lockdown.system_prompt_append {
+                meta.insert("systemPrompt".to_string(), json!({ "append": append }));
+            }
+            // SDK-spread options forwarded verbatim into the query.
+            meta.insert(
+                "claudeCode".to_string(),
+                json!({ "options": Value::Object(options) }),
+            );
+            params
+                .as_object_mut()
+                .expect("session/new params is a JSON object")
+                .insert("_meta".to_string(), Value::Object(meta));
+        }
         let result = self.request("session/new", params, id)?;
         let session_id = result
             .get("sessionId")
@@ -2056,5 +2123,144 @@ mod tests {
             headers[0].get("value").and_then(Value::as_str),
             Some("Bearer capo-token")
         );
+    }
+
+    /// Drive `session/new` and return the recorded `session/new` params object so
+    /// a test can assert the rendered wire shape with NO live bridge.
+    fn record_session_new_params(plan: AcpSessionSetupPlan) -> Value {
+        let mut transport = ScriptedAcpTransport::new().on_request(
+            "session/new",
+            vec![ScriptedServerFrame::Response(
+                json!({ "sessionId": "acp-session-lockdown" }),
+            )],
+        );
+        {
+            let mut client = AcpWireClient::attach(&mut transport, plan);
+            client
+                .session_new("/tmp/capo-acp-wire-ws")
+                .expect("session/new");
+        }
+        transport
+            .recorded
+            .iter()
+            .find(|f| f.get("method").and_then(Value::as_str) == Some("session/new"))
+            .and_then(|f| f.get("params").cloned())
+            .expect("recorded session/new params")
+    }
+
+    /// Slice-0 (a): with NO session lockdown (the default for every existing
+    /// stub/scripted/live plan), `session/new` params carry NO `_meta` key --
+    /// byte-identical to today.
+    #[test]
+    fn session_new_omits_meta_without_lockdown() {
+        let params = record_session_new_params(setup_plan());
+        assert!(
+            params.get("_meta").is_none(),
+            "the default plan must NOT add _meta to session/new params, got {params}"
+        );
+        // The params are exactly the pre-lockdown two-key object.
+        let object = params.as_object().expect("params object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["cwd", "mcpServers"],
+            "byte-identity: only cwd + mcpServers, no _meta"
+        );
+    }
+
+    /// Slice-0 (b): with the proven conductor lockdown, `session/new` params
+    /// carry the EXACT recipe in the SHAPE the bridge (`acp-agent.js@0.16.2`)
+    /// reads it: `disableBuiltInTools` + `systemPrompt` at the TOP LEVEL of
+    /// `_meta` (the bridge reads `params._meta.disableBuiltInTools` at `:748,838`
+    /// and `params._meta.systemPrompt` at `:757`), and the SDK-spread options
+    /// (settingSources, disallowedTools, strictMcpConfig) under
+    /// `_meta.claudeCode.options` (`:770,:780`).
+    #[test]
+    fn session_new_renders_conductor_lockdown_recipe() {
+        let plan =
+            setup_plan().with_session_lockdown(crate::AcpSessionLockdown::conductor_default());
+        let params = record_session_new_params(plan);
+
+        // TOP-LEVEL `_meta.disableBuiltInTools` — the ONLY lever that removes the
+        // bridge's own `mcp__acp__*` tools. MUST NOT be nested under claudeCode.
+        assert_eq!(
+            params
+                .pointer("/_meta/disableBuiltInTools")
+                .and_then(Value::as_bool),
+            Some(true),
+            "disableBuiltInTools MUST be top-level in _meta (the bridge reads \
+             params._meta.disableBuiltInTools); nesting it leaks mcp__acp__*"
+        );
+        assert!(
+            params
+                .pointer("/_meta/claudeCode/options/disableBuiltInTools")
+                .is_none(),
+            "disableBuiltInTools must NOT also live under claudeCode.options"
+        );
+
+        let options = params
+            .pointer("/_meta/claudeCode/options")
+            .expect("_meta.claudeCode.options present under lockdown");
+
+        assert_eq!(
+            options.get("strictMcpConfig").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            options.get("settingSources").and_then(Value::as_array),
+            Some(&Vec::new()),
+            "settingSources must be the empty array"
+        );
+        let disallowed: Vec<&str> = options
+            .get("disallowedTools")
+            .and_then(Value::as_array)
+            .expect("disallowedTools array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(
+            disallowed,
+            vec![
+                "Task",
+                "Agent",
+                "Bash",
+                "Read",
+                "Write",
+                "Edit",
+                "Glob",
+                "Grep",
+                "WebSearch",
+                "WebFetch",
+                "NotebookEdit",
+                "TodoWrite",
+                "Skill",
+                "SlashCommand",
+            ],
+            "disallowedTools must be the exact proven recipe list"
+        );
+        // TOP-LEVEL `_meta.systemPrompt.append` — the bridge reads
+        // `params._meta.systemPrompt` (`:757`), NOT a nested copy.
+        assert!(
+            params.pointer("/_meta/claudeCode/options/systemPrompt").is_none(),
+            "systemPrompt must NOT live under claudeCode.options (the bridge \
+             reads it from _meta.systemPrompt)"
+        );
+        let append = params
+            .pointer("/_meta/systemPrompt/append")
+            .and_then(Value::as_str)
+            .expect("_meta.systemPrompt.append present");
+        assert!(
+            append.contains("start_agent")
+                && append.contains("capo_read")
+                && append.contains("capo_write")
+                && append.contains("capo_bash")
+                && append.contains("capo_search"),
+            "guidance must point the model at the capo MCP tools, got {append:?}"
+        );
+
+        // mcpServers + cwd are still present (the lockdown is additive).
+        assert!(params.get("cwd").is_some());
+        assert!(params.get("mcpServers").is_some());
     }
 }

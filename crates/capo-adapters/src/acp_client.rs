@@ -44,6 +44,11 @@ impl AcpAdapter {
             // The deterministic stub/scripted plans forward no MCP servers, so
             // `session/new` keeps emitting `mcpServers: []` (byte-identical).
             forwarded_mcp_servers: Vec::new(),
+            // The deterministic stub/scripted + existing live plans never lock
+            // the session down, so `session/new` emits NO `_meta` (byte-identical
+            // to today). The conductor-lockdown profile sets this via
+            // `with_session_lockdown`.
+            session_lockdown: None,
         }
     }
 }
@@ -91,6 +96,80 @@ impl AcpPermissionProfile {
         match policy {
             PermissionPolicy::TrustedLocal(_) => Self::TrustedLocal,
             _ => Self::Other,
+        }
+    }
+}
+
+/// Slice-0 (fork-free Path-1): the proven `claude-code-acp` session LOCKDOWN
+/// recipe (Proto-1b, against the real bridge). Rendered into `session/new`'s
+/// `_meta.claudeCode.options` so a conductor session is confined to capo-only
+/// MCP tools.
+///
+/// The recipe (each field below is a verbatim part of the proven options):
+/// - `disable_built_in_tools`: removes the bridge's OWN `mcp__acp__*` shell/fs
+///   tools entirely, so the agent has ZERO native tools.
+/// - `setting_sources`: empty neutralizes ambient user/project settings leak.
+/// - `disallowed_tools`: belt-and-suspenders deny of every native tool name.
+/// - `strict_mcp_config`: only the explicitly-forwarded MCP servers are dialed.
+/// - `system_prompt_append`: guidance steering the model onto the capo MCP tools.
+///
+/// `None` on the setup plan (the default) means NO `_meta` is rendered, so
+/// `session/new` stays byte-identical to today.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcpSessionLockdown {
+    /// Remove the bridge's own built-in (native) tools entirely.
+    pub disable_built_in_tools: bool,
+    /// Ambient setting sources to honor (empty neutralizes user/project leak).
+    pub setting_sources: Vec<String>,
+    /// Native tool names to explicitly disallow (belt-and-suspenders).
+    pub disallowed_tools: Vec<String>,
+    /// Only dial the explicitly-forwarded MCP servers (no ambient MCP config).
+    pub strict_mcp_config: bool,
+    /// Guidance appended to the agent's system prompt.
+    pub system_prompt_append: Option<String>,
+}
+
+impl AcpSessionLockdown {
+    /// The PROVEN conductor lockdown recipe (Proto-1b): zero native tools, no
+    /// ambient settings/MCP leak, plus guidance pointing the model at the capo
+    /// MCP tools (`start_agent` for delegation; `capo_read`/`capo_write`/
+    /// `capo_bash`/`capo_search` for I/O) and telling it the native
+    /// Task/Bash/Read/etc. tools are unavailable.
+    #[must_use]
+    pub fn conductor_default() -> Self {
+        Self {
+            disable_built_in_tools: true,
+            setting_sources: Vec::new(),
+            disallowed_tools: [
+                "Task",
+                "Agent",
+                "Bash",
+                "Read",
+                "Write",
+                "Edit",
+                "Glob",
+                "Grep",
+                "WebSearch",
+                "WebFetch",
+                "NotebookEdit",
+                "TodoWrite",
+                "Skill",
+                "SlashCommand",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            strict_mcp_config: true,
+            system_prompt_append: Some(
+                "You are the capo conductor running in a locked-down session. Your native \
+                 tools (Task, Agent, Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch, \
+                 NotebookEdit, TodoWrite, Skill, SlashCommand) are UNAVAILABLE and any attempt \
+                 to call them will fail. Use ONLY the capo MCP tools: `start_agent` to delegate \
+                 work to worker agents, and `capo_read`/`capo_write`/`capo_bash`/`capo_search` \
+                 for file, shell, and search I/O. All file/shell/search work MUST go through \
+                 these capo tools so the host can supervise and confine every action."
+                    .to_string(),
+            ),
         }
     }
 }
@@ -153,6 +232,14 @@ pub struct AcpSessionSetupPlan {
     /// stateless-HTTP shape `{ "type":"http", "url", "headers" }` the agent dials
     /// directly on localhost to reach capo's in-process "capo tools" MCP endpoint.
     pub forwarded_mcp_servers: Vec<AcpHttpMcpServer>,
+    /// Slice-0 (fork-free Path-1): when `Some`, the proven `claude-code-acp`
+    /// lockdown recipe rendered into `session/new`'s `_meta.claudeCode.options`
+    /// so the conductor session is confined to capo-only MCP tools.
+    ///
+    /// `None` (the default for the deterministic stub/scripted plans AND the
+    /// existing live conductor/worker flow) means `session/new` emits NO `_meta`
+    /// -- byte-identical to today. See [`AcpSessionLockdown`].
+    pub session_lockdown: Option<AcpSessionLockdown>,
 }
 
 impl AcpSessionSetupPlan {
@@ -189,6 +276,17 @@ impl AcpSessionSetupPlan {
     #[must_use]
     pub fn with_workspace_root(mut self, workspace_root: impl Into<std::path::PathBuf>) -> Self {
         self.workspace_root = Some(workspace_root.into());
+        self
+    }
+
+    /// Builder: lock the `claude-code-acp` session down to capo-only MCP tools
+    /// by rendering the proven recipe into `session/new`'s
+    /// `_meta.claudeCode.options`. See [`AcpSessionLockdown`] and
+    /// [`Self::session_lockdown`]. Left unset (`None`), `session/new` emits NO
+    /// `_meta`, byte-identical to today.
+    #[must_use]
+    pub fn with_session_lockdown(mut self, lockdown: AcpSessionLockdown) -> Self {
+        self.session_lockdown = Some(lockdown);
         self
     }
 

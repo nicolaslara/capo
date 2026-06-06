@@ -713,6 +713,7 @@ fn sample_commands() -> Vec<ServerCommand> {
             acp_argv: vec![s()],
             acp_session_mode: None,
             live_acp_opt_in: true,
+            conductor_lockdown: false,
         },
     ]
 }

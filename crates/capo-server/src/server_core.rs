@@ -428,6 +428,15 @@ impl CapoServer {
         );
         // DELTA 1: forward capo's in-process HTTP MCP endpoint into session/new.
         setup_plan = setup_plan.with_http_mcp_server(req.mcp_url, req.mcp_headers);
+        // Slice-0 (fork-free Path-1): opt-in conductor lockdown. When set, render
+        // the proven `claude-code-acp` recipe into `session/new`'s
+        // `_meta.claudeCode.options` so the conductor is confined to capo-only MCP
+        // tools (capo re-supplies file/shell/search as capo_read/write/bash/search).
+        // Default false ⇒ NO `_meta` is added, so the existing flow is byte-identical.
+        if req.conductor_lockdown {
+            setup_plan =
+                setup_plan.with_session_lockdown(capo_adapters::AcpSessionLockdown::conductor_default());
+        }
         if let Some(mode) = req.acp_session_mode.clone() {
             setup_plan = setup_plan
                 .with_session_mode(mode)
@@ -563,6 +572,9 @@ pub(crate) struct ConductorTurnLocalRequest {
     pub acp_argv: Vec<String>,
     pub acp_session_mode: Option<String>,
     pub live_acp_opt_in: bool,
+    /// Slice-0 (fork-free Path-1): opt-in conductor session lockdown. Default
+    /// false ⇒ the existing conductor flow is byte-identical.
+    pub conductor_lockdown: bool,
 }
 
 /// SLICE-A: the flat inputs for [`CapoServer::run_acp_live_turn_local`].

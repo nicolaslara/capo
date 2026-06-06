@@ -181,6 +181,7 @@ fn live_conductor_drives_worker_that_writes_file() {
             ],
             acp_session_mode: Some("default".to_string()),
             live_acp_opt_in: true,
+            conductor_lockdown: false,
         }))
         .expect("run live conductor turn");
 
@@ -237,10 +238,12 @@ fn live_conductor_drives_worker_that_writes_file() {
         .events
         .iter()
         .filter(|e| {
+            // A worker session is any tool-bearing session that is NOT the
+            // conductor's. Do NOT require the literal "worker" in the id — the
+            // conductor names workers from the task (e.g. `create-hello-txt`,
+            // `fruit-picker-1`), so a name-substring check is brittle/flaky.
             e.kind.starts_with("tool.")
-                && e.session_id
-                    .as_deref()
-                    .is_some_and(|s| s != session_id && s.contains("worker"))
+                && e.session_id.as_deref().is_some_and(|s| s != session_id)
         })
         .count();
     assert!(

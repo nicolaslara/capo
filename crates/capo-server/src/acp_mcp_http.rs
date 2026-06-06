@@ -220,6 +220,45 @@ fn tool_schemas() -> Value {
             }
         },
         {
+            "name": "capo_read",
+            "description": "Read a file from the confined workspace via capo's supervised file tool. Use this INSTEAD of a native Read tool (which is unavailable in a locked-down session).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Path to read (confined to the workspace)."}},
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "capo_write",
+            "description": "Write a file in the confined workspace via capo's supervised file tool. Use this INSTEAD of a native Write/Edit tool (which is unavailable in a locked-down session).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to write (confined to the workspace)."},
+                    "content": {"type": "string", "description": "The new file contents."}
+                },
+                "required": ["path", "content"]
+            }
+        },
+        {
+            "name": "capo_bash",
+            "description": "Run a shell command in the confined workspace via capo's supervised shell tool. Use this INSTEAD of a native Bash tool (which is unavailable in a locked-down session).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"command": {"type": "string", "description": "The shell command line to run."}},
+                "required": ["command"]
+            }
+        },
+        {
+            "name": "capo_search",
+            "description": "Search the confined workspace via capo's supervised search tool. Use this INSTEAD of a native Grep/Glob tool (which is unavailable in a locked-down session).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "The search query (ripgrep pattern)."}},
+                "required": ["query"]
+            }
+        },
+        {
             "name": "list_agents",
             "description": "List all worker agents capo is managing, with their session/run status.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
@@ -281,6 +320,10 @@ fn handle_tools_call(state: &McpState, id: Value, params: &Value) -> Value {
 
     let outcome = match name {
         "start_agent" => tool_start_agent(state, &args),
+        "capo_read" => tool_capo_read(state, &args),
+        "capo_write" => tool_capo_write(state, &args),
+        "capo_bash" => tool_capo_bash(state, &args),
+        "capo_search" => tool_capo_search(state, &args),
         "list_agents" => tool_list_agents(state),
         "review_agent" => tool_review_agent(state, &args),
         "steer_agent" => tool_steer_agent(state, &args),
@@ -457,6 +500,134 @@ fn tool_start_agent(state: &McpState, args: &Value) -> Result<String, String> {
         "workspace_root": summary.workspace_root,
     })
     .to_string())
+}
+
+// --- Slice-0 (fork-free Path-1): capo's OWN confined file/shell/search MCP
+// tools. A locked-down conductor session has NO native tools (the proven
+// recipe removes the bridge's built-ins), so capo re-supplies file/shell/search
+// here as capo MCP tools wired to the SAME confined `RuntimeToolWrappers`
+// (`capo.file_read`/`capo.file_write`/`capo.shell_run`/`capo.search`) that
+// `run_acp_live_turn_local` uses. Confinement to the worker's `workspace_root`
+// is inherited from the wrapper config; the trusted-local policy authorizes the
+// supervised call. ---
+
+/// Build the confined wrapper bundle (wrappers + policy + the confined session
+/// identity) for a capo I/O tool call, rooted at the worker's workspace.
+fn capo_io_wrappers(
+    state: &McpState,
+) -> Result<
+    (
+        capo_tools::RuntimeToolWrappers,
+        capo_tools::PermissionPolicy,
+        capo_core::SessionId,
+        capo_core::RunId,
+    ),
+    String,
+> {
+    let workspace_root = std::path::PathBuf::from(
+        state
+            .worker
+            .default_workspace_root
+            .clone()
+            .ok_or("capo I/O tools require a configured worker workspace")?,
+    );
+    // Keep capo's tool artifacts inside the workspace so the call is fully
+    // self-contained and confined (mirrors the live-turn artifact root, which
+    // is workspace-derived).
+    let artifact_root = workspace_root.join(".capo-conductor-artifacts");
+    let wrappers = capo_tools::RuntimeToolWrappers::new(
+        capo_tools::RuntimeToolConfig::local_workspace(workspace_root, artifact_root),
+    );
+    let policy = capo_tools::PermissionPolicy::allow_trusted_local();
+    Ok((
+        wrappers,
+        policy,
+        capo_core::SessionId::new("session-conductor-capo-io"),
+        capo_core::RunId::new("run-conductor-capo-io"),
+    ))
+}
+
+/// Dispatch one confined wrapper tool call and render its result as a JSON
+/// string, mapping a non-`completed` status (denied / failed / precondition)
+/// onto a tool error so the conductor sees the real outcome.
+fn run_capo_io_tool(
+    state: &McpState,
+    tool_id: &str,
+    call_label: &str,
+    input: Value,
+) -> Result<String, String> {
+    let (wrappers, policy, session_id, run_id) = capo_io_wrappers(state)?;
+    let request = capo_tools::WrapperToolRequest {
+        tool_call_id: capo_core::ToolCallId::new(format!("conductor-{call_label}")),
+        session_id,
+        run_id,
+        tool_id: tool_id.to_string(),
+        capability_profile_id: policy.default_profile_id().to_string(),
+        input,
+    };
+    let result = wrappers.authorize_and_invoke(request, &policy);
+    if result.status != "completed" {
+        return Err(format!(
+            "{call_label} did not complete (status={}): {}",
+            result.status, result.summary
+        ));
+    }
+    Ok(json!({
+        "status": result.status,
+        "summary": result.summary,
+        "output": result.typed_output,
+    })
+    .to_string())
+}
+
+/// `capo_read(path)` -> confined `capo.file_read`.
+fn tool_capo_read(state: &McpState, args: &Value) -> Result<String, String> {
+    let path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or("capo_read requires `path`")?;
+    run_capo_io_tool(state, "capo.file_read", "capo_read", json!({ "path": path }))
+}
+
+/// `capo_write(path, content)` -> confined `capo.file_write`.
+fn tool_capo_write(state: &McpState, args: &Value) -> Result<String, String> {
+    let path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or("capo_write requires `path`")?;
+    let content = args
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or("capo_write requires `content`")?;
+    run_capo_io_tool(
+        state,
+        "capo.file_write",
+        "capo_write",
+        json!({ "path": path, "content": content }),
+    )
+}
+
+/// `capo_bash(command)` -> confined `capo.shell_run` (`sh -c <command>`).
+fn tool_capo_bash(state: &McpState, args: &Value) -> Result<String, String> {
+    let command = args
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or("capo_bash requires `command`")?;
+    run_capo_io_tool(
+        state,
+        "capo.shell_run",
+        "capo_bash",
+        json!({ "program": "sh", "argv": ["-c", command] }),
+    )
+}
+
+/// `capo_search(query)` -> confined `capo.search`.
+fn tool_capo_search(state: &McpState, args: &Value) -> Result<String, String> {
+    let query = args
+        .get("query")
+        .and_then(Value::as_str)
+        .ok_or("capo_search requires `query`")?;
+    run_capo_io_tool(state, "capo.search", "capo_search", json!({ "query": query }))
 }
 
 /// `list_agents()` -> Dashboard projection of each managed agent.

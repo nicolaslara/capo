@@ -227,6 +227,78 @@ async fn mcp_http_server_advertises_and_dispatches_capo_tools() {
     server_task.abort();
 }
 
+/// Slice-0 (fork-free Path-1): the four confined capo I/O tools
+/// (`capo_read`/`capo_write`/`capo_bash`/`capo_search`) are advertised on
+/// `tools/list` and `tools/call capo_write` then `capo_read` ROUND-TRIPS a file
+/// in the confined worker workspace. Deterministic (no live bridge, no ACP gate).
+#[tokio::test]
+async fn capo_io_tools_advertised_and_round_trip_a_file() {
+    let root = capo_tmptest::TempRoot::new("capo-mcp-http-capo-io");
+    let server = CapoServer::open(ProjectId::new("project-capo"), root.path()).expect("server");
+    let workspace = root.join("acp-ws");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+
+    let bearer = "test-bearer-token".to_string();
+    let worker = AcpWorkerToolConfig {
+        acp_program: "/bin/sh".to_string(),
+        acp_argv: Vec::new(),
+        default_workspace_root: Some(workspace.to_string_lossy().to_string()),
+        acp_session_mode: None,
+    };
+    let app = acp_mcp_router(McpState::new(server.clone(), worker, bearer.clone()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server_task = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve"); });
+
+    // tools/list advertises all four confined capo I/O tools.
+    let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}});
+    let (status, body) = http_request(addr, "POST", &bearer, Some(&list)).await;
+    assert_eq!(status, 200);
+    let v: Value = serde_json::from_str(&body).expect("tools/list json");
+    let names: Vec<&str> = v["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name"))
+        .collect();
+    for tool in ["capo_read", "capo_write", "capo_bash", "capo_search"] {
+        assert!(names.contains(&tool), "tools/list must advertise {tool}; got {names:?}");
+    }
+
+    // capo_write a file into the confined workspace.
+    let write = json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "capo_write", "arguments": {"path": "note.txt", "content": "capo io round-trip"}}
+    });
+    let (status, body) = http_request(addr, "POST", &bearer, Some(&write)).await;
+    assert_eq!(status, 200);
+    let v: Value = serde_json::from_str(&body).expect("capo_write json");
+    assert_eq!(v["result"]["isError"], false, "capo_write must succeed: {body}");
+
+    // The file actually landed in the confined workspace.
+    let on_disk = std::fs::read_to_string(workspace.join("note.txt"))
+        .expect("capo_write must write into the confined workspace");
+    assert_eq!(on_disk, "capo io round-trip");
+
+    // capo_read the same file back -> the content is reflected in the result.
+    let read = json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "capo_read", "arguments": {"path": "note.txt"}}
+    });
+    let (status, body) = http_request(addr, "POST", &bearer, Some(&read)).await;
+    assert_eq!(status, 200);
+    let v: Value = serde_json::from_str(&body).expect("capo_read json");
+    assert_eq!(v["result"]["isError"], false, "capo_read must succeed: {body}");
+    let result_text = v["result"]["content"][0]["text"].as_str().expect("read text");
+    let read_result: Value = serde_json::from_str(result_text).expect("capo_read result json");
+    assert_eq!(
+        read_result["output"]["bytes_read"], 18,
+        "capo_read must report the round-tripped byte count: {read_result}"
+    );
+
+    server_task.abort();
+}
+
 /// `start_agent {detached:true}` returns IMMEDIATELY with status:running (the
 /// depth-discipline responsiveness contract — the conductor is not blocked on the
 /// worker turn), and the worker turn still runs on a background thread and

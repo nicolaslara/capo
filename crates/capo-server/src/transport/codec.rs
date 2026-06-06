@@ -364,6 +364,7 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             acp_argv,
             acp_session_mode,
             live_acp_opt_in,
+            conductor_lockdown,
         } => json!({
             "type": "run_conductor_turn_local",
             "session_id": session_id,
@@ -380,6 +381,7 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             "acp_argv": acp_argv,
             "acp_session_mode": acp_session_mode,
             "live_acp_opt_in": live_acp_opt_in,
+            "conductor_lockdown": conductor_lockdown,
         }),
         ServerCommand::Recover => json!({ "type": "recover" }),
         ServerCommand::Subscribe {
@@ -826,6 +828,7 @@ pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
                 .unwrap_or_default(),
             acp_session_mode: optional_string(value, "acp_session_mode")?,
             live_acp_opt_in: required_bool(value, "live_acp_opt_in")?,
+            conductor_lockdown: optional_bool(value, "conductor_lockdown")?.unwrap_or(false),
         }),
         "recover" => Ok(ServerCommand::Recover),
         "subscribe" => Ok(ServerCommand::Subscribe {

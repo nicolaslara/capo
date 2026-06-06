@@ -438,6 +438,11 @@ pub enum ServerCommand {
         acp_session_mode: Option<String>,
         /// Explicit per-command opt-in, required ON TOP of the env gate.
         live_acp_opt_in: bool,
+        /// Slice-0 (fork-free Path-1): when true, lock the conductor's
+        /// `claude-code-acp` session down to capo-only MCP tools via the proven
+        /// `session/new` `_meta.claudeCode.options` recipe. Default false ⇒ the
+        /// existing conductor flow is byte-identical.
+        conductor_lockdown: bool,
     },
     Recover,
     /// Tail the append-only event log (ST4). The subscriber catches up on the

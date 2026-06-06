@@ -153,6 +153,7 @@ fn server_conductor_turn_summary_carries_verbatim_agent_text() {
             acp_argv: Vec::new(),
             acp_session_mode: None,
             live_acp_opt_in: true,
+            conductor_lockdown: false,
         }))
         .expect("run conductor turn");
 
@@ -230,6 +231,7 @@ fn server_conductor_turn_forwards_mcp_and_composes_prompt() {
             acp_argv: Vec::new(),
             acp_session_mode: None,
             live_acp_opt_in: true,
+            conductor_lockdown: false,
         }))
         .expect("run conductor turn");
 
@@ -325,6 +327,7 @@ fn server_conductor_turn_fails_closed_when_opt_in_is_false() {
         acp_argv: Vec::new(),
         acp_session_mode: None,
         live_acp_opt_in: false,
+        conductor_lockdown: false,
     }));
 
     if let Ok(resp) = result {
