@@ -44,6 +44,38 @@ Owner chose "A + live steering" (2026-06-06). The ACP spec
 - Gated live (`#[ignore]` + env): a real persistent worker is steered mid-task
   and the second prompt continues the same session.
 
+## Progress
+- **Increment 1 — DONE (`0a160b5`).** `AcpLiveAdapter::attach_persistent_session`
+  + `PersistentAcpSession::prompt` (attach once, prompt repeatedly on one
+  session). Deterministic test proves two prompts on one
+  initialize+session/new. One-shot `drive_with_decider` untouched.
+- **Increment 2 — NEXT.** Controller persistent driver (attach + per-prompt
+  ingest), server actor loop, registry steer channel, `SteerAgent` live delivery,
+  live verification.
+
+## OPEN DECISION for Increment 2 — worker lifecycle / steer window
+Real steering needs the worker process to STAY ALIVE after a turn so a follow-up
+prompt can continue. So after the initial prompt the actor must wait for a steer
+before finalizing. Two questions decide how the validated `start_agent` path
+changes:
+1. **Which workers persist?** All workers (incl. fan-out), or only an interactive
+   single-agent session? Fan-out workers are aggregated via `collect_results` and
+   are never steered in practice — making them linger is pure latency + live
+   processes held open.
+2. **Steer window.** How long does an un-steered worker stay open before it
+   finalizes (e.g. finalize immediately after the turn unless a steer is pending;
+   or hold open N seconds; or hold until an explicit stop)?
+   - Note: a deterministic stub worker EXITS after its turn, so the actor sees
+     EOF and finalizes immediately regardless — the window only affects a real,
+     still-alive `claude-code-acp` worker.
+
+Recommended default (pending owner): **interactive single-agent sessions persist
+and are steerable; fan-out (`detached`) workers stay one-shot** (finalize at turn
+end, as today) so `collect_results` latency and process count are unchanged. This
+keeps the validated fan-out loop byte-identical while making steering real where
+it is actually used. Steering a fan-out worker would then first "promote" it to a
+persistent session — deferred unless wanted.
+
 ## Risk / discipline
 This restructures the most-validated code path's neighborhood, so: additive,
 default-off (byte-identical one-shot path), gated live test, and if any part
