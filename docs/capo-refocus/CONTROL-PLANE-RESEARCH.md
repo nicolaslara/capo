@@ -163,3 +163,57 @@ Rationale:
 - `sdk.d.ts:119` (`CanUseTool.agentID` "sub-agent's ID"), `:496-530` (`allowedTools` auto-approve-only, `disallowedTools` removes from context, `tools:[]` disables built-ins), `:787-796` (`settingSources` empty = SDK isolation).
 - `acp-sdk/.../types.gen.d.ts:2017-2024` (flat `SessionId`), `:1648-1671` (`RequestPermissionRequest` no sub-agent field); `acp-agent.js:241,539` (sidechain stripping).
 - External: issue #34692 (settings.json hooks don't fire for subagent tool calls — CLOSED not-planned), #115 (`allowedTools` doesn't restrict), #26923 (PreToolUse can't block Task). Docs: code.claude.com Agent SDK permissions/hooks/subagents. Doc-version caveat: all docs track SDK newer than pinned 0.2.44; `disableBuiltInTools` is undocumented; `Task`→`Agent` rename is v2.1.63 — Proto-2 must verify behavior in the bundled `cli.js`.
+
+---
+
+# Phase 2 — PROTOTYPE RESULTS (empirical, real subscription, logged frames)
+
+Harness: a ~250-line ACP JSON-RPC client spawning an INSTRUMENTED copy of
+claude-code-acp@0.16.2 (SDK 0.2.44) on the Pro/Max subscription (no API key). Full
+artifacts were under /tmp/capo-cp-proto/ (client.mjs, instrumented bridge/, per-run
+frames.json + stderr.log). Env gotcha: must delete `CLAUDECODE`/`CLAUDE_CODE_*` from the
+spawned bridge env or the nested `claude` refuses to launch.
+
+## PROTO-1 — Path-1 lockdown integrity: **PASS**
+- `disallowedTools` reliably strips native Bash/Task/Read; a hostile project
+  `.claude/settings.json` allow-list did NOT re-grant them; a hostile `.mcp.json` server
+  never appeared. (OBSERVED, 3 variants.)
+- `_meta.claudeCode.options.settingSources:[]` **DOES override** the bridge's hardcoded
+  `["user","project","local"]` (Phase-1 "unproven" claim now PROVEN). The real ambient leak
+  was USER-level settingSources pulling in the operator's own MCP servers (e.g.
+  `hardened-workspace`) — present without the override, gone with it.
+- **Sharpened recipe / gotchas:** `tools:[]` is IGNORED (bridge hardcodes the preset after the
+  spread). `permissionMode` is hardcoded `default` (can't be overridden — fine). Plain
+  `disallowedTools` of native names leaves the bridge's OWN `mcp__acp__Bash` shell live (agent
+  ran `echo HOSTILE` through it). **TRUE total lockdown** (Proto-1b) needs
+  `_meta.disableBuiltInTools:true` (removes the acp MCP entirely → agent had only inert
+  TaskOutput/TaskStop/EnterPlanMode stubs, ZERO shell/fs/Task) OR disallow the `mcp__acp__*`
+  names and re-supply file/shell via a capo MCP server.
+
+## PROTO-2 — Path-2 crux (do sub-agent inner calls reach interception?): **PASS for control**
+A native `Task` subagent did inner Read(A.txt) + inner `echo INNER`. OBSERVED:
+- Inner Bash fired BOTH the SDK `canUseTool` callback AND `session/request_permission` to the
+  client, with **`agentID:"ae69749"` POPULATED** (the sub-agent's id). Logged frame:
+  `[CANUSE] {toolName:"mcp__acp__Bash", agentID:"ae69749", optionKeys:[...,"agentID"], ...}`.
+- The SDK-callback **PreToolUse hook fired for ALL three** (Task, inner Read, inner Bash) — the
+  most COMPLETE observation point (sees even auto-allowed tools).
+- **DENY genuinely blocks:** replying `reject` to the inner Bash's request_permission → NO
+  `terminal/create` ran → `echo INNER` blocked (deny carried `interrupt:true`).
+- This contradicts issues #34692/#26923 — but those concern the *settings.json hook* path;
+  capo's *SDK-callback* path (canUseTool + SDK-registered hooks) DOES fire for sub-agents in 0.2.44.
+- **Limitations (observed):** (1) the bridge DROPS `agentID` when it forwards to the ACP client
+  (`acp-agent.js` ~:575 destructure) → capo can SEE+GATE the inner call but needs a **one-line
+  forward-patch** to ATTRIBUTE it to a sub-agent; (2) only non-auto-allowed tools hit
+  request_permission (inner Read was auto-allowed and bypassed it) → to proxy EVERYTHING via
+  request_permission avoid broad allowlists, or use PreToolUse for universal visibility; (3)
+  sub-agents stay in-process sidechains in ONE ACP session — never separate capo sessions.
+
+## Updated verdict
+- **Path 1 (lockdown): CONFIRMED** — total lockdown demonstrated; no fork needed (all via `_meta`).
+- **Path 2 (intercept sub-agents): CONFIRMED for control** — capo CAN observe (PreToolUse, every
+  nested call) and GATE/veto (canUseTool deny blocks) a native sub-agent's inner tool calls in
+  0.2.44, with `agentID` available; needs a one-line bridge patch to attribute. NOT achievable:
+  per-sub-agent ACP sessions (that still requires Path 1's ban-Task-force-start_agent).
+- **HYBRID (evidence-backed):** Path 1 where capo must OWN orchestration (per-sub-agent sessions,
+  hard lockdown); Path-2 PreToolUse+canUseTool gate as a defense-in-depth + observability layer
+  over native sub-agents (proven to see + block them), pending the small `agentID` forward-patch.
