@@ -32,4 +32,12 @@ pending your call — it's a product-behavior choice.)
 
 ## C. Things the autonomous run DID decide (see EXECUTION-SUMMARY.md for details)
 Reasonable defaults I made while you were away — flagged here so you can veto:
-- (filled in by the run; see EXECUTION-SUMMARY.md "Decisions" section.)
+- **D-WF1a:** reused `EventKind::ToolCallRequested` for the conductor tool event (no new codec variant).
+- **D-WF1b:** arg allowlist + 120-char clip on the emitted conductor tool event (no secret/large args leak).
+- **D-WF2a (A4 tree):** the dashboard read model has **no parent field**, so the conductor→worker
+  tree is a fork-free FE heuristic — conductor = id/name matches `/conductor/i` (root), all other
+  agents are workers (one-level children). If you want a true parent/child lineage in the tree,
+  that needs the read model to carry a parent ref (small backend change) — flag it.
+- **D-WF2b (A1 buttons):** Steer/Interrupt/Stop POST the real `/api/commands` kinds, but those only
+  RECORD INTENT server-side today; the UI says so explicitly. Live delivery is WF3 (B1/B2). No faked
+  delivery.

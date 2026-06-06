@@ -17,13 +17,22 @@ Open questions for the owner: `REVIEW-WHEN-BACK.md`.
   text instead of appending deltas.
 - Verified: capo-adapters 80, capo-web 6, capo-server lib 158, acp_mcp_http_smoke 4 — all green; clippy clean.
 
+### WF2 — A1 + A3 + A4 ✅ (commit `97c89a0`)
+- **A1 (per-agent action bar):** detail-pane Steer/Interrupt/Stop buttons → `POST /api/commands`
+  (`steer_agent`/`interrupt_agent`/`stop_agent`, agent = name). Muted note: these record intent
+  server-side and become live once B1/B2 lands — no faked delivery.
+- **A3 (reload-survival):** on load, replay `/api/events?from=0` once (streamed via ReadableStream
+  because the SSE tail never closes; idle-drain + cancel) into a rebuilt activity feed; `bumpSeq`
+  per event so the live tail resumes strictly after the backlog (no double-render). `send` disabled
+  until replay settles.
+- **A4 (conductor→worker tree):** sidebar groups conductor (`/conductor/i`) as root, others indented
+  as workers; flat fallback when no conductor.
+- FE-only, no Rust touched. Verified: JS parses (`new Function`), capo-web 6/6 green, build clean;
+  review (3-agent plan→implement→review) returned all-PASS, I re-confirmed wirings against the real
+  endpoint contracts in `main.rs`.
+
 ## In progress
-- WF2 — A1 (per-agent action bar) + A3 (reload-survival) + A4 (conductor→worker tree).
-  Running (run `wf_89aaa1c2-8a8`): plan → implement → review on `chat.html`, FE-only against
-  existing endpoints. Build agents read the real files; script lives at `wf2-phase-a-console.mjs`.
-  Note: the earlier WF2 launch hit a "TypeScript syntax" parse error from embedded context tokens;
-  fixed by writing the script to a file and building agent prompts from concatenated plain strings.
-- WF3 — A2 (non-blocking conductor) + B1/B2 (in-flight ACP-turn registry → live steer/interrupt). Pending WF2 verify.
+- WF3 — A2 (non-blocking conductor) + B1/B2 (in-flight ACP-turn registry → live steer/interrupt). Next up.
 
 ## Decisions made during WF2
 - D-WF2a (A4): the dashboard read model has NO parent field, so the conductor→worker tree is a
