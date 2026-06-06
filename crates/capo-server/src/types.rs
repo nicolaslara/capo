@@ -1552,6 +1552,12 @@ pub struct AcpLiveTurnSummary {
     pub appended_event_count: usize,
     /// The finalized stop reason of the turn (e.g. `end_turn` / `cancelled`).
     pub stop_reason: Option<String>,
+    /// The agent's verbatim assistant prose for this turn, concatenated from the
+    /// streaming agent-message events (`adapter.item_delta`/`adapter.item_completed`
+    /// with `role == "assistant"`). `None`/empty when the turn produced no prose.
+    /// This is read off the live transcript's in-memory `content` (which capo does
+    /// NOT content-hash), so it carries the literal words, not a redacted label.
+    pub reply_text: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

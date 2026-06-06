@@ -256,6 +256,18 @@ fn tool_schemas() -> Value {
                 },
                 "required": ["scope"]
             }
+        },
+        {
+            "name": "collect_results",
+            "description": "Wait for and read worker result files. Given the relative filenames your detached workers were told to write, this BLOCKS server-side (up to timeout_secs) until each file has non-empty content, then returns the REAL contents. Use this to aggregate fan-out results instead of reading the files yourself (it avoids reading before the slow workers have written). The returned `results` are ground truth — never invent worker results.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "files": {"type": "array", "items": {"type": "string"}, "description": "Relative result filenames the workers write, e.g. [\"result-fruit-1.txt\",\"result-fruit-2.txt\"]."},
+                    "timeout_secs": {"type": "integer", "description": "Max seconds to wait for all files to be non-empty (default 75)."}
+                },
+                "required": ["files"]
+            }
         }
     ])
 }
@@ -273,6 +285,7 @@ fn handle_tools_call(state: &McpState, id: Value, params: &Value) -> Value {
         "review_agent" => tool_review_agent(state, &args),
         "steer_agent" => tool_steer_agent(state, &args),
         "set_mode" => tool_set_mode(state, &args),
+        "collect_results" => tool_collect_results(state, &args),
         other => Err(format!("unknown tool: {other}")),
     };
 
@@ -604,6 +617,74 @@ fn resolve_agent_name(state: &McpState, agent_ref: &str) -> Result<String, Strin
         .find(|a| a.name == agent_ref || a.agent_id.to_string() == agent_ref)
         .map(|a| a.name.clone())
         .ok_or_else(|| format!("unknown agent: {agent_ref}"))
+}
+
+/// `collect_results(files, timeout_secs?)` — block server-side until each named
+/// result file (relative to the worker workspace) has non-empty content, then
+/// return the REAL contents. Removes the conductor-vs-slow-detached-worker timing
+/// race (and the temptation to hallucinate) by handing the conductor ground-truth
+/// file contents in one tool result.
+fn tool_collect_results(state: &McpState, args: &Value) -> Result<String, String> {
+    let files: Vec<String> = args
+        .get("files")
+        .and_then(Value::as_array)
+        .ok_or("collect_results requires `files` (array of relative filenames)")?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    if files.is_empty() {
+        return Err("collect_results: `files` must be a non-empty array".to_string());
+    }
+    let timeout_secs = args
+        .get("timeout_secs")
+        .and_then(Value::as_u64)
+        .unwrap_or(75)
+        .min(180);
+    let root = std::path::PathBuf::from(
+        state
+            .worker
+            .default_workspace_root
+            .clone()
+            .ok_or("collect_results: no worker workspace configured")?,
+    );
+    // Confine to the workspace: only the file NAME component is honored.
+    let resolve = |f: &str| -> std::path::PathBuf {
+        let name = std::path::Path::new(f).file_name().unwrap_or_default();
+        root.join(name)
+    };
+    let read_nonempty = |p: &std::path::Path| -> Option<String> {
+        match std::fs::read_to_string(p) {
+            Ok(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+            _ => None,
+        }
+    };
+
+    let start = std::time::Instant::now();
+    let deadline = std::time::Duration::from_secs(timeout_secs);
+    loop {
+        let mut results = serde_json::Map::new();
+        let mut all_ready = true;
+        for f in &files {
+            match read_nonempty(&resolve(f)) {
+                Some(content) => {
+                    results.insert(f.clone(), Value::String(content));
+                }
+                None => {
+                    all_ready = false;
+                    results.insert(f.clone(), Value::Null);
+                }
+            }
+        }
+        if all_ready || start.elapsed() >= deadline {
+            return Ok(json!({
+                "ready": all_ready,
+                "results": results,
+                "waited_secs": start.elapsed().as_secs(),
+            })
+            .to_string());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
 }
 
 fn derive_agent_name(task: &str) -> String {

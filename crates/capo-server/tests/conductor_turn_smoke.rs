@@ -57,6 +57,125 @@ done
     stub.to_string_lossy().to_string()
 }
 
+/// A `/bin/sh` ACP stub that, on `session/prompt`, streams ONE
+/// `agent_message_chunk` carrying the verbatim prose `reply_marker` before
+/// finalizing `end_turn`. Used to prove the turn summary surfaces the agent's
+/// LITERAL words (read off the live transcript's in-memory `content`), not a
+/// redacted thread label.
+fn reply_text_acp_agent_stub(dir: &std::path::Path, reply_marker: &str) -> String {
+    std::fs::create_dir_all(dir).expect("stub dir");
+    let stub = dir.join("acp-reply-stub.sh");
+    let script = format!(
+        r#"#!/bin/sh
+emit() {{ printf '%s\n' "$1"; }}
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+      emit "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"protocolVersion\":1}}}}"
+      ;;
+    *'"method":"session/new"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+      emit "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"sessionId\":\"acp-reply-session\"}}}}"
+      ;;
+    *'"method":"session/prompt"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+      emit "{{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{\"sessionId\":\"acp-reply-session\",\"update\":{{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{{\"type\":\"text\",\"text\":\"{reply}\"}}}}}}}}"
+      emit "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"stopReason\":\"end_turn\"}}}}"
+      ;;
+    *) : ;;
+  esac
+done
+"#,
+        reply = reply_marker,
+    );
+    std::fs::write(&stub, script).expect("write stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&stub).expect("meta").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&stub, perms).expect("chmod");
+    }
+    stub.to_string_lossy().to_string()
+}
+
+/// DETERMINISTIC: drive ONE conductor turn through `RunConductorTurnLocal` with a
+/// `/bin/sh` ACP stub that streams a known unique `agent_message_chunk` text, and
+/// assert the returned `AcpLiveTurnSummary.reply_text` carries that VERBATIM text
+/// -- not a redacted label like `adapter.item_delta`. This pins the fix for the
+/// "gibberish replies" diagnosis: the reply is the agent's literal words.
+#[test]
+fn server_conductor_turn_summary_carries_verbatim_agent_text() {
+    unsafe {
+        std::env::set_var("CAPO_SERVER_LIVE_PROVIDER_PREFLIGHT", "1");
+        std::env::set_var("CAPO_SERVER_RUN_ACP_LIVE", "1");
+    }
+
+    let root = capo_tmptest::TempRoot::new("capo-server-conductor-reply");
+    let server = CapoServer::open(ProjectId::new("project-capo"), root.path()).expect("server");
+
+    // A unique marker that can ONLY appear if the verbatim transcript text is
+    // surfaced; it is never a capo event-kind label.
+    let reply_marker = "CAPO_VERBATIM_REPLY_42_banana";
+    let stub_dir = root.join("acp-reply-stub");
+    let program = reply_text_acp_agent_stub(&stub_dir, reply_marker);
+
+    server
+        .handle(ServerRequest::cli(ServerCommand::RegisterAgent {
+            name: "conductor".to_string(),
+            adapter: "acp".to_string(),
+        }))
+        .expect("register conductor");
+
+    let session_id = "session-conductor-reply";
+    let run_id = "run-conductor-reply";
+    server
+        .handle(ServerRequest::cli(ServerCommand::StartSession {
+            agent_name: "conductor".to_string(),
+            goal: "manage workers".to_string(),
+            adapter: "acp".to_string(),
+            session_id: Some(session_id.to_string()),
+            run_id: Some(run_id.to_string()),
+        }))
+        .expect("start session");
+
+    let resp = server
+        .handle(ServerRequest::cli(ServerCommand::RunConductorTurnLocal {
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
+            turn_id: "turn-conductor-reply".to_string(),
+            user_message: "say the marker".to_string(),
+            conductor_goal: "You are the capo conductor.".to_string(),
+            mcp_url: "http://127.0.0.1:54321/mcp".to_string(),
+            mcp_headers: Vec::new(),
+            acp_program: program,
+            acp_argv: Vec::new(),
+            acp_session_mode: None,
+            live_acp_opt_in: true,
+        }))
+        .expect("run conductor turn");
+
+    let summary = match resp.payload {
+        ServerResponsePayload::AcpLiveTurn(summary) => summary,
+        other => panic!("expected AcpLiveTurn, got {other:?}"),
+    };
+
+    let reply = summary
+        .reply_text
+        .as_deref()
+        .expect("the turn summary must carry the agent's verbatim reply text");
+    assert!(
+        reply.contains(reply_marker),
+        "reply_text must carry the agent's VERBATIM words, got: {reply:?}"
+    );
+    // It must NOT be a redacted capo event-kind label.
+    assert!(
+        !reply.contains("adapter.item_delta") && !reply.contains("adapter.item_completed"),
+        "reply_text must be the literal prose, not a redacted label, got: {reply:?}"
+    );
+}
+
 #[test]
 fn server_conductor_turn_forwards_mcp_and_composes_prompt() {
     // Open the live ACP gate the adapter self-checks (and the conductor arm

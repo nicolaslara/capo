@@ -3,37 +3,107 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>capo conductor chat</title>
+<title>capo conductor console</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root { color-scheme: dark; }
   * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
   body {
-    margin: 0; font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-    display: flex; flex-direction: column; height: 100vh;
+    font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
     background: #0f1115; color: #e6e6e6;
+    display: grid; grid-template-columns: 260px 1fr; height: 100vh; overflow: hidden;
   }
+
+  /* ---------- sidebar ---------- */
+  #sidebar {
+    border-right: 1px solid #2a2d34; background: #0c0e12;
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  #sidebar .head {
+    padding: 12px 14px; border-bottom: 1px solid #2a2d34;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  #sidebar .head h2 { font-size: 13px; margin: 0; text-transform: uppercase; letter-spacing: .06em; color: #9aa0ab; }
+  #poll-dot { width: 8px; height: 8px; border-radius: 50%; background: #3a3f4a; transition: background .2s; }
+  #poll-dot.live { background: #34d399; }
+  #agent-list { flex: 1; overflow-y: auto; padding: 6px; }
+  .agent {
+    padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 4px;
+    border: 1px solid transparent; display: flex; flex-direction: column; gap: 3px;
+  }
+  .agent:hover { background: #15181f; }
+  .agent.sel { background: #15181f; border-color: #2563eb; }
+  .agent .name { font-weight: 600; display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  .agent .role { font-size: 10px; color: #6b7280; text-transform: uppercase; letter-spacing: .05em; }
+  .agent .sub { font-size: 11px; color: #9aa0ab; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: #6b7280; }
+  .dot.running, .dot.active { background: #34d399; animation: pulse 1.4s infinite; }
+  .dot.idle, .dot.completed, .dot.done { background: #60a5fa; }
+  .dot.blocked, .dot.error, .dot.timed { background: #f87171; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+  /* ---------- main ---------- */
+  #main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
   header {
-    padding: 12px 16px; border-bottom: 1px solid #2a2d34;
+    padding: 10px 16px; border-bottom: 1px solid #2a2d34;
     display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
   }
-  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-  .modebar { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .tabs { display: flex; gap: 4px; margin-left: auto; }
+  .tab {
+    padding: 5px 12px; border-radius: 8px; cursor: pointer; font-size: 13px;
+    background: transparent; color: #9aa0ab; border: 1px solid #2a2d34;
+  }
+  .tab.active { background: #1c2027; color: #e6e6e6; border-color: #2563eb; }
+  .modebar { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #9aa0ab; }
   .modebar label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
-  #agentId { width: 140px; padding: 3px 6px; background: #1a1d24; color: #e6e6e6;
+  #agentId { width: 130px; padding: 3px 6px; background: #1a1d24; color: #e6e6e6;
     border: 1px solid #2a2d34; border-radius: 6px; }
   #agentId:disabled { opacity: 0.4; }
-  #transcript {
-    flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px;
-  }
-  .msg { max-width: 760px; padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; word-wrap: break-word; }
+
+  .pane { flex: 1; min-height: 0; display: none; flex-direction: column; }
+  .pane.show { display: flex; }
+
+  /* chat pane */
+  #transcript { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 760px; padding: 9px 13px; border-radius: 12px; white-space: pre-wrap; word-wrap: break-word; }
   .msg.user { align-self: flex-end; background: #2563eb; color: #fff; border-bottom-right-radius: 3px; }
   .msg.conductor { align-self: flex-start; background: #1c2027; border: 1px solid #2a2d34; border-bottom-left-radius: 3px; }
-  .msg.error { align-self: flex-start; background: #3a1d1d; border: 1px solid #6b2b2b; color: #ffb4b4; }
+  .msg.error { align-self: flex-start; background: #3a1d1d; border: 1px solid #6b2b2b; color: #ffb4b4; font-family: ui-monospace, monospace; font-size: 12.5px; }
   .tools { margin-top: 8px; font-size: 12px; color: #9aa0ab; }
   .tools summary { cursor: pointer; }
   .tools pre { margin: 6px 0 0; padding: 8px; background: #11141a; border-radius: 6px; overflow-x: auto; }
   .meta { font-size: 11px; color: #6b7280; margin-top: 6px; }
-  .thinking { align-self: flex-start; color: #9aa0ab; font-style: italic; }
+
+  /* live activity area, attached under in-flight user msg */
+  .activity {
+    align-self: stretch; max-width: 760px; margin: 2px 0 4px;
+    border: 1px solid #2a2d34; border-radius: 10px; background: #0c0e12; overflow: hidden;
+  }
+  .activity .act-head {
+    padding: 6px 12px; font-size: 11px; color: #9aa0ab; border-bottom: 1px solid #1c2027;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .spinner { width: 9px; height: 9px; border-radius: 50%; border: 2px solid #2563eb; border-top-color: transparent; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .act-body { max-height: 240px; overflow-y: auto; padding: 4px 0; }
+  .ev { display: flex; gap: 8px; padding: 3px 12px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .ev .k { color: #60a5fa; flex: 0 0 auto; }
+  .ev .s { color: #6b7280; flex: 0 0 auto; }
+  .ev .t { color: #cbd2dc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ev.tool .k { color: #34d399; }
+  .ev.file .k { color: #fbbf24; }
+
+  /* agent detail pane */
+  #detail { flex: 1; overflow-y: auto; padding: 16px; }
+  #detail .empty { color: #6b7280; padding: 40px; text-align: center; }
+  #detail h3 { margin: 0 0 4px; font-size: 16px; }
+  #detail .dmeta { color: #9aa0ab; font-size: 12px; margin-bottom: 16px; }
+  .ditem { padding: 8px 12px; border-radius: 8px; background: #14171d; margin-bottom: 6px; border: 1px solid #1f232b; }
+  .ditem .dk { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: #6b7280; margin-bottom: 2px; }
+  .ditem .dt { white-space: pre-wrap; word-wrap: break-word; font-size: 13px; }
+  #detail .section { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #6b7280; margin: 18px 0 8px; }
+
   footer { padding: 12px 16px; border-top: 1px solid #2a2d34; display: flex; gap: 8px; }
   #input { flex: 1; padding: 10px 12px; background: #1a1d24; color: #e6e6e6;
     border: 1px solid #2a2d34; border-radius: 10px; resize: none; font: inherit; }
@@ -43,105 +113,377 @@
 </style>
 </head>
 <body>
-  <header>
-    <h1>capo &middot; conductor chat</h1>
-    <div class="modebar">
-      <strong>Scope:</strong>
-      <label><input type="radio" name="mode" value="all" checked /> All agents</label>
-      <label><input type="radio" name="mode" value="one" /> One agent</label>
-      <input id="agentId" type="text" placeholder="agent id" disabled />
+  <!-- ============ SIDEBAR: agents ============ -->
+  <aside id="sidebar">
+    <div class="head">
+      <h2>Agents</h2>
+      <div id="poll-dot" title="dashboard polling"></div>
     </div>
-  </header>
-  <div id="transcript"></div>
-  <footer>
-    <textarea id="input" rows="2" placeholder="Message the conductor (e.g. 'spin up a worker to create HELLO.txt')"></textarea>
-    <button id="send">Send</button>
-  </footer>
+    <div id="agent-list"><div style="padding:12px;color:#6b7280;font-size:12px">loading…</div></div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <section id="main">
+    <header>
+      <h1>capo &middot; conductor console</h1>
+      <div class="modebar">
+        <span>scope:</span>
+        <label><input type="radio" name="mode" value="all" checked /> all</label>
+        <label><input type="radio" name="mode" value="one" /> one</label>
+        <input id="agentId" type="text" placeholder="agent id" disabled />
+      </div>
+      <div class="tabs">
+        <button class="tab active" data-pane="chat">Conductor</button>
+        <button class="tab" data-pane="detail" id="tab-detail">Agent</button>
+      </div>
+    </header>
+
+    <!-- chat pane -->
+    <div class="pane show" id="pane-chat">
+      <div id="transcript"></div>
+      <footer>
+        <textarea id="input" rows="2" placeholder="Message the conductor (e.g. 'fan out to 3 agents, each say a random fruit, choose the best')"></textarea>
+        <button id="send">Send</button>
+      </footer>
+    </div>
+
+    <!-- agent detail pane -->
+    <div class="pane" id="pane-detail">
+      <div id="detail"><div class="empty">Select an agent from the sidebar to inspect its thread and live events.</div></div>
+    </div>
+  </section>
 
 <script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function statusClass(s) {
+  s = (s || '').toLowerCase();
+  if (s.includes('run') || s.includes('active')) return 'running';
+  if (s.includes('block') || s.includes('error') || s.includes('timed')) return 'blocked';
+  if (s.includes('done') || s.includes('complete')) return 'completed';
+  return 'idle';
+}
+
+// Robust fetch: never throws on non-JSON / non-OK. Returns {ok, data, text, status}.
+async function safeFetch(url, opts) {
+  let resp;
+  try {
+    resp = await fetch(url, opts);
+  } catch (e) {
+    return { ok: false, data: null, text: 'network error: ' + e.message, status: 0 };
+  }
+  const body = await resp.text();
+  let data = null;
+  try { data = body ? JSON.parse(body) : null; } catch (_) { data = null; }
+  return { ok: resp.ok, data, text: body, status: resp.status };
+}
+
+// Pull a short readable snippet out of an event payload_json.
+function eventSnippet(ev) {
+  let p = ev.payload_json;
+  if (typeof p === 'string') { try { p = JSON.parse(p); } catch (_) { return String(ev.payload_json).slice(0, 160); } }
+  if (!p || typeof p !== 'object') return '';
+  // common fields across capo event payloads
+  const cand = p.content ?? p.text ?? p.message ?? p.summary ?? p.goal ??
+               p.path ?? p.tool_name ?? p.name ?? p.result ?? p.title;
+  if (cand != null) return String(cand).replace(/\s+/g, ' ').slice(0, 200);
+  return JSON.stringify(p).slice(0, 160);
+}
+function eventCategory(kind) {
+  kind = (kind || '').toLowerCase();
+  if (kind.includes('tool')) return 'tool';
+  if (kind.includes('write') || kind.includes('file') || kind.includes('fs')) return 'file';
+  return '';
+}
+
+// ---------------------------------------------------------------------------
+// global resume watermark across the whole event log (so each turn resumes
+// strictly after the last sequence the chat activity already saw)
+// ---------------------------------------------------------------------------
+let lastSeq = 0;
+function bumpSeq(n) { if (typeof n === 'number' && n > lastSeq) lastSeq = n; }
+
+// ---------------------------------------------------------------------------
+// CHAT (conductor)
+// ---------------------------------------------------------------------------
 const transcript = document.getElementById('transcript');
 const input = document.getElementById('input');
 const send = document.getElementById('send');
 const agentId = document.getElementById('agentId');
-const modeRadios = () => document.querySelector('input[name="mode"]:checked').value;
-
-function currentMode() {
-  const scope = modeRadios();
-  return { scope, agentId: scope === 'one' ? (agentId.value.trim() || null) : null };
-}
+const modeVal = () => document.querySelector('input[name="mode"]:checked').value;
 
 document.querySelectorAll('input[name="mode"]').forEach(r => {
-  r.addEventListener('change', () => { agentId.disabled = modeRadios() !== 'one'; });
+  r.addEventListener('change', () => { agentId.disabled = modeVal() !== 'one'; });
 });
 
 function bubble(cls, text) {
-  const el = document.createElement('div');
-  el.className = 'msg ' + cls;
-  el.textContent = text;
-  transcript.appendChild(el);
+  const e = el('div', 'msg ' + cls, text);
+  transcript.appendChild(e);
   transcript.scrollTop = transcript.scrollHeight;
-  return el;
+  return e;
 }
 
 function renderReply(data) {
-  const el = bubble('conductor', data.reply && data.reply.length ? data.reply : '(no reply text)');
+  const e = bubble('conductor', (data.reply && data.reply.length) ? data.reply : '(no reply text)');
   if (Array.isArray(data.toolCalls) && data.toolCalls.length) {
-    const det = document.createElement('details');
-    det.className = 'tools';
+    const det = el('details', 'tools');
     const names = data.toolCalls.map(t => t.name + (t.isError ? ' (error)' : '')).join(', ');
-    const sum = document.createElement('summary');
-    sum.textContent = 'tools: ' + names;
-    det.appendChild(sum);
-    const pre = document.createElement('pre');
-    pre.textContent = JSON.stringify(data.toolCalls, null, 2);
-    det.appendChild(pre);
-    el.appendChild(det);
+    det.appendChild(el('summary', null, 'tools: ' + names));
+    det.appendChild(el('pre', null, JSON.stringify(data.toolCalls, null, 2)));
+    e.appendChild(det);
   }
-  const meta = document.createElement('div');
-  meta.className = 'meta';
   const m = data.mode || {};
-  meta.textContent = `stop: ${data.stopReason || '?'} · scope: ${m.scope || '?'}${m.agentId ? ' (' + m.agentId + ')' : ''}`;
-  el.appendChild(meta);
+  const scope = typeof m === 'string' ? m : (m.scope || data.mode || '?');
+  e.appendChild(el('div', 'meta', `stop: ${data.stopReason || '?'} · scope: ${scope}`));
+}
+
+// Live activity area shown under the in-flight user message during a turn.
+function makeActivity() {
+  const wrap = el('div', 'activity');
+  const head = el('div', 'act-head');
+  head.appendChild(el('div', 'spinner'));
+  const label = el('span', null, 'conductor working…');
+  head.appendChild(label);
+  const count = el('span', null, '');
+  count.style.marginLeft = 'auto';
+  count.style.color = '#6b7280';
+  head.appendChild(count);
+  wrap.appendChild(head);
+  const body = el('div', 'act-body');
+  wrap.appendChild(body);
+  transcript.appendChild(wrap);
+  transcript.scrollTop = transcript.scrollHeight;
+
+  let n = 0;
+  return {
+    addEvent(ev) {
+      n++;
+      count.textContent = n + ' event' + (n === 1 ? '' : 's');
+      const cat = eventCategory(ev.kind);
+      const row = el('div', 'ev ' + cat);
+      row.appendChild(el('span', 'k', ev.kind || 'event'));
+      const sid = (ev.session_id || '').replace(/^session-/, '');
+      row.appendChild(el('span', 's', sid ? '@' + sid.slice(0, 14) : ''));
+      row.appendChild(el('span', 't', eventSnippet(ev)));
+      body.appendChild(row);
+      const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+      if (atBottom) body.scrollTop = body.scrollHeight;
+      transcript.scrollTop = transcript.scrollHeight;
+    },
+    finish(label2) {
+      head.querySelector('.spinner').remove();
+      label.textContent = label2 || 'turn complete';
+    },
+  };
+}
+
+// Open an SSE tail for the chat activity. Returns the EventSource.
+function openChatStream(activity) {
+  const from = lastSeq; // resume strictly after what we already have
+  const es = new EventSource('/api/events?from=' + from);
+  es.addEventListener('event', (m) => {
+    let ev;
+    try { ev = JSON.parse(m.data).params.event; } catch (_) { return; }
+    if (!ev) return;
+    bumpSeq(ev.sequence);
+    activity.addEvent(ev);
+  });
+  es.onerror = () => { /* keep-alive hiccups; browser auto-reconnects */ };
+  return es;
 }
 
 async function submit() {
   const message = input.value.trim();
   if (!message) return;
-  const mode = currentMode();
+  const scope = modeVal();
+  const agent = scope === 'one' ? (agentId.value.trim() || null) : null;
+
   bubble('user', message);
   input.value = '';
   send.disabled = true;
-  const thinking = document.createElement('div');
-  thinking.className = 'thinking';
-  thinking.textContent = 'conductor is thinking…';
-  transcript.appendChild(thinking);
-  transcript.scrollTop = transcript.scrollHeight;
-  try {
-    const resp = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ message, mode: mode.scope, agent_id: mode.agentId }),
-    });
-    thinking.remove();
-    const data = await resp.json();
-    if (!resp.ok || data.ok === false) {
-      bubble('error', 'error: ' + (data.error || resp.statusText || 'request failed'));
-    } else {
-      renderReply(data);
-    }
-  } catch (e) {
-    thinking.remove();
-    bubble('error', 'error: ' + e.message);
-  } finally {
-    send.disabled = false;
-    input.focus();
+
+  const activity = makeActivity();
+  const es = openChatStream(activity);
+
+  const res = await safeFetch('/api/chat', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ message, mode: scope, agent_id: agent }),
+  });
+
+  // close the live stream once the turn returns; give it a beat to flush trailers
+  setTimeout(() => es.close(), 600);
+  activity.finish();
+
+  if (!res.ok || (res.data && res.data.ok === false)) {
+    const errText = (res.data && (res.data.error || res.data.message)) ||
+                    res.text || ('HTTP ' + res.status);
+    bubble('error', 'error (HTTP ' + res.status + '): ' + errText);
+  } else if (res.data) {
+    renderReply(res.data);
+    bumpSeq(res.data.nextSequence);
+  } else {
+    bubble('error', 'unexpected non-JSON response: ' + (res.text || '(empty)'));
   }
+
+  send.disabled = false;
+  input.focus();
 }
 
 send.addEventListener('click', submit);
-input.addEventListener('keydown', e => {
+input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
 });
+
+// ---------------------------------------------------------------------------
+// TABS
+// ---------------------------------------------------------------------------
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => showPane(t.dataset.pane));
+});
+function showPane(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.pane === name));
+  document.getElementById('pane-chat').classList.toggle('show', name === 'chat');
+  document.getElementById('pane-detail').classList.toggle('show', name === 'detail');
+}
+
+// ---------------------------------------------------------------------------
+// SIDEBAR: poll /api/dashboard every 2s
+// ---------------------------------------------------------------------------
+const agentListEl = document.getElementById('agent-list');
+const pollDot = document.getElementById('poll-dot');
+let agentsById = {};
+let selectedId = null;
+
+function renderAgents(agents) {
+  agentsById = {};
+  agentListEl.innerHTML = '';
+  if (!agents.length) {
+    agentListEl.appendChild(el('div', null, 'no agents yet')).style.cssText = 'padding:12px;color:#6b7280;font-size:12px';
+    return;
+  }
+  agents.forEach(a => {
+    agentsById[a.id] = a;
+    const row = el('div', 'agent' + (a.id === selectedId ? ' sel' : ''));
+    const name = el('div', 'name');
+    name.appendChild(el('span', 'dot ' + statusClass(a.status)));
+    name.appendChild(el('span', null, a.name || a.id));
+    row.appendChild(name);
+    const isConductor = /conductor/i.test(a.id) || /conductor/i.test(a.name || '');
+    row.appendChild(el('div', 'role', isConductor ? 'conductor' : 'worker'));
+    const sub = (a.status || '') + (a.goal ? ' · ' + a.goal : (a.result ? ' · ' + a.result : ''));
+    row.appendChild(el('div', 'sub', sub));
+    row.addEventListener('click', () => selectAgent(a.id));
+    agentListEl.appendChild(row);
+  });
+}
+
+async function pollDashboard() {
+  const res = await safeFetch('/api/dashboard');
+  pollDot.classList.toggle('live', res.ok && res.data);
+  if (res.ok && res.data && Array.isArray(res.data.agents)) {
+    renderAgents(res.data.agents);
+    // if the selected agent is open, its live event tail keeps updating it.
+  }
+}
+setInterval(pollDashboard, 2000);
+pollDashboard();
+
+// ---------------------------------------------------------------------------
+// AGENT DETAIL: thread snapshot + own live event tail
+// ---------------------------------------------------------------------------
+const detailEl = document.getElementById('detail');
+let detailES = null;
+let detailSeq = 0;
+let detailEventsBox = null;
+
+async function selectAgent(id) {
+  selectedId = id;
+  showPane('detail');
+  document.querySelectorAll('.agent').forEach(r => r.classList.remove('sel'));
+  // re-mark selection on next render; also mark immediately if present
+  [...agentListEl.children].forEach(c => {
+    const nm = c.querySelector('.name span:last-child');
+    if (nm && (nm.textContent === (agentsById[id]?.name || id))) c.classList.add('sel');
+  });
+
+  const a = agentsById[id] || {};
+  const sessionId = a.sessionId || null;
+
+  detailEl.innerHTML = '';
+  detailEl.appendChild(el('h3', null, a.name || id));
+  const meta = el('div', 'dmeta');
+  meta.textContent = [a.status, a.adapter, sessionId ? 'session ' + sessionId : 'no session', a.runId ? 'run ' + a.runId : '']
+    .filter(Boolean).join(' · ');
+  detailEl.appendChild(meta);
+  if (a.goal) { const g = el('div', 'ditem'); g.appendChild(el('div', 'dk', 'goal')); g.appendChild(el('div', 'dt', a.goal)); detailEl.appendChild(g); }
+  if (a.result) { const r = el('div', 'ditem'); r.appendChild(el('div', 'dk', 'result')); r.appendChild(el('div', 'dt', a.result)); detailEl.appendChild(r); }
+
+  // close any prior tail
+  if (detailES) { detailES.close(); detailES = null; }
+  detailSeq = 0;
+
+  if (!sessionId) {
+    detailEl.appendChild(el('div', 'empty', 'This agent has no session yet.'));
+    return;
+  }
+
+  // --- thread snapshot ---
+  detailEl.appendChild(el('div', 'section', 'thread'));
+  const threadBox = el('div');
+  detailEl.appendChild(threadBox);
+  const tr = await safeFetch('/api/thread?session=' + encodeURIComponent(sessionId) + '&from=0');
+  if (tr.ok && tr.data && Array.isArray(tr.data.turns)) {
+    let any = false;
+    tr.data.turns.forEach(turn => {
+      (turn.items || []).forEach(it => {
+        detailSeq = Math.max(detailSeq, it.sequence || 0);
+        if (!it.text) return;
+        any = true;
+        const d = el('div', 'ditem');
+        d.appendChild(el('div', 'dk', (it.eventKind || it.kind || 'item')));
+        d.appendChild(el('div', 'dt', it.text));
+        threadBox.appendChild(d);
+      });
+    });
+    if (!any) threadBox.appendChild(el('div', 'empty', 'no readable thread text yet (message text is content-hashed; watch live events below or worker file writes).'));
+    if (typeof tr.data.nextSequence === 'number') detailSeq = Math.max(detailSeq, tr.data.nextSequence - 1);
+  } else {
+    threadBox.appendChild(el('div', 'empty', 'thread unavailable: ' + (tr.text || ('HTTP ' + tr.status)).slice(0, 200)));
+  }
+
+  // --- live events for THIS session ---
+  detailEl.appendChild(el('div', 'section', 'live events'));
+  detailEventsBox = el('div', 'act-body');
+  detailEventsBox.style.maxHeight = 'none';
+  detailEl.appendChild(detailEventsBox);
+
+  detailES = new EventSource('/api/events?session=' + encodeURIComponent(sessionId) + '&from=' + detailSeq);
+  detailES.addEventListener('event', (m) => {
+    let ev;
+    try { ev = JSON.parse(m.data).params.event; } catch (_) { return; }
+    if (!ev || selectedId !== id) return;
+    detailSeq = Math.max(detailSeq, ev.sequence || 0);
+    bumpSeq(ev.sequence);
+    const cat = eventCategory(ev.kind);
+    const row = el('div', 'ev ' + cat);
+    row.appendChild(el('span', 'k', ev.kind || 'event'));
+    row.appendChild(el('span', 't', eventSnippet(ev)));
+    detailEventsBox.appendChild(row);
+    detailEventsBox.scrollTop = detailEventsBox.scrollHeight;
+  });
+  detailES.onerror = () => {};
+}
+
 input.focus();
 </script>
 </body>

@@ -298,7 +298,30 @@ fn conductor_goal(mode: &ChatMode) -> String {
     let base = "You are the capo conductor. You manage worker agents via the capo MCP tools \
          (start_agent, list_agents, review_agent, steer_agent, set_mode). When the user asks for \
          work, delegate it by calling the start_agent tool with a precise `task` for the worker. \
-         Do NOT do the work yourself.";
+         Do NOT do the work yourself.\n\n\
+         CRITICAL — SHARED PROJECT DIRECTORY: you and EVERY worker you start run in the SAME project \
+         directory (the current working directory). There are NO separate worktrees. To read a \
+         worker's output, just use your Read tool on the RELATIVE filename you told it to write \
+         (e.g. `result-fruit-1.txt`) — do NOT prefix paths, do NOT look in worktrees, do NOT use \
+         absolute paths.\n\n\
+         FAN-OUT / PARALLEL WORK: When the user asks to fan out, run multiple agents, run a \
+         workflow, or do things in parallel, call start_agent ONCE PER agent with \
+         `detached: true` so the workers run concurrently. NEVER call start_agent synchronously \
+         in a loop (without `detached: true`) -- that blocks and WILL time out. Give each worker a \
+         precise task AND tell it to WRITE its result to a distinct RELATIVE file (e.g. \
+         `result-fruit-1.txt`, `result-fruit-2.txt`, ...), because you CANNOT read another agent's \
+         chat messages -- only files on disk are observable across agents.\n\n\
+         THEN AGGREGATE with the `collect_results` tool — do NOT read the files yourself (detached \
+         workers are slow and you would read before they have written). After fanning out, call \
+         `collect_results` ONCE with the list of result filenames you assigned (e.g. \
+         {\"files\":[\"result-fruit-1.txt\",\"result-fruit-2.txt\",\"result-fruit-3.txt\"]}). It \
+         BLOCKS until every file has real content and returns the ground-truth `results` map. \
+         ABSOLUTE RULE: the values in `collect_results.results` are the ONLY source of truth for \
+         what each worker produced. NEVER invent, guess, or assume a worker's result; use exactly \
+         what `collect_results` returns. If `ready` is false for some file, call `collect_results` \
+         again for the remaining files. \
+         Once you have all real results, compare them and END WITH A CLEAR FINAL ANSWER on its own \
+         line, e.g. `FINAL: the best fruit is mango (agents picked: mango, papaya, kiwi).`";
     match (mode.scope.as_str(), mode.agent_id.as_deref()) {
         ("one", Some(agent)) => format!(
             "{base}\n\nINTERACTION SCOPE: you are talking to agent `{agent}` ONLY. Steer or \
@@ -414,8 +437,10 @@ async fn chat(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
     };
 
-    let stop_reason = match &turn.payload {
-        ServerResponsePayload::AcpLiveTurn(summary) => summary.stop_reason.clone(),
+    let (stop_reason, summary_reply) = match &turn.payload {
+        ServerResponsePayload::AcpLiveTurn(summary) => {
+            (summary.stop_reason.clone(), summary.reply_text.clone())
+        }
         other => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -424,9 +449,14 @@ async fn chat(
         }
     };
 
-    // 5. Read the reply back from the thread committed by this turn (the summary
-    //    does NOT carry the reply text). Collect the agent's output items.
-    let reply = {
+    // 5. Prefer the turn summary's `reply_text` (the agent's verbatim prose read
+    //    off the live transcript, which capo does NOT content-hash). Fall back to
+    //    the thread readback only when the summary carries no prose -- the thread
+    //    item's `text` is a redacted LABEL, not the literal words.
+    let summary_reply = summary_reply.filter(|s| !s.trim().is_empty());
+    let reply = if let Some(text) = summary_reply {
+        text
+    } else {
         let server = cfg.server.clone();
         let session_id = session_id.clone();
         tokio::task::spawn_blocking(move || {
@@ -1844,17 +1874,17 @@ done
             body["stopReason"], "end_turn",
             "the conductor turn finalizes end_turn; body={body:?}"
         );
-        // The verbatim agent text ("ok") is content-hashed and never persisted as
-        // prose (capo's raw-output redaction), so the reply surfaces the conductor's
-        // OUTPUT items read back from the committed thread as their normalized
-        // labels -- a genuine surfacing of the turn's agent-output events, not a
-        // placeholder. The stub's agent_message_chunk lands as an `item_delta`
-        // output item, so the reply must be non-empty and name that output.
+        // The turn summary carries the agent's VERBATIM prose read off the live
+        // transcript (capo does NOT content-hash the live turn's transcript events,
+        // only the persisted event log). `/api/chat` prefers that verbatim
+        // `reply_text` over the redacted thread readback, so the stub's
+        // `agent_message_chunk` text "ok" surfaces literally -- proving the reply is
+        // the agent's real words, not a normalized label.
         let reply = body["reply"].as_str().expect("reply string");
-        assert!(
-            !reply.is_empty() && reply.contains("item"),
-            "the reply must surface the conductor's agent-output item(s) read back \
-             from the thread (verbatim text is content-hashed, not persisted); got {reply:?}"
+        assert_eq!(
+            reply, "ok",
+            "the reply must surface the conductor's VERBATIM agent text from the turn \
+             summary, not a redacted thread label; got {reply:?}"
         );
         assert!(
             body["mode"]["scope"] == "all",

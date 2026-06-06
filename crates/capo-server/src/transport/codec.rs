@@ -1064,6 +1064,7 @@ pub(super) fn encode_payload(payload: &ServerResponsePayload) -> Value {
             "event_count": summary.event_count,
             "appended_event_count": summary.appended_event_count,
             "stop_reason": summary.stop_reason,
+            "reply_text": summary.reply_text,
         }),
         ServerResponsePayload::Recovery(recovery) => json!({
             "type": "recovery",
@@ -1462,6 +1463,7 @@ pub(super) fn decode_payload(value: &Value) -> TransportResult<ServerResponsePay
                 event_count: required_usize(value, "event_count")?,
                 appended_event_count: required_usize(value, "appended_event_count")?,
                 stop_reason: optional_string(value, "stop_reason")?,
+                reply_text: optional_string(value, "reply_text")?,
             },
         )),
         "recovery" => Ok(ServerResponsePayload::Recovery(RecoverySummary {

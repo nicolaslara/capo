@@ -332,6 +332,7 @@ impl CapoServer {
             event_count: outcome.transcript.events.len(),
             appended_event_count: outcome.ingest.appended_event_count,
             stop_reason: outcome.transcript.stop_reason.clone(),
+            reply_text: agent_reply_text(&outcome.transcript.events),
         };
 
         let command_hash = command_identity_hash(format!(
@@ -476,6 +477,7 @@ impl CapoServer {
             event_count: outcome.transcript.events.len(),
             appended_event_count: outcome.ingest.appended_event_count,
             stop_reason: outcome.transcript.stop_reason.clone(),
+            reply_text: agent_reply_text(&outcome.transcript.events),
         };
 
         let command_hash = command_identity_hash(format!(
@@ -513,6 +515,37 @@ impl CapoServer {
             origin,
             ServerResponsePayload::AcpLiveTurn(summary),
         )
+    }
+}
+
+/// SLICE-A: extract the agent's verbatim assistant prose from a live turn's
+/// transcript events. capo content-hashes raw provider output in the persisted
+/// event log (so the thread readback only carries a redacted LABEL), but the
+/// live transcript's `NormalizedAdapterEvent.content` still holds the literal
+/// streamed text. The assistant's prose rides on the agent-message kinds
+/// (`adapter.item_delta` / `adapter.item_completed`) with `role == "assistant"`;
+/// tool results carry the same kinds with other roles, so we filter on role to
+/// avoid pulling tool output into the reply. Returns `None` when no prose exists.
+fn agent_reply_text(
+    events: &[capo_adapters::NormalizedAdapterEvent],
+) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for event in events {
+        let is_agent_message =
+            event.kind == "adapter.item_delta" || event.kind == "adapter.item_completed";
+        let is_assistant = event.role.as_deref() == Some("assistant");
+        if is_agent_message && is_assistant {
+            if let Some(text) = event.content.as_deref() {
+                if !text.is_empty() {
+                    parts.push(text);
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.concat())
     }
 }
 
