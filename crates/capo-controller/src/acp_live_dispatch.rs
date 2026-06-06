@@ -82,12 +82,19 @@ impl FakeBoundaryController {
     /// controller's `PermissionPolicy` (a policy DENY over-rules an adapter-offered
     /// allow), and the per-event batch is event-sourced into the read models --
     /// never reduced to a `TurnOutput` summary.
+    ///
+    /// COOPERATIVE CANCEL (B2): the trailing `cancel` is an OPTIONAL shared flag
+    /// forwarded to the adapter's `drive_with_decider`. `None` (the deterministic
+    /// smoke suites) is byte-identical to the pre-cancel path. The live server
+    /// path passes a registered flag so an `InterruptAgent`/`StopAgent` command
+    /// can cooperatively cancel the in-flight turn.
     pub fn drive_acp_live_turn<T: capo_adapters::AcpTransport>(
         &self,
         refs: &FakeRunRefs,
         adapter: &AcpLiveAdapter,
         transport: T,
         request: &TurnRequest,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> StateResult<AcpLiveTurnOutcome> {
         let turn_id = TurnId::new(format!("turn-acp-live-{}", request.turn_id.as_str()));
         let decider = Box::new(ControllerAcpDecider {
@@ -107,7 +114,7 @@ impl FakeBoundaryController {
         // wire client, so the wire client routes permission decisions through the
         // policy authority and writes back ONLY the controller-returned outcome.
         let transcript = adapter
-            .drive_with_decider(transport, &request.goal, decider)
+            .drive_with_decider(transport, &request.goal, decider, cancel)
             .map_err(|error| StateError::AcpLiveDrive(format!("acp live drive failed: {error}")))?;
 
         // INGESTION: the per-event batch flows through the loop's normal route, not

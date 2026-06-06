@@ -317,6 +317,7 @@ mod tests {
                     agent_name: "acp-worker".to_string(),
                     goal: "write a file".to_string(),
                 },
+                None,
             )
             .expect("drive acp live turn");
 
@@ -716,6 +717,7 @@ done
                     agent_name: "acp-worker".to_string(),
                     goal: "write a file".to_string(),
                 },
+                None,
             )
             .expect("drive live acp turn");
 
@@ -747,7 +749,7 @@ done
         request: &TurnRequest,
     ) -> AcpTurnTranscript {
         controller
-            .drive_acp_live_turn(refs, adapter, transport, request)
+            .drive_acp_live_turn(refs, adapter, transport, request, None)
             .expect("drive")
             .transcript
     }

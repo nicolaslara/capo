@@ -12,6 +12,7 @@ use crate::{
     ServerResponse, ServerResponsePayload, send_tcp, serve_tcp,
 };
 
+mod cancel_registry;
 mod claude_chat;
 mod claude_loop_route;
 mod codex_chat;

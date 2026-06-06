@@ -506,6 +506,7 @@ mod tests {
                     agent_name: "acp-worker".to_string(),
                     goal: "write a file".to_string(),
                 },
+                None,
             )
             .expect("drive acp live turn");
 

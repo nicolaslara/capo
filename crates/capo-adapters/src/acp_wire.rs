@@ -27,6 +27,8 @@
 //! an ACP agent backend.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use capo_core::RunId;
@@ -116,6 +118,14 @@ pub enum AcpWireError {
     /// treats this as fail-closed: the runtime-spawned process group is torn down
     /// rather than the turn hanging on a stalled agent.
     Timeout { awaiting: String, after_ms: u128 },
+    /// COOPERATIVE CANCEL (B2): an external cancel flag was observed between
+    /// inbound frames while the pump was awaiting `awaiting`. The pump sent a
+    /// best-effort `session/cancel` NOTIFICATION on the wire (if an external
+    /// session id was known) and then returned this sentinel. This variant is
+    /// ONLY ever produced when a cancel flag was installed via
+    /// [`AcpWireClient::with_cancel`]; the default (no flag) path NEVER produces
+    /// it, so the validated turn loop is byte-identical without cancel.
+    Cancelled { awaiting: String },
 }
 
 impl std::fmt::Display for AcpWireError {
@@ -136,6 +146,9 @@ impl std::fmt::Display for AcpWireError {
                 f,
                 "acp pump timed out after {after_ms}ms while awaiting `{awaiting}`"
             ),
+            Self::Cancelled { awaiting } => {
+                write!(f, "acp turn cancelled while awaiting `{awaiting}`")
+            }
         }
     }
 }
@@ -260,6 +273,13 @@ pub struct AcpWireClient<'d, T: AcpTransport> {
     /// crosses a thread boundary (no `Send`/`Sync` bound). A borrowed-lifetime box
     /// lets the controller install a decider that borrows the controller itself.
     permission_decider: Box<dyn AcpPermissionDecider + 'd>,
+    /// COOPERATIVE CANCEL (B2): an OPTIONAL shared cancel flag the pump checks
+    /// between inbound frames. `None` by default (installed only via
+    /// [`Self::with_cancel`]). SAFETY/INVARIANT: when `None`, the cancel check in
+    /// `pump_until_response` is skipped entirely, no `session/cancel` frame is
+    /// ever sent, and the wire behavior is byte-identical to the pre-cancel path
+    /// (the deterministic suite and the validated live loop install no flag).
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 impl<'d, T: AcpTransport> AcpWireClient<'d, T> {
@@ -278,6 +298,7 @@ impl<'d, T: AcpTransport> AcpWireClient<'d, T> {
             run_id,
             read_timeout: ACP_PUMP_READ_TIMEOUT,
             permission_decider: Box::new(FailClosedPermissionDecider),
+            cancel: None,
         }
     }
 
@@ -305,6 +326,23 @@ impl<'d, T: AcpTransport> AcpWireClient<'d, T> {
     #[must_use]
     pub fn with_read_timeout(mut self, read_timeout: Duration) -> Self {
         self.read_timeout = read_timeout;
+        self
+    }
+
+    /// COOPERATIVE CANCEL (B2): install a shared cancel flag the pump observes
+    /// BETWEEN inbound frames. When the flag flips true, the pump sends a
+    /// best-effort `session/cancel` notification (if it already knows the external
+    /// session id) and returns [`AcpWireError::Cancelled`].
+    ///
+    /// SAFETY/INVARIANT: this is purely additive. A client built WITHOUT this
+    /// builder carries `cancel: None`, the pump's cancel check is skipped, and the
+    /// frames are byte-identical to the pre-cancel path. Granularity is
+    /// between-frames: a worker blocked inside a single `recv_line_within` will not
+    /// observe the flag until the next frame arrives or the per-read deadline
+    /// (`read_timeout`) elapses. This is honest and acceptable.
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
+        self.cancel = Some(cancel);
         self
     }
 
@@ -571,6 +609,27 @@ impl<'d, T: AcpTransport> AcpWireClient<'d, T> {
         let mut line_number = 0usize;
         let deadline = Instant::now() + self.read_timeout;
         loop {
+            // COOPERATIVE CANCEL (B2): observe an installed cancel flag BETWEEN
+            // frames, before the next blocking read. When `self.cancel` is `None`
+            // (every deterministic + validated-live path) this whole block is
+            // skipped and the loop is byte-identical to the pre-cancel code.
+            //
+            // Borrow discipline: read the bool into a local and clone the session
+            // id (ending the `&self.cancel` / `&self.external_session_id` borrows)
+            // BEFORE calling `self.cancel(&sid)`, which borrows `&mut self`.
+            let cancel_requested = self
+                .cancel
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::Relaxed));
+            if cancel_requested {
+                if let Some(sid) = self.external_session_id.clone() {
+                    // Best-effort `session/cancel` NOTIFICATION (no response).
+                    let _ = self.cancel(&sid);
+                }
+                return Err(AcpWireError::Cancelled {
+                    awaiting: method.to_string(),
+                });
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(AcpWireError::Timeout {
@@ -2262,5 +2321,98 @@ mod tests {
         // mcpServers + cwd are still present (the lockdown is additive).
         assert!(params.get("cwd").is_some());
         assert!(params.get("mcpServers").is_some());
+    }
+
+    /// COOPERATIVE CANCEL (B2): a cancel flag installed via `with_cancel` and
+    /// flipped after `session/new` makes the next prompt pump observe it BETWEEN
+    /// frames, send a best-effort `session/cancel` notification on the wire, and
+    /// return the `Cancelled` sentinel. Deterministic: no live process.
+    #[test]
+    fn installed_cancel_flag_sends_session_cancel_and_returns_cancelled() {
+        let transport = ScriptedAcpTransport::new()
+            .on_request(
+                "initialize",
+                vec![ScriptedServerFrame::Response(
+                    json!({ "protocolVersion": 1, "agentCapabilities": {} }),
+                )],
+            )
+            .on_request(
+                "session/new",
+                vec![ScriptedServerFrame::Response(
+                    json!({ "sessionId": "acp-session-cancel-1" }),
+                )],
+            );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut client = AcpWireClient::attach(transport, setup_plan())
+            .with_permission_decider(allow_decider())
+            .with_cancel(Arc::clone(&cancel));
+
+        client.initialize().expect("initialize");
+        let session_id = client.session_new("/tmp/capo-acp-wire-ws").expect("session/new");
+        assert_eq!(session_id, "acp-session-cancel-1");
+
+        // Flip the flag BEFORE prompting: the pump checks it at the top of its
+        // first loop iteration, before any blocking read.
+        cancel.store(true, Ordering::Relaxed);
+
+        let err = client
+            .prompt(&session_id, "do a long thing")
+            .expect_err("prompt must observe the cancel flag");
+        match err {
+            AcpWireError::Cancelled { awaiting } => {
+                assert_eq!(awaiting, "session/prompt");
+            }
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+
+        // A `session/cancel` NOTIFICATION (no id) for this session was sent on the
+        // wire as the cooperative-cancel signal.
+        let cancel_sent = client.transport.recorded.iter().any(|frame| {
+            frame.get("method").and_then(Value::as_str) == Some("session/cancel")
+                && frame.get("id").is_none()
+                && frame.pointer("/params/sessionId").and_then(Value::as_str)
+                    == Some("acp-session-cancel-1")
+        });
+        assert!(cancel_sent, "a session/cancel frame must be sent on cancel");
+    }
+
+    /// INVARIANT: with NO cancel flag installed (the default), the pump never
+    /// produces `Cancelled` and never emits a `session/cancel` frame -- the
+    /// frames are byte-identical to the pre-cancel path.
+    #[test]
+    fn no_cancel_flag_never_cancels_and_sends_no_cancel_frame() {
+        let transport = ScriptedAcpTransport::new()
+            .on_request(
+                "initialize",
+                vec![ScriptedServerFrame::Response(
+                    json!({ "protocolVersion": 1, "agentCapabilities": {} }),
+                )],
+            )
+            .on_request(
+                "session/new",
+                vec![ScriptedServerFrame::Response(
+                    json!({ "sessionId": "acp-session-nocancel-1" }),
+                )],
+            )
+            .on_request(
+                "session/prompt",
+                vec![ScriptedServerFrame::Response(json!({ "stopReason": "end_turn" }))],
+            );
+
+        // Default attach: NO with_cancel.
+        let mut client = AcpWireClient::attach(transport, setup_plan())
+            .with_permission_decider(allow_decider());
+        client.initialize().expect("initialize");
+        let session_id = client.session_new("/tmp/capo-acp-wire-ws").expect("session/new");
+        let transcript = client.prompt(&session_id, "do a thing").expect("prompt");
+        assert_eq!(transcript.stop_reason.as_deref(), Some("end_turn"));
+
+        let cancel_sent = client
+            .transport
+            .recorded
+            .iter()
+            .any(|frame| frame.get("method").and_then(Value::as_str) == Some("session/cancel"));
+        assert!(!cancel_sent, "no session/cancel may be sent without a cancel flag");
     }
 }

@@ -8,6 +8,21 @@ use crate::{
     ServerResponse, ServerResponsePayload, ServerResult,
 };
 
+/// COOPERATIVE CANCEL (B2): RAII guard that deregisters an in-flight live turn
+/// from the [`CapoServer`] registry on EVERY exit path of the driving function
+/// (normal return, `?`-propagated error, or panic-unwind), so a finished turn can
+/// never be left as a dangling cancel target.
+struct DeregGuard<'a> {
+    server: &'a CapoServer,
+    session_id: String,
+}
+
+impl Drop for DeregGuard<'_> {
+    fn drop(&mut self) {
+        self.server.deregister_in_flight(&self.session_id);
+    }
+}
+
 impl CapoServer {
     pub(crate) fn recover_server(
         &self,
@@ -305,6 +320,16 @@ impl CapoServer {
             .take_transport()
             .ok_or_else(|| ServerError::AdapterFixture("acp live transport already taken".into()))?;
 
+        // COOPERATIVE CANCEL (B2): register this turn's cancel flag under the Capo
+        // session_id (the SAME key InterruptAgent/StopAgent resolve) and thread it
+        // into the drive. The RAII guard deregisters on every exit path. With no
+        // InterruptAgent/StopAgent arriving, the flag stays false and the drive is
+        // byte-identical to the pre-cancel path.
+        let in_flight = self.register_in_flight(session_id.as_str());
+        let _guard = DeregGuard {
+            server: self,
+            session_id: session_id.to_string(),
+        };
         let outcome = self
             .controller
             .drive_acp_live_turn(
@@ -316,6 +341,7 @@ impl CapoServer {
                     agent_name: "acp-worker".to_string(),
                     goal: req.goal.clone(),
                 },
+                Some(in_flight.cancel.clone()),
             )
             .map_err(ServerError::State)?;
 
@@ -460,6 +486,14 @@ impl CapoServer {
 
         // DELTA 2: compose the conductor prompt.
         let goal = format!("{}\n\n[user]: {}", req.conductor_goal, req.user_message);
+        // COOPERATIVE CANCEL (B2): register + RAII deregister + thread the flag,
+        // identical to run_acp_live_turn_local. Conductor turns are also
+        // cancellable via InterruptAgent/StopAgent on the conductor's session.
+        let in_flight = self.register_in_flight(session_id.as_str());
+        let _guard = DeregGuard {
+            server: self,
+            session_id: session_id.to_string(),
+        };
         let outcome = self
             .controller
             .drive_acp_live_turn(
@@ -471,6 +505,7 @@ impl CapoServer {
                     agent_name: "conductor".to_string(),
                     goal: goal.clone(),
                 },
+                Some(in_flight.cancel.clone()),
             )
             .map_err(ServerError::State)?;
 

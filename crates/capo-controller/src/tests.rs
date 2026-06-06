@@ -775,6 +775,7 @@ fn acp_live_turn_routes_permission_through_policy_and_ingests_events_via_loop_ro
                 agent_name: "acp-worker".to_string(),
                 goal: "write a file".to_string(),
             },
+            None,
         )
         .expect("drive acp live turn through the controller");
 

@@ -18,6 +18,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use capo_core::{BoundaryBinding, BoundaryKind, RunId, SessionId, TurnId};
 use capo_runtime::{LocalProcessRunner, PipedRunningProcess};
@@ -205,7 +207,8 @@ impl AcpLiveAdapter {
         let stderr_path = process.stderr_path().to_path_buf();
 
         let transport = PipedProcessTransport::new(stdin, stdout);
-        let result = self.drive_with_decider(transport, &request.goal, decider);
+        // No cancel flag on this trait-level path (byte-identical to pre-cancel).
+        let result = self.drive_with_decider(transport, &request.goal, decider, None);
 
         let shutdown = process.shutdown("acp live turn complete");
         debug_assert_eq!(shutdown.process.status, "exited");
@@ -289,21 +292,37 @@ impl AcpLiveAdapter {
         transport: T,
         prompt: &str,
     ) -> Result<AcpTurnTranscript, AcpLiveError> {
-        self.drive_with_decider(transport, prompt, Box::new(FailClosedPermissionDecider))
+        self.drive_with_decider(transport, prompt, Box::new(FailClosedPermissionDecider), None)
     }
 
     /// Drive the full flow, routing inbound `session/request_permission` through
     /// `decider` (the controller's `PermissionPolicy`-backed seam). The wire client
     /// writes back ONLY the decider's outcome, so the wire client is never the
     /// policy authority.
+    ///
+    /// COOPERATIVE CANCEL (B2): the trailing `cancel` is an OPTIONAL shared flag
+    /// installed onto the wire client. `None` (every existing caller via
+    /// [`Self::drive`], the deterministic suites, and the validated live loop)
+    /// means no cancel check and byte-identical frames. When `Some` and the flag
+    /// flips during the prompt pump, the wire client sends a best-effort
+    /// `session/cancel` and the prompt returns [`AcpWireError::Cancelled`], which
+    /// is mapped HERE to a terminal transcript with `stop_reason = "cancelled"`
+    /// (matching the existing cancelled status mapping) rather than an error, so
+    /// the controller ingests a clean cancelled turn.
     pub fn drive_with_decider<'d, T: AcpTransport>(
         &self,
         transport: T,
         prompt: &str,
         decider: Box<dyn AcpPermissionDecider + 'd>,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<AcpTurnTranscript, AcpLiveError> {
         let mut client = AcpWireClient::attach(transport, self.setup_plan.clone())
             .with_permission_decider(decider);
+        // Additive: install the cancel flag only when supplied. With `None` the
+        // client carries `cancel: None` and the pump is byte-identical to today.
+        if let Some(cancel) = cancel {
+            client = client.with_cancel(cancel);
+        }
         client.initialize()?;
         let session_id = client.session_new(self.workspace_root.to_string_lossy().as_ref())?;
         // If the setup plan selected a session mode (the live file-write profile
@@ -314,8 +333,21 @@ impl AcpLiveAdapter {
         if let Some(mode_id) = self.setup_plan.session_mode.clone() {
             client.session_set_mode(&session_id, &mode_id)?;
         }
-        let transcript = client.prompt(&session_id, prompt)?;
-        Ok(transcript)
+        match client.prompt(&session_id, prompt) {
+            Ok(transcript) => Ok(transcript),
+            // COOPERATIVE CANCEL: map the cancelled sentinel to a terminal
+            // cancelled transcript (NOT an error) so the controller ingests a
+            // clean `stopReason: cancelled` turn. Any pre-cancel `session/update`
+            // events already ingested by the pump are lost on the error path here;
+            // that is acceptable for a cancelled turn (the worker is being torn
+            // down). This arm is only reachable when a cancel flag was installed.
+            Err(AcpWireError::Cancelled { .. }) => Ok(AcpTurnTranscript {
+                stop_reason: Some("cancelled".to_string()),
+                cancelled: true,
+                ..AcpTurnTranscript::default()
+            }),
+            Err(other) => Err(AcpLiveError::Wire(other)),
+        }
     }
 }
 

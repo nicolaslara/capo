@@ -2,8 +2,9 @@
 //!
 //! This crate owns the typed request/response surface that clients should use
 //! before choosing a concrete transport such as a local socket or remote API.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use capo_adapters::{AgentAdapterHandle, ClaudeCodeLiveAdapter, CodexLiveAdapter};
@@ -74,6 +75,27 @@ pub struct CapoServer {
     /// AI2: the per-agent Codex chat binding registry + the config a Codex-bound
     /// turn needs.
     codex_chat: CodexChatBindings,
+    /// COOPERATIVE CANCEL (B2): the in-flight live-turn registry, keyed by Capo
+    /// `session_id`. A live ACP turn registers its cancel flag here while running
+    /// (`run_acp_live_turn_local` / `run_conductor_turn_local`) and deregisters
+    /// on completion via an RAII guard. `InterruptAgent`/`StopAgent` look up the
+    /// session here and flip the flag so the in-flight turn's pump observes it and
+    /// sends `session/cancel`.
+    ///
+    /// SAFETY/INVARIANT: this is an `Arc<Mutex<..>>` field, so it is SHARED across
+    /// every `CapoServer` clone (including the clone moved into the detached
+    /// worker thread) without a `static` — no cross-test bleed. When no live turn
+    /// is registered for a session, `cancel_session` returns `false` and the
+    /// command keeps its existing honest record-intent behavior (it never fakes
+    /// delivery to a worker that is not there).
+    in_flight: Arc<Mutex<HashMap<String, InFlightTurn>>>,
+}
+
+/// COOPERATIVE CANCEL (B2): the handle for one registered in-flight live turn.
+/// Holds the shared cancel flag the turn's wire pump observes between frames.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct InFlightTurn {
+    pub(crate) cancel: Arc<AtomicBool>,
 }
 
 /// AI2: the server's record of which registered agents are bound to the real
@@ -243,6 +265,7 @@ impl CapoServer {
             controller,
             controller_selection,
             codex_chat,
+            in_flight: Arc::default(),
         })
     }
 
@@ -276,12 +299,48 @@ impl CapoServer {
             controller,
             controller_selection,
             codex_chat,
+            in_flight: Arc::default(),
         })
     }
 
     /// The controller routing in effect (the RTL11 single-switch value).
     pub fn controller_selection(&self) -> ControllerSelection {
         self.controller_selection
+    }
+
+    /// COOPERATIVE CANCEL (B2): register an in-flight live turn for `session_id`,
+    /// returning its handle (carrying the cancel flag to thread into the drive).
+    /// Inserts a fresh handle (clearing any stale flag from a prior turn under the
+    /// same key).
+    pub(crate) fn register_in_flight(&self, session_id: &str) -> InFlightTurn {
+        let handle = InFlightTurn::default();
+        if let Ok(mut map) = self.in_flight.lock() {
+            map.insert(session_id.to_string(), handle.clone());
+        }
+        handle
+    }
+
+    /// COOPERATIVE CANCEL (B2): drop the in-flight registration for `session_id`
+    /// (called from the RAII guard when the turn ends, by any exit path).
+    pub(crate) fn deregister_in_flight(&self, session_id: &str) {
+        if let Ok(mut map) = self.in_flight.lock() {
+            map.remove(session_id);
+        }
+    }
+
+    /// COOPERATIVE CANCEL (B2): flip the cancel flag for a live turn registered
+    /// under `session_id`. Returns `true` iff a live turn was found and flagged
+    /// (so the caller can distinguish a real live cancel signal from the
+    /// record-intent-only case where no turn is in flight). Never fakes delivery:
+    /// when no turn is registered this is a no-op returning `false`.
+    pub(crate) fn cancel_session(&self, session_id: &str) -> bool {
+        if let Ok(map) = self.in_flight.lock()
+            && let Some(handle) = map.get(session_id)
+        {
+            handle.cancel.store(true, Ordering::Relaxed);
+            return true;
+        }
+        false
     }
 
     /// The command-routing view bound to the selected controller. Command
@@ -627,6 +686,15 @@ impl CapoServer {
                 self.command_controller()
                     .interrupt_command(&command)
                     .map_err(ServerError::State)?;
+                // COOPERATIVE CANCEL (B2): IN ADDITION to the durable record above,
+                // best-effort signal a live in-flight turn for this session. If one
+                // is registered, its pump observes the flag and sends
+                // `session/cancel` (the live win). If none is registered,
+                // `cancel_session` returns `false` and behavior is byte-identical to
+                // the prior record-intent-only path (never fakes delivery). The
+                // response/recorded event are NOT branched on this, so the
+                // deterministic-suite assertions stay stable.
+                let _was_live = self.cancel_session(session.session_id.as_str());
                 self.record_server_request_handled(
                     &command,
                     &origin,
@@ -684,6 +752,11 @@ impl CapoServer {
                 self.command_controller()
                     .stop_command(&command)
                     .map_err(ServerError::State)?;
+                // COOPERATIVE CANCEL (B2): same as InterruptAgent -- best-effort flip
+                // the in-flight turn's cancel flag in ADDITION to the durable record.
+                // No-op (returns false) when no live turn is registered, keeping the
+                // existing record-intent behavior byte-identical.
+                let _was_live = self.cancel_session(session.session_id.as_str());
                 self.record_server_request_handled(
                     &command,
                     &origin,
