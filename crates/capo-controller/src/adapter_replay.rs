@@ -178,6 +178,21 @@ impl FakeBoundaryController {
                     .as_ref()
                     .map(|content| stable_hash(content.as_bytes()))
                     .unwrap_or_else(|| adapter_event.raw_event_hash.clone());
+                // SLICE-A LEGIBILITY: for ASSISTANT prose, the summary IS the
+                // conductor's real words (capped) rather than a hash label, so the
+                // dashboard/thread readback is legible. Non-assistant items keep
+                // the hash-label form.
+                let is_assistant_prose = adapter_event.role.as_deref() == Some("assistant");
+                let latest_summary = match (is_assistant_prose, adapter_event.content.as_deref()) {
+                    (true, Some(content)) if !content.is_empty() => {
+                        Some(content.chars().take(ADAPTER_PROSE_INLINE_CAP).collect())
+                    }
+                    _ => Some(format!(
+                        "Adapter {} {} observed content_hash={content_hash}",
+                        adapter_event.adapter_kind.as_str(),
+                        adapter_event.role.as_deref().unwrap_or("event")
+                    )),
+                };
                 Ok(Some((
                     EventKind::SessionSummaryUpdated,
                     ProjectionRecord::Session(SessionProjection {
@@ -188,11 +203,7 @@ impl FakeBoundaryController {
                         title: session.title.clone(),
                         status: "active".to_string(),
                         current_goal: session.current_goal.clone(),
-                        latest_summary: Some(format!(
-                            "Adapter {} {} observed content_hash={content_hash}",
-                            adapter_event.adapter_kind.as_str(),
-                            adapter_event.role.as_deref().unwrap_or("event")
-                        )),
+                        latest_summary,
                         latest_confidence: Some(match adapter_event.timeline_confidence {
                             capo_adapters::AdapterTimelineConfidence::Stable => 82,
                             capo_adapters::AdapterTimelineConfidence::Heuristic => 60,
@@ -390,13 +401,37 @@ impl FakeBoundaryController {
     }
 }
 
+/// Inline cap for AGENT PROSE surfaced in the persisted event payload. Bounds a
+/// runaway message so the event log line stays sane; the full prose still rides
+/// the live transcript.
+const ADAPTER_PROSE_INLINE_CAP: usize = 16 * 1024;
+
 fn adapter_event_payload_json(adapter_event: &NormalizedAdapterEvent) -> String {
     let content_hash = adapter_event
         .content
         .as_ref()
         .map(|content| stable_hash(content.as_bytes()));
+    // SLICE-A LEGIBILITY (acceptance #1/#2): for AGENT MESSAGE prose (assistant
+    // item_delta / item_completed) carry the REAL WORDS inline under "content"
+    // (JSON-escaped, length-capped) so `/api/events` (SSE), `/api/thread`, and
+    // the chat reply-fallback render the conductor's text instead of the
+    // "adapter.item_delta" label. This is PROSE legibility only -- credential-
+    // shaped TOOL-payload redaction is a separate path and is untouched: tool-
+    // call kinds (`adapter.tool_call_*`) never take this branch, so their
+    // payloads keep carrying only refs/hashes.
+    let is_assistant_prose = matches!(
+        adapter_event.kind.as_str(),
+        "adapter.item_completed" | "adapter.item_delta"
+    ) && adapter_event.role.as_deref() == Some("assistant");
+    let content_field = match (is_assistant_prose, adapter_event.content.as_deref()) {
+        (true, Some(content)) if !content.is_empty() => {
+            let capped: String = content.chars().take(ADAPTER_PROSE_INLINE_CAP).collect();
+            format!(",\"content\":\"{}\"", escape_json(&capped))
+        }
+        _ => String::new(),
+    };
     format!(
-        "{{\"adapter_kind\":\"{}\",\"provider_event_kind\":\"{}\",\"normalized_kind\":\"{}\",\"external_session_ref\":\"{}\",\"external_item_ref\":\"{}\",\"timeline_key\":\"{}\",\"timeline_confidence\":\"{:?}\",\"tool_name\":\"{}\",\"status\":\"{}\",\"content_hash\":\"{}\",\"raw_event_hash\":\"{}\"}}",
+        "{{\"adapter_kind\":\"{}\",\"provider_event_kind\":\"{}\",\"normalized_kind\":\"{}\",\"external_session_ref\":\"{}\",\"external_item_ref\":\"{}\",\"timeline_key\":\"{}\",\"timeline_confidence\":\"{:?}\",\"tool_name\":\"{}\",\"status\":\"{}\",\"content_hash\":\"{}\",\"raw_event_hash\":\"{}\"{}}}",
         adapter_event.adapter_kind.as_str(),
         escape_json(&adapter_event.provider_event_kind),
         escape_json(&adapter_event.kind),
@@ -412,7 +447,8 @@ fn adapter_event_payload_json(adapter_event: &NormalizedAdapterEvent) -> String 
         escape_json(adapter_event.tool_name.as_deref().unwrap_or("none")),
         escape_json(adapter_event.status.as_deref().unwrap_or("none")),
         content_hash.as_deref().unwrap_or("none"),
-        escape_json(&adapter_event.raw_event_hash)
+        escape_json(&adapter_event.raw_event_hash),
+        content_field,
     )
 }
 

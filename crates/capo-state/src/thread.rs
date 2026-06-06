@@ -288,6 +288,12 @@ fn item_text(event: &EventRecord) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(&event.payload_json).ok()?;
     let object = value.as_object()?;
     for key in [
+        // SLICE-A LEGIBILITY: `content` carries the agent's REAL WORDS (assistant
+        // prose) on the live SSE / persisted payload; prefer it so the thread item
+        // renders the conductor's text instead of the "item_delta (streaming)"
+        // label. Tool-call payloads never carry `content`, so their refs/hash
+        // shape is unaffected.
+        "content",
         "adapter_summary",
         "latest_summary",
         "detail",

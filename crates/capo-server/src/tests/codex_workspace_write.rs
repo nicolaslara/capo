@@ -168,9 +168,16 @@ fn workspace_write_mock_round_trip_records_observed_tool_result_distinct_from_ag
     // session summary records the agent message, not the tool's applied output.
     let session_projection = state.session(&session).expect("session").expect("present");
     let summary = session_projection.latest_summary.unwrap_or_default();
+    // SLICE-A LEGIBILITY: the summary now carries the agent's REAL message prose
+    // (legible chat/feed), and is still DISTINCT from the tool's applied output
+    // (the NOTES.md diff / "hello from codex" the apply_patch observation holds).
     assert!(
-        summary.contains("assistant"),
-        "agent claim summary should reflect the assistant message, got: {summary}"
+        summary.contains("I will add a greeting to NOTES.md."),
+        "agent claim summary should be the legible assistant message prose, got: {summary}"
+    );
+    assert!(
+        !summary.contains("hello from codex"),
+        "the summary is the agent's message, NOT the tool's applied output, got: {summary}"
     );
 
     // The observed tool-result event kind is recorded and is not the summary kind.

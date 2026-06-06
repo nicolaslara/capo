@@ -180,13 +180,17 @@ fn claude_turn_lands_same_read_model_row_shape_as_codex_through_shared_ingestion
     assert!(claude_shape.has_observation_event);
     assert!(claude_shape.has_summary_updated_event);
 
-    // The Claude summary is the agent's REPORTED assistant claim projected
-    // through the SAME content-hashed loop route Codex uses (raw text is
-    // content-hashed, not rendered -- the connector retention policy), so it
-    // names the `claude_code` adapter and carries the content-hash anchor, NOT a
-    // fabricated fake-adapter summary and NOT the raw observed tool result.
+    // SLICE-A LEGIBILITY: the Claude summary is the agent's REPORTED assistant
+    // claim projected through the SAME shared loop route Codex uses, now carrying
+    // the assistant's REAL message prose inline (legible chat/feed) -- NOT a
+    // fabricated fake-adapter summary and NOT the raw observed tool result
+    // (`tests passed`, which stays redacted on the tool path).
     assert!(
-        claude_summary.contains("claude_code") && claude_summary.contains("content_hash="),
-        "the Claude summary must be the content-hashed assistant claim from the shared route, got: {claude_summary}"
+        claude_summary.contains("Claude fixture response."),
+        "the Claude summary must be the legible assistant message prose, got: {claude_summary}"
+    );
+    assert!(
+        !claude_summary.contains("tests passed"),
+        "the summary is the agent's claim, NOT the redacted tool result, got: {claude_summary}"
     );
 }

@@ -493,13 +493,13 @@ fn codex_fixture_replay_updates_controller_read_models_without_raw_content_paylo
     assert_eq!(report.tool_event_count, 2);
     assert_eq!(report.completed_turn_count, 1);
     let observation = controller.observe(&refs).expect("observe replay");
-    assert!(
-        observation
-            .session
-            .latest_summary
-            .as_deref()
-            .unwrap_or_default()
-            .contains("content_hash=")
+    // SLICE-A LEGIBILITY: the session summary for ASSISTANT prose now carries the
+    // conductor/agent's REAL WORDS (capped) so the dashboard/thread readback is
+    // legible, rather than a `content_hash=` label.
+    assert_eq!(
+        observation.session.latest_summary.as_deref(),
+        Some("Codex fixture response."),
+        "assistant-prose summary must be the legible real words"
     );
     let tools = controller
         .state()
@@ -545,11 +545,23 @@ fn codex_fixture_replay_updates_controller_read_models_without_raw_content_paylo
             .iter()
             .any(|event| event.kind == "tool.observation_recorded")
     );
-    for event in events {
-        assert!(!event.payload_json.contains("Codex fixture response."));
-        assert!(!event.payload_json.contains("cargo test"));
+    // SLICE-A LEGIBILITY: assistant PROSE is now carried inline (legible feed),
+    // while TOOL content (`cargo test`) stays redacted to a ref/hash.
+    let mut saw_prose = false;
+    for event in &events {
+        if event.payload_json.contains("Codex fixture response.") {
+            saw_prose = true;
+        }
+        assert!(
+            !event.payload_json.contains("cargo test"),
+            "tool content must stay redacted (not inlined as prose)"
+        );
         assert!(event.redaction_state != "contains_sensitive");
     }
+    assert!(
+        saw_prose,
+        "assistant message PROSE must be carried inline so the feed is legible"
+    );
 }
 
 #[test]
@@ -938,12 +950,31 @@ fn claude_fixture_replay_updates_controller_read_models_without_raw_content_payl
         .state()
         .recent_events_for_session(&refs.session_id, 16)
         .expect("recent events");
+    // SLICE-A LEGIBILITY: the redaction floor is now PROSE-vs-TOOL aware. The
+    // assistant's own message prose ("Claude fixture response.") is carried
+    // inline so the conductor chat / live feed are legible, but TOOL content
+    // (the `cargo test` command and its `tests passed` result) stays redacted to
+    // a ref/hash -- credential-shaped tool-payload redaction is unchanged.
+    let mut saw_prose = false;
     for event in events {
-        assert!(!event.payload_json.contains("Claude fixture response."));
-        assert!(!event.payload_json.contains("cargo test"));
-        assert!(!event.payload_json.contains("tests passed"));
+        if event.payload_json.contains("Claude fixture response.") {
+            saw_prose = true;
+        }
+        assert!(
+            !event.payload_json.contains("cargo test"),
+            "tool-call INPUT must stay redacted (not inlined as prose)"
+        );
+        assert!(
+            !event.payload_json.contains("tests passed"),
+            "tool-call RESULT must stay redacted (not inlined as prose)"
+        );
         assert!(event.redaction_state != "contains_sensitive");
     }
+    assert!(
+        saw_prose,
+        "assistant message PROSE must be carried inline so the chat/live feed are \
+         legible (acceptance #1/#2)"
+    );
 }
 
 #[test]
@@ -1765,11 +1796,12 @@ fn session_thread_item_text_matches_real_controller_append_payloads() {
         .find(|turn| turn.turn_id == "turn-real-b")
         .expect("turn-real-b present");
 
-    // The adapter-replay `session.summary_updated` payload carries no prose
-    // (`normalized_kind`/`tool_name`/`status`/`content_hash` only -- the
-    // assistant text itself is only hashed), so the assistant output item
-    // renders the composed label from the real refs -- the `normalized_kind`
-    // and its `status` -- NOT a fabricated `latest_summary` string.
+    // SLICE-A LEGIBILITY: the adapter-replay `session.summary_updated` payload
+    // for ASSISTANT prose now carries the REAL WORDS inline (`content`), so the
+    // assistant output item renders the conductor's literal text -- legible chat
+    // / live feed -- rather than the `normalized_kind (status)` label. (Tool
+    // items below still render their composed `tool_name (status)` label: tool
+    // payloads never carry prose.)
     let summary_item = turn_a_view
         .items
         .iter()
@@ -1778,8 +1810,8 @@ fn session_thread_item_text_matches_real_controller_append_payloads() {
     assert_eq!(summary_item.event_kind, "session.summary_updated");
     assert_eq!(
         summary_item.text.as_deref(),
-        Some("adapter.item_completed (completed)"),
-        "real adapter-replay summary payload renders the composed normalized_kind (status) label"
+        Some("state inspected"),
+        "real adapter-replay summary payload renders the legible assistant prose"
     );
 
     // The tool items render the composed `tool_name (status)` label from the

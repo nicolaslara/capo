@@ -379,12 +379,12 @@ fn project_memory_scripted_dispatch_proves_narrow_spine() {
     assert_eq!(session.task_id.as_ref(), Some(&refs.task_id));
     assert_eq!(session.agent_id, refs.agent_id);
     assert_eq!(session.latest_confidence, Some(82));
-    assert!(
-        session
-            .latest_summary
-            .as_deref()
-            .unwrap_or_default()
-            .contains("content_hash=")
+    // SLICE-A LEGIBILITY: the session summary for assistant prose now carries the
+    // legible real words (the scripted closing message), not a `content_hash=`
+    // label.
+    assert_eq!(
+        session.latest_summary.as_deref(),
+        Some("project memory context loaded")
     );
     let run = state
         .run_for_session(&refs.session_id)
@@ -1627,13 +1627,13 @@ fn adapter_dispatch_gate_blocks_until_real_smoke_evidence_is_recorded() {
     );
     assert!(dashboard_after_readiness.contains("blockers=project_memory_index_missing"));
     assert!(dashboard_after_readiness.contains("compatibility_blockers=workpad_index_missing"));
+    // SLICE-A LEGIBILITY: the raw dispatch PROMPT and the raw provider TOOL
+    // content (`cargo test`) stay redacted everywhere; only assistant PROSE is
+    // now legible (so "Codex fixture response." is no longer asserted absent).
     assert_text_absent_in_tree(&state_root, "Do not render this dispatch prompt");
-    assert_text_absent_in_tree(&state_root, "Codex fixture response.");
     assert_text_absent_in_tree(&state_root, "cargo test");
-    assert_text_absent_in_tree(&evidence_dir, "Codex fixture response.");
     assert_text_absent_in_tree(&evidence_dir, "cargo test");
     assert_text_absent_in_tree(&dispatch_evidence_dir, "Do not render this dispatch prompt");
-    assert_text_absent_in_tree(&dispatch_evidence_dir, "Codex fixture response.");
     assert_text_absent_in_tree(&dispatch_evidence_dir, "cargo test");
     assert!(!workspace.exists());
     assert!(!artifacts.exists());
@@ -2416,12 +2416,12 @@ fn workpad_index_imports_markdown_refs_without_modifying_sources() {
         .session(&plans[0].session_id)
         .expect("dispatch session query")
         .expect("dispatch session");
-    assert!(
-        dispatch_session
-            .latest_summary
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Adapter codex_exec")
+    // SLICE-A LEGIBILITY: the dispatch session summary now carries the legible
+    // assistant prose from the codex fixture, not the `Adapter codex_exec ...`
+    // hash label.
+    assert_eq!(
+        dispatch_session.latest_summary.as_deref(),
+        Some("Codex fixture response.")
     );
     let dispatch_tool_calls = state
         .tool_calls_for_session(&plans[0].session_id)
@@ -7029,8 +7029,11 @@ fn adapter_fixture_replay_cli_exports_evidence_without_raw_provider_text() {
     assert!(evidence.contains("## Tool Observations"));
     assert!(evidence.contains("source=`adapter_event:codex_exec`"));
     assert!(evidence.contains("instrumentation=`observed_only`"));
-    assert!(evidence.contains("content_hash="));
-    assert!(!evidence.contains("Codex fixture response."));
+    // SLICE-A LEGIBILITY: the evidence's "Latest summary" now renders the legible
+    // assistant PROSE; the tool observation rows still carry their `raw_event_hash`
+    // ref. The TOOL content (`cargo test`) stays redacted.
+    assert!(evidence.contains("raw_event_hash="));
+    assert!(evidence.contains("Codex fixture response."));
     assert!(!evidence.contains("cargo test"));
     let dashboard = run_cli(vec![
         "dashboard".to_string(),
@@ -7045,9 +7048,10 @@ fn adapter_fixture_replay_cli_exports_evidence_without_raw_provider_text() {
     assert!(dashboard.contains("tool_observations=2"));
     assert!(dashboard.contains("source=adapter_event:codex_exec"));
     assert!(dashboard.contains("source=runtime_output"));
-    assert_text_absent_in_tree(&state_root, "Codex fixture response.");
+    // SLICE-A LEGIBILITY: the raw provider TOOL content (`cargo test`) stays
+    // redacted everywhere; assistant PROSE is now legible, so it is no longer
+    // asserted absent (it appears in the event log / evidence summary).
     assert_text_absent_in_tree(&state_root, "cargo test");
-    assert_text_absent_in_tree(&evidence_dir, "Codex fixture response.");
     assert_text_absent_in_tree(&evidence_dir, "cargo test");
 }
 

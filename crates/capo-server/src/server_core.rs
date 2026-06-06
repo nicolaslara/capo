@@ -543,12 +543,12 @@ fn agent_reply_text(
         let is_agent_message =
             event.kind == "adapter.item_delta" || event.kind == "adapter.item_completed";
         let is_assistant = event.role.as_deref() == Some("assistant");
-        if is_agent_message && is_assistant {
-            if let Some(text) = event.content.as_deref() {
-                if !text.is_empty() {
-                    parts.push(text);
-                }
-            }
+        if is_agent_message
+            && is_assistant
+            && let Some(text) = event.content.as_deref()
+            && !text.is_empty()
+        {
+            parts.push(text);
         }
     }
     if parts.is_empty() {

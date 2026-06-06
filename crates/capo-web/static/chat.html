@@ -205,6 +205,65 @@ function eventCategory(kind) {
   return '';
 }
 
+// The conductor's long-lived session id (set once a turn starts) so the feed can
+// distinguish the conductor's own lines from worker sessions it spawned.
+let conductorSessionId = null;
+function setConductorSession(sid) { if (sid) conductorSessionId = sid; }
+
+// Short, stable label for a session: the conductor, or a trimmed worker id.
+function actorLabel(ev) {
+  const sid = ev.session_id || '';
+  if (conductorSessionId && sid === conductorSessionId) return 'conductor';
+  const agent = (ev.agent_id || '').replace(/^agent-/, '');
+  if (agent) return 'worker ' + agent;
+  const trimmed = sid.replace(/^session-/, '');
+  return trimmed ? 'worker ' + trimmed.slice(0, 18) : 'worker';
+}
+
+// Render a SINGLE legible line for one event (acceptance #2): the conductor's
+// words, a tool call with its args, or a worker's activity/result -- NOT a raw
+// event kind. Returns { who, text } or null when an event carries nothing
+// worth surfacing as a line.
+function legibleLine(ev) {
+  let p = ev.payload_json;
+  if (typeof p === 'string') { try { p = JSON.parse(p); } catch (_) { p = {}; } }
+  if (!p || typeof p !== 'object') p = {};
+  const kind = (ev.kind || '').toLowerCase();
+  const nk = (p.normalized_kind || '').toLowerCase();
+  const role = (p.role || '').toLowerCase();
+  const who = actorLabel(ev);
+  const clip = (s) => String(s).replace(/\s+/g, ' ').trim().slice(0, 240);
+
+  // 1. TOOL CALLS: "→ start_agent(task=...)" / observed tool results.
+  const isTool = kind.includes('tool') || nk.includes('tool_call');
+  if (isTool) {
+    const tool = p.tool_name || p.name || p.title || 'tool';
+    if (tool === 'none' && !p.content) return null;
+    let args = '';
+    // start_agent etc. carry the task/goal; surface it when present.
+    const arg = p.task ?? p.goal ?? p.path ?? p.query ?? p.command;
+    if (arg != null) args = '(' + clip(arg).slice(0, 120) + ')';
+    const status = p.status && p.status !== 'none' ? ' [' + p.status + ']' : '';
+    const result = p.content && p.content !== 'none' ? ' → ' + clip(p.content) : '';
+    return { who, text: '→ ' + tool + args + status + result };
+  }
+
+  // 2. AGENT PROSE: the conductor's (or a worker's) real words.
+  if (p.content && p.content !== 'none' &&
+      (nk.includes('item_delta') || nk.includes('item_completed') ||
+       kind.includes('summary') || role === 'assistant' || role === 'user')) {
+    return { who, text: clip(p.content) };
+  }
+
+  // 3. Other text-bearing payloads (goal/summary/reason/plan).
+  const cand = p.content ?? p.summary ?? p.message ?? p.goal ?? p.reason ?? p.detail;
+  if (cand != null && cand !== 'none') return { who, text: clip(cand) };
+
+  // 4. Fall back to a humanized event kind so lifecycle events still show.
+  const tail = (ev.kind || 'event').split('.').pop().replace(/_/g, ' ');
+  return { who, text: tail };
+}
+
 // ---------------------------------------------------------------------------
 // global resume watermark across the whole event log (so each turn resumes
 // strictly after the last sequence the chat activity already saw)
@@ -268,12 +327,13 @@ function makeActivity() {
     addEvent(ev) {
       n++;
       count.textContent = n + ' event' + (n === 1 ? '' : 's');
+      const line = legibleLine(ev);
+      if (!line) return;
       const cat = eventCategory(ev.kind);
       const row = el('div', 'ev ' + cat);
-      row.appendChild(el('span', 'k', ev.kind || 'event'));
-      const sid = (ev.session_id || '').replace(/^session-/, '');
-      row.appendChild(el('span', 's', sid ? '@' + sid.slice(0, 14) : ''));
-      row.appendChild(el('span', 't', eventSnippet(ev)));
+      // Legible line: "<who>: <text>" -- conductor words, tool calls, worker activity.
+      row.appendChild(el('span', 'k', line.who));
+      row.appendChild(el('span', 't', line.text));
       body.appendChild(row);
       const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
       if (atBottom) body.scrollTop = body.scrollHeight;
@@ -329,6 +389,7 @@ async function submit() {
                     res.text || ('HTTP ' + res.status);
     bubble('error', 'error (HTTP ' + res.status + '): ' + errText);
   } else if (res.data) {
+    setConductorSession(res.data.sessionId);
     renderReply(res.data);
     bumpSeq(res.data.nextSequence);
   } else {
@@ -455,7 +516,7 @@ async function selectAgent(id) {
         threadBox.appendChild(d);
       });
     });
-    if (!any) threadBox.appendChild(el('div', 'empty', 'no readable thread text yet (message text is content-hashed; watch live events below or worker file writes).'));
+    if (!any) threadBox.appendChild(el('div', 'empty', 'no thread text yet — watch the live events below as the turn runs.'));
     if (typeof tr.data.nextSequence === 'number') detailSeq = Math.max(detailSeq, tr.data.nextSequence - 1);
   } else {
     threadBox.appendChild(el('div', 'empty', 'thread unavailable: ' + (tr.text || ('HTTP ' + tr.status)).slice(0, 200)));
@@ -474,10 +535,12 @@ async function selectAgent(id) {
     if (!ev || selectedId !== id) return;
     detailSeq = Math.max(detailSeq, ev.sequence || 0);
     bumpSeq(ev.sequence);
+    const line = legibleLine(ev);
+    if (!line) return;
     const cat = eventCategory(ev.kind);
     const row = el('div', 'ev ' + cat);
-    row.appendChild(el('span', 'k', ev.kind || 'event'));
-    row.appendChild(el('span', 't', eventSnippet(ev)));
+    row.appendChild(el('span', 'k', line.who));
+    row.appendChild(el('span', 't', line.text));
     detailEventsBox.appendChild(row);
     detailEventsBox.scrollTop = detailEventsBox.scrollHeight;
   });

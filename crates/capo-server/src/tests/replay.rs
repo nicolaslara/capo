@@ -99,10 +99,16 @@ fn server_replays_codex_fixture_through_server_boundary() {
     assert!(session_events.iter().any(
         |event| event.kind == "evidence.recorded" && event.payload_json.contains("codex_exec")
     ));
+    // SLICE-A LEGIBILITY: the normalized ASSISTANT prose is now carried inline on
+    // the summary/item events so the chat / live feed are legible. The raw
+    // provider FIXTURE BODY is still NOT persisted verbatim (pinned above:
+    // `raw_fixture_body_persisted:false` / `content_hashed_not_rendered`); only
+    // the normalized assistant message text is surfaced.
     assert!(
         session_events
             .iter()
-            .all(|event| !event.payload_json.contains("Codex fixture response."))
+            .any(|event| event.payload_json.contains("Codex fixture response.")),
+        "the normalized assistant prose must be surfaced for a legible feed"
     );
 }
 

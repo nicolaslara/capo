@@ -566,18 +566,100 @@ fn run_capo_io_tool(
         input,
     };
     let result = wrappers.authorize_and_invoke(request, &policy);
-    if result.status != "completed" {
+    // SLICE-A LEGIBILITY: a wrapper signals it completed a unit of work with the
+    // authoritative `tool.call_completed` audit event, NOT a fixed status STRING:
+    // a successful `shell_run`/`git_command` reports the PROCESS status (e.g.
+    // `exited`) in `result.status`, while a `file_read`/`search`/`file_write`
+    // reports `completed`. Gating only on `status == "completed"` therefore
+    // rejected every successful shell/command run (capo_bash output was lost).
+    // Gate on the completion AUDIT EVENT so a successful command -- even a
+    // non-zero exit -- surfaces its real outcome (stdout/exit) to the conductor.
+    let reached_completion = result
+        .events
+        .iter()
+        .any(|event| event.kind == "tool.call_completed");
+    if !reached_completion {
         return Err(format!(
             "{call_label} did not complete (status={}): {}",
             result.status, result.summary
         ));
     }
+    // SLICE-A LEGIBILITY (acceptance #4): surface the ACTUAL captured content
+    // inline so a LOCKED conductor can SEE and reason over file/command output
+    // rather than an opaque `{bytes_read, content_hash}`. The artifacts on disk
+    // are ALREADY credential-redacted (`write_redacted_artifact` /
+    // `redact_bytes`) and the runner is byte-bounded, so inlining them preserves
+    // the confinement contract -- we surface CONTENT, never CREDENTIALS. We read
+    // the redacted artifact bytes back (capped) and attach them to the typed
+    // output; the hash/artifact-id stay for provenance.
+    let mut output = result.typed_output.clone();
+    enrich_capo_io_output(tool_id, &mut output, &result.output_artifacts);
     Ok(json!({
         "status": result.status,
         "summary": result.summary,
-        "output": result.typed_output,
+        "output": output,
     })
     .to_string())
+}
+
+/// Inline cap for surfaced tool I/O content (per artifact). Keeps a huge file or
+/// command output from blowing the MCP response; `*_truncated` flags report it.
+const CAPO_IO_INLINE_CAP: usize = 64 * 1024;
+
+/// Read a redacted artifact file back as (capped) UTF-8 text plus a truncated
+/// flag. The artifact was already credential-scrubbed on write; reading it back
+/// surfaces CONTENT (not credentials) to the confined conductor.
+fn read_artifact_text(
+    art: &capo_tools::WrapperArtifact,
+    cap: usize,
+) -> (String, bool) {
+    let bytes = std::fs::read(&art.uri).unwrap_or_default();
+    let truncated = bytes.len() > cap;
+    let slice = &bytes[..bytes.len().min(cap)];
+    (String::from_utf8_lossy(slice).into_owned(), truncated)
+}
+
+/// Attach the already-captured, already-redacted content inline to the typed
+/// output for the capo I/O tools that otherwise return only a hash.
+///
+/// - `capo.file_read`: artifact[0] is the read bytes -> `content` + `truncated`.
+/// - `capo.shell_run`: artifacts are `[stdout, stderr]` -> `stdout`/`stderr` text.
+/// - `capo.search`: `matches`/`total_matches` are ALREADY inline in the typed
+///   output (no artifact), so nothing to add here.
+fn enrich_capo_io_output(
+    tool_id: &str,
+    output: &mut Value,
+    artifacts: &[capo_tools::WrapperArtifact],
+) {
+    let Some(map) = output.as_object_mut() else {
+        return;
+    };
+    match tool_id {
+        "capo.file_read" => {
+            if let Some(art) = artifacts.first() {
+                let (text, truncated) = read_artifact_text(art, CAPO_IO_INLINE_CAP);
+                map.insert("content".to_string(), Value::String(text));
+                map.insert("content_truncated".to_string(), Value::Bool(truncated));
+                map.insert(
+                    "redacted".to_string(),
+                    Value::Bool(art.redaction_state == "redacted"),
+                );
+            }
+        }
+        "capo.shell_run" | "capo.git_command" => {
+            if let Some(stdout) = artifacts.first() {
+                let (text, truncated) = read_artifact_text(stdout, CAPO_IO_INLINE_CAP);
+                map.insert("stdout".to_string(), Value::String(text));
+                map.insert("stdout_truncated".to_string(), Value::Bool(truncated));
+            }
+            if let Some(stderr) = artifacts.get(1) {
+                let (text, truncated) = read_artifact_text(stderr, CAPO_IO_INLINE_CAP);
+                map.insert("stderr".to_string(), Value::String(text));
+                map.insert("stderr_truncated".to_string(), Value::Bool(truncated));
+            }
+        }
+        _ => {}
+    }
 }
 
 /// `capo_read(path)` -> confined `capo.file_read`.
