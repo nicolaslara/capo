@@ -336,3 +336,112 @@ Both paths now converge on **one additive, env-flag-gated fork of `claude-agent-
 
 Relevant files:
 - `/Users/nicolas/devel/capo-sliceA/docs/capo-refocus/CONTROL-PLANE-RESEARCH.md` — the doc this section appends to (note: Phase-1 citations are pinned to `claude-code-acp@0.16.2` / SDK `0.2.44`; Thread B requires re-baselining to bridge v0.33.x).
+
+
+---
+
+# Build Roadmap — Composing P1 + P2 into the Hybrid Control Plane
+
+This section synthesizes the [P1 lockdown plan](#p1-build-plan) and the [P2 observe/veto plan](#build-slice-p2) into a single sequenced roadmap. All anchors are `file:line` in capo (`crates/...`) or the bridge (`references/claude-code-acp/dist/acp-agent.js`).
+
+## The end state (what P1+P2 compose into)
+
+capo runs a **hybrid control plane** over one ACP session per conductor turn:
+
+- **P1 (enforcement)** makes capo the *only* orchestrator the conductor knows: `disableBuiltInTools:true` + `settingSources:[]` + `disallowedTools:[Task,Agent,...]` strip every native tool and sub-agent, and capo re-supplies file/shell/search as its OWN MCP tools (`acp_mcp_http.rs`). The conductor delegates exclusively through `start_agent`. This is the *primary* control surface — banned tools are absent from context, so the model never reaches for `Task`.
+- **P2 (observation + backstop veto)** is the *safety net* for any native sub-agent that ever slips through (a future bridge bump, a worker profile that isn't locked, a partial-lockdown mode): a patched bridge fires a universal `PreToolUse` hook that streams every inner call to capo's event log + sidebar, attributed by `agentID`, and capo's existing permission decider can veto each call.
+
+They share **one injection seam** — `_meta.claudeCode.options` rendered in `session_new` (`acp_wire.rs:375`) — and one wiring site (`server_core.rs:424-435`). P1 fills the `options` blob (lockdown recipe); P2 adds the sibling hook marker + reads `agentID` back in the permission round-trip. **The two plans were designed to occupy the same struct field** (`AcpSessionSetupPlan`) and the same params builder, so they do not collide; they layer.
+
+```
+                 session/new  _meta
+                 ┌──────────────────────────────────────┐
+   P1 fills ───► │ claudeCode.options { settingSources:[],│
+                 │   disallowedTools:[Task..], strictMcp }│
+                 │ disableBuiltInTools:true               │
+   P2 adds ────► │ (vendored-bridge PreToolUse hook)      │
+                 └──────────────────────────────────────┘
+   conductor: ZERO native tools ──► must use capo MCP (capo_read/write/bash/search + start_agent)
+   any native sub-agent (defense-in-depth): PreToolUse hook ─► capo event log + veto via request_permission
+```
+
+## Recommended order: **P1 first, then P2. Not parallel.**
+
+Three reasons, all dependency-driven:
+
+1. **P1 is the actual product; P2 is insurance.** Once `Task`/`Agent` are in `disallowedTools` and absent from context (P1 §3a), native sub-agents essentially *don't happen* on the conductor. P2's value (observe/veto native sub-agents) is therefore a backstop and a path toward locking *workers* — strictly lower priority than making the conductor lockable at all. Ship the thing that changes behavior first.
+2. **They share the injection seam, and P1 lands it cleanly.** P1 introduces `AcpSessionSetupPlan.session_lockdown` + the `session_new` `_meta` rendering (`acp_wire.rs:375`) and the byte-identity guard for stub/scripted transports (`acp_client.rs:39-46`). P2's `meta_options`/hook-marker wiring is a *small extension of the same field and the same params builder*. Building P1 first means P2 inherits a tested seam instead of two threads racing to edit `session_new` and the same `AcpSessionSetupPlan` constructor (`acp_wire.rs:21-47`) simultaneously — a guaranteed merge conflict on `slice-a-acp-wiring`.
+3. **P2 has a heavier, riskier dependency (vendored bridge fork) that P1 does not need.** P1 ships entirely against the *stock* `claude-code-acp@0.16.2` using only documented-by-observation `_meta` keys. P2 *requires* a vendored, patched bridge (the `agentID` drop at `acp-agent.js:575` and the JSON-can't-carry-a-JS-callback hook constraint are hard blockers — see Dependencies). Don't take on the vendoring risk until the enforcement layer is proven on the real subscription.
+
+**Parallelizable sub-thread:** the deny-with-guidance research (P1 §3b wire-field) and the upstream `agentID` PR (P2 option (c)) can both run as *non-blocking background threads* alongside P1 implementation. Neither gates the critical path.
+
+## The single smallest first slice that delivers user-visible value
+
+**P1 §1 + §2 + §3a only — "Locked conductor with capo file/shell tools and system-prompt guidance"** (no worker lockdown, no reactive deny-message, no P2).
+
+Concretely:
+- `AcpSessionSetupPlan.session_lockdown` field + `AcpSessionLockdown::conductor_default()` + `with_session_lockdown` builder (`acp_client.rs:99-164`).
+- Render `_meta` in `session_new` (`acp_wire.rs:375`), gated `Some`/`None` for byte-identity.
+- Wire `conductor_default()` at `server_core.rs:430`.
+- The 4 capo MCP tools `capo_read/write/bash/search` over existing `runtime_wrappers.rs` (confinement inherited free).
+- `system_prompt_append` telling the model to use `start_agent` / `capo_*` instead of `Task`/`Bash`.
+
+**Why this is the smallest valuable unit:** after this slice, a real conductor turn (gated live test, `CAPO_SERVER_RUN_ACP_LIVE=1`) demonstrably has **zero native tools** — it lists only `mcp__capo__*`, cannot call `Task`/`Bash`/`Read`, and performs all I/O through capo's observable invocation log (`acp_mcp_http.rs:101`). That is the headline capability of the entire refocus ("capo owns ALL orchestration") proven end-to-end on the real subscription, in ~2 days, with no bridge fork and no dependency on the deny-message thread. Everything else (worker lockdown, deny-with-guidance text, P2 observe/veto) is additive on top.
+
+## Dependencies
+
+| Item | Depends on | Blocking? |
+|---|---|---|
+| P1 §1/§2/§3a (smallest slice) | stock bridge `0.16.2`; existing `runtime_wrappers` | **No deps** — ships immediately |
+| P1 §3b reactive deny-message | **deny-with-guidance research thread** (exact ACP wire field for a model-visible deny string) | Blocks §3b only; ship §3a meanwhile (sufficient — banned tools are absent from context) |
+| P1 §1d worker lockdown | P1 §2 capo MCP tools must exist first (locked workers lose native `fs/*`, must route through capo MCP; workers don't currently get `with_http_mcp_server`) | Blocks worker lockdown; conductor lockdown ships without it |
+| **P2 (all)** | **Vendored bridge fork** — `agentID` is dropped at `acp-agent.js:575`; SDK hooks are JS callbacks (`sdk.d.ts:259-268`) that cannot survive JSON in `_meta`. The `_meta`-only "thin wrapper" option is **rejected by source** | **Hard blocker** — P2 cannot deliver attribution or universal observation without the fork |
+| P2 wiring (`acp_wire`/decider/event) | P1's `AcpSessionSetupPlan` `_meta` seam (reuses `with_meta_options` next to `with_session_lockdown`) | Soft — strongly prefer P1 merged first to avoid seam conflict |
+| P2 upstream `agentID` PR (option c) | upstream review/merge timing | **Non-blocking** — parallel track; P2 ships on the vendored fork regardless |
+
+**On the vendored fork (the one architectural commitment in P2):** copy `references/claude-code-acp` → `vendor/claude-code-acp/`, apply a 3-site `.patch` (forward `agentID` at `:575`; attach `_meta.capo.agentID` to both `requestPermission` payloads `:585`/`:641`; add the capo `PreToolUse` `HookCallback` at `:797-804`), and spawn *that* `dist/acp-agent.js` via the already-capo-controlled `req.acp_program`/`req.acp_argv` (`server_core.rs:436-442`). Pin `0.16.2` + SDK `0.2.44`; CI-check the patch still applies. This is the single highest-fragility item in the whole roadmap — it is the reason P2 is sequenced second and gated behind P1's value being banked.
+
+## Effort per slice
+
+| Slice | Effort | Notes |
+|---|---|---|
+| **P1 §1** plan field + builder + `session_new` render + conductor wire | ~0.5 day | |
+| **P1 §2** 4 capo MCP file/shell/search tools | ~1 day | most cost is `WrapperToolRequest` envelope + result→MCP mapping; safety reused |
+| **P1 §3a** systemPrompt append | folded into §1 | |
+| **P1 tests** (deterministic + 1 gated live) | ~1 day | |
+| **P1 smallest-slice subtotal** | **~2.5–3 days** | conductor lockdown, fully usable, no fork |
+| P1 §1d worker lockdown | follow-up | after §2 exists |
+| P1 §3b reactive deny-message | ~0.5 day | after deny-guidance thread resolves |
+| **P2** bridge fork + 3-site patch + vendor/build | ~0.5–1 day | |
+| **P2** `acp_wire` + decider/event struct threading | ~1 day | |
+| **P2** new `EventKind` + codec + projection + normalizer | ~1 day | |
+| **P2** web sidebar render + tests | ~0.5–1 day | events flow to `/api/events` free |
+| **P2 subtotal** | **~3–4 days** | |
+| **Roadmap total** (P1 conductor + P1 follow-ups + P2) | **~7–9 days** | |
+
+## Sequenced plan
+
+1. **Slice 0 (the smallest valuable slice) — P1 §1+§2+§3a.** ~2.5–3 days. Locked conductor + capo MCP file/shell/search + system-prompt guidance. Gated live test proves zero native tools on the real subscription. *Ship this first; it is the product.*
+2. **Slice 1 — P1 §3b reactive deny-message.** ~0.5 day, **after** the deny-with-guidance research thread confirms the wire field. Belt-and-suspenders; pre-design `AcpPermissionOutcome.deny_message` now (`acp_wire.rs:826`) so it's a drop-in.
+3. **Slice 2 — P1 §1d worker lockdown.** Follow-up once §2 tools exist and workers are given `with_http_mcp_server`. Extends lockdown from conductor to workers (caveat: workers lose on-wire `fs/*`, must use capo MCP).
+4. **Slice 3 — P2 observe/veto.** ~3–4 days. Vendor + patch the bridge; thread `agentID` through `answer_permission` (`acp_wire.rs:791-852`); add `ToolSubagentCallObserved` `EventKind` (`event.rs:50-56`) + normalizer branch; render nested sub-agent rows + veto badges in the web sidebar (`capo-web/src/main.rs:480-503`). Delivers attributed observation + per-call veto of any native sub-agent as defense-in-depth.
+
+**Parallel non-blocking threads** (run alongside Slices 0–3, gate nothing): the deny-with-guidance wire-field research (feeds Slice 1) and the upstream `agentID` PR (feeds Slice 3's maintainability, not its delivery).
+
+## Why this composition is correct
+
+P1 makes the *common case* impossible-to-violate by construction (no `Task` in context). P2 makes the *residual case* observable and vetoable without requiring per-sub-agent ACP sessions (which ACP cannot model — `SessionId` is flat, no parent/child). Together: capo **owns** orchestration through the locked conductor + `start_agent`, and **watches/vetoes** anything native that escapes — the hybrid control plane the research set out to build, with enforcement (P1) as the load-bearing layer and interception (P2) as the backstop.
+
+---
+
+Roadmap section delivered above (Markdown, ready to append to `/Users/nicolas/devel/capo-sliceA/docs/capo-refocus/CONTROL-PLANE-RESEARCH.md`). Key decisions: P1 first (no bridge fork, ships the product), P2 second (hard-gated on a vendored bridge fork), smallest valuable slice = P1 §1+§2+§3a locked conductor (~2.5–3 days), deny-guidance and upstream-PR threads run parallel and block nothing.
+
+> **RECONCILIATION NOTE (added after Phase-1b).** This roadmap's bridge file:line anchors
+> (`acp-agent.js:575/585/641/797`) are pinned to `claude-code-acp@0.16.2`. Phase-1b (Thread B)
+> found upstream is now `agentclientprotocol/claude-agent-acp` **v0.33.x**, which ALREADY
+> forwards `_meta.claudeCode.parentToolUseId` for subagent calls. So **P2's vendored fork must
+> be re-based on v0.33.x (Proto-6)** before patching — some P2 patch sites may already be partly
+> done upstream. Also: capo currently spawns UNPINNED `npx … claude-code-acp` (likely the newer
+> line), so even P1 should pin/verify the bridge version it runs against. P1's `_meta` lockdown
+> recipe is version-robust (proven behaviors), so P1 ships first regardless.
+
