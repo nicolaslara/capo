@@ -46,7 +46,8 @@ diversity injection) are deferred to the owner — see `REVIEW-WHEN-BACK.md`.
   committing. If an item can't be completed cleanly, I stop at the last green state + log it.
 
 ## Status
-- [ ] WF1 (F1, F2)
-- [ ] WF2 (A1, A3, A4)
-- [ ] WF3 (A2, B1/B2)
-- [ ] EXECUTION-SUMMARY.md final write-up
+- [x] WF1 (F1, F2) — commit `a8f0f13`
+- [x] WF2 (A1, A3, A4) — commit `97c89a0`
+- [x] WF3 (A2 verified, B2 cooperative cancel; B1 honestly deferred) — commit `c23d1f9`
+- [x] EXECUTION-SUMMARY.md final write-up
+All committed on `main`, NOT pushed. B1 (live steer) is the one deferral — see REVIEW-WHEN-BACK §C D-WF3b.

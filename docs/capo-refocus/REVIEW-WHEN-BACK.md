@@ -38,6 +38,17 @@ Reasonable defaults I made while you were away — flagged here so you can veto:
   tree is a fork-free FE heuristic — conductor = id/name matches `/conductor/i` (root), all other
   agents are workers (one-level children). If you want a true parent/child lineage in the tree,
   that needs the read model to carry a parent ref (small backend change) — flag it.
-- **D-WF2b (A1 buttons):** Steer/Interrupt/Stop POST the real `/api/commands` kinds, but those only
-  RECORD INTENT server-side today; the UI says so explicitly. Live delivery is WF3 (B1/B2). No faked
-  delivery.
+- **D-WF2b (A1 buttons):** Steer/Interrupt/Stop POST the real `/api/commands` kinds. After WF3,
+  Interrupt/Stop now cooperatively cancel a LIVE worker turn; Steer is still record-intent. No faked delivery.
+- **D-WF3a (B2 default-off):** cooperative cancel is additive and OFF by default — the no-cancel path is
+  byte-identical so the validated demo loop + `conductor_live_e2e` are untouched. Cancel granularity is
+  "between recv frames / per read-deadline" (a worker mid-`recv` observes it at the next frame). Documented,
+  not a defect — flag if you want finer granularity (needs a transport-level interrupt seam).
+- **D-WF3b (B1 deferred):** I did NOT implement live steer. ACP is one-prompt-per-turn and the transport
+  is torn down at turn end, so mid-turn injection is unsupported; a follow-up-turn enqueue needs
+  session-persistence/`session/resume` + a scheduler that risks the validated single-turn loop. **Decision
+  needed:** do you want live steer via session-persistence? It's a real architecture change, not a tweak.
+- **D-WF3c (A2 `turn_failed` event):** a detached worker that errors only `eprintln!`s today, so a dead
+  session can look forever `running` to `review_agent`/`list_agents`. I left this as-is (appending a typed
+  terminal event wasn't a verified-clean single append and the plan forbade risking the loop for log
+  quality). **Small follow-up if you want it.**

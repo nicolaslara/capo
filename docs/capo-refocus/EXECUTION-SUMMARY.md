@@ -31,8 +31,37 @@ Open questions for the owner: `REVIEW-WHEN-BACK.md`.
   review (3-agent plan→implement→review) returned all-PASS, I re-confirmed wirings against the real
   endpoint contracts in `main.rs`.
 
-## In progress
-- WF3 — A2 (non-blocking conductor) + B1/B2 (in-flight ACP-turn registry → live steer/interrupt). Next up.
+### WF3 — A2 + B2 ✅ / B1 deferred (commit `c23d1f9`)
+- **A2 (non-blocking conductor):** verified already built — `start_agent {detached:true}` spawns the
+  worker turn on a thread and returns `status:running`; the conductor prompt already fans out
+  detached + `collect_results`. Documented; no code change needed.
+- **B2 (interrupt/stop reach a LIVE worker):** additive, **default-off** cooperative cancel.
+  `AcpWireClient` gains an `Option<Arc<AtomicBool>>` (None ⇒ byte-identical; the pump cancel-check is
+  `is_some_and`-gated, no `session/cancel` frame ever emitted). Threaded additively
+  wire→adapter→controller→server. Process-wide registry `Arc<Mutex<HashMap<session_id,InFlightTurn>>>`
+  on `CapoServer` (shared across the clone into the detached worker thread); **RAII `DeregGuard`**
+  deregisters on normal return / `?`-error / panic. `InterruptAgent`/`StopAgent` flip the shared flag
+  *in addition to* the existing durable record; when no live turn is registered they stay honest
+  record-intent (no faked delivery). Pump checks the flag between frames → sends the existing
+  `session/cancel` notification → `stop_reason=cancelled`. Tests: 5 deterministic registry tests +
+  a gated `#[ignore]`+`CAPO_E2E_LIVE_CANCEL` live test.
+- **B1 (steer live injection):** **DEFERRED honestly** — ACP is one-prompt-per-turn and the transport
+  is consumed + the process group torn down at `finalize`, so mid-turn `session/prompt` injection is
+  unsupported and a follow-up-turn enqueue would risk the validated single-turn loop. Steer stays
+  record-intent. Limitation + rationale in `A2-B2-B1-COOPERATIVE-CANCEL.md`.
+- A1 action-bar note updated to reflect this (interrupt/stop cooperatively cancel a live turn; steer
+  records intent only).
+- Verified by me (not just the workflow): `cargo build` clean; **adapters 82, controller 201, server
+  lib 163** + all integration binaries green; `cancel_live_e2e` 0 passed / 1 ignored (gated); clippy
+  clean. I independently eyeballed the default-off pump guard and the RAII deregister (the review
+  agent's "all green" was once contradicted by the compiler, so I re-ran build/tests + read the seams
+  myself before committing).
+
+## All items complete
+Scope (F1, F2, A1, A2, A3, A4, B2) is landed and verified; B1 is the one honest deferral (see above).
+Everything is on `main`, committed per item, **not pushed** — revertable. Open product decisions for
+you remain in `REVIEW-WHEN-BACK.md` (structured `report_result` channel; fan-out diversity injection;
+true parent/child tree lineage; whether to pursue B1 via session-persistence).
 
 ## Decisions made during WF2
 - D-WF2a (A4): the dashboard read model has NO parent field, so the conductor→worker tree is a

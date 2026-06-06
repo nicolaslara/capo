@@ -630,8 +630,9 @@ async function selectAgent(id) {
     }));
     bar.appendChild(status);
     bar.appendChild(el('div', 'act-note',
-      'Steer/interrupt/stop currently record intent server-side; they become live ' +
-      'once the in-flight turn registry lands.'));
+      'Interrupt/stop cooperatively cancel a LIVE worker turn (checked between ' +
+      'frames) when one is in flight, else they record intent. Steer records ' +
+      'intent only (ACP is one-prompt-per-turn; live follow-up is deferred).'));
     detailEl.appendChild(bar);
   }
 
