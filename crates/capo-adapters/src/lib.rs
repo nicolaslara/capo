@@ -22,7 +22,7 @@ pub use acp_client::{
 };
 pub use acp_live::{
     ACP_LIVE_PREFLIGHT_OPT_IN_ENV, ACP_LIVE_RUN_OPT_IN_ENV, AcpLiveAdapter, AcpLiveError,
-    LiveAcpSession, acp_live_gate_open, turn_output_from_transcript,
+    LiveAcpSession, PersistentAcpSession, acp_live_gate_open, turn_output_from_transcript,
 };
 pub use acp_replay::{
     AcpDedupeConfidence, AcpImportConfidence, AcpRawUpdateRecord, AcpReconcileDecision,

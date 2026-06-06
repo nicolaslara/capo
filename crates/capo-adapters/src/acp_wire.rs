@@ -2415,4 +2415,58 @@ mod tests {
             .any(|frame| frame.get("method").and_then(Value::as_str) == Some("session/cancel"));
         assert!(!cancel_sent, "no session/cancel may be sent without a cancel flag");
     }
+
+    /// LIVE STEERING: a PERSISTENT session does `initialize` + `session/new` ONCE
+    /// and then drives TWO `session/prompt`s on the SAME session id (the spec's
+    /// multi-turn continuation). Proves the steerable-worker mechanism at the
+    /// adapter level: one session, repeated prompts.
+    #[test]
+    fn persistent_session_drives_multiple_prompts_on_one_session() {
+        let transport = ScriptedAcpTransport::new()
+            .on_request(
+                "initialize",
+                vec![ScriptedServerFrame::Response(
+                    json!({ "protocolVersion": 1, "agentCapabilities": {} }),
+                )],
+            )
+            .on_request(
+                "session/new",
+                vec![ScriptedServerFrame::Response(
+                    json!({ "sessionId": "acp-session-persist-1" }),
+                )],
+            )
+            // First (initial) prompt, then the steer follow-up prompt — consumed
+            // in order (send_line matches the first pending reaction per method).
+            .on_request(
+                "session/prompt",
+                vec![ScriptedServerFrame::Response(json!({ "stopReason": "end_turn" }))],
+            )
+            .on_request(
+                "session/prompt",
+                vec![ScriptedServerFrame::Response(json!({ "stopReason": "end_turn" }))],
+            );
+
+        let adapter = crate::acp_live::AcpLiveAdapter::new(
+            "/bin/true",
+            Vec::new(),
+            std::path::PathBuf::from("/tmp/capo-acp-wire-ws"),
+            std::path::PathBuf::from("/tmp/capo-acp-wire-art"),
+            setup_plan(),
+        );
+
+        let mut session = adapter
+            .attach_persistent_session(transport, allow_decider(), None)
+            .expect("attach persistent session");
+        assert_eq!(session.session_id(), "acp-session-persist-1");
+
+        // Two prompts succeed on ONE attach (one initialize + one session/new):
+        // `prompt` drives `self.session_id` every time by construction, so both
+        // continue the same `acp-session-persist-1` conversation. A second
+        // session/new would have errored (no second scripted reaction).
+        let first = session.prompt("initial task").expect("first prompt");
+        assert_eq!(first.stop_reason.as_deref(), Some("end_turn"));
+        let second = session.prompt("steer: do it differently").expect("steer prompt");
+        assert_eq!(second.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(session.session_id(), "acp-session-persist-1");
+    }
 }

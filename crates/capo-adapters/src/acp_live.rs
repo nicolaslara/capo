@@ -349,6 +349,69 @@ impl AcpLiveAdapter {
             Err(other) => Err(AcpLiveError::Wire(other)),
         }
     }
+
+    /// LIVE STEERING: attach a PERSISTENT session — `initialize` + `session/new`
+    /// (+ optional `session/set_mode`) performed ONCE — then `prompt` may be
+    /// called REPEATEDLY on the same session id to CONTINUE the conversation
+    /// (the ACP spec's multi-turn "once a prompt turn completes, the Client may
+    /// send another `session/prompt`"). This is the steerable-worker path; the
+    /// one-shot [`Self::drive_with_decider`] above is unchanged.
+    ///
+    /// The returned [`PersistentAcpSession`] borrows nothing from `self`; it owns
+    /// the wire client (and its `!Send` decider), so it stays pinned to the
+    /// thread that drives it — exactly how the worker actor uses it.
+    pub fn attach_persistent_session<'d, T: AcpTransport>(
+        &self,
+        transport: T,
+        decider: Box<dyn AcpPermissionDecider + 'd>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<PersistentAcpSession<'d, T>, AcpLiveError> {
+        let mut client = AcpWireClient::attach(transport, self.setup_plan.clone())
+            .with_permission_decider(decider);
+        if let Some(cancel) = cancel {
+            client = client.with_cancel(cancel);
+        }
+        client.initialize()?;
+        let session_id = client.session_new(self.workspace_root.to_string_lossy().as_ref())?;
+        if let Some(mode_id) = self.setup_plan.session_mode.clone() {
+            client.session_set_mode(&session_id, &mode_id)?;
+        }
+        Ok(PersistentAcpSession { client, session_id })
+    }
+}
+
+/// A live ACP session kept open across multiple prompts so a worker can be
+/// STEERED: the conductor cancels the in-flight prompt (B2 cooperative cancel)
+/// and a follow-up [`Self::prompt`] continues the SAME session. Owns the wire
+/// client; not `Send` (the permission decider isn't), so it lives on the
+/// worker's driving thread.
+pub struct PersistentAcpSession<'d, T: AcpTransport> {
+    client: AcpWireClient<'d, T>,
+    session_id: String,
+}
+
+impl<'d, T: AcpTransport> PersistentAcpSession<'d, T> {
+    /// The external ACP session id (`session/new` result) every prompt continues.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Drive ONE `session/prompt` on the persistent session. A cooperative cancel
+    /// is mapped to a terminal `cancelled` transcript (same mapping as
+    /// [`AcpLiveAdapter::drive_with_decider`]), NOT an error — so a steered turn
+    /// ends cleanly and the next prompt can continue. The caller resets the
+    /// cancel flag between prompts.
+    pub fn prompt(&mut self, prompt: &str) -> Result<AcpTurnTranscript, AcpLiveError> {
+        match self.client.prompt(&self.session_id, prompt) {
+            Ok(transcript) => Ok(transcript),
+            Err(AcpWireError::Cancelled { .. }) => Ok(AcpTurnTranscript {
+                stop_reason: Some("cancelled".to_string()),
+                cancelled: true,
+                ..AcpTurnTranscript::default()
+            }),
+            Err(other) => Err(AcpLiveError::Wire(other)),
+        }
+    }
 }
 
 /// DP11: a live ACP agent spawned through the runtime (the runtime owns the
