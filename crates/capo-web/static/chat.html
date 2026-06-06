@@ -36,6 +36,10 @@
   .agent .name { font-weight: 600; display: flex; align-items: center; gap: 6px; font-size: 13px; }
   .agent .role { font-size: 10px; color: #6b7280; text-transform: uppercase; letter-spacing: .05em; }
   .agent .sub { font-size: 11px; color: #9aa0ab; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* A4 — conductor->worker one-level tree: workers render indented under the
+     conductor root with a left connector. (No parent field in the read model,
+     so this conductor=root / rest=workers indent is the heuristic.) */
+  .agent.is-child { margin-left: 14px; border-left: 1px solid #2a2d34; border-radius: 0 8px 8px 0; padding-left: 14px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: #6b7280; }
   .dot.running, .dot.active { background: #34d399; animation: pulse 1.4s infinite; }
   .dot.idle, .dot.completed, .dot.done { background: #60a5fa; }
@@ -108,6 +112,19 @@
   .ditem .dk { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: #6b7280; margin-bottom: 2px; }
   .ditem .dt { white-space: pre-wrap; word-wrap: break-word; font-size: 13px; }
   #detail .section { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #6b7280; margin: 18px 0 8px; }
+
+  /* A1 — per-agent action bar (steer/interrupt/stop) in the detail pane. */
+  .actionbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 4px 0 12px; }
+  .actionbar button {
+    padding: 5px 12px; background: #1c2027; color: #e6e6e6; border: 1px solid #2a2d34;
+    border-radius: 8px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600;
+  }
+  .actionbar button:hover { background: #232733; }
+  .actionbar button:disabled { opacity: 0.5; cursor: default; }
+  .act-status { font-size: 12px; }
+  .act-status.ok { color: #34d399; }
+  .act-status.err { color: #f87171; font-family: ui-monospace, monospace; }
+  .act-note { flex-basis: 100%; font-size: 11px; color: #6b7280; }
 
   footer { padding: 12px 16px; border-top: 1px solid #2a2d34; display: flex; gap: 8px; }
   #input { flex: 1; padding: 10px 12px; background: #1a1d24; color: #e6e6e6;
@@ -191,6 +208,30 @@ async function safeFetch(url, opts) {
   let data = null;
   try { data = body ? JSON.parse(body) : null; } catch (_) { data = null; }
   return { ok: resp.ok, data, text: body, status: resp.status };
+}
+
+// A1 — fire a per-agent intent command (steer/interrupt/stop) and report the
+// ok/error result inline via `statusEl`. `agentId` must be the agent's NAME/id
+// (the /api/commands handler matches it as `agent_name`), NOT the sessionId.
+// `payload` is {message} for steer or {reason} for interrupt/stop.
+async function sendAgentCommand(kind, agentId, payload, statusEl) {
+  statusEl.className = 'act-status';
+  statusEl.textContent = '…';
+  const res = await safeFetch('/api/commands', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ kind, agent: agentId, ...payload }),
+  });
+  // Reuse the submit() ok/error idiom: ok unless HTTP failed or ok===false.
+  if (res.ok && !(res.data && res.data.ok === false)) {
+    statusEl.className = 'act-status ok';
+    statusEl.textContent = kind.replace(/_/g, ' ') + ' recorded';
+  } else {
+    const errText = (res.data && (res.data.error || res.data.message)) ||
+                    res.text || ('HTTP ' + res.status);
+    statusEl.className = 'act-status err';
+    statusEl.textContent = 'error (HTTP ' + res.status + '): ' + String(errText).slice(0, 200);
+  }
 }
 
 // Pull a short readable snippet out of an event payload_json.
@@ -487,11 +528,12 @@ function renderAgents(agents) {
     agentListEl.appendChild(el('div', null, 'no agents yet')).style.cssText = 'padding:12px;color:#6b7280;font-size:12px';
     return;
   }
-  agents.forEach(a => {
-    agentsById[a.id] = a;
-    const row = el('div', 'agent' + (a.id === selectedId ? ' sel' : ''));
+  // Build a single agent row. `isChild` indents it under the conductor root.
+  const buildRow = (a, isChild) => {
+    agentsById[a.id] = a; // keep EVERY agent keyed (root + children) so selection works
+    const row = el('div', 'agent' + (a.id === selectedId ? ' sel' : '') + (isChild ? ' is-child' : ''));
     const name = el('div', 'name');
-    name.appendChild(el('span', 'dot ' + statusClass(a.status)));
+    name.appendChild(el('span', 'dot ' + statusClass(a.status))); // real lifecycle dot
     name.appendChild(el('span', null, a.name || a.id));
     row.appendChild(name);
     const isConductor = /conductor/i.test(a.id) || /conductor/i.test(a.name || '');
@@ -500,7 +542,19 @@ function renderAgents(agents) {
     row.appendChild(el('div', 'sub', sub));
     row.addEventListener('click', () => selectAgent(a.id));
     agentListEl.appendChild(row);
-  });
+  };
+
+  // A4 — one-level conductor->worker tree. The read model has NO parent field,
+  // so this conductor=root / rest=workers heuristic is the intended fork-free
+  // grouping. If no conductor is present yet, fall back to the flat list.
+  const isConductorAgent = (a) => /conductor/i.test(a.id) || /conductor/i.test(a.name || '');
+  const conductor = agents.find(isConductorAgent);
+  if (conductor) {
+    buildRow(conductor, false); // root
+    agents.filter(a => a !== conductor).forEach(a => buildRow(a, true)); // indented workers
+  } else {
+    agents.forEach(a => buildRow(a, false)); // flat fallback
+  }
 }
 
 async function pollDashboard() {
@@ -543,6 +597,43 @@ async function selectAgent(id) {
   detailEl.appendChild(meta);
   if (a.goal) { const g = el('div', 'ditem'); g.appendChild(el('div', 'dk', 'goal')); g.appendChild(el('div', 'dt', a.goal)); detailEl.appendChild(g); }
   if (a.result) { const r = el('div', 'ditem'); r.appendChild(el('div', 'dk', 'result')); r.appendChild(el('div', 'dt', a.result)); detailEl.appendChild(r); }
+
+  // A1 — per-agent action bar: steer / interrupt / stop. Rendered only when the
+  // agent has a live session. Buttons target `id` (the agent NAME, captured in
+  // the closure) so the right agent is acted on even if selection changes.
+  if (sessionId) {
+    const bar = el('div', 'actionbar');
+    const status = el('span', 'act-status');
+    const mkBtn = (label, run) => {
+      const b = el('button', null, label);
+      b.addEventListener('click', async () => {
+        // prompt() is synchronous and only fires on click, so it never blocks render.
+        const payload = run();
+        if (payload == null) return; // user cancelled the prompt
+        [...bar.querySelectorAll('button')].forEach(x => x.disabled = true);
+        try { await sendAgentCommand(payload.kind, id, payload.body, status); }
+        finally { [...bar.querySelectorAll('button')].forEach(x => x.disabled = false); }
+      });
+      return b;
+    };
+    bar.appendChild(mkBtn('Steer', () => {
+      const message = prompt('Steer message for ' + (a.name || id));
+      return message == null ? null : { kind: 'steer_agent', body: { message } };
+    }));
+    bar.appendChild(mkBtn('Interrupt', () => {
+      const reason = prompt('Interrupt reason', 'operator interrupt');
+      return reason == null ? null : { kind: 'interrupt_agent', body: { reason } };
+    }));
+    bar.appendChild(mkBtn('Stop', () => {
+      const reason = prompt('Stop reason', 'operator stop');
+      return reason == null ? null : { kind: 'stop_agent', body: { reason } };
+    }));
+    bar.appendChild(status);
+    bar.appendChild(el('div', 'act-note',
+      'Steer/interrupt/stop currently record intent server-side; they become live ' +
+      'once the in-flight turn registry lands.'));
+    detailEl.appendChild(bar);
+  }
 
   // close any prior tail
   if (detailES) { detailES.close(); detailES = null; }
@@ -605,6 +696,72 @@ async function selectAgent(id) {
   });
   detailES.onerror = () => {};
 }
+
+// ---------------------------------------------------------------------------
+// A3 — Reload-survival: on page load, replay the durable event log ONCE into a
+// rebuilt conductor activity feed so a browser refresh doesn't lose the
+// conversation. Reuses makeActivity()/legibleLine so the rebuild looks IDENTICAL
+// to the live feed, and bumpSeq() per event so the live tail (openChatStream,
+// which starts at lastSeq) resumes strictly AFTER the backlog — no double-render.
+//
+// /api/events is a long-lived SSE stream that NEVER closes (it tails live after
+// replaying the backlog), so `await resp.text()` would hang. Instead we stream
+// the body with a reader, parse `data:` frames incrementally, and stop after the
+// backlog drains — detected by a short idle gap (no new bytes for ~500ms once we
+// have seen >=1 frame) then cancel the reader. This is the simplest robust way
+// to read just the backlog of a never-closing stream.
+async function replayConductorBacklog() {
+  let resp;
+  try { resp = await fetch('/api/events?from=0'); } catch (_) { return; }
+  if (!resp.ok || !resp.body) return;
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  const activity = makeActivity();
+  activity.finish('history'); // it's replayed backlog, not an in-flight turn
+  let buf = '', seen = 0, idleTimer = null, done = false;
+
+  const stop = () => { if (!done) { done = true; try { reader.cancel(); } catch (_) {} } };
+  const armIdle = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    // Once we've drained the backlog, the live stream goes quiet — stop then.
+    if (seen > 0) idleTimer = setTimeout(stop, 500);
+  };
+
+  // Parse complete `data:` lines out of the SSE buffer (mirrors openChatStream's
+  // per-event handling: JSON.parse(data).params.event -> bumpSeq + addEvent).
+  const flush = () => {
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).replace(/\r$/, '');
+      buf = buf.slice(nl + 1);
+      if (!line.startsWith('data:')) continue;
+      let ev;
+      try { ev = JSON.parse(line.slice(5).trim()).params.event; } catch (_) { continue; }
+      if (!ev) continue;
+      bumpSeq(ev.sequence);
+      activity.addEvent(ev);
+      seen++;
+    }
+  };
+
+  try {
+    while (!done) {
+      const { value, done: rdone } = await reader.read();
+      if (rdone) break;
+      buf += decoder.decode(value, { stream: true });
+      flush();
+      armIdle();
+    }
+  } catch (_) { /* reader cancelled on idle — expected */ }
+  if (idleTimer) clearTimeout(idleTimer);
+}
+
+// Run the replay on load, independent of the 2s dashboard poll. Disable `send`
+// until it settles so a mid-replay submit can't race lastSeq (bumpSeq is
+// monotonic, so once replay finishes the live tail resumes after the backlog).
+send.disabled = true;
+replayConductorBacklog().finally(() => { send.disabled = false; input.focus(); });
 
 input.focus();
 </script>
