@@ -342,6 +342,7 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             acp_session_mode,
             mcp_url,
             mcp_headers,
+            steer_window_secs,
         } => json!({
             "type": "run_acp_live_turn_local",
             "session_id": session_id,
@@ -358,6 +359,7 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
                 .iter()
                 .map(|(name, value)| json!({ "name": name, "value": value }))
                 .collect::<Vec<_>>(),
+            "steer_window_secs": steer_window_secs,
         }),
         ServerCommand::RunConductorTurnLocal {
             session_id,
@@ -815,6 +817,10 @@ pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default(),
+            steer_window_secs: value
+                .get("steer_window_secs")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
         }),
         "run_conductor_turn_local" => Ok(ServerCommand::RunConductorTurnLocal {
             session_id: required_string(value, "session_id")?,

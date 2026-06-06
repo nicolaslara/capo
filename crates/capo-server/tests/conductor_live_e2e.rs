@@ -102,6 +102,7 @@ fn live_conductor_drives_worker_that_writes_file() {
         // the wire), so no file lands -- the source of the original flake. `default`
         // forecloses that shortcut and keeps the write under capo supervision.
         acp_session_mode: Some("default".to_string()),
+        steer_window_secs: 0,
     };
     let state = McpState::new(server.clone(), worker, bearer.clone());
     let invocation_log: Arc<Mutex<Vec<ToolInvocation>>> = state.invocation_log();

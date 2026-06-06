@@ -127,6 +127,7 @@ async fn mcp_http_server_advertises_and_dispatches_capo_tools() {
         acp_argv: Vec::new(),
         default_workspace_root: Some(workspace.to_string_lossy().to_string()),
         acp_session_mode: None, // deterministic stub path
+        steer_window_secs: 0,
     };
     let state = McpState::new(server.clone(), worker, bearer.clone());
     let app = acp_mcp_router(state);
@@ -244,6 +245,7 @@ async fn capo_io_tools_advertised_and_round_trip_a_file() {
         acp_argv: Vec::new(),
         default_workspace_root: Some(workspace.to_string_lossy().to_string()),
         acp_session_mode: None,
+        steer_window_secs: 0,
     };
     let app = acp_mcp_router(McpState::new(server.clone(), worker, bearer.clone()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -316,6 +318,7 @@ async fn report_result_is_preferred_by_collect_results() {
         acp_argv: Vec::new(),
         default_workspace_root: Some(workspace.to_string_lossy().to_string()),
         acp_session_mode: None,
+        steer_window_secs: 0,
     };
     let app = acp_mcp_router(McpState::new(server.clone(), worker, bearer.clone()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -388,6 +391,7 @@ async fn tools_call_emits_conductor_tool_event_with_name() {
         acp_argv: Vec::new(),
         default_workspace_root: Some(workspace.to_string_lossy().to_string()),
         acp_session_mode: None,
+        steer_window_secs: 0,
     };
     // Override the conductor identity so we can assert the event's session tag.
     let state = McpState::new(server.clone(), worker, bearer.clone())
@@ -461,6 +465,7 @@ async fn start_agent_detached_returns_running_and_writes_in_background() {
         acp_argv: Vec::new(),
         default_workspace_root: Some(workspace.to_string_lossy().to_string()),
         acp_session_mode: None,
+        steer_window_secs: 0,
     };
     let app = acp_mcp_router(McpState::new(server.clone(), worker, bearer.clone()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");

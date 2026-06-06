@@ -103,6 +103,7 @@ async fn live_conductor_chat_and_capo_io_are_legible() {
         acp_argv: vec!["-y".to_string(), "@zed-industries/claude-code-acp".to_string()],
         default_workspace_root: Some(project_ws.to_string_lossy().to_string()),
         acp_session_mode: Some("default".to_string()),
+        steer_window_secs: 0,
     };
     let state = McpState::new(server.clone(), worker, bearer.clone());
     let invocation_log: Arc<Mutex<Vec<ToolInvocation>>> = state.invocation_log();

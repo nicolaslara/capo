@@ -49,9 +49,37 @@ Owner chose "A + live steering" (2026-06-06). The ACP spec
   + `PersistentAcpSession::prompt` (attach once, prompt repeatedly on one
   session). Deterministic test proves two prompts on one
   initialize+session/new. One-shot `drive_with_decider` untouched.
-- **Increment 2 — NEXT.** Controller persistent driver (attach + per-prompt
-  ingest), server actor loop, registry steer channel, `SteerAgent` live delivery,
-  live verification.
+- **Increment 2 — DONE.** End-to-end wiring:
+  - Controller `attach_persistent_acp_session` + `ingest_acp_prompt` (per-prompt
+    ingest through the loop's normal route; initial prompt uses the IDENTICAL
+    `turn-acp-live-{turn_id}` so the zero-window path is byte-identical).
+  - `run_acp_live_turn_local` restructured into attach → initial prompt+ingest →
+    `while let` steer loop (cancel + re-prompt the same session) → finalize.
+    `steer_window_secs` (additive command field) gates it: **0 ⇒ one-shot,
+    byte-identical** (every deterministic test + the validated live loop);
+    positive ⇒ persistent + steerable.
+  - Registry extended with a steer `Sender` (`register_in_flight_steerable`);
+    `steer_session` (flip cancel + send `Steer`) and `stop_session` (send `Stop`).
+  - `SteerAgent` delivers live to a registered persistent session IN ADDITION to
+    the durable redirect record; `StopAgent` also signals the actor. No fake
+    delivery when no persistent session is registered (honest record-intent).
+  - capo-web sets `steer_window_secs` from `CAPO_WEB_STEER_WINDOW_SECS` (default
+    30) so ALL ops workers are persistent + steerable; tests use 0.
+  - Tests: adapter `persistent_session_drives_multiple_prompts_on_one_session`;
+    server registry `steer_session_*` / `stop_session_*` / clone-sharing (9 total).
+    capo-adapters 83, capo-controller 201, capo-server 167, capo-web 6 — green;
+    clippy clean.
+  - NOT YET verified against a REAL `claude-code-acp` bridge (cancel + re-prompt
+    continuing the same live session). The mechanism is deterministically tested
+    and the live path is wired; a live smoke is the remaining confidence step.
+
+## DECISION (owner): ALL workers persist
+The owner chose "all workers persist" — every worker is steerable in ops via a
+positive `steer_window_secs` (default 30s). The one-shot path is preserved only
+as the `0` case (tests + the validated live fan-out `conductor_live_e2e`, which
+sets 0 to stay stable/byte-identical). Trade-off accepted: ops workers linger for
+the steer window after their turn (extra latency + held-open processes); they
+finalize on `stop_agent` (immediate) or the window timeout.
 
 ## OPEN DECISION for Increment 2 — worker lifecycle / steer window
 Real steering needs the worker process to STAY ALIVE after a turn so a follow-up

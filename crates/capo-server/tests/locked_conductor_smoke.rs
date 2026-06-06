@@ -102,6 +102,7 @@ fn live_locked_conductor_has_only_capo_tools() {
         ],
         default_workspace_root: Some(project_ws.to_string_lossy().to_string()),
         acp_session_mode: Some("default".to_string()),
+        steer_window_secs: 0,
     };
     let state = McpState::new(server.clone(), worker, bearer.clone());
     let invocation_log: Arc<Mutex<Vec<ToolInvocation>>> = state.invocation_log();

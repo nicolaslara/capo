@@ -91,11 +91,26 @@ pub struct CapoServer {
     in_flight: Arc<Mutex<HashMap<String, InFlightTurn>>>,
 }
 
-/// COOPERATIVE CANCEL (B2): the handle for one registered in-flight live turn.
-/// Holds the shared cancel flag the turn's wire pump observes between frames.
+/// COOPERATIVE CANCEL (B2) + LIVE STEERING: the handle for one registered
+/// in-flight live turn. Holds the shared cancel flag the turn's wire pump
+/// observes between frames, and — for a PERSISTENT steerable session — the steer
+/// channel the worker actor loops on.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct InFlightTurn {
     pub(crate) cancel: Arc<AtomicBool>,
+    /// LIVE STEERING: present only for a persistent (positive steer-window)
+    /// session. `None` for a one-shot turn, so `steer_session` stays honest
+    /// record-intent and never fakes delivery to a non-persistent worker.
+    pub(crate) steer: Option<std::sync::mpsc::Sender<SteerSignal>>,
+}
+
+/// LIVE STEERING: a signal delivered to a persistent worker actor over its steer
+/// channel. The actor cancels the in-flight prompt (if any) and continues the
+/// SAME ACP session with a new prompt (`Steer`), or finalizes (`Stop`).
+#[derive(Clone, Debug)]
+pub(crate) enum SteerSignal {
+    Steer(String),
+    Stop,
 }
 
 /// AI2: the server's record of which registered agents are bound to the real
@@ -318,6 +333,52 @@ impl CapoServer {
             map.insert(session_id.to_string(), handle.clone());
         }
         handle
+    }
+
+    /// LIVE STEERING: register a PERSISTENT steerable turn, carrying the steer
+    /// channel the worker actor loops on (alongside the B2 cancel flag).
+    pub(crate) fn register_in_flight_steerable(
+        &self,
+        session_id: &str,
+        steer: std::sync::mpsc::Sender<SteerSignal>,
+    ) -> InFlightTurn {
+        let handle = InFlightTurn {
+            cancel: Arc::new(AtomicBool::new(false)),
+            steer: Some(steer),
+        };
+        if let Ok(mut map) = self.in_flight.lock() {
+            map.insert(session_id.to_string(), handle.clone());
+        }
+        handle
+    }
+
+    /// LIVE STEERING: deliver a steer message to a registered PERSISTENT session.
+    /// Flips the cancel flag (so an in-flight prompt aborts → `cancelled`) and
+    /// sends the steer so the worker actor re-prompts on the SAME session. Returns
+    /// `true` iff a steerable session was found (else honest record-intent: no
+    /// fake delivery to a one-shot / absent worker).
+    pub(crate) fn steer_session(&self, session_id: &str, message: &str) -> bool {
+        if let Ok(map) = self.in_flight.lock()
+            && let Some(handle) = map.get(session_id)
+            && let Some(tx) = &handle.steer
+        {
+            handle.cancel.store(true, Ordering::Relaxed);
+            return tx.send(SteerSignal::Steer(message.to_string())).is_ok();
+        }
+        false
+    }
+
+    /// LIVE STEERING: tell a registered PERSISTENT session to finalize promptly
+    /// (sends `Stop` so the worker actor breaks its steer-wait instead of running
+    /// out the idle window). Best-effort and additive to the B2 cancel flip;
+    /// a no-op when no steerable session is registered.
+    pub(crate) fn stop_session(&self, session_id: &str) {
+        if let Ok(map) = self.in_flight.lock()
+            && let Some(handle) = map.get(session_id)
+            && let Some(tx) = &handle.steer
+        {
+            let _ = tx.send(SteerSignal::Stop);
+        }
     }
 
     /// COOPERATIVE CANCEL (B2): drop the in-flight registration for `session_id`
@@ -609,6 +670,12 @@ impl CapoServer {
                         })?;
                 let (_, _, _, refs) =
                     self.run_refs_for_session_run(&session.session_id, &run_id)?;
+                // LIVE STEERING: if this agent's session is a PERSISTENT steerable
+                // worker, deliver the steer to its actor (cancel the in-flight
+                // prompt + re-prompt on the SAME session) IN ADDITION to recording
+                // the redirect below. When no persistent session is registered this
+                // is a no-op and behavior is the existing record-intent redirect.
+                let _steered_live = self.steer_session(session.session_id.as_str(), &goal);
                 let goal_hash = stable_hash(goal.as_bytes());
                 let command_hash =
                     command_identity_hash(format!("steer_agent:{agent_name}:{goal_hash}"));
@@ -757,6 +824,9 @@ impl CapoServer {
                 // No-op (returns false) when no live turn is registered, keeping the
                 // existing record-intent behavior byte-identical.
                 let _was_live = self.cancel_session(session.session_id.as_str());
+                // LIVE STEERING: also break a persistent worker's steer-wait so it
+                // finalizes now rather than at the idle window (no-op otherwise).
+                self.stop_session(session.session_id.as_str());
                 self.record_server_request_handled(
                     &command,
                     &origin,
@@ -1578,6 +1648,7 @@ impl CapoServer {
                 acp_session_mode,
                 mcp_url,
                 mcp_headers,
+                steer_window_secs,
             } => self.run_acp_live_turn_local(
                 request_id,
                 origin,
@@ -1593,6 +1664,7 @@ impl CapoServer {
                     acp_session_mode,
                     mcp_url,
                     mcp_headers,
+                    steer_window_secs,
                 },
             ),
             ServerCommand::RunConductorTurnLocal {

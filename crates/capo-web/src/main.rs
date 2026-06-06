@@ -106,6 +106,10 @@ struct ChatConfig {
     /// MCP tools. Off by default so the validated fruit demo is unchanged; set
     /// from `CAPO_WEB_LOCKDOWN=="1"`.
     conductor_lockdown: bool,
+    /// LIVE STEERING: seconds to keep each worker's ACP session alive after its
+    /// turn so the conductor can steer it. From `CAPO_WEB_STEER_WINDOW_SECS`
+    /// (default 30). `0` disables persistence (workers are one-shot).
+    steer_window_secs: u64,
 }
 
 /// The conductor's interaction scope (the one/all toggle), owned by capo-web and
@@ -162,6 +166,10 @@ async fn main() {
         acp_session_mode: Some("default".to_string()),
         live_acp_opt_in: std::env::var("CAPO_WEB_LIVE_ACP").as_deref() == Ok("1"),
         conductor_lockdown: std::env::var("CAPO_WEB_LOCKDOWN").as_deref() == Ok("1"),
+        steer_window_secs: std::env::var("CAPO_WEB_STEER_WINDOW_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30),
     };
 
     // The confined project workspace the live worker writes into; git-init it so
@@ -186,6 +194,10 @@ async fn main() {
         acp_argv: chat.acp_argv.clone(),
         default_workspace_root: Some(project_ws.to_string_lossy().to_string()),
         acp_session_mode: chat.acp_session_mode.clone(),
+        // LIVE STEERING: keep each worker's ACP session alive after its turn so
+        // the conductor can steer it (cancel + re-prompt the SAME session). All
+        // workers are steerable in ops; deterministic tests use 0 (one-shot).
+        steer_window_secs: chat.steer_window_secs,
     };
     // Register + start ONE long-lived conductor session, reused across messages.
     // Bootstrap BEFORE the MCP listener so the listener can tag every tools/call
@@ -1603,6 +1615,7 @@ mod tests {
                 acp_session_mode: None,
                 live_acp_opt_in: false,
                 conductor_lockdown: false,
+                steer_window_secs: 0,
             },
         });
         // A bogus dist dir is fine: the test never hits the static fallback.
@@ -1875,6 +1888,7 @@ done
             acp_argv: Vec::new(),
             default_workspace_root: Some(root.path().to_string_lossy().to_string()),
             acp_session_mode: None,
+            steer_window_secs: 0,
         };
         let bearer = "capo-web-test".to_string();
         let mcp_state = McpState::new((*server).clone(), worker, bearer.clone());
@@ -1898,6 +1912,7 @@ done
                 acp_session_mode: None,
                 live_acp_opt_in: true,
                 conductor_lockdown: false,
+                steer_window_secs: 0,
             },
         });
         let app = build_router(cfg, "web/app/dist");

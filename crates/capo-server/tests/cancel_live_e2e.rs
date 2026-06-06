@@ -121,6 +121,7 @@ fn interrupt_agent_cooperatively_cancels_a_live_worker_turn() {
                 acp_session_mode: Some("default".to_string()),
                 mcp_url: None,
                 mcp_headers: vec![],
+                steer_window_secs: 0,
             }))
             .expect("run acp live turn");
         turn_done_in_thread.store(true, Ordering::Relaxed);

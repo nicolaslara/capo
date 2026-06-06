@@ -45,6 +45,12 @@ pub struct AcpWorkerToolConfig {
     /// deterministic stub path uses `None`; the live bridge uses
     /// `Some("bypassPermissions")` so its Write tool round-trips an on-wire write.
     pub acp_session_mode: Option<String>,
+    /// LIVE STEERING: seconds to keep each worker's ACP session alive after its
+    /// turn so the conductor can steer it (cancel + re-prompt the SAME session).
+    /// `0` (the default, used by deterministic tests) ⇒ one-shot workers,
+    /// byte-identical to the pre-steering path. capo-web ops sets a positive
+    /// window so all workers are steerable.
+    pub steer_window_secs: u64,
 }
 
 /// Conductor-session-local routing state (`set_mode`). There is no server
@@ -558,6 +564,7 @@ fn tool_start_agent(state: &McpState, args: &Value) -> Result<String, String> {
         let ws = workspace_root.clone();
         let wmcp_url = state.worker_mcp_url.clone();
         let wmcp_headers = state.worker_mcp_headers.clone();
+        let steer_window = state.worker.steer_window_secs;
         let log_session = session_id.clone();
         std::thread::spawn(move || {
             // Surface failures instead of swallowing them: a discarded Err here
@@ -576,6 +583,7 @@ fn tool_start_agent(state: &McpState, args: &Value) -> Result<String, String> {
                 acp_session_mode: mode,
                 mcp_url: wmcp_url,
                 mcp_headers: wmcp_headers,
+                steer_window_secs: steer_window,
             })) {
                 eprintln!("capo: detached worker turn failed (session={log_session}): {error:?}");
             }
@@ -607,6 +615,7 @@ fn tool_start_agent(state: &McpState, args: &Value) -> Result<String, String> {
             acp_session_mode: state.worker.acp_session_mode.clone(),
             mcp_url: state.worker_mcp_url.clone(),
             mcp_headers: state.worker_mcp_headers.clone(),
+            steer_window_secs: state.worker.steer_window_secs,
         }))
         .map_err(|e| format!("RunAcpLiveTurnLocal failed: {e:?}"))?;
 

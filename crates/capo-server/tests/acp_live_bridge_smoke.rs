@@ -123,6 +123,7 @@ fn live_acp_bridge_writes_observed_file_through_server() {
             acp_session_mode: Some("bypassPermissions".to_string()),
             mcp_url: None,
             mcp_headers: vec![],
+            steer_window_secs: 0,
         }))
         .expect("run acp live turn against the real bridge");
 

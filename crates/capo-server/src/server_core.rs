@@ -238,7 +238,7 @@ impl CapoServer {
         origin: ServerClientOrigin,
         req: AcpLiveTurnLocalRequest,
     ) -> ServerResult<ServerResponse> {
-        use capo_adapters::{AcpAdapter, AcpLiveAdapter, TurnRequest, acp_live_gate_open};
+        use capo_adapters::{AcpAdapter, AcpLiveAdapter, acp_live_gate_open};
         use capo_core::TurnId;
 
         // GATE: fail closed unless BOTH the explicit per-command opt-in AND the
@@ -319,8 +319,7 @@ impl CapoServer {
         );
 
         let turn_id = TurnId::new(req.turn_id.clone());
-        // Spawn the LOCAL ACP agent through the runtime (gate self-checked) and
-        // drive ONE turn through the controller seam over its live transport.
+        // Spawn the LOCAL ACP agent through the runtime (gate self-checked).
         let mut session = adapter
             .spawn_live_session(&turn_id)
             .map_err(|error| ServerError::AdapterFixture(format!("acp live spawn: {error}")))?;
@@ -328,32 +327,81 @@ impl CapoServer {
             .take_transport()
             .ok_or_else(|| ServerError::AdapterFixture("acp live transport already taken".into()))?;
 
-        // COOPERATIVE CANCEL (B2): register this turn's cancel flag under the Capo
-        // session_id (the SAME key InterruptAgent/StopAgent resolve) and thread it
-        // into the drive. The RAII guard deregisters on every exit path. With no
-        // InterruptAgent/StopAgent arriving, the flag stays false and the drive is
-        // byte-identical to the pre-cancel path.
-        let in_flight = self.register_in_flight(session_id.as_str());
+        // Register this turn under the Capo session_id (the SAME key
+        // InterruptAgent/StopAgent/SteerAgent resolve). A POSITIVE steer window
+        // makes the session PERSISTENT + steerable (register the steer channel);
+        // a 0 window keeps the one-shot path (no steer channel). The RAII guard
+        // deregisters on every exit path. With no command arriving, the cancel
+        // flag stays false and the initial prompt is byte-identical to the
+        // pre-steering drive.
+        let (steer_tx, steer_rx) = std::sync::mpsc::channel::<crate::SteerSignal>();
+        let steer_window = std::time::Duration::from_secs(req.steer_window_secs);
+        let in_flight = if steer_window.is_zero() {
+            self.register_in_flight(session_id.as_str())
+        } else {
+            self.register_in_flight_steerable(session_id.as_str(), steer_tx)
+        };
         let _guard = DeregGuard {
             server: self,
             session_id: session_id.to_string(),
         };
-        let outcome = self
+
+        // LIVE STEERING: attach a PERSISTENT session and drive the INITIAL prompt
+        // through the controller's ingest seam under `turn-acp-live-{turn_id}` —
+        // IDENTICAL to `drive_acp_live_turn`, so the zero-window path is
+        // byte-identical. Then, while the steer window is open, loop: a `Steer`
+        // signal cancels any in-flight prompt and re-prompts the SAME session (the
+        // ACP multi-turn continuation); `Stop` / window-timeout / channel-close
+        // ends the session.
+        let mut psession = self
             .controller
-            .drive_acp_live_turn(
+            .attach_persistent_acp_session(
                 &refs,
                 &adapter,
                 transport,
-                &TurnRequest {
-                    turn_id: turn_id.clone(),
-                    agent_name: "acp-worker".to_string(),
-                    goal: req.goal.clone(),
-                },
+                &turn_id,
                 Some(in_flight.cancel.clone()),
             )
             .map_err(ServerError::State)?;
 
-        // Tear the agent down and enforce the secrets-stripped stderr contract.
+        in_flight
+            .cancel
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let ingest_turn_0 = format!("turn-acp-live-{}", req.turn_id);
+        let mut last_transcript = psession
+            .prompt(&req.goal)
+            .map_err(|error| ServerError::AdapterFixture(format!("acp live prompt: {error}")))?;
+        let mut last_ingest = self
+            .controller
+            .ingest_acp_prompt(&refs, &last_transcript, &ingest_turn_0)
+            .map_err(ServerError::State)?;
+
+        if !steer_window.is_zero() {
+            // Loop while STEER signals arrive within the window; exit on Stop, an
+            // idle timeout, or all senders dropped (any non-`Steer` recv result
+            // fails the `while let` pattern and ends the session).
+            let mut steer_seq = 0u64;
+            while let Ok(crate::SteerSignal::Steer(message)) = steer_rx.recv_timeout(steer_window) {
+                steer_seq += 1;
+                // The cancel flag may have aborted the prior prompt; reset it so
+                // the continuation prompt runs on the same session.
+                in_flight
+                    .cancel
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                last_transcript = psession.prompt(&message).map_err(|error| {
+                    ServerError::AdapterFixture(format!("acp steer prompt: {error}"))
+                })?;
+                let ingest_turn = format!("turn-acp-live-{}-steer-{steer_seq}", req.turn_id);
+                last_ingest = self
+                    .controller
+                    .ingest_acp_prompt(&refs, &last_transcript, &ingest_turn)
+                    .map_err(ServerError::State)?;
+            }
+        }
+
+        // Drop the persistent session (closes the agent's stdin) BEFORE finalize
+        // tears down the process group and scans stderr for credential markers.
+        drop(psession);
         session
             .finalize("server acp live turn complete")
             .map_err(|error| ServerError::AdapterFixture(format!("acp live finalize: {error}")))?;
@@ -363,10 +411,12 @@ impl CapoServer {
             run_id: run_id.to_string(),
             turn_id: req.turn_id.clone(),
             workspace_root: workspace_root.to_string_lossy().to_string(),
-            event_count: outcome.transcript.events.len(),
-            appended_event_count: outcome.ingest.appended_event_count,
-            stop_reason: outcome.transcript.stop_reason.clone(),
-            reply_text: agent_reply_text(&outcome.transcript.events),
+            // The summary reflects the LAST prompt (the only one for a one-shot
+            // worker; the final continuation for a steered worker).
+            event_count: last_transcript.events.len(),
+            appended_event_count: last_ingest.appended_event_count,
+            stop_reason: last_transcript.stop_reason.clone(),
+            reply_text: agent_reply_text(&last_transcript.events),
         };
 
         let command_hash = command_identity_hash(format!(
@@ -636,4 +686,8 @@ pub(crate) struct AcpLiveTurnLocalRequest {
     /// the worker (validated file-only loop unchanged). See the command field.
     pub mcp_url: Option<String>,
     pub mcp_headers: Vec<(String, String)>,
+    /// LIVE STEERING: seconds to keep the session alive after the turn for
+    /// steer/stop signals. `0` ⇒ one-shot (finalize immediately), byte-identical
+    /// to the pre-steering path. See the command field.
+    pub steer_window_secs: u64,
 }

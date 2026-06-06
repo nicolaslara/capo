@@ -407,6 +407,13 @@ pub enum ServerCommand {
         /// advertised to the worker. `mcp_headers` carries the bearer auth.
         mcp_url: Option<String>,
         mcp_headers: Vec<(String, String)>,
+        /// LIVE STEERING: how long (seconds) to keep the worker's ACP session
+        /// ALIVE after its turn, listening for steer/stop signals so the conductor
+        /// can cancel + re-prompt the SAME session. `0` (the default) means
+        /// one-shot: drive the turn and finalize immediately — BYTE-IDENTICAL to
+        /// the pre-steering path (used by every deterministic test). capo-web ops
+        /// sets a positive window so all workers are steerable.
+        steer_window_secs: u64,
     },
     /// SLICE-A (DESIGN-B Layer 2): drive ONE CONDUCTOR turn -- a claude-code-acp
     /// session the user chats with, with capo's in-process "capo tools" HTTP MCP

@@ -127,4 +127,60 @@ impl FakeBoundaryController {
 
         Ok(AcpLiveTurnOutcome { transcript, ingest })
     }
+
+    /// LIVE STEERING: attach a PERSISTENT live ACP session through the controller
+    /// (installs the same policy-authority `ControllerAcpDecider` as
+    /// [`Self::drive_acp_live_turn`]). The returned [`capo_adapters::PersistentAcpSession`]
+    /// can be `prompt`ed REPEATEDLY on one session; each prompt's transcript is
+    /// ingested via [`Self::ingest_acp_prompt`] through the loop's normal route.
+    ///
+    /// FIDELITY NOTE: the permission decider's `scope.turn_id` is fixed at attach
+    /// time (`turn-acp-live-{base}`), so permission-round-trip events for STEERED
+    /// follow-up prompts tag the session's initial turn. The session-update events
+    /// themselves are ingested under the caller-supplied per-prompt turn id.
+    pub fn attach_persistent_acp_session<'c, T: capo_adapters::AcpTransport>(
+        &'c self,
+        refs: &FakeRunRefs,
+        adapter: &AcpLiveAdapter,
+        transport: T,
+        base_turn_id: &TurnId,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> StateResult<capo_adapters::PersistentAcpSession<'c, T>> {
+        let scope_turn_id = TurnId::new(format!("turn-acp-live-{}", base_turn_id.as_str()));
+        let decider = Box::new(ControllerAcpDecider {
+            controller: self,
+            scope: PermissionRoundTripScope {
+                task_id: refs.task_id.clone(),
+                agent_id: refs.agent_id.clone(),
+                session_id: refs.session_id.clone(),
+                run_id: refs.run_id.clone(),
+                turn_id: scope_turn_id,
+                request_ref: format!("acp-live-perm-{}", base_turn_id.as_str()),
+            },
+            seq: Cell::new(0),
+        });
+        adapter
+            .attach_persistent_session(transport, decider, cancel)
+            .map_err(|error| {
+                StateError::AcpLiveDrive(format!("acp persistent attach failed: {error}"))
+            })
+    }
+
+    /// LIVE STEERING: ingest ONE persistent-session prompt's transcript through
+    /// the loop's standard `apply_normalized_adapter_events_with_turn` route under
+    /// `ingest_turn_id`. The initial prompt uses `turn-acp-live-{base}` (identical
+    /// to [`Self::drive_acp_live_turn`], so the one-shot/zero-window path is
+    /// byte-identical); each steered prompt uses a distinct per-prompt turn id.
+    pub fn ingest_acp_prompt(
+        &self,
+        refs: &FakeRunRefs,
+        transcript: &AcpTurnTranscript,
+        ingest_turn_id: &str,
+    ) -> StateResult<AdapterReplayReport> {
+        self.apply_normalized_adapter_events_with_turn(
+            refs,
+            &transcript.events,
+            Some(ingest_turn_id),
+        )
+    }
 }
