@@ -231,6 +231,7 @@ fn build_router(cfg: Arc<Config>, dist: &str) -> Router {
         .route("/api/chat", post(chat))
         .route("/api/thread", get(thread))
         .route("/api/events", get(events))
+        .route("/", get(root_redirect))
         .route("/chat", get(chat_page))
         .route("/chat.html", get(chat_page))
         .fallback_service(static_service)
@@ -242,8 +243,19 @@ fn build_router(cfg: Arc<Config>, dist: &str) -> Router {
 /// so it needs no filesystem / CWD and works under the `oneshot` test harness.
 const CHAT_HTML: &str = include_str!("../static/chat.html");
 
-async fn chat_page() -> Html<&'static str> {
-    Html(CHAT_HTML)
+/// The legible conductor chat is the front door: `/` redirects here so loading
+/// the root never serves the old React operator console (the source of the
+/// "Chrome vs Firefox show different things" confusion).
+async fn root_redirect() -> axum::response::Redirect {
+    axum::response::Redirect::temporary("/chat")
+}
+
+async fn chat_page() -> impl axum::response::IntoResponse {
+    // `no-store` so a browser never serves a stale chat shell.
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store, must-revalidate")],
+        Html(CHAT_HTML),
+    )
 }
 
 /// Host the in-process STATELESS HTTP MCP server on a loopback ephemeral port,
