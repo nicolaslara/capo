@@ -69,9 +69,12 @@ Owner chose "A + live steering" (2026-06-06). The ACP spec
     server registry `steer_session_*` / `stop_session_*` / clone-sharing (9 total).
     capo-adapters 83, capo-controller 201, capo-server 167, capo-web 6 — green;
     clippy clean.
-  - NOT YET verified against a REAL `claude-code-acp` bridge (cancel + re-prompt
-    continuing the same live session). The mechanism is deterministically tested
-    and the live path is wired; a live smoke is the remaining confidence step.
+  - **VERIFIED LIVE** against a REAL `claude-code-acp` bridge over the
+    subscription (gated test `steer_live_e2e.rs`): an initial prompt wrote
+    `alpha.txt`, a `SteerAgent` follow-up continued the SAME session and wrote
+    `bravo.txt`, `stop_reason=end_turn`. Run with `CAPO_E2E_LIVE_STEER=1`
+    (+ the live ACP env gate). Both files present ⇒ the steered prompt ran on the
+    one persistent session (adapter does `session/new` exactly once).
 
 ## DECISION (owner): ALL workers persist
 The owner chose "all workers persist" — every worker is steerable in ops via a
