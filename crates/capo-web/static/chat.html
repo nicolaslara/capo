@@ -93,6 +93,11 @@
   .ev .t { color: #cbd2dc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ev.tool .k { color: #34d399; }
   .ev.file .k { color: #fbbf24; }
+  .ev.prose .k { color: #a78bfa; }
+  .ev.prose .t { white-space: normal; overflow: visible; text-overflow: clip; }
+  /* Low-level plumbing (permissions/grants/lifecycle) hidden until "details". */
+  .ev.plumbing { display: none; }
+  body.show-details .ev.plumbing { display: flex; opacity: .5; }
 
   /* agent detail pane */
   #detail { flex: 1; overflow-y: auto; padding: 16px; }
@@ -131,6 +136,7 @@
         <label><input type="radio" name="mode" value="all" checked /> all</label>
         <label><input type="radio" name="mode" value="one" /> one</label>
         <input id="agentId" type="text" placeholder="agent id" disabled />
+        <label style="margin-left:12px" title="show the low-level permission/grant/lifecycle plumbing events"><input type="checkbox" id="details-toggle" /> details</label>
       </div>
       <div class="tabs">
         <button class="tab active" data-pane="chat">Conductor</button>
@@ -213,11 +219,16 @@ function setConductorSession(sid) { if (sid) conductorSessionId = sid; }
 // Short, stable label for a session: the conductor, or a trimmed worker id.
 function actorLabel(ev) {
   const sid = ev.session_id || '';
-  if (conductorSessionId && sid === conductorSessionId) return 'conductor';
   const agent = (ev.agent_id || '').replace(/^agent-/, '');
+  if (agent === 'conductor') return 'conductor';
   if (agent) return 'worker ' + agent;
+  // The conductor's own long-lived session.
+  if ((conductorSessionId && sid === conductorSessionId) || /conductor-web$/.test(sid)) return 'conductor';
+  // Worker sessions are `session-conductor-<name>-<hexhash>`; show just <name>.
+  const m = sid.match(/^session-conductor-(.+)-[0-9a-f]{8,}$/);
+  if (m) return 'worker ' + m[1];
   const trimmed = sid.replace(/^session-/, '');
-  return trimmed ? 'worker ' + trimmed.slice(0, 18) : 'worker';
+  return trimmed ? 'worker ' + trimmed.slice(0, 24) : 'worker';
 }
 
 // Render a SINGLE legible line for one event (acceptance #2): the conductor's
@@ -234,34 +245,52 @@ function legibleLine(ev) {
   const who = actorLabel(ev);
   const clip = (s) => String(s).replace(/\s+/g, ' ').trim().slice(0, 240);
 
-  // 1. TOOL CALLS: "→ start_agent(task=...)" / observed tool results.
+  // PLUMBING: permission/grant/request-handled + contentless summary updates.
+  // Real, but noise for the default view — hidden behind the "details" toggle.
+  const isPlumbing = kind.includes('permission') || kind.includes('capability') ||
+    kind.includes('grant') || kind.includes('request_handled') ||
+    kind.includes('registered') || kind.includes('session.started') ||
+    (kind.includes('summary_updated') && !(p.content && p.content !== 'none'));
+
+  // 1. AGENT PROSE first (so a summary_updated that carries real words is prose,
+  //    not plumbing): the conductor's / a worker's real words.
+  if (p.content && p.content !== 'none' &&
+      (nk.includes('item_delta') || nk.includes('item_completed') ||
+       kind.includes('summary') || role === 'assistant' || role === 'user')) {
+    return { who, text: clip(p.content), cat: 'prose' };
+  }
+
+  // 2. TOOL CALLS: "→ start_agent(task=...)" / observed tool results.
   const isTool = kind.includes('tool') || nk.includes('tool_call');
   if (isTool) {
-    const tool = p.tool_name || p.name || p.title || 'tool';
-    if (tool === 'none' && !p.content) return null;
+    let tool = p.tool_name || p.name || p.title;
+    if (!tool || tool === 'none') {
+      // An unnamed tool event (e.g. a streamed tool_call update with no name) is
+      // noise unless it carries a result — demote to plumbing.
+      if (!(p.content && p.content !== 'none')) return { who, text: '→ tool', cat: 'plumbing' };
+      tool = 'tool';
+    }
+    tool = String(tool).replace(/^mcp__capo__/, '');
     let args = '';
-    // start_agent etc. carry the task/goal; surface it when present.
     const arg = p.task ?? p.goal ?? p.path ?? p.query ?? p.command;
     if (arg != null) args = '(' + clip(arg).slice(0, 120) + ')';
     const status = p.status && p.status !== 'none' ? ' [' + p.status + ']' : '';
     const result = p.content && p.content !== 'none' ? ' → ' + clip(p.content) : '';
-    return { who, text: '→ ' + tool + args + status + result };
+    return { who, text: '→ ' + tool + args + status + result, cat: 'tool' };
   }
 
-  // 2. AGENT PROSE: the conductor's (or a worker's) real words.
-  if (p.content && p.content !== 'none' &&
-      (nk.includes('item_delta') || nk.includes('item_completed') ||
-       kind.includes('summary') || role === 'assistant' || role === 'user')) {
-    return { who, text: clip(p.content) };
+  if (isPlumbing) {
+    const tail = (ev.kind || 'event').split('.').pop().replace(/_/g, ' ');
+    return { who, text: tail, cat: 'plumbing' };
   }
 
   // 3. Other text-bearing payloads (goal/summary/reason/plan).
   const cand = p.content ?? p.summary ?? p.message ?? p.goal ?? p.reason ?? p.detail;
-  if (cand != null && cand !== 'none') return { who, text: clip(cand) };
+  if (cand != null && cand !== 'none') return { who, text: clip(cand), cat: 'prose' };
 
-  // 4. Fall back to a humanized event kind so lifecycle events still show.
+  // 4. Fall back to a humanized event kind.
   const tail = (ev.kind || 'event').split('.').pop().replace(/_/g, ' ');
-  return { who, text: tail };
+  return { who, text: tail, cat: 'plumbing' };
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +311,10 @@ const modeVal = () => document.querySelector('input[name="mode"]:checked').value
 
 document.querySelectorAll('input[name="mode"]').forEach(r => {
   r.addEventListener('change', () => { agentId.disabled = modeVal() !== 'one'; });
+});
+const detailsToggle = document.getElementById('details-toggle');
+if (detailsToggle) detailsToggle.addEventListener('change', () => {
+  document.body.classList.toggle('show-details', detailsToggle.checked);
 });
 
 function bubble(cls, text) {
@@ -322,20 +355,28 @@ function makeActivity() {
   transcript.appendChild(wrap);
   transcript.scrollTop = transcript.scrollHeight;
 
-  let n = 0;
+  let n = 0, lastRow = null, lastWho = null, lastText = null, lastCat = null;
   return {
     addEvent(ev) {
       n++;
       count.textContent = n + ' event' + (n === 1 ? '' : 's');
       const line = legibleLine(ev);
       if (!line) return;
-      const cat = eventCategory(ev.kind);
-      const row = el('div', 'ev ' + cat);
-      // Legible line: "<who>: <text>" -- conductor words, tool calls, worker activity.
-      row.appendChild(el('span', 'k', line.who));
-      row.appendChild(el('span', 't', line.text));
-      body.appendChild(row);
       const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+      // Coalesce consecutive PROSE from the same actor (the model streams a
+      // message as many tiny deltas: "The" / "file…" / "HELLO").
+      if (line.cat === 'prose' && lastRow && lastCat === 'prose' && lastWho === line.who) {
+        lastText = (lastText + ' ' + line.text).replace(/\s+/g, ' ').trim();
+        lastRow.querySelector('.t').textContent = lastText;
+      } else if (lastRow && lastWho === line.who && lastText === line.text && lastCat === line.cat) {
+        // Dedupe: identical consecutive line (events frequently arrive twice).
+      } else {
+        const row = el('div', 'ev ' + line.cat);
+        row.appendChild(el('span', 'k', line.who));
+        row.appendChild(el('span', 't', line.text));
+        body.appendChild(row);
+        lastRow = row; lastWho = line.who; lastText = line.text; lastCat = line.cat;
+      }
       if (atBottom) body.scrollTop = body.scrollHeight;
       transcript.scrollTop = transcript.scrollHeight;
     },
@@ -508,11 +549,16 @@ async function selectAgent(id) {
     tr.data.turns.forEach(turn => {
       (turn.items || []).forEach(it => {
         detailSeq = Math.max(detailSeq, it.sequence || 0);
-        if (!it.text) return;
+        const text = (it.text || '').trim();
+        // Skip redacted/raw kind labels ("adapter.item_delta (streaming)",
+        // "adapter.tool_call_requested (updated)") — the real prose is in
+        // sibling items; showing the labels is just noise.
+        if (!text || /^adapter\./.test(text)) return;
         any = true;
         const d = el('div', 'ditem');
-        d.appendChild(el('div', 'dk', (it.eventKind || it.kind || 'item')));
-        d.appendChild(el('div', 'dt', it.text));
+        const label = (it.eventKind || it.kind || 'item').split('.').pop().replace(/_/g, ' ');
+        d.appendChild(el('div', 'dk', label));
+        d.appendChild(el('div', 'dt', text));
         threadBox.appendChild(d);
       });
     });
@@ -537,8 +583,7 @@ async function selectAgent(id) {
     bumpSeq(ev.sequence);
     const line = legibleLine(ev);
     if (!line) return;
-    const cat = eventCategory(ev.kind);
-    const row = el('div', 'ev ' + cat);
+    const row = el('div', 'ev ' + line.cat);
     row.appendChild(el('span', 'k', line.who));
     row.appendChild(el('span', 't', line.text));
     detailEventsBox.appendChild(row);
