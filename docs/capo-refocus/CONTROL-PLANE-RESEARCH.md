@@ -217,3 +217,122 @@ A native `Task` subagent did inner Read(A.txt) + inner `echo INNER`. OBSERVED:
 - **HYBRID (evidence-backed):** Path 1 where capo must OWN orchestration (per-sub-agent sessions,
   hard lockdown); Path-2 PreToolUse+canUseTool gate as a defense-in-depth + observability layer
   over native sub-agents (proven to see + block them), pending the small `agentID` forward-patch.
+
+
+---
+
+# Phase 1b — deny-with-guidance + ACP fork/upstream
+
+Two follow-up threads refine the Phase-1/Phase-2 verdict. Thread A nails down a *third control primitive* — denial that carries a model-visible redirect message — which materially upgrades both paths' UX but is **blocked by the pinned bridge today**. Thread B maps the upstream/fork landscape that determines the *cost* of the bridge patches both paths now depend on. Neither overturns the Phase-2 verdict (Path 1 primary, Path 2 hybrid gate); both sharpen the recommendations and add two small, well-scoped prototypes/patches.
+
+---
+
+## A. Deny-with-guidance: a model-visible redirect, not just a veto
+
+### Finding (concrete)
+
+There is a first-class mechanism to **deny a tool call AND feed a free-text message back to the model as the tool result**, so the model adapts instead of failing silently. Two surfaces:
+
+1. **`canUseTool` → `{ behavior:"deny", message, interrupt? }`** (`references/claude-agent-sdk/sdk.d.ts:895-905`). `message` is required on deny; `interrupt?:boolean` controls whether the turn aborts. The bundled engine (`cli.js` fn `iiY`, ~offset 9035905) writes that `message` as the **`content` of a `tool_result` block with `is_error:true`** for the denied call — the model reads it next turn. Anthropic docs carry a verbatim **"Suggest alternative"** recipe (`agent-sdk/user-input`): `return { behavior:"deny", message:"User doesn't want to delete files. They asked if you could compress them into an archive instead." }`. This is exactly the "graceful redirect" mechanism the premise referenced.
+2. **PreToolUse hook → `permissionDecision:"deny"` + `permissionDecisionReason`** (`sdk.d.ts:984-990`). Reason text surfaces to the model the same way. ⚠️ but *enforcement* via this path is contested (issues #37210/#33106/#4669/#39344 — deny silently ignored for some tools). Reason-text surfacing is reliable; hard blocking is not. Use as backstop only.
+
+A third lever — `disallowedTools:["Task"]` — removes the tool from context entirely: strongest lockdown, but **no deny event and no message** (nothing to redirect from).
+
+**Critical interaction with our own Phase-2 result:** Proto-2 already observed that a `reject` to inner Bash blocked it *and carried `interrupt:true`*. Thread A explains why and why that is a problem — see below.
+
+### How it changes Path 1
+
+**CAN (new):** Path 1's enforcement story gains a *guidance* mode. Instead of the binary choice between (a) `disallowedTools:["Task"]` (Task invisible — model may not know to call `start_agent`) and (b) silent denial (model stops/loops), capo can keep `Task` *present-but-not-auto-approved* and, on a `Task` call, deny with `message:"Task is disabled here. Call mcp__capo__start_agent with {...} instead."` The model then pivots to capo's orchestration tool **at call time**, which is precisely the "force the conductor to call `start_agent`" requirement that Phase-1 identified as the *only* way to get a first-class capo session per sub-agent. This makes the ban-Task-force-start_agent posture far more reliable than prompt-steering alone.
+
+**LIMITS:** Two postures, with a real trade:
+- *Posture 1 — hard removal* (`disallowedTools:["Task","Agent"]`): guaranteed, but no redirect message; relies on system-prompt + `start_agent` being the obvious tool.
+- *Posture 2 — deny-with-guidance*: keep Task interceptable (no bare-name disallow, `permissionMode:"default"`, no allow rule for Task → call reaches `canUseTool`). Subject to the **"ask-only" trigger** the doc already documents — the call only reaches the permission callback if not auto-allowed.
+
+Best practice is **both**: `disallowedTools` to *guarantee* Task can't execute, OR keep it interceptable for guidance but have `canUseTool` deny-with-message anything not `mcp__capo__*`.
+
+**COSTS:** Confidence that the message reaches and steers the model is **HIGH** (cli.js sink + 3 doc pages + the explicit example). Confidence the model *reliably pivots* to `start_agent` rather than giving up/looping is **MEDIUM** — it's prompt-following, not a guarantee; reinforce with a system-prompt instruction naming `start_agent`. Needs a prototype to confirm the pivot.
+
+### How it changes Path 2
+
+**CAN (new):** Path 2's gate upgrades from "veto + telemetry" to "veto + steer." When capo denies a native sub-agent's inner call (proven to fire and block in Proto-2), it can now attach a redirect message so the sub-agent adapts rather than dies mid-turn.
+
+**LIMITS / blocker (the load-bearing finding):** **capo cannot deliver a custom deny message through `claude-code-acp@0.16.2` today.** The bridge's `canUseTool` reject branch (`acp-agent.js:683-689`) **hardcodes** `message:"User refused permission to run tool"` and `interrupt:true`. Two consequences:
+1. capo's intended redirect never reaches the model — it only ever sees the generic denial (more likely to make it *stop* than redirect).
+2. `interrupt:true` **aborts the turn** — the opposite of deny-with-guidance. This is exactly the `interrupt:true` Proto-2 logged. So the deny *that we already proved works* is the wrong flavor for steering.
+
+Also: the ACP wire protocol has **no free-text field** on the permission response — `SelectedPermissionOutcome` carries only `optionId` (`acp-sdk/.../types.gen.d.ts:1636-1640,1799-1813`); `RequestPermissionResponse._meta` (`:1675-1690`) is the only extensibility escape hatch, and the bridge ignores it. So this is a bridge patch, not just a config change.
+
+**COSTS:** Small, well-scoped bridge patch (a few lines), same hot file as the already-needed `agentID` forward-patch — so it folds into one bridge-fork effort, not a new one.
+
+### Recommendation (Thread A)
+
+- **Adopt deny-with-guidance as the steering mechanism for the ban-Task-force-`start_agent` posture** in Path 1, and as the steer layer on Path 2's gate.
+- **Use mechanism (a) `canUseTool` deny+message** as primary (best-documented, model-visible). Use `disallowedTools` for hard removal where guidance is unneeded. Treat PreToolUse-deny as backstop only (enforcement unreliable per the issue cluster).
+- **Land the bridge patch** (below) — without it, every capo denial reaches the model as the generic hardcoded string with `interrupt:true`, defeating the redirect.
+
+**Patch needed (load-bearing):** in `acp-agent.js` reject branch, derive `message` and `interrupt` from capo's response instead of hardcoding. Preferred form — `_meta` passthrough (general, keeps the ACP options menu clean):
+```js
+const denyMsg = response._meta?.["capo.denyMessage"] ?? "User refused permission to run tool";
+return { behavior:"deny", message: denyMsg, interrupt: response._meta?.["capo.interrupt"] ?? false };
+```
+(Alternative: encode semantics in a distinct `optionId` and map bridge-side.) Note `interrupt` now defaults **false** so the model keeps going and reads the message.
+
+**Prototype needed — Proto-5 (deny-with-guidance pivot):** patch the bridge reject branch to forward `_meta["capo.denyMessage"]` + `interrupt:false`; drive a turn where the conductor calls `Task`; have capo deny with `message:"Task is disabled. Call mcp__capo__start_agent with {...}."`
+- **PASS:** model receives the message as an `is_error:true` tool_result and **next calls `mcp__capo__start_agent`** (not retry-Task, not stop). Confirms HIGH-confidence transport + MEDIUM-confidence pivot.
+- **FAIL:** model loops on Task / gives up → fall back to Posture 1 (hard `disallowedTools` removal) + system-prompt steering, and rely on capo owning `start_agent` as the only orchestration tool.
+
+---
+
+## B. Fork/upstream feasibility for the bridge patches
+
+### Finding (concrete)
+
+Both bridge patches Phase-1/1b now depend on (`agentID` forward + deny-message passthrough) require modifying the bridge. Thread B maps that cost.
+
+1. **Repos moved to a vendor-neutral org.** Spec is now `agentclientprotocol/agent-client-protocol`; the bridge is `agentclientprotocol/claude-agent-acp` (npm `@zed-industries/claude-code-acp` → `@agentclientprotocol/claude-agent-acp`). **Version delta vs our doc:** our references pin `claude-code-acp@0.16.2`; upstream is now **v0.33.x**. The old `zed-industries/*` repos redirect.
+2. **Premise correction on "strips sidechain."** The doc's "bridge strips `isSidechain`" observation (`acp-agent.js:241,539`) reflects **0.16.x**. Current v0.33.x already **forwards subagent tool calls tagged with `_meta.claudeCode.parentToolUseId`** (proven on the wire in bridge issue #708's packet capture). What it still does *not* do: stream subagent *text/thinking* as live partials (gated on `parent_tool_use_id === null`, ~lines 1288/1395), and give subagents first-class ACP identity. **This must be re-verified against v0.33.x `src/acp-agent.ts` before designing any fork** — the line numbers and some behaviors in our Phase-1 citations are 0.16.2-specific.
+3. **No sub-agent primitive in the spec, v1 or v2.** No parent/child, sub-session, or `agent_id` field on tool calls/updates. Maintainer posture (#623): subagent semantics belong to the Claude Agent SDK; ACP only relays. v2 roadmap has no sub-agent primitive.
+4. **`_meta` is the blessed extension channel**, and the **meta-propagation RFD moved to Completed 2026-06-03** — the project actively endorses namespaced `_meta` (e.g. `_meta.claudeCode.*`) for cross-protocol attribution. The bridge already discards a known bucket of SDK events in dead-letter switch arms (issues #650/#679/#624; PR #713 forwards task events; PR #653 adds agent selection as session config) — meaning our needed changes are *the same shape as changes the maintainers already accept*.
+
+### How it changes Path 1 / Path 2 (can/limits/costs)
+
+**CAN:** Everything both paths need is achievable **additively, via `_meta` + capability advertisement, by forking the bridge only — not the spec.** The deny-message passthrough (Thread A), the `agentID`→`requestPermission._meta` forward (Phase-2 limitation #1), and `settingSources:[]` override (already proven) are all `_meta`-shaped and consistent with upstream conventions. This validates the doc's "no SDK fork required" claim for Path 1 and "one-line bridge patch" for Path 2 — and adds that they are **plausibly upstreamable**, which can collapse fork-maintenance to near-zero.
+
+**LIMITS:**
+- **Spec cannot give us per-sub-agent ACP sessions** — confirms Investigation C is a *durable* constraint, not a version artifact. The only upstream peg for isolated sub-conversations is the `session/fork` RFD (author @josevalim, explicitly names subagents as a use case) — worth watching, but not shipping, and not a parent/child runtime tree.
+- **SDK coupling is the irreducible ceiling for Path 2.** Subagent dispatch + context inheritance live in the closed Claude Agent SDK (#623: subagents don't even inherit CLAUDE.md). The fork can only relay what the SDK exposes; it cannot make sub-agents first-class. External risk: Agent SDK Pro/Max availability churn (#658).
+- **Live subagent text/thinking** is gated off in the bridge (`parent_tool_use_id === null`) — Path-2 *visualization* (our Proto-4 FAIL mode) needs a bridge change to relax that gate and tag chunks with `parentToolUseId`; this is additive and PR #713-shaped.
+
+**COSTS:**
+- **Bridge fork: moderate, ongoing but mitigable.** `src/acp-agent.ts` is one ~3,750-line file under heavy churn (frequent SDK bumps), and our diffs land in the *hottest* zone (the message-routing switch / `toAcpNotifications`). Expect rebase conflicts. Mitigate by keeping changes small, additive, and **behind an env flag** (repo precedent: `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`) — which also eases upstreaming.
+- **Spec fork: high cost, low value — avoid.** Multi-vendor governance, fast-moving; a divergent core type is unmergeable and perpetually stale.
+- **Upstreaming: realistically good for the bridge.** "Don't drop SDK events" PRs already land (#649/#676/#694/#713); `_meta.claudeCode.*` extensions match the completed meta-propagation RFD; responsive triager (benbrandt). If accepted, fork maintenance → ~zero.
+
+### Recommendation (Thread B)
+
+- **Fork `agentclientprotocol/claude-agent-acp` (the bridge), never the spec.** Bundle all needed changes — deny-message `_meta` passthrough, `agentID` forward, relax the `parent_tool_use_id===null` streaming gate, `subagentType`/`subSessionId` in `_meta.claudeCode` — into **one additive, env-flag-gated patch set**.
+- **Re-baseline our references to v0.33.x before implementing.** Our Phase-1 line numbers (`:539,:575,:683`, the sidechain-strip claim) are 0.16.2-specific; confirm each against current `src/acp-agent.ts`. This is a prerequisite for both bridge patches above.
+- **Pursue upstreaming** via the "don't drop SDK events" precedent + `_meta` extension model to drive fork cost toward zero. **Watch `session/fork`** as the only upstream primitive that could ever yield isolated sub-conversations.
+
+**Prototype/patch needed — Proto-6 (re-baseline + unified bridge patch):** clone `claude-agent-acp@0.33.x`, confirm (a) subagent tool calls already arrive with `_meta.claudeCode.parentToolUseId`, (b) the reject-branch hardcoded message/`interrupt` still exists, (c) the streaming gate location. Then apply the unified `_meta` patch set behind a `CAPO_*` env flag and re-run Proto-2/Proto-4/Proto-5 against it. This single effort de-risks Thread A's blocker, Path-2's attribution gap, and Path-2's visualization gap together.
+
+---
+
+## Updated recommendations
+
+### Path 1 — Lock to capo-only tools (still PRIMARY)
+Unchanged as the primary architecture, now **strengthened**: pair `disallowedTools`/`disableBuiltInTools` hard-lockdown (Proto-1 PASS, no fork) with **deny-with-guidance** to reliably force the conductor onto `mcp__capo__start_agent` — the only route to first-class per-sub-agent capo sessions, which Thread B confirms the spec will *never* provide natively. Guidance needs the bridge deny-message patch (Thread A) + the model-pivot confirmation (Proto-5). Posture: prefer hard removal where guidance is unneeded; use deny-with-guidance where you want the model to discover `start_agent` at call time. Keep both as defense-in-depth.
+
+### Path 2 — Proxy every tool call, incl. sub-agents' (still HYBRID gate)
+Unchanged as the observability/veto hybrid (Proto-2 PASS for control), now with two concrete upgrades, both gated on the **same** bridge fork:
+1. **Deny-with-guidance** turns the gate from veto-only into veto+steer — but requires replacing the hardcoded `message:"User refused permission to run tool"` + `interrupt:true` (Thread A; this is exactly the `interrupt:true` Proto-2 logged).
+2. **Attribution + live nested visualization** require the `agentID` forward and relaxing the `parent_tool_use_id===null` streaming gate (Thread B; resolves Proto-4's FAIL mode).
+Ceiling unchanged and now confirmed durable: **no per-sub-agent ACP sessions** (spec has no primitive; only `session/fork` is a distant peg). SDK coupling (#623) caps how first-class sub-agents can ever be.
+
+### Net
+Both paths now converge on **one additive, env-flag-gated fork of `claude-agent-acp` v0.33.x** carrying: `settingSources:[]` override (proven), `agentID`→`requestPermission._meta` forward, deny-message + `interrupt:false` passthrough, and a relaxed subagent-streaming gate — all `_meta`-shaped, upstreamable, and re-baselined off our 0.16.2 references. Outstanding empirical risks reduce to **Proto-5** (does the model actually pivot to `start_agent` on a guided deny?) and **Proto-6** (re-baseline + unified patch against v0.33.x). Recommendation stands: **Path 1 primary, Path 2 as defense-in-depth + observability hybrid**, now with deny-with-guidance as the steering layer across both.
+
+---
+
+Relevant files:
+- `/Users/nicolas/devel/capo-sliceA/docs/capo-refocus/CONTROL-PLANE-RESEARCH.md` — the doc this section appends to (note: Phase-1 citations are pinned to `claude-code-acp@0.16.2` / SDK `0.2.44`; Thread B requires re-baselining to bridge v0.33.x).
