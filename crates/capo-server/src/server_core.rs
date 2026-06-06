@@ -302,6 +302,14 @@ impl CapoServer {
                 .with_session_mode(mode)
                 .with_workspace_root(workspace_root.clone());
         }
+        // Optional worker-result channel: forward capo's in-process MCP endpoint
+        // into the worker's `session/new` so it can call `report_result`. Default
+        // (`None`) advertises NO MCP server to the worker, keeping the validated
+        // file-only worker loop byte-identical (mirrors the conductor turn's
+        // `with_http_mcp_server`).
+        if let Some(mcp_url) = req.mcp_url.clone() {
+            setup_plan = setup_plan.with_http_mcp_server(mcp_url, req.mcp_headers.clone());
+        }
         let adapter = AcpLiveAdapter::new(
             req.acp_program,
             req.acp_argv,
@@ -623,4 +631,9 @@ pub(crate) struct AcpLiveTurnLocalRequest {
     pub workspace_root: Option<String>,
     pub live_acp_opt_in: bool,
     pub acp_session_mode: Option<String>,
+    /// Optional capo MCP endpoint forwarded into the worker's `session/new` so
+    /// the worker can call `report_result`. `None` ⇒ no MCP server advertised to
+    /// the worker (validated file-only loop unchanged). See the command field.
+    pub mcp_url: Option<String>,
+    pub mcp_headers: Vec<(String, String)>,
 }

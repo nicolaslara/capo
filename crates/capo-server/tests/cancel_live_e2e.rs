@@ -119,6 +119,8 @@ fn interrupt_agent_cooperatively_cancels_a_live_worker_turn() {
                 workspace_root: Some(ws),
                 live_acp_opt_in: true,
                 acp_session_mode: Some("default".to_string()),
+                mcp_url: None,
+                mcp_headers: vec![],
             }))
             .expect("run acp live turn");
         turn_done_in_thread.store(true, Ordering::Relaxed);

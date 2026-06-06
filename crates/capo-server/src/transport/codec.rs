@@ -340,6 +340,8 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             workspace_root,
             live_acp_opt_in,
             acp_session_mode,
+            mcp_url,
+            mcp_headers,
         } => json!({
             "type": "run_acp_live_turn_local",
             "session_id": session_id,
@@ -351,6 +353,11 @@ pub(super) fn encode_command(command: &ServerCommand) -> Value {
             "workspace_root": workspace_root,
             "live_acp_opt_in": live_acp_opt_in,
             "acp_session_mode": acp_session_mode,
+            "mcp_url": mcp_url,
+            "mcp_headers": mcp_headers
+                .iter()
+                .map(|(name, value)| json!({ "name": name, "value": value }))
+                .collect::<Vec<_>>(),
         }),
         ServerCommand::RunConductorTurnLocal {
             session_id,
@@ -793,6 +800,21 @@ pub(super) fn decode_command(value: &Value) -> TransportResult<ServerCommand> {
             workspace_root: optional_string(value, "workspace_root")?,
             live_acp_opt_in: required_bool(value, "live_acp_opt_in")?,
             acp_session_mode: optional_string(value, "acp_session_mode")?,
+            mcp_url: optional_string(value, "mcp_url")?,
+            mcp_headers: value
+                .get("mcp_headers")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            let name = item.get("name")?.as_str()?.to_string();
+                            let val = item.get("value")?.as_str()?.to_string();
+                            Some((name, val))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
         }),
         "run_conductor_turn_local" => Ok(ServerCommand::RunConductorTurnLocal {
             session_id: required_string(value, "session_id")?,

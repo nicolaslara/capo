@@ -15,6 +15,7 @@
 //! `tower::ServiceExt::oneshot` (no socket). The live wiring (forwarding the
 //! URL through `session/new`'s `mcpServers`) is Layer 2.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -77,6 +78,18 @@ pub struct McpState {
     /// conductor's tool activity surfaces on `/api/events` + the chat feed.
     conductor_session_id: String,
     conductor_run_id: String,
+    /// Structured worker results reported via `report_result(key, value)`. Keyed
+    /// by the same `key` the conductor passes to `collect_results` (typically the
+    /// result filename), so a reported value takes precedence over reading the
+    /// file. Shared across `CapoServer`/`McpState` clones (incl. detached worker
+    /// threads) because all sessions hit this one in-process MCP endpoint.
+    reports: Arc<Mutex<HashMap<String, String>>>,
+    /// When set, `start_agent` forwards this MCP endpoint (+ `worker_mcp_headers`
+    /// bearer) into each WORKER's `session/new`, so workers can call
+    /// `report_result`. `None` (the default) advertises NO MCP server to workers,
+    /// keeping the validated file-only worker loop byte-identical.
+    worker_mcp_url: Option<String>,
+    worker_mcp_headers: Vec<(String, String)>,
 }
 
 /// One observed `tools/call` dispatch through the in-process MCP server.
@@ -103,7 +116,24 @@ impl McpState {
             // caller knows the bootstrap-assigned ids.
             conductor_session_id: "session-conductor-web".to_string(),
             conductor_run_id: "run-conductor-web".to_string(),
+            reports: Arc::new(Mutex::new(HashMap::new())),
+            worker_mcp_url: None,
+            worker_mcp_headers: Vec::new(),
         }
+    }
+
+    /// Forward this MCP endpoint into each worker's `session/new` so workers can
+    /// call `report_result`. Pass capo's own in-process `/mcp` URL + the bearer
+    /// header. Leaving this unset keeps the validated file-only worker loop
+    /// byte-identical (no MCP server advertised to workers).
+    pub fn with_worker_mcp(
+        mut self,
+        worker_mcp_url: impl Into<String>,
+        worker_mcp_headers: Vec<(String, String)>,
+    ) -> Self {
+        self.worker_mcp_url = Some(worker_mcp_url.into());
+        self.worker_mcp_headers = worker_mcp_headers;
+        self
     }
 
     /// Override the conductor session/run identity emitted tool events are
@@ -320,8 +350,20 @@ fn tool_schemas() -> Value {
             }
         },
         {
+            "name": "report_result",
+            "description": "Return your final structured result to the conductor. Call this ONCE when your task is done, with `key` set to the exact result identifier the conductor gave you (usually the result filename, e.g. \"result-fruit-1.txt\") and `value` set to your result. This is the PRIMARY way to hand a result back — it is read directly by the conductor's collect_results, so it is preferred over (and need not duplicate) writing a result file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "The result identifier the conductor assigned (typically the result filename you were told to use)."},
+                    "value": {"type": "string", "description": "Your final result/answer."}
+                },
+                "required": ["key", "value"]
+            }
+        },
+        {
             "name": "collect_results",
-            "description": "Wait for and read worker result files. Given the relative filenames your detached workers were told to write, this BLOCKS server-side (up to timeout_secs) until each file has non-empty content, then returns the REAL contents. Use this to aggregate fan-out results instead of reading the files yourself (it avoids reading before the slow workers have written). The returned `results` are ground truth — never invent worker results.",
+            "description": "Wait for and read worker results. For each key/filename, returns a REPORTED value (if a worker called report_result with that key) in preference to reading the file; otherwise BLOCKS server-side (up to timeout_secs) until the file has non-empty content. Use this to aggregate fan-out results instead of reading them yourself. The returned `results` are ground truth — never invent worker results.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -351,6 +393,7 @@ fn handle_tools_call(state: &McpState, id: Value, params: &Value) -> Value {
         "review_agent" => tool_review_agent(state, &args),
         "steer_agent" => tool_steer_agent(state, &args),
         "set_mode" => tool_set_mode(state, &args),
+        "report_result" => tool_report_result(state, &args),
         "collect_results" => tool_collect_results(state, &args),
         other => Err(format!("unknown tool: {other}")),
     };
@@ -513,6 +556,8 @@ fn tool_start_agent(state: &McpState, args: &Value) -> Result<String, String> {
         let argv = state.worker.acp_argv.clone();
         let mode = state.worker.acp_session_mode.clone();
         let ws = workspace_root.clone();
+        let wmcp_url = state.worker_mcp_url.clone();
+        let wmcp_headers = state.worker_mcp_headers.clone();
         let log_session = session_id.clone();
         std::thread::spawn(move || {
             // Surface failures instead of swallowing them: a discarded Err here
@@ -529,6 +574,8 @@ fn tool_start_agent(state: &McpState, args: &Value) -> Result<String, String> {
                 workspace_root: ws,
                 live_acp_opt_in: true,
                 acp_session_mode: mode,
+                mcp_url: wmcp_url,
+                mcp_headers: wmcp_headers,
             })) {
                 eprintln!("capo: detached worker turn failed (session={log_session}): {error:?}");
             }
@@ -558,6 +605,8 @@ fn tool_start_agent(state: &McpState, args: &Value) -> Result<String, String> {
             workspace_root,
             live_acp_opt_in: true,
             acp_session_mode: state.worker.acp_session_mode.clone(),
+            mcp_url: state.worker_mcp_url.clone(),
+            mcp_headers: state.worker_mcp_headers.clone(),
         }))
         .map_err(|e| format!("RunAcpLiveTurnLocal failed: {e:?}"))?;
 
@@ -950,6 +999,35 @@ fn resolve_agent_name(state: &McpState, agent_ref: &str) -> Result<String, Strin
         .ok_or_else(|| format!("unknown agent: {agent_ref}"))
 }
 
+/// `report_result(key, value)` — a worker returns its final structured result to
+/// the conductor over capo's MCP wire (the primary worker-result channel). The
+/// value is stored under `key` (the result identifier the conductor assigned,
+/// typically the result filename) and read back, in preference to the file, by
+/// `collect_results`. Shared across `McpState` clones, so a detached worker's
+/// report reaches the conductor turn that calls `collect_results`.
+fn tool_report_result(state: &McpState, args: &Value) -> Result<String, String> {
+    let key = args
+        .get("key")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .ok_or("report_result requires a non-empty `key`")?
+        // Confine to a bare name so a worker can't key another worker's slot via
+        // a path; mirrors collect_results' file-name confinement.
+        .trim()
+        .to_string();
+    let value = args
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or("report_result requires `value`")?
+        .to_string();
+    state
+        .reports
+        .lock()
+        .map_err(|_| "report_result: reports map poisoned".to_string())?
+        .insert(key.clone(), value);
+    Ok(json!({ "ok": true, "key": key }).to_string())
+}
+
 /// `collect_results(files, timeout_secs?)` — block server-side until each named
 /// result file (relative to the worker workspace) has non-empty content, then
 /// return the REAL contents. Removes the conductor-vs-slow-detached-worker timing
@@ -990,13 +1068,29 @@ fn tool_collect_results(state: &McpState, args: &Value) -> Result<String, String
         }
     };
 
+    // Tier 1: a value reported via `report_result(key, value)` is ground truth
+    // and takes precedence over the file (no wait needed). Snapshot the map each
+    // poll so a value reported mid-wait is picked up.
+    let reported = |key: &str| -> Option<String> {
+        state
+            .reports
+            .lock()
+            .ok()
+            .and_then(|m| m.get(key).cloned())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string())
+    };
+
     let start = std::time::Instant::now();
     let deadline = std::time::Duration::from_secs(timeout_secs);
     loop {
         let mut results = serde_json::Map::new();
         let mut all_ready = true;
         for f in &files {
-            match read_nonempty(&resolve(f)) {
+            // Tier 1 (reported value) → Tier 2 (result file). Tier 3 (LLM extract
+            // from the worker's reply text) is handled by the conductor layer, not
+            // here, since this server has no model handle.
+            match reported(f).or_else(|| read_nonempty(&resolve(f))) {
                 Some(content) => {
                     results.insert(f.clone(), Value::String(content));
                 }

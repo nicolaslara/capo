@@ -121,6 +121,8 @@ fn live_acp_bridge_writes_observed_file_through_server() {
             workspace_root: Some(workspace.to_string_lossy().to_string()),
             live_acp_opt_in: true,
             acp_session_mode: Some("bypassPermissions".to_string()),
+            mcp_url: None,
+            mcp_headers: vec![],
         }))
         .expect("run acp live turn against the real bridge");
 

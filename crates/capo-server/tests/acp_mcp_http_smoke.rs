@@ -299,6 +299,77 @@ async fn capo_io_tools_advertised_and_round_trip_a_file() {
     server_task.abort();
 }
 
+/// The worker-result channel: a `report_result(key, value)` is read back by
+/// `collect_results` IN PREFERENCE to the file (here no file is ever written),
+/// and an unreported key falls through to the (absent) file as `null`/not-ready.
+/// Deterministic (no live bridge, no ACP gate).
+#[tokio::test]
+async fn report_result_is_preferred_by_collect_results() {
+    let root = capo_tmptest::TempRoot::new("capo-mcp-http-report");
+    let server = CapoServer::open(ProjectId::new("project-capo"), root.path()).expect("server");
+    let workspace = root.join("acp-ws");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+
+    let bearer = "test-bearer-token".to_string();
+    let worker = AcpWorkerToolConfig {
+        acp_program: "/bin/sh".to_string(),
+        acp_argv: Vec::new(),
+        default_workspace_root: Some(workspace.to_string_lossy().to_string()),
+        acp_session_mode: None,
+    };
+    let app = acp_mcp_router(McpState::new(server.clone(), worker, bearer.clone()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server_task = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve"); });
+
+    // tools/list advertises report_result.
+    let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}});
+    let (_, body) = http_request(addr, "POST", &bearer, Some(&list)).await;
+    let v: Value = serde_json::from_str(&body).expect("tools/list json");
+    let names: Vec<&str> = v["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name"))
+        .collect();
+    assert!(names.contains(&"report_result"), "must advertise report_result; got {names:?}");
+
+    // A worker reports its result (no file written anywhere).
+    let report = json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "report_result", "arguments": {"key": "result-fruit-1.txt", "value": "mango"}}
+    });
+    let (status, body) = http_request(addr, "POST", &bearer, Some(&report)).await;
+    assert_eq!(status, 200);
+    let v: Value = serde_json::from_str(&body).expect("report_result json");
+    assert_eq!(v["result"]["isError"], false, "report_result must succeed: {body}");
+
+    // collect_results returns the REPORTED value for the reported key (preferred,
+    // no file on disk) and marks the unreported key not-ready.
+    let collect = json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "collect_results", "arguments": {
+            "files": ["result-fruit-1.txt", "result-fruit-2.txt"], "timeout_secs": 1
+        }}
+    });
+    let (status, body) = http_request(addr, "POST", &bearer, Some(&collect)).await;
+    assert_eq!(status, 200);
+    let v: Value = serde_json::from_str(&body).expect("collect_results json");
+    let result_text = v["result"]["content"][0]["text"].as_str().expect("collect text");
+    let collected: Value = serde_json::from_str(result_text).expect("collect result json");
+    assert_eq!(
+        collected["results"]["result-fruit-1.txt"], "mango",
+        "reported value must be returned in preference to the file: {collected}"
+    );
+    assert_eq!(
+        collected["results"]["result-fruit-2.txt"], Value::Null,
+        "an unreported key with no file must be null/not-ready: {collected}"
+    );
+    assert_eq!(collected["ready"], false, "not all keys ready: {collected}");
+
+    server_task.abort();
+}
+
 /// F1: a `tools/call` dispatched through the MCP server emits a capo SESSION
 /// EVENT (`tool.call_requested`) tagged to the conductor's session/run, carrying
 /// the tool name + an allowlisted, clipped arg summary. This is what surfaces the

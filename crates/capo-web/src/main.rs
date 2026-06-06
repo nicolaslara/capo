@@ -197,7 +197,7 @@ async fn main() {
     let mcp_state = McpState::new((*server).clone(), worker, bearer.clone())
         .with_conductor_identity(conductor.session_id.clone(), conductor.run_id.clone());
     let mcp_invocations = mcp_state.invocation_log();
-    let mcp_url = spawn_mcp_server(mcp_state).await;
+    let mcp_url = spawn_mcp_server(mcp_state, &bearer).await;
     println!("capo-web hosting in-process MCP endpoint at {mcp_url}");
 
     let cfg = Arc::new(Config {
@@ -264,16 +264,24 @@ async fn chat_page() -> impl axum::response::IntoResponse {
 /// Host the in-process STATELESS HTTP MCP server on a loopback ephemeral port,
 /// detached for the process lifetime, and return its `http://127.0.0.1:PORT/mcp`
 /// URL. Runs inside the caller's tokio runtime (capo-web's `main`).
-async fn spawn_mcp_server(state: McpState) -> String {
-    let app = acp_mcp_router(state);
+async fn spawn_mcp_server(state: McpState, bearer: &str) -> String {
+    // Bind FIRST so the ephemeral url is known before we build the served state:
+    // workers report back to this SAME endpoint, so `with_worker_mcp` forwards
+    // this url (+ bearer) into each worker's session/new (enabling report_result).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind in-process MCP endpoint");
     let addr = listener.local_addr().expect("MCP local addr");
+    let url = format!("http://{addr}/mcp");
+    let state = state.with_worker_mcp(
+        url.clone(),
+        vec![("Authorization".to_string(), format!("Bearer {bearer}"))],
+    );
+    let app = acp_mcp_router(state);
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve MCP endpoint");
     });
-    format!("http://{addr}/mcp")
+    url
 }
 
 /// Register + start the single long-lived conductor session reused across every
@@ -328,18 +336,24 @@ fn conductor_goal(mode: &ChatMode) -> String {
          workflow, or do things in parallel, call start_agent ONCE PER agent with \
          `detached: true` so the workers run concurrently. NEVER call start_agent synchronously \
          in a loop (without `detached: true`) -- that blocks and WILL time out. Give each worker a \
-         precise task AND tell it to WRITE its result to a distinct RELATIVE file (e.g. \
-         `result-fruit-1.txt`, `result-fruit-2.txt`, ...), because you CANNOT read another agent's \
-         chat messages -- only files on disk are observable across agents.\n\n\
+         precise task AND give it a distinct RELATIVE result key (e.g. `result-fruit-1.txt`, \
+         `result-fruit-2.txt`, ...). Tell each worker to RETURN its result by calling the \
+         `report_result` tool with `key` set to that exact result key and `value` set to its \
+         answer, AND to also WRITE the same result to that relative filename as a fallback. You \
+         CANNOT read another agent's chat messages — only its reported value or a file on disk is \
+         observable across agents.\n\n\
          THEN AGGREGATE with the `collect_results` tool — do NOT read the files yourself (detached \
          workers are slow and you would read before they have written). After fanning out, call \
          `collect_results` ONCE with the list of result filenames you assigned (e.g. \
          {\"files\":[\"result-fruit-1.txt\",\"result-fruit-2.txt\",\"result-fruit-3.txt\"]}). It \
-         BLOCKS until every file has real content and returns the ground-truth `results` map. \
+         returns each worker's REPORTED value when available (preferred) and otherwise BLOCKS \
+         until the file has real content, then returns the ground-truth `results` map. \
          ABSOLUTE RULE: the values in `collect_results.results` are the ONLY source of truth for \
          what each worker produced. NEVER invent, guess, or assume a worker's result; use exactly \
          what `collect_results` returns. If `ready` is false for some file, call `collect_results` \
-         again for the remaining files. \
+         again for the remaining files. As a LAST-RESORT fallback, if a worker neither reported a \
+         value nor wrote its file (its result stays `null` after retrying), call `review_agent` on \
+         that worker and read its result from its reply text — but ONLY then, and say so. \
          Once you have all real results, compare them and END WITH A CLEAR FINAL ANSWER on its own \
          line, e.g. `FINAL: the best fruit is mango (agents picked: mango, papaya, kiwi).`";
     match (mode.scope.as_str(), mode.agent_id.as_deref()) {
@@ -1865,7 +1879,7 @@ done
         let bearer = "capo-web-test".to_string();
         let mcp_state = McpState::new((*server).clone(), worker, bearer.clone());
         let mcp_invocations = mcp_state.invocation_log();
-        let mcp_url = spawn_mcp_server(mcp_state).await;
+        let mcp_url = spawn_mcp_server(mcp_state, &bearer).await;
 
         // Point the conductor drive at the deterministic stub (NO live bridge).
         let stub = stub_conductor_program(&root.join("acp-stub"));

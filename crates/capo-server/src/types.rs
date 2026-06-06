@@ -399,6 +399,14 @@ pub enum ServerCommand {
         /// `fs/write_text_file` callback instead of simulating the tool in its
         /// default mode.
         acp_session_mode: Option<String>,
+        /// Optional capo MCP endpoint to forward into the WORKER's `session/new`
+        /// so the worker can call `report_result` to return a structured value
+        /// to the conductor (the primary worker-result channel; the file the
+        /// worker writes is the fallback). `None` (the default) keeps the
+        /// validated file-only worker loop BYTE-IDENTICAL — no MCP server is
+        /// advertised to the worker. `mcp_headers` carries the bearer auth.
+        mcp_url: Option<String>,
+        mcp_headers: Vec<(String, String)>,
     },
     /// SLICE-A (DESIGN-B Layer 2): drive ONE CONDUCTOR turn -- a claude-code-acp
     /// session the user chats with, with capo's in-process "capo tools" HTTP MCP
