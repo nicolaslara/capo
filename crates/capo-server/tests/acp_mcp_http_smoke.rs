@@ -299,6 +299,75 @@ async fn capo_io_tools_advertised_and_round_trip_a_file() {
     server_task.abort();
 }
 
+/// F1: a `tools/call` dispatched through the MCP server emits a capo SESSION
+/// EVENT (`tool.call_requested`) tagged to the conductor's session/run, carrying
+/// the tool name + an allowlisted, clipped arg summary. This is what surfaces the
+/// conductor's tool activity as a `→ <name>(args)` line in the chat feed.
+/// Deterministic (/bin/sh worker, no live bridge, no ACP gate).
+#[tokio::test]
+async fn tools_call_emits_conductor_tool_event_with_name() {
+    let root = capo_tmptest::TempRoot::new("capo-mcp-http-tool-event");
+    let server = CapoServer::open(ProjectId::new("project-capo"), root.path()).expect("server");
+    let workspace = root.join("acp-ws");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+
+    let bearer = "test-bearer-token".to_string();
+    let worker = AcpWorkerToolConfig {
+        acp_program: "/bin/sh".to_string(),
+        acp_argv: Vec::new(),
+        default_workspace_root: Some(workspace.to_string_lossy().to_string()),
+        acp_session_mode: None,
+    };
+    // Override the conductor identity so we can assert the event's session tag.
+    let state = McpState::new(server.clone(), worker, bearer.clone())
+        .with_conductor_identity("session-conductor-web", "run-conductor-web");
+    let app = acp_mcp_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server_task = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve"); });
+
+    // A confined capo_write tools/call (deterministic; lands a file).
+    let write = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "capo_write", "arguments": {"path": "note.txt", "content": "hello"}}
+    });
+    let (status, body) = http_request(addr, "POST", &bearer, Some(&write)).await;
+    assert_eq!(status, 200);
+    let v: Value = serde_json::from_str(&body).expect("capo_write json");
+    assert_eq!(v["result"]["isError"], false, "capo_write must succeed: {body}");
+
+    // The dispatch must have appended a tool.call_requested event tagged to the
+    // conductor session, carrying tool_name + the allowlisted `path` arg.
+    let (backlog, _stream) = server.subscribe(None, 0).expect("subscribe backlog");
+    let tool_ev = backlog
+        .events
+        .iter()
+        .find(|e| {
+            e.kind == "tool.call_requested"
+                && e.session_id.as_deref() == Some("session-conductor-web")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a tool.call_requested event tagged to the conductor session; got {:?}",
+                backlog.events.iter().map(|e| (e.kind.as_str(), e.session_id.clone())).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(tool_ev.actor, "agent-conductor", "tool event labels as conductor");
+    assert_eq!(tool_ev.run_id.as_deref(), Some("run-conductor-web"));
+    let payload: Value = serde_json::from_str(&tool_ev.payload_json).expect("payload json");
+    assert_eq!(payload["tool_name"], "capo_write", "payload carries the tool name");
+    assert_eq!(payload["status"], "completed");
+    assert_eq!(payload["source"], "conductor_mcp");
+    // Allowlisted arg surfaced; non-allowlisted `content` is NOT dumped (redaction).
+    assert_eq!(payload["path"], "note.txt", "allowlisted path arg is surfaced");
+    assert!(
+        payload.get("content").is_none(),
+        "non-allowlisted args must not be dumped: {payload}"
+    );
+
+    server_task.abort();
+}
+
 /// `start_agent {detached:true}` returns IMMEDIATELY with status:running (the
 /// depth-discipline responsiveness contract — the conductor is not blocked on the
 /// worker turn), and the worker turn still runs on a background thread and

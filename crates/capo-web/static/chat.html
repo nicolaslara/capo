@@ -257,7 +257,11 @@ function legibleLine(ev) {
   if (p.content && p.content !== 'none' &&
       (nk.includes('item_delta') || nk.includes('item_completed') ||
        kind.includes('summary') || role === 'assistant' || role === 'user')) {
-    return { who, text: clip(p.content), cat: 'prose' };
+    // `full` marks an AUTHORITATIVE complete message (item_completed or a full
+    // assistant/user role payload) vs a streaming delta. The coalescer REPLACES
+    // the accumulated partials with a full message instead of appending (F2).
+    const full = nk.includes('item_completed') || role === 'assistant' || role === 'user';
+    return { who, text: clip(p.content), cat: 'prose', full };
   }
 
   // 2. TOOL CALLS: "→ start_agent(task=...)" / observed tool results.
@@ -366,7 +370,17 @@ function makeActivity() {
       // Coalesce consecutive PROSE from the same actor (the model streams a
       // message as many tiny deltas: "The" / "file…" / "HELLO").
       if (line.cat === 'prose' && lastRow && lastCat === 'prose' && lastWho === line.who) {
-        lastText = (lastText + ' ' + line.text).replace(/\s+/g, ' ').trim();
+        // F2 — avoid prose doubling. An item_completed (full message) is the
+        // authoritative text: REPLACE the accumulated partial deltas with it.
+        // For a streaming delta, append but GUARD against overlap/restate so a
+        // chunk already covered by what we have isn't doubled.
+        if (line.full) {
+          lastText = line.text;                              // completed: replace
+        } else if (lastText.endsWith(line.text) || lastText.includes(line.text)) {
+          /* delta already covered — skip to avoid doubling */
+        } else {
+          lastText = (lastText + ' ' + line.text).replace(/\s+/g, ' ').trim();
+        }
         lastRow.querySelector('.t').textContent = lastText;
       } else if (lastRow && lastWho === line.who && lastText === line.text && lastCat === line.cat) {
         // Dedupe: identical consecutive line (events frequently arrive twice).

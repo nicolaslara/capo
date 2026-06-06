@@ -187,15 +187,18 @@ async fn main() {
         default_workspace_root: Some(project_ws.to_string_lossy().to_string()),
         acp_session_mode: chat.acp_session_mode.clone(),
     };
-    let mcp_state = McpState::new((*server).clone(), worker, bearer.clone());
-    let mcp_invocations = mcp_state.invocation_log();
-    let mcp_url = spawn_mcp_server(mcp_state).await;
-    println!("capo-web hosting in-process MCP endpoint at {mcp_url}");
-
     // Register + start ONE long-lived conductor session, reused across messages.
+    // Bootstrap BEFORE the MCP listener so the listener can tag every tools/call
+    // event with the conductor's authoritative session/run ids (F1).
     let conductor = Arc::new(
         bootstrap_conductor(&server).unwrap_or_else(|e| panic!("bootstrap conductor: {e}")),
     );
+
+    let mcp_state = McpState::new((*server).clone(), worker, bearer.clone())
+        .with_conductor_identity(conductor.session_id.clone(), conductor.run_id.clone());
+    let mcp_invocations = mcp_state.invocation_log();
+    let mcp_url = spawn_mcp_server(mcp_state).await;
+    println!("capo-web hosting in-process MCP endpoint at {mcp_url}");
 
     let cfg = Arc::new(Config {
         state_root: state_root.clone(),

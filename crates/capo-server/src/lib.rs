@@ -1789,6 +1789,18 @@ impl CapoServer {
         self.controller.state()
     }
 
+    /// Append an observability event through the server's own event store (the
+    /// same broadcaster `subscribe`/`/api/events` reads from). This is the
+    /// public seam the in-process MCP listener uses to surface the conductor's
+    /// `tools/call` activity as a feed line (F1). Appends are best-effort at the
+    /// call site; this returns the committed sequence on success.
+    pub fn append_event(&self, event: NewEvent, records: &[ProjectionRecord]) -> ServerResult<i64> {
+        self.controller
+            .state()
+            .append_event(event, records)
+            .map_err(ServerError::State)
+    }
+
     /// Open an event tail (ST4): the catch-up backlog plus a live [`EventStream`]
     /// over newly-committed events.
     ///

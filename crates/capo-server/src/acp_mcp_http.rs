@@ -72,6 +72,11 @@ pub struct McpState {
     /// reads this (out of band) to prove the conductor actually CALLED a capo
     /// tool (e.g. `start_agent`) over the localhost MCP endpoint.
     invocations: Arc<Mutex<Vec<ToolInvocation>>>,
+    /// The conductor's long-lived session/run identity. Each `tools/call`
+    /// dispatch emits a capo SESSION EVENT tagged to these ids (F1) so the
+    /// conductor's tool activity surfaces on `/api/events` + the chat feed.
+    conductor_session_id: String,
+    conductor_run_id: String,
 }
 
 /// One observed `tools/call` dispatch through the in-process MCP server.
@@ -93,7 +98,25 @@ impl McpState {
             bearer_token,
             mode: Arc::new(Mutex::new(ConductorMode::default())),
             invocations: Arc::new(Mutex::new(Vec::new())),
+            // Default to the capo-web conductor identity (the single live
+            // consumer). `with_conductor_identity` overrides this when the
+            // caller knows the bootstrap-assigned ids.
+            conductor_session_id: "session-conductor-web".to_string(),
+            conductor_run_id: "run-conductor-web".to_string(),
         }
+    }
+
+    /// Override the conductor session/run identity emitted tool events are
+    /// tagged with (F1). Use the ids from `bootstrap_conductor` as the single
+    /// source of truth.
+    pub fn with_conductor_identity(
+        mut self,
+        conductor_session_id: impl Into<String>,
+        conductor_run_id: impl Into<String>,
+    ) -> Self {
+        self.conductor_session_id = conductor_session_id.into();
+        self.conductor_run_id = conductor_run_id.into();
+        self
     }
 
     /// A cloneable handle to the invocation log so a test (or operator) can
@@ -341,12 +364,67 @@ fn handle_tools_call(state: &McpState, id: Value, params: &Value) -> Value {
         });
     }
 
+    // F1: emit a capo SESSION EVENT for this tools/call, tagged to the
+    // conductor's session/run, so the conductor's tool activity surfaces on
+    // `/api/events` + the chat feed as `→ <name>(args)`. Best-effort: a store
+    // error must never break the tool reply.
+    emit_conductor_tool_event(state, name, &args, outcome.is_err());
+
     match outcome {
         Ok(text) => tool_result(id, &text, false),
         // MCP convention: tool-execution failures are reported in-result with
         // isError:true, NOT as a JSON-RPC error.
         Err(message) => tool_result(id, &message, true),
     }
+}
+
+/// Allowlisted `arguments` keys that are safe to surface in a tool-event
+/// payload. Anything outside this set (e.g. arbitrary/secret args) is dropped,
+/// keeping credential redaction intact. The capo tools' args (task/path/...)
+/// are not credential-shaped, but the allowlist + length cap is defense-in-depth.
+const TOOL_ARG_ALLOWLIST: &[&str] = &[
+    "task", "goal", "path", "query", "command", "name", "agent_id", "mode", "detached", "worktree",
+];
+
+/// F1: append a `tool.call_requested` SESSION EVENT for one conductor `tools/call`
+/// dispatch. Tagged to the conductor's session/run + actor `agent-conductor` so
+/// the chat feed labels it "conductor" and renders `→ <name>(args)` via
+/// `legibleLine`. Best-effort — any store error is swallowed so the tool reply
+/// is never broken.
+fn emit_conductor_tool_event(state: &McpState, name: &str, args: &Value, is_error: bool) {
+    use capo_core::{RunId, SessionId};
+    use capo_state::{EventKind, NewEvent, RedactionState};
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("tool_name".to_string(), json!(name));
+    payload.insert(
+        "status".to_string(),
+        json!(if is_error { "failed" } else { "completed" }),
+    );
+    payload.insert("source".to_string(), json!("conductor_mcp"));
+    // Surface only allowlisted args, clipped — never dump arbitrary args.
+    if let Some(obj) = args.as_object() {
+        for key in TOOL_ARG_ALLOWLIST {
+            if let Some(v) = obj.get(*key) {
+                let clipped = match v {
+                    Value::String(s) => json!(s.chars().take(120).collect::<String>()),
+                    other => other.clone(),
+                };
+                payload.insert((*key).to_string(), clipped);
+            }
+        }
+    }
+
+    let event_id = format!(
+        "event-conductor-tool-{}",
+        crate::util::stable_hash(format!("{name}:{args}").as_bytes())
+    );
+    let mut ev = NewEvent::new(event_id, EventKind::ToolCallRequested, "agent-conductor");
+    ev.session_id = Some(SessionId::new(state.conductor_session_id.clone()));
+    ev.run_id = Some(RunId::new(state.conductor_run_id.clone()));
+    ev.payload_json = Value::Object(payload).to_string();
+    ev.redaction_state = RedactionState::Safe;
+    let _ = state.server.append_event(ev, &[]);
 }
 
 /// `start_agent(task, worktree?, name?)` — the L1 -> L2 hop: RegisterAgent ->
